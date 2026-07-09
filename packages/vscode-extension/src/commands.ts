@@ -1,5 +1,6 @@
 import type { TaskStore, CheckpointLevel, TaskStatus } from '@ariadne/core';
-import { buildContext, searchWorkspace } from '@ariadne/core';
+import { buildContext, searchWorkspace, findTaskWorkspace, openRegistry, listTasksAcrossWorkspaces, searchAcrossWorkspaces } from '@ariadne/core';
+import { getOrOpenStore } from './storeCache.js';
 
 /**
  * Pure, vscode-independent command logic for the Ariadne chat participant.
@@ -14,6 +15,8 @@ export interface ChatCommandInput {
   prompt: string;
   /** The workspace's currently-tracked task id, if any. */
   currentTaskId?: string;
+  /** This workspace's root, if known — required to resolve a task id that belongs to a different workspace via the cross-workspace registry. */
+  workspaceRoot?: string;
 }
 
 export interface ChatCommandResult {
@@ -33,6 +36,40 @@ export interface ChatCommandResult {
 function requireTask(store: TaskStore, currentTaskId: string | undefined): string | undefined {
   if (!currentTaskId) return undefined;
   return store.getTask(currentTaskId) ? currentTaskId : undefined;
+}
+
+/**
+ * Resolves an explicit task id that isn't in the current workspace's store
+ * by consulting the global cross-workspace registry (the same mechanism
+ * the CLI's `withResolvedTask` and the MCP server's `withTaskStore` use),
+ * and opens (or reuses, via storeCache's per-root cache) the actual owning
+ * workspace's store. Callers should check the current store first — this
+ * only handles the "not found locally" fallback. Returns `undefined` if the
+ * id isn't a task in any other known workspace.
+ */
+function resolveCrossWorkspaceTask(
+  workspaceRoot: string | undefined,
+  taskId: string,
+): { store: TaskStore; workspaceRoot: string } | undefined {
+  if (!workspaceRoot) return undefined;
+  const otherRoot = findTaskWorkspace(openRegistry(), taskId);
+  if (!otherRoot || otherRoot === workspaceRoot) return undefined;
+  try {
+    const otherStore = getOrOpenStore(otherRoot);
+    if (!otherStore.getTask(taskId)) return undefined;
+    return { store: otherStore, workspaceRoot: otherRoot };
+  } catch {
+    return undefined;
+  }
+}
+
+/** Strips a trailing `--all-workspaces`/`-a` flag off a prompt, returning the flag state and the remaining text. */
+function extractAllWorkspacesFlag(prompt: string): { allWorkspaces: boolean; rest: string } {
+  const re = /\s*(?:--all-workspaces|-a)\b\s*/i;
+  if (re.test(prompt)) {
+    return { allWorkspaces: true, rest: prompt.replace(re, ' ').trim() };
+  }
+  return { allWorkspaces: false, rest: prompt };
 }
 
 /**
@@ -142,6 +179,11 @@ export function inferIntent(rawPrompt: string): InferredIntent | undefined {
       re: /^(?:new task|start(?:ing)? (?:a )?task|create (?:a )?task)\s*[:\-]?\s*(.+)$/i,
       build: (m) => ({ command: 'task', prompt: `new ${m[1].trim()}` }),
     },
+    // "list tasks in all workspaces" / "show tasks across all workspaces" / "what tasks are there in every workspace"
+    {
+      re: /^(?:list|show)\s+tasks\s+(?:in|across)\s+(?:all|every)\s+workspaces?\s*\??$|^what\s+tasks(?: are there)?\s+(?:in|across)\s+(?:all|every)\s+workspaces?\s*\??$/i,
+      build: () => ({ command: 'task', prompt: 'list --all-workspaces' }),
+    },
     // "list tasks" / "show tasks" / "what tasks are there"
     {
       re: /^(?:list tasks|show tasks|what tasks(?: are there)?)\s*\??$/i,
@@ -248,6 +290,16 @@ export function handleChatCommand(store: TaskStore, input: ChatCommandInput): Ch
         };
       }
       if (sub === 'list') {
+        const { allWorkspaces } = extractAllWorkspacesFlag(rest);
+        if (allWorkspaces) {
+          const tasks = listTasksAcrossWorkspaces();
+          if (tasks.length === 0) return { markdown: 'No tasks found in any known workspace.' };
+          const lines = tasks.map(
+            (t) =>
+              `- ${t.taskId === taskId ? '**' : ''}[${t.status}] \`${t.taskId}\` ${t.title}${t.taskId === taskId ? '**' : ''} _(${t.workspaceRoot})_`,
+          );
+          return { markdown: lines.join('\n') };
+        }
         const tasks = store.listTasks();
         if (tasks.length === 0) return { markdown: 'No tasks found.' };
         const lines = tasks.map(
@@ -263,23 +315,45 @@ export function handleChatCommand(store: TaskStore, input: ChatCommandInput): Ch
       if (sub === 'pause' || sub === 'done' || sub === 'archive' || sub === 'reopen') {
         const targetId = rest || taskId;
         if (!targetId) return { markdown: noCurrentTaskMessage() };
-        if (!store.getTask(targetId)) return { markdown: `No task found with id \`${targetId}\`.` };
         const status: TaskStatus =
           sub === 'reopen' ? 'active' : sub === 'pause' ? 'paused' : sub === 'archive' ? 'archived' : 'done';
-        store.updateTaskStatus(targetId, status);
-        return { markdown: `Task \`${targetId}\` ${sub === 'reopen' ? 'reactivated' : `marked ${status}`}.` };
+        if (store.getTask(targetId)) {
+          store.updateTaskStatus(targetId, status);
+          return { markdown: `Task \`${targetId}\` ${sub === 'reopen' ? 'reactivated' : `marked ${status}`}.` };
+        }
+        const resolved = resolveCrossWorkspaceTask(input.workspaceRoot, targetId);
+        if (!resolved) return { markdown: `No task found with id \`${targetId}\`.` };
+        resolved.store.updateTaskStatus(targetId, status);
+        return {
+          markdown:
+            `Task \`${targetId}\` ${sub === 'reopen' ? 'reactivated' : `marked ${status}`} ` +
+            `(in workspace \`${resolved.workspaceRoot}\`).`,
+        };
       }
       return {
         markdown:
-          'Usage: `/task new <title>`, `/task list`, `/task use <id>`, ' +
+          'Usage: `/task new <title>`, `/task list [--all-workspaces]`, `/task use <id>`, ' +
           '`/task pause [id]`, `/task done [id]`, `/task archive [id]`, or `/task reopen [id]`.',
       };
     }
 
     case 'search': {
-      if (!prompt.trim()) return { markdown: 'Usage: `/search <query>`.' };
-      const results = searchWorkspace(store, prompt.trim());
-      if (results.length === 0) return { markdown: `No matches for "${prompt.trim()}".` };
+      const { allWorkspaces, rest: query } = extractAllWorkspacesFlag(prompt);
+      if (!query.trim()) return { markdown: 'Usage: `/search <query> [--all-workspaces]`.' };
+      if (allWorkspaces) {
+        const crossResults = searchAcrossWorkspaces(query.trim());
+        if (crossResults.length === 0) return { markdown: `No matches for "${query.trim()}" in any known workspace.` };
+        const lines = crossResults.map((r) => {
+          const matchLines = r.matches.map((m) => `  - (${m.category}) ${m.text}`).join('\n');
+          return (
+            `- ${r.taskId === taskId ? '**' : ''}[${r.taskStatus}] \`${r.taskId}\` ${r.taskTitle}${r.taskId === taskId ? '**' : ''} ` +
+            `_(${r.workspaceRoot})_\n${matchLines}`
+          );
+        });
+        return { markdown: lines.join('\n') };
+      }
+      const results = searchWorkspace(store, query.trim());
+      if (results.length === 0) return { markdown: `No matches for "${query.trim()}".` };
       const lines = results.map((r) => {
         const matchLines = r.matches.map((m) => `  - (${m.category}) ${m.text}`).join('\n');
         return `- ${r.taskId === taskId ? '**' : ''}[${r.taskStatus}] \`${r.taskId}\` ${r.taskTitle}${r.taskId === taskId ? '**' : ''}\n${matchLines}`;

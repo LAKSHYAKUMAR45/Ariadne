@@ -149,6 +149,13 @@ VSIX...", then open a folder and type `@ariadne` in Copilot Chat (or use the
 for chat commands, natural-language phrasing, passive capture, and
 multi-platform packaging details.
 
+`@ariadne /task list --all-workspaces` and `@ariadne /search <query>
+--all-workspaces` (or natural language like "list tasks in all
+workspaces") work the same way as the CLI — plus `@ariadne /task done
+<id>` (and `pause`/`archive`/`reopen`) transparently resolve and update a
+task even if it belongs to a workspace other than the one currently open
+in the editor.
+
 ## Project status
 
 Early / pre-release. The CLI, MCP server, and VS Code extension are all

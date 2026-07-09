@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { openStoreForCurrentWorkspace, getCurrentTaskId, setCurrentTask, initWorkspaceResolution, promptSelectWorkspaceFolder } from './workspace.js';
+import { openStoreForCurrentWorkspace, getCurrentTaskId, setCurrentTask, initWorkspaceResolution, promptSelectWorkspaceFolder, resolveWorkspaceRoot } from './workspace.js';
 import { handleChatCommand, progressMessageFor } from './commands.js';
 import { closeAllStores, closeStore } from './storeCache.js';
 import { registerPassiveCapture } from './passiveCapture.js';
@@ -128,6 +128,7 @@ async function handleRequest(
       command: request.command,
       prompt: request.prompt,
       currentTaskId,
+      workspaceRoot: resolveWorkspaceRoot(),
     });
 
     if (result.newCurrentTaskId) {

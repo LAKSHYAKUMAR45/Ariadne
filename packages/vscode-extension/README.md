@@ -36,9 +36,18 @@ commands below — or just describe what you want in plain language (e.g.
 | `/resume` | Alias of `/status`. |
 | `/checkpoint <summary>` | Record a checkpoint summary for the current task. |
 | `/todo add <text>` / `/todo list` / `/todo done <id>` | Manage todos. |
-| `/task new <title>` / `/task list` / `/task use <id>` | Create, list, or switch the current task. |
+| `/task new <title>` / `/task list [--all-workspaces]` / `/task use <id>` | Create, list, or switch the current task. `--all-workspaces` lists tasks from every workspace Ariadne has ever seen (tagged with each task's workspace root). |
+| `/task pause [id]` / `/task done [id]` / `/task archive [id]` / `/task reopen [id]` | Change a task's lifecycle status. Defaults to the current task; an explicit id works even if it belongs to a different workspace. |
 | `/decision <text>` | Record a decision. |
 | `/error <message>` / `/error resolve <id>` | Record or resolve an error. |
+| `/question add <text>` / `/question list` / `/question resolve <id>` | Record, list, or resolve an open question blocking the task. |
+| `/search <query> [--all-workspaces]` | Cross-entity search over task titles/goals, checkpoints, decisions, todos, errors, open questions, files, and commits. `--all-workspaces` searches every known workspace, tagging each result with its workspace root. |
+
+Any command above that resolves a task by id (not just the current task) —
+`/task pause|done|archive|reopen <id>` — transparently falls back to the
+global cross-workspace registry (`~/.ariadne/registry.db`) if the id isn't
+in the currently open workspace, and operates on whichever workspace
+actually owns it.
 
 ## Requirements
 

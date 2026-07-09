@@ -38,11 +38,11 @@
           { "name": "resume", "description": "Reload full context for the current task" },
           { "name": "checkpoint", "description": "Record a checkpoint summary" },
           { "name": "todo", "description": "Add, list, or complete todos" },
-          { "name": "task", "description": "Create, list, switch, pause, complete, archive, or reopen tasks" },
+          { "name": "task", "description": "Create, list (add --all-workspaces for every workspace), switch, pause, complete, archive, or reopen tasks (pause/done/archive/reopen with an id work across workspaces)" },
           { "name": "decision", "description": "Record a decision" },
           { "name": "error", "description": "Record or resolve an error" },
           { "name": "question", "description": "Add, list, or resolve open questions" },
-          { "name": "search", "description": "Search this workspace's tasks, checkpoints, decisions, todos, errors, and more" }
+          { "name": "search", "description": "Search this workspace's tasks, checkpoints, decisions, todos, errors, and more (add --all-workspaces to search every workspace)" }
         ]
       }
     ],
