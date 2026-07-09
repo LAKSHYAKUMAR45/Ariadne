@@ -32,7 +32,7 @@ commands below — or just describe what you want in plain language (e.g.
 
 | Command | What it does |
 |---|---|
-| `/status [id]` (default) | Show a task's goal, latest checkpoint, open questions, unresolved errors, pending todos, recent files, recent commits, and recent commands. Defaults to the current task; an explicit id works even if it belongs to a different workspace. |
+| `/status [id]` (default) | Show a task's goal, latest checkpoint, open questions, unresolved errors, blocked todos, pending todos, recent files, recent commits, and recent commands. Defaults to the current task; an explicit id works even if it belongs to a different workspace. |
 | `/resume [id]` | Alias of `/status`. |
 | `/checkpoint <summary>` | Record a checkpoint summary for the current task. |
 | `/todo add <text>` / `/todo list` / `/todo done <id>` / `/todo reopen <id>` / `/todo block <id>` / `/todo edit <id> --text <t>` / `/todo delete <id>` (all `[--task <taskId>]`) | Manage todos, including curation (edit/delete) and reopening/blocking. `--task` tells id-based subcommands which task/workspace the todo belongs to, if not the current one. |

@@ -531,6 +531,11 @@ function printStatus(store: TaskStore, taskId: string, tokenBudget?: number): vo
     for (const e of ctx.unresolvedErrors) console.log(`  - ${e}`);
   }
 
+  if (ctx.blockedTodos.length > 0) {
+    console.log(`\nBlocked todos:`);
+    for (const td of ctx.blockedTodos) console.log(`  - ${td}`);
+  }
+
   if (ctx.decisions.length > 0) {
     console.log(`\nDecisions:`);
     for (const d of ctx.decisions) console.log(`  - ${d}`);

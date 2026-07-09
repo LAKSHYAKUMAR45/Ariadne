@@ -166,6 +166,31 @@ describe('chat participant command logic', () => {
     expect(store.getTodo(created.id)).toBeUndefined();
   });
 
+  it('shows blocked todos with a distinct marker in /todo list, separate from pending/done', () => {
+    const task = store.createTask({ title: 'Todo list task' });
+    const pending = store.createTodo({ taskId: task.id, text: 'Pending task' });
+    const done = store.createTodo({ taskId: task.id, text: 'Done task' });
+    const blocked = store.createTodo({ taskId: task.id, text: 'Blocked task' });
+    store.updateTodoStatus(done.id, 'done');
+    store.updateTodoStatus(blocked.id, 'blocked');
+
+    const result = handleChatCommand(store, { command: 'todo', prompt: 'list', currentTaskId: task.id });
+    expect(result.markdown).toContain(`- [ ] \`${pending.id}\` Pending task`);
+    expect(result.markdown).toContain(`- [x] \`${done.id}\` Done task`);
+    expect(result.markdown).toContain(`- [!] \`${blocked.id}\` Blocked task _(blocked)_`);
+  });
+
+  it('surfaces blocked todos in /status, distinct from pending todos', () => {
+    const task = store.createTask({ title: 'Status task' });
+    const blocked = store.createTodo({ taskId: task.id, text: 'Waiting on API access' });
+    store.updateTodoStatus(blocked.id, 'blocked');
+    store.createTodo({ taskId: task.id, text: 'Write docs' });
+
+    const result = handleChatCommand(store, { command: 'status', prompt: '', currentTaskId: task.id });
+    expect(result.markdown).toContain('Blocked todos');
+    expect(result.markdown).toContain('Waiting on API access');
+  });
+
   it('lists, edits, and deletes decisions via /decision', () => {
     const task = store.createTask({ title: 'Decision curation task' });
     const decision = store.recordDecision({ taskId: task.id, text: 'Use SQLite', rationale: 'simple' });

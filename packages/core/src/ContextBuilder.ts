@@ -61,6 +61,8 @@ export interface ContextPackage {
   latestSummary: string | null;
   openQuestions: string[];
   openTodos: string[];
+  /** Todos explicitly marked blocked (distinct from pending) — surfaced separately since a blocker is important status context, not just another pending item. */
+  blockedTodos: string[];
   unresolvedErrors: string[];
   recentFiles: ContextFileRef[];
   recentCommits: ContextCommitRef[];
@@ -154,6 +156,11 @@ export function buildContext(store: TaskStore, taskId: string, options: BuildCon
     candidates.push({ tier: 'medium', category: 'pendingTodos', createdAt: t.createdAt, cost: estimateTokens(t.text), text: t.text });
   }
 
+  const blockedTodos = store.listTodos(taskId, { status: 'blocked' });
+  for (const t of blockedTodos) {
+    candidates.push({ tier: 'high', category: 'blockedTodos', createdAt: t.createdAt, cost: estimateTokens(t.text), text: t.text });
+  }
+
   // Commits since the last checkpoint (message only, per the data model doc).
   const allCommits = store.listCommits(taskId, 100);
   const sinceCheckpoint = latestCheckpoint
@@ -199,6 +206,7 @@ export function buildContext(store: TaskStore, taskId: string, options: BuildCon
     latestSummary,
     openQuestions: (included.openQuestions ?? []).map((c) => c.text),
     openTodos: (included.pendingTodos ?? []).map((c) => c.text),
+    blockedTodos: (included.blockedTodos ?? []).map((c) => c.text),
     unresolvedErrors: (included.unresolvedErrors ?? []).map((c) => c.text),
     recentFiles: (included.recentFiles ?? [])
       .map((c) => c.data as ContextFileRefSource)

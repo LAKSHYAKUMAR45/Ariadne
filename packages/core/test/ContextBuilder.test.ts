@@ -92,6 +92,23 @@ describe('buildContext', () => {
     expect(ctx.truncated).toEqual({});
   });
 
+  it('surfaces blocked todos separately from pending/done todos, at high tier', () => {
+    const task = store.createTask({ title: 'A' });
+    const blocked = store.createTodo({ taskId: task.id, text: 'Waiting on API access' });
+    store.updateTodoStatus(blocked.id, 'blocked');
+    store.createTodo({ taskId: task.id, text: 'Write docs' });
+
+    const ctx = buildContext(store, task.id, { tokenBudget: 10_000 });
+    expect(ctx.blockedTodos).toEqual(['Waiting on API access']);
+    expect(ctx.openTodos).toEqual(['Write docs']);
+
+    // Blocked todos are high-tier, so a tight budget that only fits one
+    // candidate keeps the blocked todo over the merely-pending one.
+    const tight = buildContext(store, task.id, { tokenBudget: 6 });
+    expect(tight.blockedTodos).toEqual(['Waiting on API access']);
+    expect(tight.openTodos).toEqual([]);
+  });
+
   it('surfaces recently run commands, most-recent-first, falling back to the raw redacted command when there is no summary', () => {
     const task = store.createTask({ title: 'A' });
     store.recordCommand({ taskId: task.id, cmdRedacted: 'npm install', summary: undefined, exitCode: 0 });

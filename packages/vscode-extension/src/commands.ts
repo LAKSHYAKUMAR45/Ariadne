@@ -151,6 +151,10 @@ export function formatStatusSections(store: TaskStore, taskId: string, tokenBudg
     sections.push(`**Unresolved errors:**\n${ctx.unresolvedErrors.map((e) => `- ${e}`).join('\n')}`);
   }
 
+  if (ctx.blockedTodos.length > 0) {
+    sections.push(`**Blocked todos:**\n${ctx.blockedTodos.map((td) => `- ${td}`).join('\n')}`);
+  }
+
   if (ctx.decisions.length > 0) {
     sections.push(`**Decisions:**\n${ctx.decisions.map((d) => `- ${d}`).join('\n')}`);
   }
@@ -481,7 +485,13 @@ export function handleChatCommand(store: TaskStore, input: ChatCommandInput): Ch
       const todos = store.listTodos(taskId);
       if (todos.length === 0) return { markdown: 'No todos found.' };
       return {
-        markdown: todos.map((t) => `- [${t.status === 'done' ? 'x' : ' '}] \`${t.id}\` ${t.text}`).join('\n'),
+        markdown: todos
+          .map((t) => {
+            const marker = t.status === 'done' ? 'x' : t.status === 'blocked' ? '!' : ' ';
+            const suffix = t.status === 'blocked' ? ' _(blocked)_' : '';
+            return `- [${marker}] \`${t.id}\` ${t.text}${suffix}`;
+          })
+          .join('\n'),
       };
     }
 

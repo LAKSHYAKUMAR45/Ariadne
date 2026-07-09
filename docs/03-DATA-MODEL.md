@@ -173,6 +173,7 @@ it likes (system message, printed text, etc.):
   "latestSummary": "...",           // most recent checkpoint, never trimmed
   "openQuestions": ["..."],
   "openTodos": ["..."],
+  "blockedTodos": ["..."],        // todos explicitly marked blocked, surfaced separately (high tier)
   "unresolvedErrors": ["..."],
   "recentFiles": [{ "path": "...", "role": "edited" }],
   "recentCommits": [{ "sha": "...", "message": "..." }],
