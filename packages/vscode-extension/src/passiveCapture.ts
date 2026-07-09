@@ -176,10 +176,111 @@ async function registerGitCommitCapture(context: vscode.ExtensionContext): Promi
   }
 }
 
+const DIAGNOSTICS_DEBOUNCE_MS = 1500;
+
+/** Builds a stable key for a diagnostic so we can tell "new" from "already recorded". */
+function diagnosticKey(d: vscode.Diagnostic): string {
+  return `${d.range.start.line}:${d.range.start.character}:${d.message}`;
+}
+
+/**
+ * Passively captures compiler/linter errors surfaced via VS Code's built-in
+ * Problems panel (any language server, linter, or build task that reports
+ * through `vscode.languages.onDidChangeDiagnostics`), auto-populating the
+ * `errors` table for the workspace's current task — no need to manually run
+ * `/error add`. Debounced per-file to avoid recording noise while typing,
+ * and auto-resolves entries once the underlying diagnostic disappears
+ * (fixed, or the file/problem no longer applies).
+ */
+function registerDiagnosticsCapture(context: vscode.ExtensionContext): void {
+  // Per-file map of diagnostic key -> recorded error id, so we can detect
+  // both newly-appeared diagnostics (record) and newly-cleared ones (resolve).
+  const trackedByFile = new Map<string, Map<string, string>>();
+  const debounceTimers = new Map<string, NodeJS.Timeout>();
+
+  const processUri = (uri: vscode.Uri) => {
+    try {
+      const ctx = resolveTaskContext(uri);
+      const fileKey = uri.toString();
+      const previous = trackedByFile.get(fileKey);
+      if (!ctx) {
+        // No current task for this root — nothing to record, but still
+        // forget prior tracking so we don't try to resolve stale ids later.
+        trackedByFile.delete(fileKey);
+        return;
+      }
+
+      const relPath = path.relative(ctx.root, uri.fsPath);
+      if (shouldIgnorePath(relPath)) return;
+
+      const diagnostics = vscode.languages
+        .getDiagnostics(uri)
+        .filter((d) => d.severity === vscode.DiagnosticSeverity.Error);
+
+      const store = getOrOpenStore(ctx.root);
+      const current = new Map<string, string>();
+
+      for (const d of diagnostics) {
+        const key = diagnosticKey(d);
+        const existingId = previous?.get(key);
+        if (existingId) {
+          current.set(key, existingId);
+          continue;
+        }
+        const line = d.range.start.line + 1;
+        const message = `${relPath}:${line} — ${d.message}`.slice(0, 500);
+        const recorded = store.recordError({ taskId: ctx.taskId, message });
+        current.set(key, recorded.id);
+      }
+
+      if (previous) {
+        for (const [key, id] of previous) {
+          if (!current.has(key)) store.resolveError(id, 'diagnostic cleared');
+        }
+      }
+
+      if (current.size > 0) {
+        trackedByFile.set(fileKey, current);
+      } else {
+        trackedByFile.delete(fileKey);
+      }
+    } catch (err) {
+      log('diagnostics', err);
+    }
+  };
+
+  context.subscriptions.push(
+    vscode.languages.onDidChangeDiagnostics((e) => {
+      for (const uri of e.uris) {
+        if (uri.scheme !== 'file') continue;
+        const key = uri.toString();
+        const existingTimer = debounceTimers.get(key);
+        if (existingTimer) clearTimeout(existingTimer);
+        debounceTimers.set(
+          key,
+          setTimeout(() => {
+            debounceTimers.delete(key);
+            processUri(uri);
+          }, DIAGNOSTICS_DEBOUNCE_MS),
+        );
+      }
+    }),
+  );
+
+  context.subscriptions.push({
+    dispose: () => {
+      for (const timer of debounceTimers.values()) clearTimeout(timer);
+      debounceTimers.clear();
+    },
+  });
+}
+
 /** Registers all passive-capture listeners. Called once from activate(). */
 export function registerPassiveCapture(context: vscode.ExtensionContext, outputChannel: vscode.OutputChannel): void {
   output = outputChannel;
   registerFileSaveCapture(context);
   registerTerminalCommandCapture(context);
   void registerGitCommitCapture(context);
+  registerDiagnosticsCapture(context);
 }
+

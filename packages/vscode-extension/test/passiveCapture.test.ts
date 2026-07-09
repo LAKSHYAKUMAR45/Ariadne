@@ -11,7 +11,9 @@ import { TaskStore, openWorkspaceStore, setCurrentTaskId } from '@ariadne/core';
 // scope for a unit test since it needs the real vscode.git extension).
 let savedDocHandler: ((doc: { uri: { scheme: string; fsPath: string } }) => void) | undefined;
 let terminalHandler: ((e: unknown) => void) | undefined;
+let diagnosticsChangeHandler: ((e: { uris: { scheme: string; fsPath: string; toString(): string }[] }) => void) | undefined;
 let folders: { uri: { fsPath: string } }[] = [];
+let diagnosticsByUri = new Map<string, { severity: number; message: string; range: { start: { line: number; character: number } } }[]>();
 
 vi.mock('vscode', () => {
   return {
@@ -32,6 +34,14 @@ vi.mock('vscode', () => {
         return { dispose: () => {} };
       },
     },
+    languages: {
+      onDidChangeDiagnostics: (fn: typeof diagnosticsChangeHandler) => {
+        diagnosticsChangeHandler = fn;
+        return { dispose: () => {} };
+      },
+      getDiagnostics: (uri: { toString(): string }) => diagnosticsByUri.get(uri.toString()) ?? [],
+    },
+    DiagnosticSeverity: { Error: 0, Warning: 1, Information: 2, Hint: 3 },
     extensions: {
       getExtension: () => undefined,
     },
@@ -49,6 +59,8 @@ describe('passive capture', () => {
     vi.resetModules();
     savedDocHandler = undefined;
     terminalHandler = undefined;
+    diagnosticsChangeHandler = undefined;
+    diagnosticsByUri = new Map();
 
     root = fs.mkdtempSync(path.join(os.tmpdir(), 'ariadne-passive-'));
     fs.mkdirSync(path.join(root, '.git'));
@@ -131,5 +143,62 @@ describe('passive capture', () => {
       store2.close();
       fs.rmSync(root2, { recursive: true, force: true });
     }
+  });
+
+  describe('diagnostics capture', () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it('records a new error diagnostic against the current task, debounced', () => {
+      const filePath = path.join(root, 'src', 'broken.ts');
+      const uriStr = `file://${filePath}`;
+      diagnosticsByUri.set(uriStr, [
+        { severity: 0, message: "Cannot find name 'foo'", range: { start: { line: 4, character: 2 } } },
+      ]);
+
+      diagnosticsChangeHandler!({ uris: [{ scheme: 'file', fsPath: filePath, toString: () => uriStr }] });
+      expect(store.listErrors(taskId)).toHaveLength(0); // debounced, not yet fired
+
+      vi.advanceTimersByTime(2000);
+
+      const errors = store.listErrors(taskId);
+      expect(errors).toHaveLength(1);
+      expect(errors[0].message).toContain("Cannot find name 'foo'");
+      expect(errors[0].message).toContain('broken.ts:5');
+    });
+
+    it('auto-resolves an error once its diagnostic disappears', () => {
+      const filePath = path.join(root, 'src', 'broken.ts');
+      const uriStr = `file://${filePath}`;
+      const uri = { scheme: 'file', fsPath: filePath, toString: () => uriStr };
+
+      diagnosticsByUri.set(uriStr, [{ severity: 0, message: 'boom', range: { start: { line: 0, character: 0 } } }]);
+      diagnosticsChangeHandler!({ uris: [uri] });
+      vi.advanceTimersByTime(2000);
+      expect(store.listErrors(taskId, { resolved: false })).toHaveLength(1);
+
+      diagnosticsByUri.set(uriStr, []);
+      diagnosticsChangeHandler!({ uris: [uri] });
+      vi.advanceTimersByTime(2000);
+
+      expect(store.listErrors(taskId, { resolved: false })).toHaveLength(0);
+      expect(store.listErrors(taskId, { resolved: true })).toHaveLength(1);
+    });
+
+    it('ignores non-error severities (warnings, hints)', () => {
+      const filePath = path.join(root, 'src', 'warn.ts');
+      const uriStr = `file://${filePath}`;
+      diagnosticsByUri.set(uriStr, [{ severity: 1, message: 'unused var', range: { start: { line: 0, character: 0 } } }]);
+
+      diagnosticsChangeHandler!({ uris: [{ scheme: 'file', fsPath: filePath, toString: () => uriStr }] });
+      vi.advanceTimersByTime(2000);
+
+      expect(store.listErrors(taskId)).toHaveLength(0);
+    });
   });
 });
