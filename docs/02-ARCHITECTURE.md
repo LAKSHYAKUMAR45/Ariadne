@@ -20,7 +20,8 @@ each surface is a thin adapter over `@ariadne/core`.
      │ stdio MCP server        │        │  `ariadne` binary     │
      │ tools: task.*, get_context, │        │  task/checkpoint/todo/  │
      │ git_sync, export_task       │        │  status/resume/git-sync/│
-     │                          │        │  export                 │
+     │ resources: ariadne://task/  │        │  export                 │
+     │ {current,<id>}/context       │        │                          │
      └──────────┬─────────────┘        └──────────┬───────────┘
                 │                                 │
      ┌──────────▼──────────────────────────────────▼───────────┐
@@ -47,6 +48,14 @@ SQLite file using the same shared library.
   assistant.
 - Copilot Chat, Copilot CLI, and Claude Code can all attach to the same local MCP
   server. One implementation, three+ front doors.
+- `@ariadne/mcp-server` exposes both **tools** (explicit, invoked by name —
+  `task_new`, `get_context`, `search`, etc.) and **resources** (URI-addressable,
+  discoverable/subscribable reads — `ariadne://task/current/context` and the
+  templated `ariadne://task/{taskId}/context`). Both routes return the same
+  `ContextPackage` from `@ariadne/core`'s `ContextBuilder`; resources exist
+  because some MCP hosts auto-attach subscribed resources to a conversation
+  without requiring the model to explicitly call a tool, which is a strictly
+  better UX for "give me the current task's context" than a tool call.
 - The chat participant (`@ariadne` in Copilot Chat) currently reimplements its
   `/status`/`/resume` output directly against `@ariadne/core` (see
   `packages/vscode-extension/src/commands.ts`) rather than calling into

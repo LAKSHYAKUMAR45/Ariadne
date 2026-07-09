@@ -1,4 +1,4 @@
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { McpServer, ResourceTemplate } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import type { TaskStore } from '@ariadne/core';
 import { findWorkspaceRoot, openWorkspaceStore } from './workspace.js';
@@ -344,6 +344,53 @@ export function createAriadneMcpServer(options?: { workspaceRoot?: string; store
       } catch (err) {
         return errorResult(err);
       }
+    },
+  );
+
+  // Resources: a read-only, URI-addressable alternative to the `get_context` tool.
+  // Some MCP hosts auto-attach subscribed/discoverable resources to a conversation
+  // without an explicit tool call, so exposing context this way (in addition to the
+  // tool) lets those clients pull in Ariadne's task context passively. Both routes
+  // delegate to the same `tools.getContext`, so they never drift from the tool.
+  server.registerResource(
+    'current-task-context',
+    'ariadne://task/current/context',
+    {
+      title: "Current task's context",
+      description:
+        'The ranked, token-budgeted context package for whichever task is currently active in this workspace.',
+      mimeType: 'application/json',
+    },
+    async (uri) => {
+      const context = tools.getContext(store, workspaceRoot, {});
+      return {
+        contents: [{ uri: uri.href, mimeType: 'application/json', text: JSON.stringify(context, null, 2) }],
+      };
+    },
+  );
+
+  server.registerResource(
+    'task-context',
+    new ResourceTemplate('ariadne://task/{taskId}/context', {
+      list: async () => ({
+        resources: store.listTasks().map((task) => ({
+          uri: `ariadne://task/${task.id}/context`,
+          name: `${task.title} — context`,
+          mimeType: 'application/json',
+        })),
+      }),
+    }),
+    {
+      title: "A specific task's context",
+      description: 'The ranked, token-budgeted context package for the task identified by {taskId}.',
+      mimeType: 'application/json',
+    },
+    async (uri, variables) => {
+      const taskId = Array.isArray(variables.taskId) ? variables.taskId[0] : variables.taskId;
+      const context = tools.getContext(store, workspaceRoot, { taskId });
+      return {
+        contents: [{ uri: uri.href, mimeType: 'application/json', text: JSON.stringify(context, null, 2) }],
+      };
     },
   );
 
