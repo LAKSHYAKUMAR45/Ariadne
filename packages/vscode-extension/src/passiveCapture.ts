@@ -1,7 +1,13 @@
 import * as vscode from 'vscode';
 import * as path from 'node:path';
 import { findWorkspaceRoot, redactCommand } from '@ariadne/core';
-import { getOrOpenStore } from './storeCache.js';
+import {
+  maybeCheckpointOnFileActivity,
+  checkpointOnCommit,
+  checkpointOnError,
+  maybeCheckpointOnIdle,
+} from '@ariadne/core';
+import { getOrOpenStore, listOpenStores } from './storeCache.js';
 
 /**
  * Passive background capture: watches file saves, terminal command
@@ -27,7 +33,7 @@ interface GitCommit {
   message: string;
 }
 interface GitRepositoryState {
-  HEAD?: { commit?: string };
+  HEAD?: { commit?: string; name?: string };
   onDidChange: vscode.Event<void>;
 }
 interface GitRepository {
@@ -99,7 +105,12 @@ function registerFileSaveCapture(context: vscode.ExtensionContext): void {
         if (!ctx) return;
         const relPath = path.relative(ctx.root, doc.uri.fsPath);
         if (shouldIgnorePath(relPath)) return;
-        getOrOpenStore(ctx.root).touchFile({ taskId: ctx.taskId, path: relPath, role: 'edited' });
+        const store = getOrOpenStore(ctx.root);
+        store.touchFile({ taskId: ctx.taskId, path: relPath, role: 'edited' });
+        // Rule-based checkpoint trigger: once enough files have been touched
+        // since the last checkpoint, roll them into a micro checkpoint
+        // summary automatically (docs/03-DATA-MODEL.md section 6).
+        maybeCheckpointOnFileActivity(store, ctx.taskId);
       } catch (err) {
         log('file save', err);
       }
@@ -143,28 +154,43 @@ async function registerGitCommitCapture(context: vscode.ExtensionContext): Promi
     const exports = gitExtension.isActive ? gitExtension.exports : await gitExtension.activate();
     const api = exports.getAPI(1);
 
-    // Tracks the last HEAD sha we've seen per repo root, seeded from the
-    // repo's current HEAD so we only capture *new* commits made during this
-    // session, not the whole prior history.
+    // Tracks the last HEAD sha/branch we've seen per repo root, seeded from
+    // the repo's current state so we only capture *new* commits/branch
+    // switches made during this session, not the whole prior history.
     const lastKnownHead = new Map<string, string>();
+    const lastKnownBranch = new Map<string, string | undefined>();
 
     const watchRepo = (repo: GitRepository) => {
       lastKnownHead.set(repo.rootUri.fsPath, repo.state.HEAD?.commit ?? '');
+      lastKnownBranch.set(repo.rootUri.fsPath, repo.state.HEAD?.name);
       context.subscriptions.push(
         repo.state.onDidChange(async () => {
           try {
+            const repoRoot = repo.rootUri.fsPath;
+            const ctx = resolveTaskContext(repo.rootUri);
+
+            // Branch switch detection (independent of whether HEAD's commit
+            // also changed) — updates task.branch via GitWatcher's TaskStore
+            // method, per docs/02-ARCHITECTURE.md's GitWatcher responsibility.
+            const branch = repo.state.HEAD?.name;
+            if (ctx && lastKnownBranch.get(repoRoot) !== branch) {
+              lastKnownBranch.set(repoRoot, branch);
+              getOrOpenStore(ctx.root).updateTaskBranch(ctx.taskId, branch ?? null);
+            }
+
             const head = repo.state.HEAD?.commit;
             if (!head) return;
-            const repoRoot = repo.rootUri.fsPath;
             if (lastKnownHead.get(repoRoot) === head) return;
             lastKnownHead.set(repoRoot, head);
 
-            const ctx = resolveTaskContext(repo.rootUri);
             if (!ctx) return;
 
             const [commit] = await repo.log({ maxEntries: 1 });
-            const message = commit?.message?.split('\n')[0];
-            getOrOpenStore(ctx.root).recordCommit({ sha: head, taskId: ctx.taskId, message });
+            const message = commit?.message?.split('\n')[0] ?? null;
+            const store = getOrOpenStore(ctx.root);
+            store.recordCommit({ sha: head, taskId: ctx.taskId, message });
+            // A commit always triggers a micro checkpoint (docs/03-DATA-MODEL.md section 6).
+            checkpointOnCommit(store, ctx.taskId, head, message);
           } catch (err) {
             log('git commit', err);
           }
@@ -234,6 +260,9 @@ function registerDiagnosticsCapture(context: vscode.ExtensionContext): void {
         const message = `${relPath}:${line} — ${d.message}`.slice(0, 500);
         const recorded = store.recordError({ taskId: ctx.taskId, message });
         current.set(key, recorded.id);
+        // A newly recorded unresolved error always triggers a micro
+        // checkpoint (docs/03-DATA-MODEL.md section 6).
+        checkpointOnError(store, ctx.taskId, message);
       }
 
       if (previous) {
@@ -278,6 +307,37 @@ function registerDiagnosticsCapture(context: vscode.ExtensionContext): void {
   });
 }
 
+/** How often to poll open tasks for idle-checkpoint eligibility. Kept well below
+ * the default 10-minute idle threshold so idle sessions get captured promptly
+ * after crossing it, without polling so often it's wasteful. */
+const IDLE_CHECK_INTERVAL_MS = 2 * 60_000;
+
+/**
+ * Periodically checks every currently-open workspace's current task for the
+ * idle-checkpoint trigger (docs/03-DATA-MODEL.md section 6: no checkpoint
+ * activity for >10 minutes despite file touches since the last one). There's
+ * no natural VS Code "editor went idle" event to hook, so this runs on a
+ * plain interval instead — cheap (a couple of indexed SQLite reads per open
+ * workspace) and self-limiting (maybeCheckpointOnIdle is a no-op unless the
+ * threshold is actually crossed).
+ */
+function registerIdleCheckpointPolling(context: vscode.ExtensionContext): void {
+  const timer = setInterval(() => {
+    for (const [, store] of listOpenStores()) {
+      try {
+        const taskId = store.getCurrentTaskId();
+        if (!taskId) continue;
+        maybeCheckpointOnIdle(store, taskId);
+      } catch (err) {
+        log('idle checkpoint', err);
+      }
+    }
+  }, IDLE_CHECK_INTERVAL_MS);
+  // Let Node exit even if this timer is still pending (e.g. during tests).
+  timer.unref?.();
+  context.subscriptions.push({ dispose: () => clearInterval(timer) });
+}
+
 /** Registers all passive-capture listeners. Called once from activate(). */
 export function registerPassiveCapture(context: vscode.ExtensionContext, outputChannel: vscode.OutputChannel): void {
   output = outputChannel;
@@ -285,5 +345,6 @@ export function registerPassiveCapture(context: vscode.ExtensionContext, outputC
   registerTerminalCommandCapture(context);
   void registerGitCommitCapture(context);
   registerDiagnosticsCapture(context);
+  registerIdleCheckpointPolling(context);
 }
 

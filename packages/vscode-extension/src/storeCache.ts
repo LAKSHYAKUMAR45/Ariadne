@@ -32,3 +32,8 @@ export function closeAllStores(): void {
   for (const store of cache.values()) store.close();
   cache.clear();
 }
+
+/** Iterates every currently-open (root, store) pair — used by idle-checkpoint polling. */
+export function listOpenStores(): IterableIterator<[string, TaskStore]> {
+  return cache.entries();
+}

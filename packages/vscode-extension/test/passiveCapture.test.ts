@@ -57,6 +57,7 @@ describe('passive capture', () => {
 
   beforeEach(async () => {
     vi.resetModules();
+    vi.useFakeTimers();
     savedDocHandler = undefined;
     terminalHandler = undefined;
     diagnosticsChangeHandler = undefined;
@@ -74,11 +75,16 @@ describe('passive capture', () => {
     context = { subscriptions: [] };
     output = { appendLine: () => {} };
 
+    // Fake timers are enabled up-front (rather than only in the
+    // timer-dependent describe blocks below) so the idle-checkpoint
+    // setInterval registered by registerPassiveCapture is itself a fake
+    // timer that vi.advanceTimersByTime can drive.
     const { registerPassiveCapture } = await import('../src/passiveCapture.js');
     registerPassiveCapture(context as never, output as never);
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     store.close();
     fs.rmSync(root, { recursive: true, force: true });
   });
@@ -145,6 +151,15 @@ describe('passive capture', () => {
     }
   });
 
+  it('creates a micro checkpoint automatically once enough files have been touched', () => {
+    for (let i = 0; i < 5; i++) {
+      savedDocHandler!({ uri: { scheme: 'file', fsPath: path.join(root, `src/file${i}.ts`) } });
+    }
+    const checkpoints = store.listCheckpoints(taskId);
+    expect(checkpoints.length).toBeGreaterThanOrEqual(1);
+    expect(checkpoints[0].summary).toMatch(/Edited \d+ files?/);
+  });
+
   describe('diagnostics capture', () => {
     beforeEach(() => {
       vi.useFakeTimers();
@@ -199,6 +214,47 @@ describe('passive capture', () => {
       vi.advanceTimersByTime(2000);
 
       expect(store.listErrors(taskId)).toHaveLength(0);
+    });
+
+    it('creates a micro checkpoint when a new error diagnostic is recorded', () => {
+      const filePath = path.join(root, 'src', 'broken.ts');
+      const uriStr = `file://${filePath}`;
+      diagnosticsByUri.set(uriStr, [
+        { severity: 0, message: "Cannot find name 'bar'", range: { start: { line: 1, character: 0 } } },
+      ]);
+
+      diagnosticsChangeHandler!({ uris: [{ scheme: 'file', fsPath: filePath, toString: () => uriStr }] });
+      vi.advanceTimersByTime(2000);
+
+      const checkpoints = store.listCheckpoints(taskId);
+      expect(checkpoints.length).toBeGreaterThanOrEqual(1);
+      expect(checkpoints[0].summary).toContain('New error');
+    });
+  });
+
+  describe('idle checkpoint polling', () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it('creates a micro checkpoint once a workspace has gone idle with untouched-since file activity', () => {
+      savedDocHandler!({ uri: { scheme: 'file', fsPath: path.join(root, 'src', 'idle.ts') } });
+      // The file-save handler itself may create a checkpoint if the
+      // file-activity threshold happens to be hit; clear the slate so this
+      // test only asserts on the idle-specific checkpoint.
+      const before = store.listCheckpoints(taskId).length;
+
+      // Idle poll runs every IDLE_CHECK_INTERVAL_MS (2 minutes); advance past
+      // the default 10-minute idle threshold across several poll ticks.
+      vi.advanceTimersByTime(11 * 60_000);
+
+      const after = store.listCheckpoints(taskId);
+      expect(after.length).toBeGreaterThan(before);
+      expect(after[0].summary).toContain('idle');
     });
   });
 });
