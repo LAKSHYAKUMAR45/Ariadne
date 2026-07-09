@@ -2,14 +2,13 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
-import { findWorkspaceRoot, stateDbPath } from '../src/workspace.js';
-import { readCurrentTaskId, setCurrentTaskId } from '../src/currentTask.js';
+import { findWorkspaceRoot, stateDbPath, readCurrentTaskId, setCurrentTaskId } from '../src/workspace.js';
 
 describe('workspace resolution', () => {
   let tmpDir: string;
 
   beforeEach(() => {
-    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ariadne-cli-test-'));
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ariadne-core-test-'));
   });
 
   afterEach(() => {

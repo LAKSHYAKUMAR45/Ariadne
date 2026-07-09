@@ -1,0 +1,66 @@
+{
+  "name": "ariadne-vscode",
+  "displayName": "Ariadne",
+  "description": "Chats are disposable, tasks are permanent. Persists task state (goals, decisions, files, todos, errors, commands) across any AI assistant.",
+  "version": "0.1.0",
+  "publisher": "ariadne-dev",
+  "private": true,
+  "engines": {
+    "vscode": "^1.93.0"
+  },
+  "categories": [
+    "Chat",
+    "Other"
+  ],
+  "activationEvents": [],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "chatParticipants": [
+      {
+        "id": "ariadne.chat",
+        "fullName": "Ariadne",
+        "name": "ariadne",
+        "description": "Recall and update the current task's persistent state (goal, decisions, todos, errors, files).",
+        "isSticky": true,
+        "commands": [
+          { "name": "status", "description": "Show the current task's status" },
+          { "name": "resume", "description": "Reload full context for the current task" },
+          { "name": "checkpoint", "description": "Record a checkpoint summary" },
+          { "name": "todo", "description": "Add, list, or complete todos" },
+          { "name": "task", "description": "Create, list, or switch tasks" },
+          { "name": "decision", "description": "Record a decision" },
+          { "name": "error", "description": "Record or resolve an error" }
+        ]
+      }
+    ],
+    "commands": [
+      {
+        "command": "ariadne.newTask",
+        "title": "Ariadne: New Task"
+      },
+      {
+        "command": "ariadne.status",
+        "title": "Ariadne: Show Task Status"
+      }
+    ]
+  },
+  "scripts": {
+    "build": "node esbuild.js",
+    "watch": "node esbuild.js --watch",
+    "test": "vitest run",
+    "lint": "echo \"(no lint configured yet)\"",
+    "package": "vsce package --no-dependencies"
+  },
+  "dependencies": {
+    "@ariadne/core": "workspace:*",
+    "better-sqlite3": "^11.3.0"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.93.0",
+    "@types/node": "^20.14.0",
+    "@vscode/vsce": "^3.1.1",
+    "esbuild": "^0.21.5",
+    "typescript": "^5.5.4",
+    "vitest": "^2.1.1"
+  }
+}
