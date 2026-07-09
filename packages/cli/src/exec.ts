@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process';
 import type { ChildProcess } from 'node:child_process';
-import type { TaskStore } from '@ariadne/core';
-import { redactCommand } from '@ariadne/core';
+import type { TaskStore } from '@ariadne-dev/core';
+import { redactCommand } from '@ariadne-dev/core';
 
 type SpawnFn = typeof spawn;
 

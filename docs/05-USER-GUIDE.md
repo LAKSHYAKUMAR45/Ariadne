@@ -47,7 +47,7 @@ interface you're already in:
 | Surface | Best for |
 |---|---|
 | **CLI** (`ariadne`) | Scripting, terminal-first workflows, any assistant that can run shell commands. |
-| **MCP server** (`@ariadne/mcp-server`) | Any MCP-capable AI client (Claude Code, Gemini CLI, Codex, Copilot's MCP integration, custom agents) — task state becomes tools/resources the assistant can call directly. |
+| **MCP server** (`@ariadne-dev/mcp-server`) | Any MCP-capable AI client (Claude Code, Gemini CLI, Codex, Copilot's MCP integration, custom agents) — task state becomes tools/resources the assistant can call directly. |
 | **VS Code extension** (`@ariadne` chat participant) | Copilot Chat users in VS Code — type `@ariadne ...` like any other chat participant. |
 
 All three read and write the exact same data. Use whichever fits the moment;
@@ -75,7 +75,7 @@ yourself — see the main README) via Extensions view → "Install from VSIX..."
 "Setting up the MCP server in an MCP client" below).
 
 > The project is early/pre-release — npm publishing of `ariadne` and
-> `@ariadne/mcp-server` is set up (via changesets) but may not have happened
+> `@ariadne-dev/mcp-server` is set up (via changesets) but may not have happened
 > yet. Building from source always works.
 
 ## 4. Quick start

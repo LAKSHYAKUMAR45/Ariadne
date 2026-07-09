@@ -3,7 +3,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { EventEmitter } from 'node:events';
 import type { ChildProcess } from 'node:child_process';
-import { openWorkspaceStore, setCurrentTaskId } from '@ariadne/core';
+import { openWorkspaceStore, setCurrentTaskId } from '@ariadne-dev/core';
 import { runTaskExec } from '../src/exec.js';
 import { program } from '../src/index.js';
 

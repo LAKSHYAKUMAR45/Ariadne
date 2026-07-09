@@ -69,7 +69,7 @@ and let any assistant read and write to it.
   recover a workspace's state database.
 - **Three interchangeable surfaces, one shared core** — CLI, MCP server,
   and VS Code chat participant all read/write the exact same
-  `@ariadne/core` data, so nothing is surface-specific or out of sync.
+  `@ariadne-dev/core` data, so nothing is surface-specific or out of sync.
 
 ## How it works
 
@@ -87,7 +87,7 @@ dashboard.
          └──────────────────────┼──────────────────────────┘
                                  │
                          ┌───────▼────────┐
-                         │  @ariadne/core │   SQLite schema + TaskStore
+                         │  @ariadne-dev/core │   SQLite schema + TaskStore
                          └───────┬────────┘
                                  │
                     <workspace-root>/.ariadne/state.db
@@ -113,9 +113,9 @@ This is a pnpm workspace monorepo:
 
 | Package | What it is |
 |---|---|
-| [`packages/core`](packages/core) | `@ariadne/core` — the shared SQLite schema, `TaskStore`, and context-building logic used by every surface. |
+| [`packages/core`](packages/core) | `@ariadne-dev/core` — the shared SQLite schema, `TaskStore`, and context-building logic used by every surface. |
 | [`packages/cli`](packages/cli) | `ariadne` — a command-line interface for managing tasks, todos, checkpoints, and status. |
-| [`packages/mcp-server`](packages/mcp-server) | `@ariadne/mcp-server` — an MCP server exposing task state as tools to any MCP-capable AI client (Claude Code, Gemini CLI, Codex, Copilot, etc.), no VS Code required. |
+| [`packages/mcp-server`](packages/mcp-server) | `@ariadne-dev/mcp-server` — an MCP server exposing task state as tools to any MCP-capable AI client (Claude Code, Gemini CLI, Codex, Copilot, etc.), no VS Code required. |
 | [`packages/vscode-extension`](packages/vscode-extension) | `ariadne-vscode` — a VS Code extension that adds an `@ariadne` Copilot Chat participant, commands, and passive background capture (saved files, terminal commands, git commits). |
 
 ## Getting started
@@ -134,7 +134,7 @@ pnpm test    # runs the full test suite across all packages
 ### Using the CLI
 
 ```bash
-pnpm --filter @ariadne/cli build
+pnpm --filter @ariadne-dev/cli build
 node packages/cli/dist/index.js task new "Fix login bug"
 node packages/cli/dist/index.js status
 ```
@@ -175,8 +175,8 @@ breaking the search.
 ### Using the MCP server
 
 ```bash
-pnpm --filter @ariadne/core build
-pnpm --filter @ariadne/mcp-server build
+pnpm --filter @ariadne-dev/core build
+pnpm --filter @ariadne-dev/mcp-server build
 node packages/mcp-server/dist/index.js   # speaks MCP over stdio
 ```
 
@@ -188,7 +188,7 @@ tool list.
 ### Using the VS Code extension
 
 ```bash
-pnpm --filter @ariadne/core build
+pnpm --filter @ariadne-dev/core build
 pnpm --filter ariadne-vscode build
 pnpm --filter ariadne-vscode package   # produces a .vsix for your current platform
 ```
@@ -220,8 +220,8 @@ Issues and PRs welcome. CI runs build/typecheck/test on every push and PR
 and publish multi-platform `.vsix` artifacts (see
 `.github/workflows/release.yml`).
 
-If your PR changes the behavior of `@ariadne/core`, `ariadne` (CLI), or
-`@ariadne/mcp-server` (the VS Code extension is released separately as a
+If your PR changes the behavior of `@ariadne-dev/core`, `ariadne` (CLI), or
+`@ariadne-dev/mcp-server` (the VS Code extension is released separately as a
 `.vsix`, not to npm), add a changeset describing it:
 
 ```bash

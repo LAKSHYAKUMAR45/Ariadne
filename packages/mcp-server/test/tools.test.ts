@@ -3,7 +3,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import { execFileSync } from 'node:child_process';
-import { TaskStore } from '@ariadne/core';
+import { TaskStore } from '@ariadne-dev/core';
 import * as tools from '../src/tools.js';
 import { readCurrentTaskId } from '../src/workspace.js';
 

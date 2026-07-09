@@ -7,7 +7,7 @@ decisions, files touched, todos, errors, and commands — in a local SQLite
 database (`.ariadne/state.db`), independent of any single chat transcript or
 AI assistant. This extension is one of three interchangeable surfaces
 (alongside a [CLI](https://github.com/LAKSHYAKUMAR45/Ariadne/tree/main/packages/cli)
-and an MCP server) built on the same shared `@ariadne/core` library, so your
+and an MCP server) built on the same shared `@ariadne-dev/core` library, so your
 task state is identical no matter which one you use.
 
 ## What it does
@@ -79,7 +79,7 @@ workspaces — without it they operate on the current workspace only, as before.
 
 ```bash
 pnpm install
-pnpm --filter @ariadne/core build   # @ariadne/core must be built first
+pnpm --filter @ariadne-dev/core build   # @ariadne-dev/core must be built first
 pnpm --filter ariadne-vscode build  # bundles dist/extension.js via esbuild
 pnpm --filter ariadne-vscode package  # produces a .vsix via vsce (current machine's platform only)
 ```

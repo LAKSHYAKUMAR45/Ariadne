@@ -1,9 +1,9 @@
-import { TaskStore, openWorkspaceStore } from '@ariadne/core';
+import { TaskStore, openWorkspaceStore } from '@ariadne-dev/core';
 
 /**
  * Caches one TaskStore (i.e. one open SQLite connection) per workspace root
  * for the extension's lifetime, instead of opening/closing a connection on
- * every single command or chat turn. WAL mode (enabled in @ariadne/core's
+ * every single command or chat turn. WAL mode (enabled in @ariadne-dev/core's
  * openDatabase()) makes this safe to hold open alongside the CLI and/or an
  * MCP server process writing to the same `.ariadne/state.db` concurrently —
  * SQLite's own file locking arbitrates cross-process writes regardless of

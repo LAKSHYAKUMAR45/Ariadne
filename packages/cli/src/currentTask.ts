@@ -1,4 +1,4 @@
-import { readCurrentTaskId as coreRead, setCurrentTaskId as coreSet } from '@ariadne/core';
+import { readCurrentTaskId as coreRead, setCurrentTaskId as coreSet } from '@ariadne-dev/core';
 import { findWorkspaceRoot } from './workspace.js';
 
 /** CLI-specific convenience wrappers that default to the resolved workspace root. */

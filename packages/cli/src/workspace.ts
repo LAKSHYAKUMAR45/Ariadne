@@ -1,5 +1,5 @@
-import { findWorkspaceRoot as coreFindWorkspaceRoot, stateDbPath as coreStateDbPath, openWorkspaceStore as coreOpenWorkspaceStore } from '@ariadne/core';
-import type { TaskStore } from '@ariadne/core';
+import { findWorkspaceRoot as coreFindWorkspaceRoot, stateDbPath as coreStateDbPath, openWorkspaceStore as coreOpenWorkspaceStore } from '@ariadne-dev/core';
+import type { TaskStore } from '@ariadne-dev/core';
 
 /** CLI-specific convenience wrappers that default to `process.cwd()`. */
 export function findWorkspaceRoot(startDir: string = process.cwd()): string {

@@ -1,12 +1,12 @@
 import * as vscode from 'vscode';
 import * as path from 'node:path';
-import { findWorkspaceRoot, redactCommand } from '@ariadne/core';
+import { findWorkspaceRoot, redactCommand } from '@ariadne-dev/core';
 import {
   maybeCheckpointOnFileActivity,
   checkpointOnCommit,
   checkpointOnError,
   maybeCheckpointOnIdle,
-} from '@ariadne/core';
+} from '@ariadne-dev/core';
 import { getOrOpenStore, listOpenStores } from './storeCache.js';
 import { branchMismatchWarning } from './commands.js';
 

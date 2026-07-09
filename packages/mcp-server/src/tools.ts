@@ -12,7 +12,7 @@ import type {
   TaskStore,
   Todo,
   TodoStatus,
-} from '@ariadne/core';
+} from '@ariadne-dev/core';
 import {
   buildContext,
   syncTaskGit,
@@ -22,8 +22,8 @@ import {
   listTasksAcrossWorkspaces,
   searchAcrossWorkspaces,
   setTaskStatusWithRollup,
-} from '@ariadne/core';
-import type { CrossWorkspaceTask, CrossWorkspaceSearchResult } from '@ariadne/core';
+} from '@ariadne-dev/core';
+import type { CrossWorkspaceTask, CrossWorkspaceSearchResult } from '@ariadne-dev/core';
 import { readCurrentTaskId, setCurrentTaskId } from './workspace.js';
 
 /**
@@ -466,7 +466,7 @@ export interface SearchArgs {
 /**
  * Cross-entity search (title/goal, checkpoints, decisions, todos, errors,
  * open questions, files, commits). By default scoped to this workspace via
- * `@ariadne/core`'s shared `searchWorkspace`; pass `allWorkspaces: true` to
+ * `@ariadne-dev/core`'s shared `searchWorkspace`; pass `allWorkspaces: true` to
  * search every workspace Ariadne has ever seen (each result tagged with its
  * `workspaceRoot`) via `searchAcrossWorkspaces`.
  */
@@ -488,7 +488,7 @@ export interface GetContextArgs {
 /**
  * Assembles the current (or given) task's ranked, token-budgeted context —
  * this is the `task.getContext` tool from the architecture doc. Delegates to
- * `@ariadne/core`'s `buildContext` (the shared `ContextBuilder`), so the MCP
+ * `@ariadne-dev/core`'s `buildContext` (the shared `ContextBuilder`), so the MCP
  * server, CLI, and any future surface rank/trim context identically instead
  * of each reimplementing an ad-hoc dump of raw data. Falls back to the
  * cross-workspace registry if `taskId` belongs to a different workspace.
@@ -505,7 +505,7 @@ export interface GitSyncArgs {
 
 /**
  * Syncs the current git branch and any new commits (since what's already
- * recorded) into the current (or given) task, using @ariadne/core's
+ * recorded) into the current (or given) task, using @ariadne-dev/core's
  * editor-agnostic GitWatcher (shells out to `git` directly) — so MCP
  * clients without an editor's git integration still get commit/branch
  * capture. Runs against the task's actual owning workspace root (which may

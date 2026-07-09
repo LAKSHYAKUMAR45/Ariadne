@@ -1,4 +1,4 @@
-// Points the global cross-workspace registry (see @ariadne/core's
+// Points the global cross-workspace registry (see @ariadne-dev/core's
 // Registry.ts) at an in-memory database instead of the real
 // ~/.ariadne/registry.db for the duration of this package's test suite, so
 // tests never touch (or depend on) the developer's / CI runner's actual

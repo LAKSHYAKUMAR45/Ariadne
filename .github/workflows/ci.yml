@@ -21,7 +21,7 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      # @ariadne/core must be built before packages/cli or
+      # @ariadne-dev/core must be built before packages/cli or
       # packages/vscode-extension can typecheck/test, since they import its
       # compiled dist/. `pnpm -r run build` runs in workspace dependency
       # order, so this handles that automatically.

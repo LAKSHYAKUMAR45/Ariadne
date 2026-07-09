@@ -3,14 +3,14 @@ import {
   openWorkspaceStore as coreOpenWorkspaceStore,
   readCurrentTaskId as coreReadCurrentTaskId,
   setCurrentTaskId as coreSetCurrentTaskId,
-} from '@ariadne/core';
-import type { TaskStore } from '@ariadne/core';
+} from '@ariadne-dev/core';
+import type { TaskStore } from '@ariadne-dev/core';
 
 /**
  * MCP-server-specific convenience wrappers that default to `process.cwd()`,
  * mirroring the equivalents in `packages/cli/src/workspace.ts` and
  * `packages/cli/src/currentTask.ts` — every surface resolves the workspace
- * root and "current task" file the same way via `@ariadne/core`.
+ * root and "current task" file the same way via `@ariadne-dev/core`.
  */
 export function findWorkspaceRoot(startDir: string = process.cwd()): string {
   return coreFindWorkspaceRoot(startDir);

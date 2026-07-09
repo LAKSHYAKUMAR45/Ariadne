@@ -1,5 +1,5 @@
-import type { TaskStore } from '@ariadne/core';
-import { resolveTaskAnyWorkspace } from '@ariadne/core';
+import type { TaskStore } from '@ariadne-dev/core';
+import { resolveTaskAnyWorkspace } from '@ariadne-dev/core';
 import { findWorkspaceRoot, openWorkspaceStore } from './workspace.js';
 import { readCurrentTaskId } from './currentTask.js';
 
@@ -13,7 +13,7 @@ function isPromiseLike<T>(value: T): value is Extract<T, PromiseLike<unknown>> {
  * falls back to this workspace's current task. If the resolved id isn't a
  * task in the current workspace, transparently falls back to the global
  * cross-workspace registry to find and open the actual owning workspace
- * (see `resolveTaskAnyWorkspace` in `@ariadne/core`) — this is what lets
+ * (see `resolveTaskAnyWorkspace` in `@ariadne-dev/core`) — this is what lets
  * e.g. `ariadne status --task <id>` operate on a task from a different
  * workspace without the user needing to `cd` there first.
  */

@@ -1,6 +1,6 @@
 import { McpServer, ResourceTemplate } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
-import type { TaskStore } from '@ariadne/core';
+import type { TaskStore } from '@ariadne-dev/core';
 import { findWorkspaceRoot, openWorkspaceStore } from './workspace.js';
 import * as tools from './tools.js';
 
@@ -22,7 +22,7 @@ const TODO_STATUS = z.enum(['pending', 'done', 'blocked']);
 /**
  * Builds an MCP server exposing Ariadne's task state as tools, per
  * docs/02-ARCHITECTURE.md section 3. Every tool is a thin wrapper over the
- * pure functions in `tools.ts`, which in turn call the same `@ariadne/core`
+ * pure functions in `tools.ts`, which in turn call the same `@ariadne-dev/core`
  * `TaskStore` the CLI and VS Code extension use — one shared implementation,
  * three surfaces.
  *

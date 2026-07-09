@@ -3,7 +3,7 @@ import { openStoreForCurrentWorkspace, getCurrentTaskId, setCurrentTask, initWor
 import { handleChatCommand, progressMessageFor, formatStatusBarItem } from './commands.js';
 import { closeAllStores, closeStore } from './storeCache.js';
 import { registerPassiveCapture } from './passiveCapture.js';
-import { findWorkspaceRoot } from '@ariadne/core';
+import { findWorkspaceRoot } from '@ariadne-dev/core';
 
 let output: vscode.OutputChannel;
 let statusBarItem: vscode.StatusBarItem | undefined;

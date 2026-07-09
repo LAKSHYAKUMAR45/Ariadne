@@ -1,5 +1,5 @@
 {
-  "name": "@ariadne/mcp-server",
+  "name": "@ariadne-dev/mcp-server",
   "version": "0.1.0",
   "description": "MCP (Model Context Protocol) server for Ariadne — exposes task state as tools/resources to any MCP-capable AI client.",
   "license": "MIT",
@@ -20,7 +20,7 @@
     "lint": "echo \"(no lint configured yet)\""
   },
   "dependencies": {
-    "@ariadne/core": "workspace:*",
+    "@ariadne-dev/core": "workspace:*",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "zod": "^3.23.8"
   },

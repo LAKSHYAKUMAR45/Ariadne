@@ -1,5 +1,5 @@
 {
-  "name": "@ariadne/cli",
+  "name": "@ariadne-dev/cli",
   "version": "0.1.0",
   "description": "CLI for Ariadne — chats are disposable, tasks are permanent.",
   "license": "MIT",
@@ -19,7 +19,7 @@
     "lint": "echo \"(no lint configured yet)\""
   },
   "dependencies": {
-    "@ariadne/core": "workspace:*",
+    "@ariadne-dev/core": "workspace:*",
     "commander": "^12.1.0"
   },
   "devDependencies": {

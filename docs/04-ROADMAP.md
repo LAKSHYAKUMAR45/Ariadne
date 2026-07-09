@@ -6,16 +6,16 @@
 - Storage: `.ariadne/state.db` (SQLite) **gitignored by default**; Markdown
   export is opt-in.
 - v1 ships **all three surfaces together**: Copilot Chat participant, MCP server,
-  and CLI — all wrapping one shared `@ariadne/core`.
+  and CLI — all wrapping one shared `@ariadne-dev/core`.
 
 ## 2. MVP Feature List
-- [ ] `@ariadne/core`: TaskStore (SQLite), ContextBuilder (ranked, budgeted),
+- [ ] `@ariadne-dev/core`: TaskStore (SQLite), ContextBuilder (ranked, budgeted),
       CheckpointEngine (rule-based, hierarchical), GitWatcher, Redactor.
-- [ ] `@ariadne/mcp-server`: exposes `task.start/switch/list/checkpoint/
+- [ ] `@ariadne-dev/mcp-server`: exposes `task.start/switch/list/checkpoint/
       getContext/addDecision/addTodo/resolveError/search` as MCP tools.
-- [ ] `@ariadne/cli` (`ariadne` binary): same operations as plain commands,
+- [ ] `@ariadne-dev/cli` (`ariadne` binary): same operations as plain commands,
       usable by any agent/CLI (Copilot CLI included) without VS Code.
-- [ ] `@ariadne/vscode-extension`:
+- [ ] `@ariadne-dev/vscode-extension`:
   - Registers `@ariadne` Copilot Chat participant (`/start /checkpoint /resume
     /status /decide /context /switch`).
   - Spawns/registers the MCP server for Copilot Chat's MCP integration.

@@ -3,7 +3,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import { execFileSync } from 'node:child_process';
-import { TaskStore } from '@ariadne/core';
+import { TaskStore } from '@ariadne-dev/core';
 import { handleChatCommand, formatStatus, formatStatusSections, formatStatusBarItem, branchMismatchWarning } from '../src/commands.js';
 
 describe('chat participant command logic', () => {

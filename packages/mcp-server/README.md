@@ -1,10 +1,10 @@
-# @ariadne/mcp-server
+# @ariadne-dev/mcp-server
 
 An MCP ([Model Context Protocol](https://modelcontextprotocol.io/)) server that
 exposes Ariadne's task state as tools to **any** MCP-capable AI client —
 Claude Code, Gemini CLI, Codex, Copilot Chat/CLI, or a custom agent — without
 needing VS Code. It's one of three thin surfaces over the shared
-`@ariadne/core` `TaskStore`; the CLI and VS Code extension read/write the
+`@ariadne-dev/core` `TaskStore`; the CLI and VS Code extension read/write the
 exact same `.ariadne/state.db`, so state is identical no matter which surface
 you use.
 
@@ -73,9 +73,9 @@ requiring the model to make an explicit tool call:
 ## Development
 
 ```bash
-pnpm --filter @ariadne/core build   # @ariadne/core must be built first
-pnpm --filter @ariadne/mcp-server build
-pnpm --filter @ariadne/mcp-server test
+pnpm --filter @ariadne-dev/core build   # @ariadne-dev/core must be built first
+pnpm --filter @ariadne-dev/mcp-server build
+pnpm --filter @ariadne-dev/mcp-server test
 ```
 
 `src/tools.ts` holds pure, transport-agnostic implementations of every tool

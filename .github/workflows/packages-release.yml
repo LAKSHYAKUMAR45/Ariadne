@@ -1,7 +1,7 @@
 name: Release npm packages
 
 # Changesets-driven versioning/publishing for the npm-publishable packages
-# (@ariadne/core, ariadne (CLI), @ariadne/mcp-server). The VS Code extension
+# (@ariadne-dev/core, ariadne (CLI), @ariadne-dev/mcp-server). The VS Code extension
 # is intentionally excluded (see .changeset/config.json's `ignore` list and
 # its package.json's `private: true`) — it's released separately as a .vsix
 # via release.yml, not to npm.
@@ -41,9 +41,9 @@ jobs:
 
       - name: Build publishable packages
         run: |
-          pnpm --filter @ariadne/core run build
-          pnpm --filter @ariadne/cli run build
-          pnpm --filter @ariadne/mcp-server run build
+          pnpm --filter @ariadne-dev/core run build
+          pnpm --filter @ariadne-dev/cli run build
+          pnpm --filter @ariadne-dev/mcp-server run build
 
       - name: Create/update Version Packages PR or publish
         uses: changesets/action@v1

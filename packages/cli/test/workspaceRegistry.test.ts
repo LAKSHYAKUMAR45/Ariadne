@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
-import { openWorkspaceStore, closeRegistry } from '@ariadne/core';
+import { openWorkspaceStore, closeRegistry } from '@ariadne-dev/core';
 import { program } from '../src/index.js';
 
 // These commands (`workspace list/prune/forget`, `backup`, `restore`) are

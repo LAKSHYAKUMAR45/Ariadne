@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
-import { openWorkspaceStore, closeRegistry } from '@ariadne/core';
+import { openWorkspaceStore, closeRegistry } from '@ariadne-dev/core';
 import { handleChatCommand } from '../src/commands.js';
 import { closeAllStores } from '../src/storeCache.js';
 

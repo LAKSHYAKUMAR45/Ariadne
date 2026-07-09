@@ -1,5 +1,5 @@
-import type { TaskStore, CheckpointLevel, TaskStatus } from '@ariadne/core';
-import { buildContext, searchWorkspace, findTaskWorkspace, openRegistry, listTasksAcrossWorkspaces, searchAcrossWorkspaces, setTaskStatusWithRollup, syncTaskGit, exportTaskMarkdown } from '@ariadne/core';
+import type { TaskStore, CheckpointLevel, TaskStatus } from '@ariadne-dev/core';
+import { buildContext, searchWorkspace, findTaskWorkspace, openRegistry, listTasksAcrossWorkspaces, searchAcrossWorkspaces, setTaskStatusWithRollup, syncTaskGit, exportTaskMarkdown } from '@ariadne-dev/core';
 import { getOrOpenStore } from './storeCache.js';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
@@ -209,7 +209,7 @@ function extractFlagValue(prompt: string, flag: string): { value: string | undef
 
 /**
  * Builds the /status (and /resume) output as an ordered list of sections, so
- * callers can stream them incrementally. Delegates to @ariadne/core's
+ * callers can stream them incrementally. Delegates to @ariadne-dev/core's
  * buildContext — the same ranked, token-budgeted context package the CLI's
  * `status`/`resume` and the MCP server's `get_context` tool use — so all
  * three surfaces show identical "what am I working on" context instead of

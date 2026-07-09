@@ -3,20 +3,20 @@
 ## 1. Guiding Constraint
 Every surface (VS Code extension, CLI, Copilot Chat participant, any future MCP
 client) must share **one** core implementation. No logic is duplicated per client —
-each surface is a thin adapter over `@ariadne/core`.
+each surface is a thin adapter over `@ariadne-dev/core`.
 
 ## 2. High-Level Diagram
 
 ```
 ┌───────────────────────────────────────────────────────────────────┐
-│                        @ariadne/core (library)                   │
+│                        @ariadne-dev/core (library)                   │
 │  TaskStore (SQLite) │ ContextBuilder │ CheckpointEngine │ GitWatcher│
 │                       │ Redactor │ Exporter                        │
 │                       │ (PluginRegistry — deferred, post-MVP)      │
 └───────────────┬───────────────────────────────┬─────────────────────┘
                 │                               │
      ┌──────────▼───────────┐        ┌──────────▼───────────┐
-     │ @ariadne/mcp-server  │        │  @ariadne/cli        │
+     │ @ariadne-dev/mcp-server  │        │  @ariadne-dev/cli        │
      │ stdio MCP server        │        │  `ariadne` binary     │
      │ tools: task.*, get_context, │        │  task/checkpoint/todo/  │
      │ git_sync, export_task       │        │  status/resume/git-sync/│
@@ -25,20 +25,20 @@ each surface is a thin adapter over `@ariadne/core`.
      └──────────┬─────────────┘        └──────────┬───────────┘
                 │                                 │
      ┌──────────▼──────────────────────────────────▼───────────┐
-     │              @ariadne/vscode-extension                 │
+     │              @ariadne-dev/vscode-extension                 │
      │  - registers `@ariadne` chat participant (commands.ts)    │
-     │  - background listeners → write directly to @ariadne/core │
+     │  - background listeners → write directly to @ariadne-dev/core │
      │    (file saves, terminal commands, git commits, diagnostics)│
      │  - optional thin tree view (secondary, v1.1+)              │
      └────────────────────────────────────────────────────────────┘
                 │
      Any MCP-capable client (Copilot CLI, Claude Code, Cursor,
-     custom agents) connects to `@ariadne/mcp-server` directly —
+     custom agents) connects to `@ariadne-dev/mcp-server` directly —
      no VS Code required for the CLI + MCP path.
 ```
 
 Each of the three surfaces above opens its own connection directly to
-`.ariadne/state.db` via `@ariadne/core`'s `TaskStore` (no daemon, no IPC — see
+`.ariadne/state.db` via `@ariadne-dev/core`'s `TaskStore` (no daemon, no IPC — see
 §4). They agree on shared state purely because they all read/write the same
 SQLite file using the same shared library. In addition, every surface also
 syncs a lightweight entry into a single machine-wide registry at
@@ -51,18 +51,18 @@ from any workspace, not just the one it was created in.
   assistant.
 - Copilot Chat, Copilot CLI, and Claude Code can all attach to the same local MCP
   server. One implementation, three+ front doors.
-- `@ariadne/mcp-server` exposes both **tools** (explicit, invoked by name —
+- `@ariadne-dev/mcp-server` exposes both **tools** (explicit, invoked by name —
   `task_new`, `get_context`, `search`, etc.) and **resources** (URI-addressable,
   discoverable/subscribable reads — `ariadne://task/current/context` and the
   templated `ariadne://task/{taskId}/context`). Both routes return the same
-  `ContextPackage` from `@ariadne/core`'s `ContextBuilder`; resources exist
+  `ContextPackage` from `@ariadne-dev/core`'s `ContextBuilder`; resources exist
   because some MCP hosts auto-attach subscribed resources to a conversation
   without requiring the model to explicitly call a tool, which is a strictly
   better UX for "give me the current task's context" than a tool call.
 - The chat participant (`@ariadne` in Copilot Chat) currently reimplements its
-  `/status`/`/resume` output directly against `@ariadne/core` (see
+  `/status`/`/resume` output directly against `@ariadne-dev/core` (see
   `packages/vscode-extension/src/commands.ts`) rather than calling into
-  `@ariadne/mcp-server`, since running an MCP client from inside the extension
+  `@ariadne-dev/mcp-server`, since running an MCP client from inside the extension
   isn't wired up yet. Tracked as a known gap (see `ext-chat-participant-shared-context`
   in the roadmap) — the intent is still for it to become a thin wrapper over the
   exact same `buildContext`/tool logic the CLI and MCP server already share, just
@@ -74,7 +74,7 @@ here:** there is no long-lived daemon and no IPC transport. Every process — th
 CLI (one process per invocation), the MCP server (one process per client
 session), and the VS Code extension (one process per editor window) — opens
 its own `better-sqlite3` connection straight to `.ariadne/state.db` via
-`@ariadne/core`'s `TaskStore`/`openWorkspaceStore()`.
+`@ariadne-dev/core`'s `TaskStore`/`openWorkspaceStore()`.
 
 This works safely today because:
 - SQLite is opened in **WAL mode** (`packages/core/src/db.ts`), which allows
@@ -223,7 +223,7 @@ editor and never prompts the user.
 ## 7. Sequence: Resuming a Task in a New Chat
 
 ```
-Developer            Copilot Chat        @ariadne participant       @ariadne/core
+Developer            Copilot Chat        @ariadne participant       @ariadne-dev/core
     │  "@ariadne resume"  │                    │                         │
     ├──────────────────────►│                    │                         │
     │                       ├───────────────────►│                         │
@@ -233,13 +233,13 @@ Developer            Copilot Chat        @ariadne participant       @ariadne/cor
     │◄── injected context ──┤                    │                         │
 ```
 
-Today the chat participant calls `@ariadne/core` in-process (no MCP hop — see
+Today the chat participant calls `@ariadne-dev/core` in-process (no MCP hop — see
 §3's note). The equivalent flow for **Copilot CLI** or any other MCP-capable
-client instead calls `@ariadne/mcp-server`'s `get_context` tool, which
+client instead calls `@ariadne-dev/mcp-server`'s `get_context` tool, which
 delegates to the same `buildContext` under the hood:
 
 ```
-Developer        Copilot CLI / other MCP client        @ariadne/mcp-server   @ariadne/core
+Developer        Copilot CLI / other MCP client        @ariadne-dev/mcp-server   @ariadne-dev/core
     │ "resume task X" │                                      │                    │
     ├──────────────────►│                                      │                    │
     │                   ├── tools/call get_context ───────────►│                    │

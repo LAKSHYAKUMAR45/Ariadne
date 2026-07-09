@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
-import { findWorkspaceRoot } from '@ariadne/core';
-import type { TaskStore } from '@ariadne/core';
+import { findWorkspaceRoot } from '@ariadne-dev/core';
+import type { TaskStore } from '@ariadne-dev/core';
 import { getOrOpenStore } from './storeCache.js';
 
 const SELECTED_FOLDER_KEY = 'ariadne.selectedFolderPath';

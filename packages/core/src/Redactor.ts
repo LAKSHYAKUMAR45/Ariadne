@@ -7,7 +7,7 @@
  * LLM calls), matching the project's "rule-based only for MVP" decision.
  *
  * Used by the VS Code extension's terminal-command passive capture today;
- * exported from @ariadne/core so the CLI and MCP server can reuse the exact
+ * exported from @ariadne-dev/core so the CLI and MCP server can reuse the exact
  * same rules if/when they gain command-capture of their own, instead of
  * each surface reimplementing its own ad-hoc heuristic.
  */

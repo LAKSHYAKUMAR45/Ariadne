@@ -1,6 +1,6 @@
 name: Release VS Code Extension
 
-# Builds @ariadne/core, then packages the VS Code extension into one .vsix
+# Builds @ariadne-dev/core, then packages the VS Code extension into one .vsix
 # per supported platform (each bundling a real, correctly-ABI'd
 # better-sqlite3 native binary — see packages/vscode-extension/esbuild.js
 # and README.md's "Multi-platform packaging" section) and attaches them to
@@ -27,19 +27,19 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Build @ariadne/core
-        run: pnpm --filter @ariadne/core run build
+      - name: Build @ariadne-dev/core
+        run: pnpm --filter @ariadne-dev/core run build
 
-      - name: Test @ariadne/core, cli, mcp-server, and vscode-extension
+      - name: Test @ariadne-dev/core, cli, mcp-server, and vscode-extension
         run: |
-          pnpm --filter @ariadne/core run test
-          pnpm --filter @ariadne/core exec tsc --noEmit -p tsconfig.json
-          pnpm --filter @ariadne/cli run build
-          pnpm --filter @ariadne/cli run test
-          pnpm --filter @ariadne/cli exec tsc --noEmit -p tsconfig.json
-          pnpm --filter @ariadne/mcp-server run build
-          pnpm --filter @ariadne/mcp-server run test
-          pnpm --filter @ariadne/mcp-server exec tsc --noEmit -p tsconfig.json
+          pnpm --filter @ariadne-dev/core run test
+          pnpm --filter @ariadne-dev/core exec tsc --noEmit -p tsconfig.json
+          pnpm --filter @ariadne-dev/cli run build
+          pnpm --filter @ariadne-dev/cli run test
+          pnpm --filter @ariadne-dev/cli exec tsc --noEmit -p tsconfig.json
+          pnpm --filter @ariadne-dev/mcp-server run build
+          pnpm --filter @ariadne-dev/mcp-server run test
+          pnpm --filter @ariadne-dev/mcp-server exec tsc --noEmit -p tsconfig.json
           pnpm --filter ariadne-vscode exec tsc --noEmit -p tsconfig.json
           pnpm --filter ariadne-vscode run test
 

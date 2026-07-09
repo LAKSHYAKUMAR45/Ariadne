@@ -2,7 +2,7 @@
 import { Command } from 'commander';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import type { TaskStore, TodoStatus } from '@ariadne/core';
+import type { TaskStore, TodoStatus } from '@ariadne-dev/core';
 import {
   buildContext,
   syncTaskGit,
@@ -16,7 +16,7 @@ import {
   listWorkspaces,
   forgetWorkspace,
   pruneMissingWorkspaces,
-} from '@ariadne/core';
+} from '@ariadne-dev/core';
 import { openWorkspaceStore, findWorkspaceRoot, stateDbPath } from './workspace.js';
 import { readCurrentTaskId, setCurrentTaskId } from './currentTask.js';
 import { withResolvedTask, withScopedStore } from './withTask.js';

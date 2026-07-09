@@ -87,7 +87,7 @@
     "package:all": "pnpm run package:linux-x64 && pnpm run package:linux-arm64 && pnpm run package:darwin-x64 && pnpm run package:darwin-arm64 && pnpm run package:win32-x64"
   },
   "dependencies": {
-    "@ariadne/core": "workspace:*",
+    "@ariadne-dev/core": "workspace:*",
     "better-sqlite3": "^11.3.0"
   },
   "devDependencies": {

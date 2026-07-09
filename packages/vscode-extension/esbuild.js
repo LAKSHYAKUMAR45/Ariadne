@@ -54,7 +54,7 @@ const options = {
 };
 
 /**
- * Fails the build loudly if @ariadne/core's better-sqlite3 dependency has
+ * Fails the build loudly if @ariadne-dev/core's better-sqlite3 dependency has
  * moved to a major version this pipeline hasn't been re-verified against.
  * Bump SUPPORTED_BETTER_SQLITE3_MAJOR only after checking that
  * copyRuntimePackage()'s skip lists, the bindings/file-uri-to-path runtime
