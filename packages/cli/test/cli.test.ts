@@ -4,7 +4,9 @@ import { program } from '../src/index.js';
 describe('ariadne CLI surface', () => {
   it('registers the expected top-level commands', () => {
     const names = program.commands.map((c) => c.name());
-    expect(names).toEqual(expect.arrayContaining(['task', 'checkpoint', 'todo', 'status', 'resume', 'where']));
+    expect(names).toEqual(
+      expect.arrayContaining(['task', 'checkpoint', 'todo', 'status', 'resume', 'where', 'git-sync']),
+    );
   });
 
   it('registers task and todo subcommands', () => {

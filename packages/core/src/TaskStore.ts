@@ -275,6 +275,13 @@ export class TaskStore {
       .run(status, nowIso(), id);
   }
 
+  /** Updates a task's tracked git branch (used by GitWatcher when it detects a branch switch). */
+  updateTaskBranch(id: string, branch: string | null): void {
+    this.db
+      .prepare(`UPDATE tasks SET branch = ?, updated_at = ? WHERE id = ?`)
+      .run(branch, nowIso(), id);
+  }
+
   touchTask(id: string): void {
     this.db.prepare(`UPDATE tasks SET updated_at = ? WHERE id = ?`).run(nowIso(), id);
   }

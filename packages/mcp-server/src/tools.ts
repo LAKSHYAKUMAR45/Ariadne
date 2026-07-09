@@ -3,6 +3,7 @@ import type {
   CheckpointLevel,
   ContextPackage,
   Decision,
+  SyncGitResult,
   Task,
   TaskError,
   TaskStatus,
@@ -10,7 +11,7 @@ import type {
   Todo,
   TodoStatus,
 } from '@ariadne/core';
-import { buildContext } from '@ariadne/core';
+import { buildContext, syncTaskGit } from '@ariadne/core';
 import { readCurrentTaskId, setCurrentTaskId } from './workspace.js';
 
 /**
@@ -162,4 +163,20 @@ export interface GetContextArgs {
 export function getContext(store: TaskStore, workspaceRoot: string, args: GetContextArgs): ContextPackage {
   const taskId = resolveTaskId(store, workspaceRoot, args.taskId);
   return buildContext(store, taskId, args.tokenBudget ? { tokenBudget: args.tokenBudget } : undefined);
+}
+
+export interface GitSyncArgs {
+  taskId?: string;
+}
+
+/**
+ * Syncs the current git branch and any new commits (since what's already
+ * recorded) into the current (or given) task, using @ariadne/core's
+ * editor-agnostic GitWatcher (shells out to `git` directly) — so MCP
+ * clients without an editor's git integration still get commit/branch
+ * capture.
+ */
+export function gitSync(store: TaskStore, workspaceRoot: string, args: GitSyncArgs): SyncGitResult {
+  const taskId = resolveTaskId(store, workspaceRoot, args.taskId);
+  return syncTaskGit(store, taskId, workspaceRoot);
 }

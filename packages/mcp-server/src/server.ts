@@ -235,5 +235,23 @@ export function createAriadneMcpServer(options?: { workspaceRoot?: string; store
     },
   );
 
+  server.registerTool(
+    'git_sync',
+    {
+      title: 'Sync git state',
+      description:
+        'Syncs the current git branch and any new commits (since what\'s already recorded) into the ' +
+        'current (or given) task, by shelling out to `git` directly — works without any editor open.',
+      inputSchema: { taskId: z.string().optional() },
+    },
+    async (args) => {
+      try {
+        return jsonResult(tools.gitSync(store, workspaceRoot, args));
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
+
   return server;
 }

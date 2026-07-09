@@ -22,6 +22,13 @@ export {
   rollupCheckpoints,
 } from './CheckpointEngine.js';
 export {
+  getHeadSha,
+  getCurrentBranch,
+  listRecentCommits,
+  syncTaskGit,
+} from './GitWatcher.js';
+export type { GitLogEntry, SyncGitResult } from './GitWatcher.js';
+export {
   findWorkspaceRoot,
   stateDbPath,
   openWorkspaceStore,

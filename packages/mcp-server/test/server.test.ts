@@ -27,6 +27,7 @@ describe('createAriadneMcpServer', () => {
           'error_resolve',
           'search',
           'get_context',
+          'git_sync',
         ].sort(),
       );
     } finally {

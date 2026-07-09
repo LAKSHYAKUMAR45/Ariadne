@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { Command } from 'commander';
 import type { TaskStore, TodoStatus } from '@ariadne/core';
-import { buildContext } from '@ariadne/core';
+import { buildContext, syncTaskGit } from '@ariadne/core';
 import { openWorkspaceStore, findWorkspaceRoot } from './workspace.js';
 import { readCurrentTaskId, setCurrentTaskId } from './currentTask.js';
 
@@ -227,6 +227,26 @@ program
   .description('Print the resolved workspace root and state db path')
   .action(() => {
     console.log(findWorkspaceRoot());
+  });
+
+program
+  .command('git-sync')
+  .description('Sync the current git branch and any new commits into the current (or --task) task — for CLI-only workflows without VS Code')
+  .option('-t, --task <id>', 'Task id')
+  .action((opts: { task?: string }) => {
+    withStore((store) => {
+      const taskId = resolveTaskId(store, opts.task);
+      const result = syncTaskGit(store, taskId, findWorkspaceRoot());
+      if (result.branchChanged) {
+        console.log(`Branch updated to ${result.newBranch}.`);
+      }
+      if (result.recordedCommits.length > 0) {
+        console.log(`Recorded ${result.recordedCommits.length} commit(s):`);
+        for (const c of result.recordedCommits) console.log(`  - ${c.sha.slice(0, 7)} ${c.message}`);
+      } else {
+        console.log('No new commits.');
+      }
+    });
   });
 
 export { program };

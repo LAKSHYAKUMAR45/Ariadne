@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
+import { execFileSync } from 'node:child_process';
 import { TaskStore } from '@ariadne/core';
 import * as tools from '../src/tools.js';
 import { readCurrentTaskId } from '../src/workspace.js';
@@ -92,5 +93,19 @@ describe('mcp-server tools', () => {
     expect(ctx.openTodos).toHaveLength(1);
     expect(ctx.unresolvedErrors).toHaveLength(1);
     expect(ctx.decisions).toHaveLength(1);
+  });
+
+  it('git_sync records commits from a real git repo at the workspace root', () => {
+    execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: workspaceRoot });
+    execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: workspaceRoot });
+    execFileSync('git', ['config', 'user.name', 'Test'], { cwd: workspaceRoot });
+    fs.writeFileSync(path.join(workspaceRoot, 'a.txt'), 'a');
+    execFileSync('git', ['add', 'a.txt'], { cwd: workspaceRoot });
+    execFileSync('git', ['commit', '-q', '-m', 'Initial commit'], { cwd: workspaceRoot });
+
+    tools.taskNew(store, workspaceRoot, { title: 'A' });
+    const result = tools.gitSync(store, workspaceRoot, {});
+    expect(result.recordedCommits).toHaveLength(1);
+    expect(result.recordedCommits[0].message).toBe('Initial commit');
   });
 });
