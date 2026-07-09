@@ -34,7 +34,7 @@ directory), and reads/writes `<workspace-root>/.ariadne/state.db`.
 | `decision_add` | Records a decision (with optional rationale). |
 | `error_add` / `error_resolve` | Record or resolve an error. |
 | `search` | Substring search over task titles/goals. |
-| `get_context` | Returns the current (or given) task's full context — goal, latest checkpoint, open questions, unresolved errors, pending todos, recent files, commits, and decisions — as structured JSON. Equivalent to the CLI's `status`/`resume`. |
+| `get_context` | Returns the current (or given) task's full context — goal, latest checkpoint, open questions, unresolved errors, pending todos, recent files, commits, and decisions — as structured JSON, ranked and trimmed to fit an optional `tokenBudget` (default 2000). Equivalent to the CLI's `status`/`resume`. |
 
 All tools that need a task default to the workspace's "current task" (the
 same one `ariadne task use` sets) when no explicit `taskId` is given.
@@ -54,8 +54,5 @@ stdio entry point.
 
 ## Known limitations (early/pre-release)
 
-- No ranked/token-budgeted context assembly yet (`get_context` returns
-  everything, capped by fixed limits) — see the `core-context-builder`
-  roadmap item.
 - No resources (only tools) are exposed yet.
 - Not yet published to npm.

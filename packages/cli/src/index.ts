@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { Command } from 'commander';
 import type { TaskStore, TodoStatus } from '@ariadne/core';
+import { buildContext } from '@ariadne/core';
 import { openWorkspaceStore, findWorkspaceRoot } from './workspace.js';
 import { readCurrentTaskId, setCurrentTaskId } from './currentTask.js';
 
@@ -147,56 +148,65 @@ todo
 // status / resume
 // ---------------------------------------------------------------------
 
-function printStatus(store: TaskStore, taskId: string): void {
+function printStatus(store: TaskStore, taskId: string, tokenBudget?: number): void {
   const t = store.getTask(taskId)!;
   console.log(`Task: ${t.title}  (${t.status})`);
-  if (t.goal) console.log(`Goal: ${t.goal}`);
 
-  const latest = store.latestCheckpoint(taskId);
-  if (latest) {
-    console.log(`\nLatest checkpoint (${latest.level}, ${latest.createdAt}):`);
-    console.log(`  ${latest.summary}`);
+  const ctx = buildContext(store, taskId, tokenBudget ? { tokenBudget } : undefined);
+
+  if (ctx.goal) console.log(`Goal: ${ctx.goal}`);
+
+  if (ctx.latestSummary) {
+    console.log(`\nLatest checkpoint:`);
+    console.log(`  ${ctx.latestSummary}`);
   }
 
-  const openQuestions = store.listOpenQuestions(taskId, { resolved: false });
-  if (openQuestions.length > 0) {
+  if (ctx.openQuestions.length > 0) {
     console.log(`\nOpen questions:`);
-    for (const q of openQuestions) console.log(`  - ${q.text}`);
+    for (const q of ctx.openQuestions) console.log(`  - ${q}`);
   }
 
-  const unresolvedErrors = store.listErrors(taskId, { resolved: false });
-  if (unresolvedErrors.length > 0) {
+  if (ctx.unresolvedErrors.length > 0) {
     console.log(`\nUnresolved errors:`);
-    for (const e of unresolvedErrors) console.log(`  - ${e.message}`);
+    for (const e of ctx.unresolvedErrors) console.log(`  - ${e}`);
   }
 
-  const pendingTodos = store.listTodos(taskId, { status: 'pending' });
-  if (pendingTodos.length > 0) {
+  if (ctx.decisions.length > 0) {
+    console.log(`\nDecisions:`);
+    for (const d of ctx.decisions) console.log(`  - ${d}`);
+  }
+
+  if (ctx.openTodos.length > 0) {
     console.log(`\nPending todos:`);
-    for (const td of pendingTodos) console.log(`  - [${td.id}] ${td.text}`);
+    for (const td of ctx.openTodos) console.log(`  - ${td}`);
   }
 
-  const recentFiles = store.listFiles(taskId, 10);
-  if (recentFiles.length > 0) {
+  if (ctx.recentFiles.length > 0) {
     console.log(`\nRecently touched files:`);
-    for (const f of recentFiles) console.log(`  - (${f.role}) ${f.path}`);
+    for (const f of ctx.recentFiles) console.log(`  - (${f.role}) ${f.path}`);
   }
 
-  const recentCommits = store.listCommits(taskId, 5);
-  if (recentCommits.length > 0) {
+  if (ctx.recentCommits.length > 0) {
     console.log(`\nRecent commits:`);
-    for (const c of recentCommits) console.log(`  - ${c.sha.slice(0, 7)} ${c.message ?? ''}`);
+    for (const c of ctx.recentCommits) console.log(`  - ${c.sha.slice(0, 7)} ${c.message ?? ''}`);
+  }
+
+  const truncatedEntries = Object.entries(ctx.truncated);
+  if (truncatedEntries.length > 0) {
+    const summary = truncatedEntries.map(([category, count]) => `${count} ${category}`).join(', ');
+    console.log(`\n(Trimmed to fit token budget — omitted: ${summary}. Use --budget to raise the limit.)`);
   }
 }
 
 program
   .command('status')
-  .description('Show a summary of the current (or --task) task')
+  .description('Show a ranked, token-budgeted summary of the current (or --task) task')
   .option('-t, --task <id>', 'Task id')
-  .action((opts: { task?: string }) => {
+  .option('-b, --budget <tokens>', 'Token budget for context ranking (default: 2000)', (v) => parseInt(v, 10))
+  .action((opts: { task?: string; budget?: number }) => {
     withStore((store) => {
       const taskId = resolveTaskId(store, opts.task);
-      printStatus(store, taskId);
+      printStatus(store, taskId, opts.budget);
     });
   });
 
@@ -204,10 +214,11 @@ program
   .command('resume')
   .description('Alias of "status" — reload context for the current (or --task) task')
   .option('-t, --task <id>', 'Task id')
-  .action((opts: { task?: string }) => {
+  .option('-b, --budget <tokens>', 'Token budget for context ranking (default: 2000)', (v) => parseInt(v, 10))
+  .action((opts: { task?: string; budget?: number }) => {
     withStore((store) => {
       const taskId = resolveTaskId(store, opts.task);
-      printStatus(store, taskId);
+      printStatus(store, taskId, opts.budget);
     });
   });
 

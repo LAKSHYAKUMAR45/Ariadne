@@ -1,6 +1,7 @@
 import type {
   Checkpoint,
   CheckpointLevel,
+  ContextPackage,
   Decision,
   Task,
   TaskError,
@@ -9,6 +10,7 @@ import type {
   Todo,
   TodoStatus,
 } from '@ariadne/core';
+import { buildContext } from '@ariadne/core';
 import { readCurrentTaskId, setCurrentTaskId } from './workspace.js';
 
 /**
@@ -147,45 +149,17 @@ export function searchTasks(store: TaskStore, args: SearchArgs): Task[] {
 
 export interface GetContextArgs {
   taskId?: string;
-}
-
-export interface TaskContext {
-  task: Task;
-  latestCheckpoint: Checkpoint | null;
-  openQuestions: string[];
-  unresolvedErrors: TaskError[];
-  pendingTodos: Todo[];
-  recentFiles: { path: string; role: string }[];
-  recentCommits: { sha: string; message: string | null }[];
-  recentDecisions: Decision[];
+  tokenBudget?: number;
 }
 
 /**
- * Assembles the same "status" data the CLI's `status`/`resume` commands
- * print, but as structured JSON — this is the `task.getContext` tool from
- * the architecture doc. Not yet ranked/token-budgeted (see the
- * `core-context-builder` todo); it currently returns everything, capped by
- * the same fixed limits the CLI uses.
+ * Assembles the current (or given) task's ranked, token-budgeted context —
+ * this is the `task.getContext` tool from the architecture doc. Delegates to
+ * `@ariadne/core`'s `buildContext` (the shared `ContextBuilder`), so the MCP
+ * server, CLI, and any future surface rank/trim context identically instead
+ * of each reimplementing an ad-hoc dump of raw data.
  */
-export function getContext(store: TaskStore, workspaceRoot: string, args: GetContextArgs): TaskContext {
+export function getContext(store: TaskStore, workspaceRoot: string, args: GetContextArgs): ContextPackage {
   const taskId = resolveTaskId(store, workspaceRoot, args.taskId);
-  const task = store.getTask(taskId)!;
-  const latestCheckpoint = store.latestCheckpoint(taskId) ?? null;
-  const openQuestions = store.listOpenQuestions(taskId, { resolved: false }).map((q) => q.text);
-  const unresolvedErrors = store.listErrors(taskId, { resolved: false });
-  const pendingTodos = store.listTodos(taskId, { status: 'pending' });
-  const recentFiles = store.listFiles(taskId, 10).map((f) => ({ path: f.path, role: f.role }));
-  const recentCommits = store.listCommits(taskId, 5).map((c) => ({ sha: c.sha, message: c.message }));
-  const recentDecisions = store.listDecisions(taskId, 5);
-
-  return {
-    task,
-    latestCheckpoint,
-    openQuestions,
-    unresolvedErrors,
-    pendingTodos,
-    recentFiles,
-    recentCommits,
-    recentDecisions,
-  };
+  return buildContext(store, taskId, args.tokenBudget ? { tokenBudget: args.tokenBudget } : undefined);
 }

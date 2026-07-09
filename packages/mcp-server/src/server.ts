@@ -221,10 +221,10 @@ export function createAriadneMcpServer(options?: { workspaceRoot?: string; store
     {
       title: 'Get task context',
       description:
-        'Returns the current (or given) task\'s full context: goal, latest checkpoint, open questions, ' +
-        'unresolved errors, pending todos, recent files, recent commits, and recent decisions. Equivalent ' +
-        'to the CLI\'s "status"/"resume" commands, as structured JSON.',
-      inputSchema: { taskId: z.string().optional() },
+        'Returns the current (or given) task\'s ranked, token-budgeted context: goal, latest checkpoint, ' +
+        'open questions, unresolved errors, current decisions, pending todos, recent files, and commits ' +
+        'since the last checkpoint. Equivalent to the CLI\'s "status"/"resume" commands, as structured JSON.',
+      inputSchema: { taskId: z.string().optional(), tokenBudget: z.number().int().positive().optional() },
     },
     async (args) => {
       try {

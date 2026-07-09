@@ -3,6 +3,12 @@ export { openDatabase } from './db.js';
 export { SCHEMA_SQL, SCHEMA_VERSION } from './schema.js';
 export * from './types.js';
 export {
+  DEFAULT_TOKEN_BUDGET,
+  estimateTokens,
+  buildContext,
+} from './ContextBuilder.js';
+export type { ContextPackage, ContextFileRef, ContextCommitRef, BuildContextOptions } from './ContextBuilder.js';
+export {
   findWorkspaceRoot,
   stateDbPath,
   openWorkspaceStore,

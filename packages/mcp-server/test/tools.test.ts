@@ -87,10 +87,10 @@ describe('mcp-server tools', () => {
     tools.decisionAdd(store, workspaceRoot, { text: 'use SQLite' });
 
     const ctx = tools.getContext(store, workspaceRoot, {});
-    expect(ctx.task.id).toBe(task.id);
-    expect(ctx.latestCheckpoint?.summary).toBe('first checkpoint');
-    expect(ctx.pendingTodos).toHaveLength(1);
+    expect(ctx.taskId).toBe(task.id);
+    expect(ctx.latestSummary).toBe('first checkpoint');
+    expect(ctx.openTodos).toHaveLength(1);
     expect(ctx.unresolvedErrors).toHaveLength(1);
-    expect(ctx.recentDecisions).toHaveLength(1);
+    expect(ctx.decisions).toHaveLength(1);
   });
 });
