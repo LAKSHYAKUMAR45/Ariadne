@@ -24,4 +24,11 @@ All notable changes to the Ariadne VS Code extension will be documented here.
   `ariadne.passiveCapture.enabled`.
 
 ### Known limitations
-- Native SQLite binding packaged for linux-x64 only so far.
+- (none currently tracked — see docs/04-ROADMAP.md for deferred/stretch items)
+
+### Infrastructure
+- Added `package:<platform>-<arch>` / `package:all` scripts that fetch
+  real, correctly-ABI'd `better-sqlite3` prebuilt binaries (targeting VS
+  Code's bundled Electron version) for linux-x64/arm64, darwin-x64/arm64,
+  and win32-x64, producing one native, working `.vsix` per platform without
+  needing to actually run on that OS.

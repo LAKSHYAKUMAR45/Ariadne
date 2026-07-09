@@ -74,7 +74,13 @@
     "watch": "node esbuild.js --watch",
     "test": "vitest run",
     "lint": "echo \"(no lint configured yet)\"",
-    "package": "vsce package --no-dependencies"
+    "package": "vsce package --no-dependencies",
+    "package:linux-x64": "mkdir -p dist-vsix && node esbuild.js --vsce-target=linux-x64 && vsce package --no-dependencies --target linux-x64 -o dist-vsix/ariadne-linux-x64.vsix",
+    "package:linux-arm64": "mkdir -p dist-vsix && node esbuild.js --vsce-target=linux-arm64 && vsce package --no-dependencies --target linux-arm64 -o dist-vsix/ariadne-linux-arm64.vsix",
+    "package:darwin-x64": "mkdir -p dist-vsix && node esbuild.js --vsce-target=darwin-x64 && vsce package --no-dependencies --target darwin-x64 -o dist-vsix/ariadne-darwin-x64.vsix",
+    "package:darwin-arm64": "mkdir -p dist-vsix && node esbuild.js --vsce-target=darwin-arm64 && vsce package --no-dependencies --target darwin-arm64 -o dist-vsix/ariadne-darwin-arm64.vsix",
+    "package:win32-x64": "mkdir -p dist-vsix && node esbuild.js --vsce-target=win32-x64 && vsce package --no-dependencies --target win32-x64 -o dist-vsix/ariadne-win32-x64.vsix",
+    "package:all": "pnpm run package:linux-x64 && pnpm run package:linux-arm64 && pnpm run package:darwin-x64 && pnpm run package:darwin-arm64 && pnpm run package:win32-x64"
   },
   "dependencies": {
     "@ariadne/core": "workspace:*",

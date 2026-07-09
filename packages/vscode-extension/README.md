@@ -51,8 +51,6 @@ commands below — or just describe what you want in plain language (e.g.
   `/task new` or "Ariadne: New Task") — it never creates or auto-switches
   tasks. Terminal command capture requires VS Code's shell integration API
   (stable since 1.93) and a shell that supports it.
-- The packaged native SQLite binding currently targets linux-x64 only;
-  multi-platform `.vsix` builds are in progress.
 
 ## Development
 
@@ -60,11 +58,39 @@ commands below — or just describe what you want in plain language (e.g.
 pnpm install
 pnpm --filter @ariadne/core build   # @ariadne/core must be built first
 pnpm --filter ariadne-vscode build  # bundles dist/extension.js via esbuild
-pnpm --filter ariadne-vscode package  # produces a .vsix via vsce
+pnpm --filter ariadne-vscode package  # produces a .vsix via vsce (current machine's platform only)
 ```
 
 See `esbuild.js` for why `better-sqlite3` is bundled the way it is (its
 native binding can't be inlined by esbuild).
+
+### Multi-platform packaging
+
+`better-sqlite3`'s native binding is platform/ABI-specific, so a single
+`.vsix` can only run on the platform it was built on. Real, per-platform
+`.vsix` files are produced without needing that OS, by downloading
+`better-sqlite3`'s official prebuilt binaries (via `prebuild-install`,
+targeting VS Code's bundled Electron ABI — see `VSCODE_ELECTRON_VERSION` in
+`esbuild.js`) instead of relying on whatever's locally compiled:
+
+```bash
+pnpm --filter ariadne-vscode run package:linux-x64
+pnpm --filter ariadne-vscode run package:linux-arm64
+pnpm --filter ariadne-vscode run package:darwin-x64
+pnpm --filter ariadne-vscode run package:darwin-arm64
+pnpm --filter ariadne-vscode run package:win32-x64
+pnpm --filter ariadne-vscode run package:all   # all five, into dist-vsix/
+```
+
+Each script fetches the correct native binary for that target before
+running `vsce package --target <platform>-<arch>`, so `dist-vsix/` ends up
+with one correctly-targeted `.vsix` per platform, ready to publish with
+`vsce publish --target <platform>-<arch> --packagePath dist-vsix/*.vsix` (or
+upload individually via the Marketplace UI/`vsce publish -i <file>`).
+
+If `engines.vscode`'s floor is ever raised, bump `VSCODE_ELECTRON_VERSION`
+in `esbuild.js` to match the new floor's bundled Electron version (check
+`electron` in https://github.com/microsoft/vscode/blob/<tag>/package.json).
 
 ## License
 
