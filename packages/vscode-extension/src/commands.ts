@@ -16,8 +16,15 @@ export interface ChatCommandInput {
 }
 
 export interface ChatCommandResult {
-  /** Markdown to stream back to the chat. */
+  /** Markdown to stream back to the chat (full text — used by callers that want one block, e.g. the palette "status" command). */
   markdown: string;
+  /**
+   * When present, callers that support incremental streaming (the chat
+   * participant) should render these one at a time instead of `markdown`
+   * as a single block, so long status/resume output appears progressively
+   * rather than all at once.
+   */
+  sections?: string[];
   /** Set when the command changed which task is "current" (e.g. `task new`, `task use`). */
   newCurrentTaskId?: string;
 }
@@ -27,51 +34,54 @@ function requireTask(store: TaskStore, currentTaskId: string | undefined): strin
   return store.getTask(currentTaskId) ? currentTaskId : undefined;
 }
 
-export function formatStatus(store: TaskStore, taskId: string): string {
+/** Builds the /status (and /resume) output as an ordered list of sections, so callers can stream them incrementally. */
+export function formatStatusSections(store: TaskStore, taskId: string): string[] {
   const t = store.getTask(taskId);
-  if (!t) return `No task found with id \`${taskId}\`.`;
+  if (!t) return [`No task found with id \`${taskId}\`.`];
 
-  const lines: string[] = [];
-  lines.push(`### ${t.title}  \`${t.status}\``);
-  if (t.goal) lines.push(`**Goal:** ${t.goal}`);
+  const sections: string[] = [];
+
+  let header = `### ${t.title}  \`${t.status}\``;
+  if (t.goal) header += `\n**Goal:** ${t.goal}`;
+  sections.push(header);
 
   const latest = store.latestCheckpoint(taskId);
   if (latest) {
-    lines.push(`\n**Latest checkpoint** (${latest.level}, ${latest.createdAt}):`);
-    lines.push(`> ${latest.summary}`);
+    sections.push(`**Latest checkpoint** (${latest.level}, ${latest.createdAt}):\n> ${latest.summary}`);
   }
 
   const openQuestions = store.listOpenQuestions(taskId, { resolved: false });
   if (openQuestions.length > 0) {
-    lines.push(`\n**Open questions:**`);
-    for (const q of openQuestions) lines.push(`- ${q.text}`);
+    sections.push(`**Open questions:**\n${openQuestions.map((q) => `- ${q.text}`).join('\n')}`);
   }
 
   const unresolvedErrors = store.listErrors(taskId, { resolved: false });
   if (unresolvedErrors.length > 0) {
-    lines.push(`\n**Unresolved errors:**`);
-    for (const e of unresolvedErrors) lines.push(`- ${e.message}`);
+    sections.push(`**Unresolved errors:**\n${unresolvedErrors.map((e) => `- ${e.message}`).join('\n')}`);
   }
 
   const pendingTodos = store.listTodos(taskId, { status: 'pending' });
   if (pendingTodos.length > 0) {
-    lines.push(`\n**Pending todos:**`);
-    for (const td of pendingTodos) lines.push(`- [ ] \`${td.id}\` ${td.text}`);
+    sections.push(`**Pending todos:**\n${pendingTodos.map((td) => `- [ ] \`${td.id}\` ${td.text}`).join('\n')}`);
   }
 
   const recentFiles = store.listFiles(taskId, 10);
   if (recentFiles.length > 0) {
-    lines.push(`\n**Recently touched files:**`);
-    for (const f of recentFiles) lines.push(`- (${f.role}) \`${f.path}\``);
+    sections.push(`**Recently touched files:**\n${recentFiles.map((f) => `- (${f.role}) \`${f.path}\``).join('\n')}`);
   }
 
   const recentCommits = store.listCommits(taskId, 5);
   if (recentCommits.length > 0) {
-    lines.push(`\n**Recent commits:**`);
-    for (const c of recentCommits) lines.push(`- \`${c.sha.slice(0, 7)}\` ${c.message ?? ''}`);
+    sections.push(
+      `**Recent commits:**\n${recentCommits.map((c) => `- \`${c.sha.slice(0, 7)}\` ${c.message ?? ''}`).join('\n')}`,
+    );
   }
 
-  return lines.join('\n');
+  return sections;
+}
+
+export function formatStatus(store: TaskStore, taskId: string): string {
+  return formatStatusSections(store, taskId).join('\n\n');
 }
 
 /** Parses "add <text>" / "list" / "done <id>" style sub-commands used by /todo and similar. */
@@ -163,11 +173,33 @@ export function handleChatCommand(store: TaskStore, input: ChatCommandInput): Ch
     case 'status':
     default: {
       if (!taskId) return { markdown: noCurrentTaskMessage() };
-      return { markdown: formatStatus(store, taskId) };
+      const sections = formatStatusSections(store, taskId);
+      return { markdown: sections.join('\n\n'), sections };
     }
   }
 }
 
 function noCurrentTaskMessage(): string {
   return 'No current task for this workspace. Run `/task new <title>` to start one.';
+}
+
+/** A short human-readable phrase describing what's about to happen, shown via stream.progress() before the command runs. */
+export function progressMessageFor(command: string | undefined): string {
+  switch (command) {
+    case 'task':
+      return 'Updating task…';
+    case 'checkpoint':
+      return 'Recording checkpoint…';
+    case 'todo':
+      return 'Updating todos…';
+    case 'decision':
+      return 'Recording decision…';
+    case 'error':
+      return 'Recording error…';
+    case 'resume':
+      return 'Resuming task context…';
+    case 'status':
+    default:
+      return 'Loading task status…';
+  }
 }

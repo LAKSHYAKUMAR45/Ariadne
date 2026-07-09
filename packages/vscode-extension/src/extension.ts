@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import { openStoreForCurrentWorkspace, getCurrentTaskId, setCurrentTask, initWorkspaceResolution, promptSelectWorkspaceFolder } from './workspace.js';
-import { handleChatCommand } from './commands.js';
+import { handleChatCommand, progressMessageFor } from './commands.js';
 import { closeAllStores, closeStore } from './storeCache.js';
 import { findWorkspaceRoot } from '@ariadne/core';
 
@@ -101,6 +101,7 @@ async function handleRequest(
 ): Promise<vscode.ChatResult | void> {
   let store;
   try {
+    stream.progress('Opening Ariadne task database…');
     store = openStoreForCurrentWorkspace();
   } catch (err) {
     const message = logError('chat handler (open store)', err);
@@ -117,6 +118,7 @@ async function handleRequest(
 
   try {
     const currentTaskId = getCurrentTaskId();
+    stream.progress(progressMessageFor(request.command));
     const result = handleChatCommand(store, {
       command: request.command,
       prompt: request.prompt,
@@ -127,7 +129,17 @@ async function handleRequest(
       setCurrentTask(result.newCurrentTaskId);
     }
 
-    stream.markdown(result.markdown);
+    if (result.sections && result.sections.length > 1) {
+      // Stream section-by-section (with a microtask yield between each) so
+      // long /status or /resume output renders progressively instead of
+      // appearing as one large block once everything is ready.
+      for (const section of result.sections) {
+        stream.markdown(section + '\n\n');
+        await Promise.resolve();
+      }
+    } else {
+      stream.markdown(result.markdown);
+    }
 
     if (!currentTaskId && !result.newCurrentTaskId) {
       stream.button({

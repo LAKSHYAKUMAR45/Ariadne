@@ -45,7 +45,7 @@ let capturedHandler:
   | ((
       request: { command?: string; prompt: string },
       context: unknown,
-      stream: { markdown: (s: string) => void; button: (b: unknown) => void },
+      stream: { markdown: (s: string) => void; button: (b: unknown) => void; progress: (s: string) => void },
       token: unknown,
     ) => Promise<{ errorDetails?: { message: string } } | void>)
   | undefined;
@@ -74,7 +74,7 @@ describe('chat participant error handling', () => {
     const result = await capturedHandler!(
       { command: 'todo', prompt: 'add ' + 'x'.repeat(1) },
       {},
-      { markdown: (s: string) => markdownCalls.push(s), button: () => {} },
+      { markdown: (s: string) => markdownCalls.push(s), button: () => {}, progress: () => {} },
       {},
     );
 
@@ -82,6 +82,48 @@ describe('chat participant error handling', () => {
     // not a thrown error — confirms the happy path still works post-refactor.
     expect(markdownCalls.join('\n')).toMatch(/no current task/i);
     expect(result).toBeUndefined();
+  });
+
+  it('streams /status output section-by-section rather than as one block', async () => {
+    const markdownCalls: string[] = [];
+    const progressCalls: string[] = [];
+
+    // Create a task with enough content to produce multiple status sections.
+    await capturedHandler!(
+      { command: 'task', prompt: 'new My task' },
+      {},
+      { markdown: () => {}, button: () => {}, progress: () => {} },
+      {},
+    );
+    await capturedHandler!(
+      { command: 'todo', prompt: 'add write tests' },
+      {},
+      { markdown: () => {}, button: () => {}, progress: () => {} },
+      {},
+    );
+    await capturedHandler!(
+      { command: 'decision', prompt: 'use SQLite' },
+      {},
+      { markdown: () => {}, button: () => {}, progress: () => {} },
+      {},
+    );
+
+    await capturedHandler!(
+      { command: 'status', prompt: '' },
+      {},
+      {
+        markdown: (s: string) => markdownCalls.push(s),
+        button: () => {},
+        progress: (s: string) => progressCalls.push(s),
+      },
+      {},
+    );
+
+    // More than one markdown chunk means status streamed progressively.
+    expect(markdownCalls.length).toBeGreaterThan(1);
+    expect(markdownCalls.join('')).toMatch(/My task/);
+    expect(markdownCalls.join('')).toMatch(/write tests/);
+    expect(progressCalls.some((p) => /status/i.test(p))).toBe(true);
   });
 
   it('reports a friendly error and logs details when TaskStore throws', async () => {
@@ -94,7 +136,7 @@ describe('chat participant error handling', () => {
     const result = await capturedHandler!(
       { command: 'status', prompt: '' },
       {},
-      { markdown: (s: string) => markdownCalls.push(s), button: () => {} },
+      { markdown: (s: string) => markdownCalls.push(s), button: () => {}, progress: () => {} },
       {},
     );
 
