@@ -75,6 +75,22 @@ importers:
         specifier: ^2.1.1
         version: 2.1.9(@types/node@20.19.43)
 
+  packages/plugins/console-logger:
+    dependencies:
+      '@ariadne-dev/core':
+        specifier: workspace:*
+        version: link:../../core
+    devDependencies:
+      '@types/node':
+        specifier: ^20.14.0
+        version: 20.19.43
+      typescript:
+        specifier: ^5.5.4
+        version: 5.9.3
+      vitest:
+        specifier: ^2.1.1
+        version: 2.1.9(@types/node@20.19.43)
+
   packages/vscode-extension:
     dependencies:
       '@ariadne-dev/core':

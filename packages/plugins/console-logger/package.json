@@ -1,0 +1,28 @@
+{
+  "name": "@ariadne-dev/plugin-console-logger",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Reference Ariadne plugin: logs task lifecycle events (checkpoints, status changes, todos, decisions, errors, questions) to the console. Intended as a minimal, dependency-free starting point for real plugins (Jira/GitHub Issues/Linear/Slack sync, Obsidian export, local-LLM summarization, etc.).",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/LAKSHYAKUMAR45/Ariadne.git",
+    "directory": "packages/plugins/console-logger"
+  },
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "type": "commonjs",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "lint": "echo \"(no lint configured yet)\""
+  },
+  "dependencies": {
+    "@ariadne-dev/core": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "typescript": "^5.5.4",
+    "vitest": "^2.1.1"
+  }
+}

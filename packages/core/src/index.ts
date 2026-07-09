@@ -76,3 +76,11 @@ export type {
   CrossWorkspaceSearchOptions,
   ResolvedTask,
 } from './CrossWorkspace.js';
+export { PluginRegistry } from './PluginRegistry.js';
+export type {
+  AriadnePlugin,
+  AriadnePluginContext,
+  AriadnePluginEvents,
+  AriadneEventName,
+  PluginHooks,
+} from './PluginRegistry.js';

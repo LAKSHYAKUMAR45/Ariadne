@@ -37,10 +37,13 @@
 ## 3. Explicitly Deferred (Stretch Goals) — still not started
 - Tree view / timeline / knowledge-base browser UI (secondary per product
   direction; can ship in v1.1 once core loop is validated).
-- LLM-assisted summarization plugin (opt-in, bring-your-own-model).
-- Plugin platform/interface itself, plus reference plugins (Jira, GitHub Issues,
-  Linear, Slack, Obsidian export, local LLM backends) — no `PluginRegistry` or
-  plugin loading mechanism exists yet.
+- LLM-assisted summarization plugin (opt-in, bring-your-own-model) — can now
+  be built as an `AriadnePlugin` subscribed to `checkpoint.created` (see §4
+  Phase 5), but hasn't been.
+- Reference plugins beyond `console-logger` (Jira, GitHub Issues, Linear,
+  Slack, Obsidian export, local LLM backends) — the `PluginRegistry`
+  interface exists (§4 Phase 5) but none of these have been built, and no
+  call site wires the registry in yet.
 - Cloud sync / team-shared task graph.
 - True cross-repo tasks (one task entity spanning multiple repos as a single
   linked unit). Note: cross-workspace *discovery and operation* of
@@ -68,19 +71,33 @@
 5. ✅ **Phase 4 — Polish + optional UI:** Markdown export shipped (`Exporter.ts`,
    `ariadne export`). Packaging scripts for the VS Code extension (`vsce
    package`) and npm (CLI/core/mcp-server via Changesets) are in place and the
-   release workflows are green — but the extension has **not actually been
-   published to the VS Code Marketplace yet** (`packages/vscode-extension/
-   package.json` is still `"private": true`), and the minimal read-only tree
+   release workflows are green. `packages/vscode-extension/package.json` is
+   now `"private": false` (marketplace-publish-ready: icon, keywords,
+   categories, license all present) but has **not actually been submitted to
+   the VS Code Marketplace yet** (needs an Azure DevOps PAT + publisher
+   account) — deferred by choice, not blocked. The minimal read-only tree
    view was not built (folded into the deferred UI work in §3).
-6. ⬜ **Phase 5 (post-MVP) — Plugin platform:** not started. No plugin
-   interface or `PluginRegistry` exists yet.
+6. 🟡 **Phase 5 (post-MVP) — Plugin platform: interface shipped, no real
+   plugins yet.** `PluginRegistry` (`packages/core/src/PluginRegistry.ts`) is
+   a minimal in-process event bus — plugins implement `AriadnePlugin.activate()`
+   and subscribe to lifecycle events (`checkpoint.created`,
+   `task.statusChanged`, `todo.added`, `decision.added`, `error.added`,
+   `question.added`); a throwing/rejecting plugin hook is isolated per-plugin
+   and never breaks core or other plugins (`emit` returns settled results
+   instead of throwing). `packages/plugins/console-logger` is the reference
+   implementation (kept `private: true` and changeset-ignored — not published
+   to npm). **Not yet done:** the registry isn't wired into any call site
+   (CLI/MCP server/VS Code extension never construct one or call `emit(...)`
+   today), and no real-world plugin (Jira/GitHub Issues/Linear/Slack sync,
+   Obsidian export, LLM summarization) has been built against it yet.
 
 ## 5. Repo / OSS Structure
 - **Monorepo** (pnpm workspaces): `packages/core`, `packages/cli`,
-  `packages/mcp-server`, `packages/vscode-extension`, `docs/`. (No
-  `packages/plugins/*` yet — added if/when Phase 5 starts.) Justification:
-  shared core changes constantly touch all surfaces during early development —
-  multi-repo coordination overhead isn't worth it pre-1.0.
+  `packages/mcp-server`, `packages/vscode-extension`, `packages/plugins/*`
+  (currently just the `console-logger` reference plugin), `docs/`.
+  Justification: shared core changes constantly touch all surfaces during
+  early development — multi-repo coordination overhead isn't worth it
+  pre-1.0.
 - CI: per-package build/test/typecheck on push (`.github/workflows/ci.yml`,
   `release.yml`); `release.yml` also builds and packages the VS Code extension
   `.vsix` on tagged release.
@@ -144,14 +161,19 @@ The MVP (§2) is done and the release pipeline (npm + VS Code packaging) is
 verified working. Remaining work is about *shipping what exists* and *choosing
 what's next*, not building the core loop:
 
-1. **Publish the VS Code extension to the Marketplace.** It's currently
-   `"private": true` in `packages/vscode-extension/package.json` with no
-   Marketplace listing — decide on a publish date and flip this, or document
-   why it's staying VSIX-only for now.
-2. **Decide the Phase 5 plugin platform's shape** (if pursuing it next):
-   what's the minimal interface a plugin needs (e.g. GitHub Issues sync), and
-   should `packages/plugins/*` be added to the workspace now or deferred
-   further.
+1. **Publish the VS Code extension to the Marketplace.** `"private": false`
+   is already set and the package is publish-ready (icon, keywords,
+   categories, license) — the remaining step is obtaining an Azure DevOps PAT
+   and publisher account and deciding on a publish date, or documenting why
+   it's staying VSIX-only for now.
+2. **Wire `PluginRegistry` into a real call site and build one real plugin.**
+   The interface and reference `console-logger` plugin are shipped
+   (`packages/core/src/PluginRegistry.ts`, `packages/plugins/console-logger`)
+   but nothing in the CLI/MCP server/VS Code extension constructs a registry
+   or calls `emit(...)` yet, and no plugin talks to a real external system.
+   Picking one thin real plugin (e.g. GitHub Issues sync on `todo.added`, or
+   an LLM summarizer subscribed to `checkpoint.created`) would validate the
+   interface shape before more plugins are built against it.
 3. **Decide on the tree-view/timeline UI** (§3): still deferred: confirm it's
    still out of scope for v1.1, or scope a minimal read-only version.
 4. **Broaden integration-test coverage** on the lighter-tested surfaces (CLI,
