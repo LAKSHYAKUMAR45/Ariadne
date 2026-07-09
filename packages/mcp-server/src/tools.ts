@@ -21,6 +21,7 @@ import {
   resolveTaskAnyWorkspace,
   listTasksAcrossWorkspaces,
   searchAcrossWorkspaces,
+  setTaskStatusWithRollup,
 } from '@ariadne/core';
 import type { CrossWorkspaceTask, CrossWorkspaceSearchResult } from '@ariadne/core';
 import { readCurrentTaskId, setCurrentTaskId } from './workspace.js';
@@ -134,10 +135,25 @@ export interface TaskSetStatusArgs {
   status: TaskStatus;
 }
 
-/** Backs task_pause/task_done/task_archive/task_reopen — all are the same "set task status" operation with a fixed status. */
+/** Backs task_pause/task_done/task_archive/task_reopen — all are the same "set task status" operation with a fixed status. Uses `setTaskStatusWithRollup` (instead of calling `store.updateTaskStatus` directly) so pausing/finishing a task also rolls up its checkpoints into a session/milestone summary, same as the CLI and chat participant. */
 export function taskSetStatus(store: TaskStore, workspaceRoot: string, args: TaskSetStatusArgs): Task {
   return withTaskStore(store, workspaceRoot, args.taskId, (s, taskId) => {
-    s.updateTaskStatus(taskId, args.status);
+    setTaskStatusWithRollup(s, taskId, args.status);
+    return s.getTask(taskId)!;
+  });
+}
+
+export interface TaskEditArgs {
+  taskId?: string;
+  title?: string;
+  goal?: string;
+}
+
+/** Edits a task's title and/or goal (curation). Leaves either unchanged if not supplied. */
+export function taskEdit(store: TaskStore, workspaceRoot: string, args: TaskEditArgs): Task {
+  return withTaskStore(store, workspaceRoot, args.taskId, (s, taskId) => {
+    if (args.title !== undefined) s.updateTaskTitle(taskId, args.title);
+    if (args.goal !== undefined) s.updateTaskGoal(taskId, args.goal);
     return s.getTask(taskId)!;
   });
 }
@@ -176,10 +192,70 @@ export function todoList(store: TaskStore, workspaceRoot: string, args: TodoList
 
 export interface TodoDoneArgs {
   todoId: string;
+  /** Optional task id hint — needed if the todo belongs to a different workspace than the current one (the cross-workspace registry indexes tasks, not sub-entity ids). */
+  taskId?: string;
 }
 
-export function todoDone(store: TaskStore, args: TodoDoneArgs): void {
+export function todoDone(store: TaskStore, workspaceRoot: string, args: TodoDoneArgs): void {
+  if (args.taskId) {
+    withTaskStore(store, workspaceRoot, args.taskId, (s) => s.updateTodoStatus(args.todoId, 'done'));
+    return;
+  }
   store.updateTodoStatus(args.todoId, 'done');
+}
+
+export interface TodoReopenArgs {
+  todoId: string;
+  taskId?: string;
+}
+
+/** Sets a done/blocked todo back to pending. */
+export function todoReopen(store: TaskStore, workspaceRoot: string, args: TodoReopenArgs): void {
+  if (args.taskId) {
+    withTaskStore(store, workspaceRoot, args.taskId, (s) => s.updateTodoStatus(args.todoId, 'pending'));
+    return;
+  }
+  store.updateTodoStatus(args.todoId, 'pending');
+}
+
+export interface TodoBlockArgs {
+  todoId: string;
+  taskId?: string;
+}
+
+export function todoBlock(store: TaskStore, workspaceRoot: string, args: TodoBlockArgs): void {
+  if (args.taskId) {
+    withTaskStore(store, workspaceRoot, args.taskId, (s) => s.updateTodoStatus(args.todoId, 'blocked'));
+    return;
+  }
+  store.updateTodoStatus(args.todoId, 'blocked');
+}
+
+export interface TodoEditArgs {
+  todoId: string;
+  text: string;
+  taskId?: string;
+}
+
+export function todoEdit(store: TaskStore, workspaceRoot: string, args: TodoEditArgs): void {
+  if (args.taskId) {
+    withTaskStore(store, workspaceRoot, args.taskId, (s) => s.updateTodoText(args.todoId, args.text));
+    return;
+  }
+  store.updateTodoText(args.todoId, args.text);
+}
+
+export interface TodoDeleteArgs {
+  todoId: string;
+  taskId?: string;
+}
+
+export function todoDelete(store: TaskStore, workspaceRoot: string, args: TodoDeleteArgs): void {
+  if (args.taskId) {
+    withTaskStore(store, workspaceRoot, args.taskId, (s) => s.deleteTodo(args.todoId));
+    return;
+  }
+  store.deleteTodo(args.todoId);
 }
 
 export interface DecisionAddArgs {
@@ -194,6 +270,43 @@ export function decisionAdd(store: TaskStore, workspaceRoot: string, args: Decis
   );
 }
 
+export interface DecisionListArgs {
+  taskId?: string;
+}
+
+export function decisionList(store: TaskStore, workspaceRoot: string, args: DecisionListArgs): Decision[] {
+  return withTaskStore(store, workspaceRoot, args.taskId, (s, taskId) => s.listDecisions(taskId));
+}
+
+export interface DecisionEditArgs {
+  decisionId: string;
+  text?: string;
+  rationale?: string;
+  taskId?: string;
+}
+
+export function decisionEdit(store: TaskStore, workspaceRoot: string, args: DecisionEditArgs): void {
+  const apply = (s: TaskStore) => s.updateDecision(args.decisionId, { text: args.text, rationale: args.rationale });
+  if (args.taskId) {
+    withTaskStore(store, workspaceRoot, args.taskId, (s) => apply(s));
+    return;
+  }
+  apply(store);
+}
+
+export interface DecisionDeleteArgs {
+  decisionId: string;
+  taskId?: string;
+}
+
+export function decisionDelete(store: TaskStore, workspaceRoot: string, args: DecisionDeleteArgs): void {
+  if (args.taskId) {
+    withTaskStore(store, workspaceRoot, args.taskId, (s) => s.deleteDecision(args.decisionId));
+    return;
+  }
+  store.deleteDecision(args.decisionId);
+}
+
 export interface ErrorAddArgs {
   message: string;
   taskId?: string;
@@ -206,10 +319,56 @@ export function errorAdd(store: TaskStore, workspaceRoot: string, args: ErrorAdd
 export interface ErrorResolveArgs {
   errorId: string;
   resolution?: string;
+  /** Optional task id hint — needed if the error belongs to a different workspace than the current one. */
+  taskId?: string;
 }
 
-export function errorResolve(store: TaskStore, args: ErrorResolveArgs): void {
+export function errorResolve(store: TaskStore, workspaceRoot: string, args: ErrorResolveArgs): void {
+  if (args.taskId) {
+    withTaskStore(store, workspaceRoot, args.taskId, (s) => s.resolveError(args.errorId, args.resolution));
+    return;
+  }
   store.resolveError(args.errorId, args.resolution);
+}
+
+export interface ErrorReopenArgs {
+  errorId: string;
+  taskId?: string;
+}
+
+export function errorReopen(store: TaskStore, workspaceRoot: string, args: ErrorReopenArgs): void {
+  if (args.taskId) {
+    withTaskStore(store, workspaceRoot, args.taskId, (s) => s.unresolveError(args.errorId));
+    return;
+  }
+  store.unresolveError(args.errorId);
+}
+
+export interface ErrorEditArgs {
+  errorId: string;
+  message: string;
+  taskId?: string;
+}
+
+export function errorEdit(store: TaskStore, workspaceRoot: string, args: ErrorEditArgs): void {
+  if (args.taskId) {
+    withTaskStore(store, workspaceRoot, args.taskId, (s) => s.updateError(args.errorId, args.message));
+    return;
+  }
+  store.updateError(args.errorId, args.message);
+}
+
+export interface ErrorDeleteArgs {
+  errorId: string;
+  taskId?: string;
+}
+
+export function errorDelete(store: TaskStore, workspaceRoot: string, args: ErrorDeleteArgs): void {
+  if (args.taskId) {
+    withTaskStore(store, workspaceRoot, args.taskId, (s) => s.deleteError(args.errorId));
+    return;
+  }
+  store.deleteError(args.errorId);
 }
 
 export interface QuestionAddArgs {
@@ -234,10 +393,56 @@ export function questionList(store: TaskStore, workspaceRoot: string, args: Ques
 
 export interface QuestionResolveArgs {
   questionId: string;
+  /** Optional task id hint — needed if the question belongs to a different workspace than the current one. */
+  taskId?: string;
 }
 
-export function questionResolve(store: TaskStore, args: QuestionResolveArgs): void {
+export function questionResolve(store: TaskStore, workspaceRoot: string, args: QuestionResolveArgs): void {
+  if (args.taskId) {
+    withTaskStore(store, workspaceRoot, args.taskId, (s) => s.resolveOpenQuestion(args.questionId));
+    return;
+  }
   store.resolveOpenQuestion(args.questionId);
+}
+
+export interface QuestionReopenArgs {
+  questionId: string;
+  taskId?: string;
+}
+
+export function questionReopen(store: TaskStore, workspaceRoot: string, args: QuestionReopenArgs): void {
+  if (args.taskId) {
+    withTaskStore(store, workspaceRoot, args.taskId, (s) => s.unresolveOpenQuestion(args.questionId));
+    return;
+  }
+  store.unresolveOpenQuestion(args.questionId);
+}
+
+export interface QuestionEditArgs {
+  questionId: string;
+  text: string;
+  taskId?: string;
+}
+
+export function questionEdit(store: TaskStore, workspaceRoot: string, args: QuestionEditArgs): void {
+  if (args.taskId) {
+    withTaskStore(store, workspaceRoot, args.taskId, (s) => s.updateOpenQuestion(args.questionId, args.text));
+    return;
+  }
+  store.updateOpenQuestion(args.questionId, args.text);
+}
+
+export interface QuestionDeleteArgs {
+  questionId: string;
+  taskId?: string;
+}
+
+export function questionDelete(store: TaskStore, workspaceRoot: string, args: QuestionDeleteArgs): void {
+  if (args.taskId) {
+    withTaskStore(store, workspaceRoot, args.taskId, (s) => s.deleteOpenQuestion(args.questionId));
+    return;
+  }
+  store.deleteOpenQuestion(args.questionId);
 }
 
 export interface SearchArgs {

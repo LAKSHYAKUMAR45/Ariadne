@@ -89,4 +89,107 @@ describe('TaskStore', () => {
     store.setCurrentTaskId(task2.id);
     expect(store.getCurrentTaskId()).toBe(task2.id);
   });
+
+  it('supports editing and deleting a task title/goal (curation)', () => {
+    const task = store.createTask({ title: 'Original title', goal: 'Original goal' });
+    store.updateTaskTitle(task.id, 'Fixed title');
+    store.updateTaskGoal(task.id, 'Fixed goal');
+    const updated = store.getTask(task.id);
+    expect(updated?.title).toBe('Fixed title');
+    expect(updated?.goal).toBe('Fixed goal');
+
+    store.updateTaskGoal(task.id, null);
+    expect(store.getTask(task.id)?.goal).toBeNull();
+  });
+
+  it('supports editing and deleting a decision (curation)', () => {
+    const task = store.createTask({ title: 'A' });
+    const decision = store.recordDecision({ taskId: task.id, text: 'Use SQLite', rationale: 'simple' });
+
+    store.updateDecision(decision.id, { text: 'Use SQLite (WAL mode)' });
+    expect(store.getDecision(decision.id)?.text).toBe('Use SQLite (WAL mode)');
+    expect(store.getDecision(decision.id)?.rationale).toBe('simple');
+
+    store.updateDecision(decision.id, { rationale: null });
+    expect(store.getDecision(decision.id)?.rationale).toBeNull();
+
+    store.deleteDecision(decision.id);
+    expect(store.getDecision(decision.id)).toBeUndefined();
+    expect(store.listDecisions(task.id)).toEqual([]);
+  });
+
+  it('supports editing and deleting a todo, and reopening a done todo (curation)', () => {
+    const task = store.createTask({ title: 'A' });
+    const todo = store.createTodo({ taskId: task.id, text: 'Write tests' });
+
+    store.updateTodoText(todo.id, 'Write more tests');
+    expect(store.getTodo(todo.id)?.text).toBe('Write more tests');
+
+    store.updateTodoStatus(todo.id, 'done');
+    expect(store.getTodo(todo.id)?.status).toBe('done');
+    // "Reopen" is just setting status back to pending — already supported by updateTodoStatus.
+    store.updateTodoStatus(todo.id, 'pending');
+    expect(store.getTodo(todo.id)?.status).toBe('pending');
+
+    store.deleteTodo(todo.id);
+    expect(store.getTodo(todo.id)).toBeUndefined();
+  });
+
+  it('supports editing, deleting, and reopening a resolved error (curation)', () => {
+    const task = store.createTask({ title: 'A' });
+    const error = store.recordError({ taskId: task.id, message: 'boom' });
+
+    store.updateError(error.id, 'boom (with stack trace)');
+    expect(store.getError(error.id)?.message).toBe('boom (with stack trace)');
+
+    store.resolveError(error.id, 'fixed');
+    expect(store.getError(error.id)?.resolved).toBe(true);
+    store.unresolveError(error.id);
+    expect(store.getError(error.id)?.resolved).toBe(false);
+    expect(store.getError(error.id)?.resolution).toBeNull();
+
+    store.deleteError(error.id);
+    expect(store.getError(error.id)).toBeUndefined();
+  });
+
+  it('supports editing, deleting, and reopening a resolved open question (curation)', () => {
+    const task = store.createTask({ title: 'A' });
+    const question = store.recordOpenQuestion({ taskId: task.id, text: 'Unix socket or TCP?' });
+
+    store.updateOpenQuestion(question.id, 'Unix socket, TCP, or named pipe?');
+    expect(store.getOpenQuestion(question.id)?.text).toBe('Unix socket, TCP, or named pipe?');
+
+    store.resolveOpenQuestion(question.id);
+    expect(store.getOpenQuestion(question.id)?.resolved).toBe(true);
+    store.unresolveOpenQuestion(question.id);
+    expect(store.getOpenQuestion(question.id)?.resolved).toBe(false);
+
+    store.deleteOpenQuestion(question.id);
+    expect(store.getOpenQuestion(question.id)).toBeUndefined();
+  });
+
+  it('bumps the parent task updated_at when a todo/error/question is resolved or reopened', async () => {
+    const task = store.createTask({ title: 'A' });
+    const initialUpdatedAt = store.getTask(task.id)!.updatedAt;
+
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    const todo = store.createTodo({ taskId: task.id, text: 'x' });
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    store.updateTodoStatus(todo.id, 'done');
+    expect(store.getTask(task.id)!.updatedAt > initialUpdatedAt).toBe(true);
+
+    const afterTodoDone = store.getTask(task.id)!.updatedAt;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    const error = store.recordError({ taskId: task.id, message: 'boom' });
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    store.resolveError(error.id);
+    expect(store.getTask(task.id)!.updatedAt > afterTodoDone).toBe(true);
+
+    const afterErrorResolve = store.getTask(task.id)!.updatedAt;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    const question = store.recordOpenQuestion({ taskId: task.id, text: 'y?' });
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    store.resolveOpenQuestion(question.id);
+    expect(store.getTask(task.id)!.updatedAt > afterErrorResolve).toBe(true);
+  });
 });

@@ -1,5 +1,5 @@
 import type { TaskStore, CheckpointLevel, TaskStatus } from '@ariadne/core';
-import { buildContext, searchWorkspace, findTaskWorkspace, openRegistry, listTasksAcrossWorkspaces, searchAcrossWorkspaces } from '@ariadne/core';
+import { buildContext, searchWorkspace, findTaskWorkspace, openRegistry, listTasksAcrossWorkspaces, searchAcrossWorkspaces, setTaskStatusWithRollup } from '@ariadne/core';
 import { getOrOpenStore } from './storeCache.js';
 
 /**
@@ -37,7 +37,6 @@ function requireTask(store: TaskStore, currentTaskId: string | undefined): strin
   if (!currentTaskId) return undefined;
   return store.getTask(currentTaskId) ? currentTaskId : undefined;
 }
-
 /**
  * Resolves an explicit task id that isn't in the current workspace's store
  * by consulting the global cross-workspace registry (the same mechanism
@@ -63,6 +62,26 @@ function resolveCrossWorkspaceTask(
   }
 }
 
+/**
+ * Resolves which store a sub-entity mutation (`todo done`, `error resolve`,
+ * `question resolve`) should run against, given an optional `--task <id>`
+ * hint. Without a hint, operates against the current workspace's store
+ * unchanged (backwards compatible). With a hint, checks the current store
+ * first, then falls back to the cross-workspace registry so a hinted task
+ * that lives in a different workspace resolves to that workspace's store.
+ */
+function resolveTargetStore(
+  store: TaskStore,
+  workspaceRoot: string | undefined,
+  taskHint: string | undefined,
+): { store: TaskStore } | { error: string } {
+  if (!taskHint) return { store };
+  if (store.getTask(taskHint)) return { store };
+  const resolved = resolveCrossWorkspaceTask(workspaceRoot, taskHint);
+  if (!resolved) return { error: `No task found with id \`${taskHint}\` in this or any known workspace.` };
+  return { store: resolved.store };
+}
+
 /** Strips a trailing `--all-workspaces`/`-a` flag off a prompt, returning the flag state and the remaining text. */
 function extractAllWorkspacesFlag(prompt: string): { allWorkspaces: boolean; rest: string } {
   const re = /\s*(?:--all-workspaces|-a)\b\s*/i;
@@ -70,6 +89,35 @@ function extractAllWorkspacesFlag(prompt: string): { allWorkspaces: boolean; res
     return { allWorkspaces: true, rest: prompt.replace(re, ' ').trim() };
   }
   return { allWorkspaces: false, rest: prompt };
+}
+
+/**
+ * Strips a trailing `--task <id>` hint off a prompt (used by sub-entity
+ * commands like `/todo done <id> --task <taskId>` to say which task/
+ * workspace a raw todo/error/question id belongs to — the cross-workspace
+ * registry only indexes task ids, not sub-entity ids, so a bare todo/error/
+ * question id from another workspace can't be resolved without this hint).
+ */
+function extractTaskHint(prompt: string): { taskHint: string | undefined; rest: string } {
+  const re = /\s*--task[= ]([^\s]+)\s*/i;
+  const match = prompt.match(re);
+  if (!match) return { taskHint: undefined, rest: prompt };
+  return { taskHint: match[1], rest: prompt.replace(re, ' ').trim() };
+}
+
+/**
+ * Extracts a `--<flag> <value>` argument whose value may itself contain
+ * spaces (e.g. `--text new todo wording`), capturing greedily up to the next
+ * `--word` flag or the end of the string. Used by curation commands like
+ * `/todo edit <id> --text <new text> [--rationale <r>]`.
+ */
+function extractFlagValue(prompt: string, flag: string): { value: string | undefined; rest: string } {
+  const re = new RegExp(`--${flag}[= ]([\\s\\S]*?)(?=\\s+--[a-zA-Z]|$)`, 'i');
+  const match = prompt.match(re);
+  if (!match) return { value: undefined, rest: prompt };
+  const value = match[1].trim();
+  const rest = (prompt.slice(0, match.index!) + prompt.slice(match.index! + match[0].length)).trim();
+  return { value, rest };
 }
 
 /**
@@ -118,6 +166,12 @@ export function formatStatusSections(store: TaskStore, taskId: string, tokenBudg
   if (ctx.recentCommits.length > 0) {
     sections.push(
       `**Recent commits:**\n${ctx.recentCommits.map((c) => `- \`${c.sha.slice(0, 7)}\` ${c.message ?? ''}`).join('\n')}`,
+    );
+  }
+
+  if (ctx.recentCommands.length > 0) {
+    sections.push(
+      `**Recent commands:**\n${ctx.recentCommands.map((c) => `- \`${c.cmd}\`${c.exitCode !== null ? ` (exit ${c.exitCode})` : ''}`).join('\n')}`,
     );
   }
 
@@ -318,22 +372,36 @@ export function handleChatCommand(store: TaskStore, input: ChatCommandInput): Ch
         const status: TaskStatus =
           sub === 'reopen' ? 'active' : sub === 'pause' ? 'paused' : sub === 'archive' ? 'archived' : 'done';
         if (store.getTask(targetId)) {
-          store.updateTaskStatus(targetId, status);
+          setTaskStatusWithRollup(store, targetId, status);
           return { markdown: `Task \`${targetId}\` ${sub === 'reopen' ? 'reactivated' : `marked ${status}`}.` };
         }
         const resolved = resolveCrossWorkspaceTask(input.workspaceRoot, targetId);
         if (!resolved) return { markdown: `No task found with id \`${targetId}\`.` };
-        resolved.store.updateTaskStatus(targetId, status);
+        setTaskStatusWithRollup(resolved.store, targetId, status);
         return {
           markdown:
             `Task \`${targetId}\` ${sub === 'reopen' ? 'reactivated' : `marked ${status}`} ` +
             `(in workspace \`${resolved.workspaceRoot}\`).`,
         };
       }
+      if (sub === 'edit') {
+        const { value: title, rest: afterTitle } = extractFlagValue(rest, 'title');
+        const { value: goal } = extractFlagValue(afterTitle, 'goal');
+        if (title === undefined && goal === undefined) {
+          return { markdown: 'Usage: `/task edit [id] --title <t> --goal <g>`.' };
+        }
+        const targetId = taskId;
+        if (!targetId) return { markdown: noCurrentTaskMessage() };
+        if (!store.getTask(targetId)) return { markdown: `No task found with id \`${targetId}\`.` };
+        if (title !== undefined) store.updateTaskTitle(targetId, title);
+        if (goal !== undefined) store.updateTaskGoal(targetId, goal);
+        return { markdown: `Task \`${targetId}\` updated.` };
+      }
       return {
         markdown:
           'Usage: `/task new <title>`, `/task list [--all-workspaces]`, `/task use <id>`, ' +
-          '`/task pause [id]`, `/task done [id]`, `/task archive [id]`, or `/task reopen [id]`.',
+          '`/task pause [id]`, `/task done [id]`, `/task archive [id]`, `/task reopen [id]`, or ' +
+          '`/task edit --title <t> --goal <g>`.',
       };
     }
 
@@ -370,17 +438,45 @@ export function handleChatCommand(store: TaskStore, input: ChatCommandInput): Ch
     }
 
     case 'todo': {
-      if (!taskId) return { markdown: noCurrentTaskMessage() };
       const { sub, rest } = splitSubcommand(prompt);
+      if (sub === 'done' || sub === 'reopen' || sub === 'block' || sub === 'delete') {
+        if (!rest) return { markdown: `Usage: \`/todo ${sub} <id> [--task <taskId>]\`.` };
+        const { taskHint, rest: todoId } = extractTaskHint(rest);
+        const target = resolveTargetStore(store, input.workspaceRoot, taskHint);
+        if ('error' in target) return { markdown: target.error };
+        if (sub === 'done') {
+          target.store.updateTodoStatus(todoId, 'done');
+          return { markdown: `Marked todo \`${todoId}\` done.` };
+        }
+        if (sub === 'reopen') {
+          target.store.updateTodoStatus(todoId, 'pending');
+          return { markdown: `Reopened todo \`${todoId}\` (set to pending).` };
+        }
+        if (sub === 'block') {
+          target.store.updateTodoStatus(todoId, 'blocked');
+          return { markdown: `Marked todo \`${todoId}\` blocked.` };
+        }
+        target.store.deleteTodo(todoId);
+        return { markdown: `Deleted todo \`${todoId}\`.` };
+      }
+      if (sub === 'edit') {
+        if (!rest) return { markdown: 'Usage: `/todo edit <id> --text <new text> [--task <taskId>]`.' };
+        const { taskHint, rest: afterTask } = extractTaskHint(rest);
+        const { value: text, rest: afterText } = extractFlagValue(afterTask, 'text');
+        const todoId = afterText.trim();
+        if (!todoId || text === undefined) {
+          return { markdown: 'Usage: `/todo edit <id> --text <new text> [--task <taskId>]`.' };
+        }
+        const target = resolveTargetStore(store, input.workspaceRoot, taskHint);
+        if ('error' in target) return { markdown: target.error };
+        target.store.updateTodoText(todoId, text);
+        return { markdown: `Todo \`${todoId}\` updated.` };
+      }
+      if (!taskId) return { markdown: noCurrentTaskMessage() };
       if (sub === 'add') {
         if (!rest) return { markdown: 'Usage: `/todo add <text>`.' };
         const created = store.createTodo({ taskId, text: rest });
         return { markdown: `Added todo \`${created.id}\`: ${created.text}` };
-      }
-      if (sub === 'done') {
-        if (!rest) return { markdown: 'Usage: `/todo done <id>`.' };
-        store.updateTodoStatus(rest, 'done');
-        return { markdown: `Marked todo \`${rest}\` done.` };
       }
       const todos = store.listTodos(taskId);
       if (todos.length === 0) return { markdown: 'No todos found.' };
@@ -390,6 +486,35 @@ export function handleChatCommand(store: TaskStore, input: ChatCommandInput): Ch
     }
 
     case 'decision': {
+      const { sub, rest } = splitSubcommand(prompt);
+      if (sub === 'list') {
+        if (!taskId) return { markdown: noCurrentTaskMessage() };
+        const decisions = store.listDecisions(taskId);
+        if (decisions.length === 0) return { markdown: 'No decisions found.' };
+        return { markdown: decisions.map((d) => `- \`${d.id}\` ${d.text}${d.rationale ? ` _(${d.rationale})_` : ''}`).join('\n') };
+      }
+      if (sub === 'delete') {
+        if (!rest) return { markdown: 'Usage: `/decision delete <id> [--task <taskId>]`.' };
+        const { taskHint, rest: decisionId } = extractTaskHint(rest);
+        const target = resolveTargetStore(store, input.workspaceRoot, taskHint);
+        if ('error' in target) return { markdown: target.error };
+        target.store.deleteDecision(decisionId);
+        return { markdown: `Deleted decision \`${decisionId}\`.` };
+      }
+      if (sub === 'edit') {
+        if (!rest) return { markdown: 'Usage: `/decision edit <id> --text <t> --rationale <r> [--task <taskId>]`.' };
+        const { taskHint, rest: afterTask } = extractTaskHint(rest);
+        const { value: text, rest: afterText } = extractFlagValue(afterTask, 'text');
+        const { value: rationale, rest: afterRationale } = extractFlagValue(afterText, 'rationale');
+        const decisionId = afterRationale.trim();
+        if (!decisionId || (text === undefined && rationale === undefined)) {
+          return { markdown: 'Usage: `/decision edit <id> --text <t> --rationale <r> [--task <taskId>]`.' };
+        }
+        const target = resolveTargetStore(store, input.workspaceRoot, taskHint);
+        if ('error' in target) return { markdown: target.error };
+        target.store.updateDecision(decisionId, { text, rationale });
+        return { markdown: `Decision \`${decisionId}\` updated.` };
+      }
       if (!taskId) return { markdown: noCurrentTaskMessage() };
       if (!prompt.trim()) return { markdown: 'Usage: `/decision <text>`.' };
       const decision = store.recordDecision({ taskId, text: prompt.trim() });
@@ -397,29 +522,78 @@ export function handleChatCommand(store: TaskStore, input: ChatCommandInput): Ch
     }
 
     case 'error': {
-      if (!taskId) return { markdown: noCurrentTaskMessage() };
       const { sub, rest } = splitSubcommand(prompt);
-      if (sub === 'resolve') {
-        store.resolveError(rest);
-        return { markdown: `Marked error \`${rest}\` resolved.` };
+      if (sub === 'resolve' || sub === 'reopen' || sub === 'delete') {
+        const { taskHint, rest: errorId } = extractTaskHint(rest);
+        if (!errorId) return { markdown: `Usage: \`/error ${sub} <id> [--task <taskId>]\`.` };
+        const target = resolveTargetStore(store, input.workspaceRoot, taskHint);
+        if ('error' in target) return { markdown: target.error };
+        if (sub === 'resolve') {
+          target.store.resolveError(errorId);
+          return { markdown: `Marked error \`${errorId}\` resolved.` };
+        }
+        if (sub === 'reopen') {
+          target.store.unresolveError(errorId);
+          return { markdown: `Reopened error \`${errorId}\`.` };
+        }
+        target.store.deleteError(errorId);
+        return { markdown: `Deleted error \`${errorId}\`.` };
       }
+      if (sub === 'edit') {
+        if (!rest) return { markdown: 'Usage: `/error edit <id> --message <text> [--task <taskId>]`.' };
+        const { taskHint, rest: afterTask } = extractTaskHint(rest);
+        const { value: message, rest: afterMessage } = extractFlagValue(afterTask, 'message');
+        const errorId = afterMessage.trim();
+        if (!errorId || message === undefined) {
+          return { markdown: 'Usage: `/error edit <id> --message <text> [--task <taskId>]`.' };
+        }
+        const target = resolveTargetStore(store, input.workspaceRoot, taskHint);
+        if ('error' in target) return { markdown: target.error };
+        target.store.updateError(errorId, message);
+        return { markdown: `Error \`${errorId}\` updated.` };
+      }
+      if (!taskId) return { markdown: noCurrentTaskMessage() };
       if (!prompt.trim()) return { markdown: 'Usage: `/error <message>` or `/error resolve <id>`.' };
       const err = store.recordError({ taskId, message: prompt.trim() });
       return { markdown: `Recorded error \`${err.id}\`.` };
     }
 
     case 'question': {
-      if (!taskId) return { markdown: noCurrentTaskMessage() };
       const { sub, rest } = splitSubcommand(prompt);
+      if (sub === 'resolve' || sub === 'reopen' || sub === 'delete') {
+        if (!rest) return { markdown: `Usage: \`/question ${sub} <id> [--task <taskId>]\`.` };
+        const { taskHint, rest: questionId } = extractTaskHint(rest);
+        const target = resolveTargetStore(store, input.workspaceRoot, taskHint);
+        if ('error' in target) return { markdown: target.error };
+        if (sub === 'resolve') {
+          target.store.resolveOpenQuestion(questionId);
+          return { markdown: `Marked question \`${questionId}\` resolved.` };
+        }
+        if (sub === 'reopen') {
+          target.store.unresolveOpenQuestion(questionId);
+          return { markdown: `Reopened question \`${questionId}\`.` };
+        }
+        target.store.deleteOpenQuestion(questionId);
+        return { markdown: `Deleted question \`${questionId}\`.` };
+      }
+      if (sub === 'edit') {
+        if (!rest) return { markdown: 'Usage: `/question edit <id> --text <new text> [--task <taskId>]`.' };
+        const { taskHint, rest: afterTask } = extractTaskHint(rest);
+        const { value: text, rest: afterText } = extractFlagValue(afterTask, 'text');
+        const questionId = afterText.trim();
+        if (!questionId || text === undefined) {
+          return { markdown: 'Usage: `/question edit <id> --text <new text> [--task <taskId>]`.' };
+        }
+        const target = resolveTargetStore(store, input.workspaceRoot, taskHint);
+        if ('error' in target) return { markdown: target.error };
+        target.store.updateOpenQuestion(questionId, text);
+        return { markdown: `Question \`${questionId}\` updated.` };
+      }
+      if (!taskId) return { markdown: noCurrentTaskMessage() };
       if (sub === 'add') {
         if (!rest) return { markdown: 'Usage: `/question add <text>`.' };
         const created = store.recordOpenQuestion({ taskId, text: rest });
         return { markdown: `Added open question \`${created.id}\`: ${created.text}` };
-      }
-      if (sub === 'resolve') {
-        if (!rest) return { markdown: 'Usage: `/question resolve <id>`.' };
-        store.resolveOpenQuestion(rest);
-        return { markdown: `Marked question \`${rest}\` resolved.` };
       }
       if (sub === 'list' || !prompt.trim()) {
         const questions = store.listOpenQuestions(taskId, { resolved: false });
@@ -434,7 +608,30 @@ export function handleChatCommand(store: TaskStore, input: ChatCommandInput): Ch
     }
 
     case 'resume':
-    case 'status':
+    case 'status': {
+      // An explicit id in the prompt (e.g. `/status abc123`) targets that
+      // task even if it belongs to a different workspace, falling back to
+      // the cross-workspace registry when it isn't in the local store.
+      // Plain NL messages never reach here with a non-empty prompt —
+      // inferIntent() always clears the prompt for its status/resume
+      // patterns — so this only fires for the explicit slash-command form.
+      const explicitId = prompt.trim() || undefined;
+      if (explicitId) {
+        if (store.getTask(explicitId)) {
+          const sections = formatStatusSections(store, explicitId);
+          return { markdown: sections.join('\n\n'), sections };
+        }
+        const resolved = resolveCrossWorkspaceTask(input.workspaceRoot, explicitId);
+        if (!resolved) return { markdown: `No task found with id \`${explicitId}\`.` };
+        const sections = formatStatusSections(resolved.store, explicitId);
+        sections.push(`_(from workspace \`${resolved.workspaceRoot}\`)_`);
+        return { markdown: sections.join('\n\n'), sections };
+      }
+      if (!taskId) return { markdown: noCurrentTaskMessage() };
+      const sections = formatStatusSections(store, taskId);
+      return { markdown: sections.join('\n\n'), sections };
+    }
+
     default: {
       if (!taskId) return { markdown: noCurrentTaskMessage() };
       const sections = formatStatusSections(store, taskId);

@@ -30,13 +30,14 @@ directory), and reads/writes `<workspace-root>/.ariadne/state.db`.
 | `task_list` | Lists tasks, optionally filtered by status. Pass `allWorkspaces: true` to list tasks from every workspace Ariadne has ever seen, each tagged with its `workspaceRoot`. |
 | `task_use` | Switches the current task (always scoped to this workspace — "current task" is a per-workspace concept). |
 | `task_pause` / `task_done` / `task_archive` / `task_reopen` | Change the current (or given) task's lifecycle status. |
+| `task_edit` | Edits the current (or given) task's title and/or goal (curation). Leaves either unchanged if not supplied. |
 | `checkpoint_add` | Records a checkpoint summary. |
-| `todo_add` / `todo_list` / `todo_done` | Manage todos. |
-| `decision_add` | Records a decision (with optional rationale). |
-| `error_add` / `error_resolve` | Record or resolve an error. |
-| `question_add` / `question_list` / `question_resolve` | Record, list, or resolve an open question blocking the task. |
+| `todo_add` / `todo_list` / `todo_done` / `todo_reopen` / `todo_block` / `todo_edit` / `todo_delete` | Manage todos, including curation (edit/delete) and reopening/blocking. All id-based ones accept an optional `taskId` if the todo belongs to a different workspace than the current one (needed because the cross-workspace registry indexes tasks, not sub-entity ids). |
+| `decision_add` / `decision_list` / `decision_edit` / `decision_delete` | Record, list, edit, or delete a decision (with optional rationale). |
+| `error_add` / `error_resolve` / `error_reopen` / `error_edit` / `error_delete` | Record, resolve, reopen, edit, or delete an error. Id-based ones accept an optional `taskId` the same way `todo_done` does. |
+| `question_add` / `question_list` / `question_resolve` / `question_reopen` / `question_edit` / `question_delete` | Record, list, resolve, reopen, edit, or delete an open question blocking the task. Id-based ones accept an optional `taskId` the same way `todo_done` does. |
 | `search` | Cross-entity search over task titles/goals, checkpoints, decisions, todos, errors, open questions, files, and commits — returns tasks ranked by match count, each with its matching entities. Pass `allWorkspaces: true` to search every known workspace, with each result tagged by its `workspaceRoot`. |
-| `get_context` | Returns the current (or given) task's full context — goal, latest checkpoint, open questions, unresolved errors, pending todos, recent files, commits, and decisions — as structured JSON, ranked and trimmed to fit an optional `tokenBudget` (default 2000). Equivalent to the CLI's `status`/`resume`. |
+| `get_context` | Returns the current (or given) task's full context — goal, latest checkpoint, open questions, unresolved errors, pending todos, recent files, commits, commands, and decisions — as structured JSON, ranked and trimmed to fit an optional `tokenBudget` (default 2000). Equivalent to the CLI's `status`/`resume`. |
 | `git_sync` | Syncs the current git branch and any new commits into the current (or given) task by shelling out to `git` directly — works without any editor's git integration open. Equivalent to the CLI's `git-sync`. |
 | `export_task` | Renders the current (or given) task's full history as a Markdown document (text in the response) — for sharing or pasting into a PR description. Equivalent to the CLI's `export` (which additionally writes the file to `.ariadne/export/<task-id>.md`). |
 

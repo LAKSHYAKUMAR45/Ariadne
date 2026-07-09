@@ -132,6 +132,100 @@ describe('chat participant command logic', () => {
     expect(result.markdown).toContain('Plain message task');
   });
 
+  it('edits task title/goal via /task edit', () => {
+    const task = store.createTask({ title: 'Old title', goal: 'Old goal' });
+    handleChatCommand(store, { command: 'task', prompt: 'edit --title New title', currentTaskId: task.id });
+    expect(store.getTask(task.id)?.title).toBe('New title');
+    expect(store.getTask(task.id)?.goal).toBe('Old goal');
+
+    handleChatCommand(store, { command: 'task', prompt: 'edit --goal New goal', currentTaskId: task.id });
+    expect(store.getTask(task.id)?.goal).toBe('New goal');
+  });
+
+  it('reopens, blocks, edits, and deletes a todo via /todo', () => {
+    const task = store.createTask({ title: 'Todo curation task' });
+    const created = store.createTodo({ taskId: task.id, text: 'Write tests' });
+
+    handleChatCommand(store, { command: 'todo', prompt: `done ${created.id}`, currentTaskId: task.id });
+    expect(store.getTodo(created.id)?.status).toBe('done');
+
+    handleChatCommand(store, { command: 'todo', prompt: `reopen ${created.id}`, currentTaskId: task.id });
+    expect(store.getTodo(created.id)?.status).toBe('pending');
+
+    handleChatCommand(store, { command: 'todo', prompt: `block ${created.id}`, currentTaskId: task.id });
+    expect(store.getTodo(created.id)?.status).toBe('blocked');
+
+    handleChatCommand(store, {
+      command: 'todo',
+      prompt: `edit ${created.id} --text Write more tests`,
+      currentTaskId: task.id,
+    });
+    expect(store.getTodo(created.id)?.text).toBe('Write more tests');
+
+    handleChatCommand(store, { command: 'todo', prompt: `delete ${created.id}`, currentTaskId: task.id });
+    expect(store.getTodo(created.id)).toBeUndefined();
+  });
+
+  it('lists, edits, and deletes decisions via /decision', () => {
+    const task = store.createTask({ title: 'Decision curation task' });
+    const decision = store.recordDecision({ taskId: task.id, text: 'Use SQLite', rationale: 'simple' });
+
+    const list = handleChatCommand(store, { command: 'decision', prompt: 'list', currentTaskId: task.id });
+    expect(list.markdown).toContain('Use SQLite');
+
+    handleChatCommand(store, {
+      command: 'decision',
+      prompt: `edit ${decision.id} --text Use Postgres`,
+      currentTaskId: task.id,
+    });
+    expect(store.getDecision(decision.id)?.text).toBe('Use Postgres');
+
+    handleChatCommand(store, { command: 'decision', prompt: `delete ${decision.id}`, currentTaskId: task.id });
+    expect(store.getDecision(decision.id)).toBeUndefined();
+  });
+
+  it('reopens, edits, and deletes an error via /error', () => {
+    const task = store.createTask({ title: 'Error curation task' });
+    const err = store.recordError({ taskId: task.id, message: 'TypeError: x is undefined' });
+
+    handleChatCommand(store, { command: 'error', prompt: `resolve ${err.id}`, currentTaskId: task.id });
+    expect(store.getError(err.id)?.resolved).toBe(true);
+
+    handleChatCommand(store, { command: 'error', prompt: `reopen ${err.id}`, currentTaskId: task.id });
+    expect(store.getError(err.id)?.resolved).toBe(false);
+
+    handleChatCommand(store, {
+      command: 'error',
+      prompt: `edit ${err.id} --message Fixed message`,
+      currentTaskId: task.id,
+    });
+    expect(store.getError(err.id)?.message).toBe('Fixed message');
+
+    handleChatCommand(store, { command: 'error', prompt: `delete ${err.id}`, currentTaskId: task.id });
+    expect(store.getError(err.id)).toBeUndefined();
+  });
+
+  it('reopens, edits, and deletes an open question via /question', () => {
+    const task = store.createTask({ title: 'Question curation task' });
+    const q = store.recordOpenQuestion({ taskId: task.id, text: 'Should we use X?' });
+
+    handleChatCommand(store, { command: 'question', prompt: `resolve ${q.id}`, currentTaskId: task.id });
+    expect(store.getOpenQuestion(q.id)?.resolved).toBe(true);
+
+    handleChatCommand(store, { command: 'question', prompt: `reopen ${q.id}`, currentTaskId: task.id });
+    expect(store.getOpenQuestion(q.id)?.resolved).toBe(false);
+
+    handleChatCommand(store, {
+      command: 'question',
+      prompt: `edit ${q.id} --text Should we use Y?`,
+      currentTaskId: task.id,
+    });
+    expect(store.getOpenQuestion(q.id)?.text).toBe('Should we use Y?');
+
+    handleChatCommand(store, { command: 'question', prompt: `delete ${q.id}`, currentTaskId: task.id });
+    expect(store.getOpenQuestion(q.id)).toBeUndefined();
+  });
+
   describe('natural language intent routing (no slash command)', () => {
     it('creates a task from "new task: <title>" phrasing', () => {
       const result = handleChatCommand(store, { prompt: 'new task: Implement auth' });

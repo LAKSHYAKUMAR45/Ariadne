@@ -32,22 +32,26 @@ commands below — or just describe what you want in plain language (e.g.
 
 | Command | What it does |
 |---|---|
-| `/status` (default) | Show the current task's goal, latest checkpoint, open questions, unresolved errors, pending todos, recent files, and recent commits. |
-| `/resume` | Alias of `/status`. |
+| `/status [id]` (default) | Show a task's goal, latest checkpoint, open questions, unresolved errors, pending todos, recent files, recent commits, and recent commands. Defaults to the current task; an explicit id works even if it belongs to a different workspace. |
+| `/resume [id]` | Alias of `/status`. |
 | `/checkpoint <summary>` | Record a checkpoint summary for the current task. |
-| `/todo add <text>` / `/todo list` / `/todo done <id>` | Manage todos. |
+| `/todo add <text>` / `/todo list` / `/todo done <id>` / `/todo reopen <id>` / `/todo block <id>` / `/todo edit <id> --text <t>` / `/todo delete <id>` (all `[--task <taskId>]`) | Manage todos, including curation (edit/delete) and reopening/blocking. `--task` tells id-based subcommands which task/workspace the todo belongs to, if not the current one. |
 | `/task new <title>` / `/task list [--all-workspaces]` / `/task use <id>` | Create, list, or switch the current task. `--all-workspaces` lists tasks from every workspace Ariadne has ever seen (tagged with each task's workspace root). |
-| `/task pause [id]` / `/task done [id]` / `/task archive [id]` / `/task reopen [id]` | Change a task's lifecycle status. Defaults to the current task; an explicit id works even if it belongs to a different workspace. |
-| `/decision <text>` | Record a decision. |
-| `/error <message>` / `/error resolve <id>` | Record or resolve an error. |
-| `/question add <text>` / `/question list` / `/question resolve <id>` | Record, list, or resolve an open question blocking the task. |
+| `/task pause [id]` / `/task done [id]` / `/task archive [id]` / `/task reopen [id]` / `/task edit --title <t> --goal <g>` | Change a task's lifecycle status, or edit its title/goal (curation). Defaults to the current task; an explicit id works even if it belongs to a different workspace. |
+| `/decision <text>` / `/decision list` / `/decision edit <id> --text <t> --rationale <r>` / `/decision delete <id>` (last two `[--task <taskId>]`) | Record, list, edit, or delete a decision. |
+| `/error <message>` / `/error resolve <id>` / `/error reopen <id>` / `/error edit <id> --message <m>` / `/error delete <id>` (all `[--task <taskId>]`) | Record, resolve, reopen, edit, or delete an error. `--task` tells id-based subcommands which task/workspace the error belongs to, if not the current one. |
+| `/question add <text>` / `/question list` / `/question resolve <id>` / `/question reopen <id>` / `/question edit <id> --text <t>` / `/question delete <id>` (id-based ones `[--task <taskId>]`) | Record, list, resolve, reopen, edit, or delete an open question blocking the task. `--task` works the same way. |
 | `/search <query> [--all-workspaces]` | Cross-entity search over task titles/goals, checkpoints, decisions, todos, errors, open questions, files, and commits. `--all-workspaces` searches every known workspace, tagging each result with its workspace root. |
 
 Any command above that resolves a task by id (not just the current task) —
-`/task pause|done|archive|reopen <id>` — transparently falls back to the
-global cross-workspace registry (`~/.ariadne/registry.db`) if the id isn't
-in the currently open workspace, and operates on whichever workspace
-actually owns it.
+`/status|/resume <id>`, `/task pause|done|archive|reopen <id>` —
+transparently falls back to the global cross-workspace registry
+(`~/.ariadne/registry.db`) if the id isn't in the currently open workspace,
+and operates on whichever workspace actually owns it. Sub-entity ids
+(todos, errors, open questions, decisions) aren't indexed by the registry, so
+their id-based subcommands (`done`, `reopen`, `block`, `edit`, `delete`,
+`resolve`) need an explicit `--task <taskId>` hint to resolve across
+workspaces — without it they operate on the current workspace only, as before.
 
 ## Requirements
 

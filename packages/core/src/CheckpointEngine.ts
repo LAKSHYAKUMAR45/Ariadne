@@ -1,4 +1,4 @@
-import type { Checkpoint, CheckpointLevel } from './types.js';
+import type { Checkpoint, CheckpointLevel, TaskStatus } from './types.js';
 import type { TaskStore } from './TaskStore.js';
 
 /**
@@ -140,4 +140,27 @@ export function rollupCheckpoints(
     store.setCheckpointParent(c.id, rolled.id);
   }
   return rolled;
+}
+
+/**
+ * Updates a task's status and, at natural session/milestone boundaries,
+ * rolls up lower-level checkpoints into a higher-level one so long-running
+ * tasks don't accumulate an ever-noisier flat list of micro checkpoints —
+ * this is what actually invokes `rollupCheckpoints` (previously implemented
+ * but never called from any surface). Pausing or finishing a task rolls up
+ * micro checkpoints into a session checkpoint; marking a task done or
+ * archived additionally rolls that up into a milestone checkpoint. All
+ * three surfaces (CLI, MCP server, chat participant) call this instead of
+ * `store.updateTaskStatus` directly so the behavior stays consistent
+ * everywhere. Rollup is a no-op (returns null, does nothing) when there's
+ * nothing to roll up, so this is always safe to call unconditionally.
+ */
+export function setTaskStatusWithRollup(store: TaskStore, taskId: string, status: TaskStatus): void {
+  store.updateTaskStatus(taskId, status);
+  if (status === 'paused' || status === 'done' || status === 'archived') {
+    rollupCheckpoints(store, taskId, 'micro', 'session');
+  }
+  if (status === 'done' || status === 'archived') {
+    rollupCheckpoints(store, taskId, 'session', 'milestone');
+  }
 }

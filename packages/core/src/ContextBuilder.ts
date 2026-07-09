@@ -44,6 +44,17 @@ interface ContextCommitRefSource {
   message: string | null;
 }
 
+export interface ContextCommandRef {
+  cmd: string;
+  exitCode: number | null;
+}
+
+interface ContextCommandRefSource {
+  cmdRedacted: string;
+  summary: string | null;
+  exitCode: number | null;
+}
+
 export interface ContextPackage {
   taskId: string;
   goal: string | null;
@@ -53,6 +64,8 @@ export interface ContextPackage {
   unresolvedErrors: string[];
   recentFiles: ContextFileRef[];
   recentCommits: ContextCommitRef[];
+  /** Recently run terminal commands (captured via passive capture or `git-sync`), most-recent-first, trimmed to fit the token budget like everything else. Was previously stored but never surfaced here — see docs/04-ROADMAP.md gap tracking. */
+  recentCommands: ContextCommandRef[];
   decisions: string[];
   /** What was cut for budget, keyed by category, e.g. `{ commands: 12, resolvedTodos: 5 }`. */
   truncated: Record<string, number>;
@@ -159,7 +172,7 @@ export function buildContext(store: TaskStore, taskId: string, options: BuildCon
   const commands = store.listCommands(taskId, 200);
   for (const c of commands) {
     const text = c.summary ?? c.cmdRedacted;
-    candidates.push({ tier: 'low', category: 'commands', createdAt: c.createdAt, cost: estimateTokens(text), text });
+    candidates.push({ tier: 'low', category: 'commands', createdAt: c.createdAt, cost: estimateTokens(text), text, data: c });
   }
 
   // --- Sort: tier priority first, then most-recent-first within a tier. ---
@@ -193,6 +206,9 @@ export function buildContext(store: TaskStore, taskId: string, options: BuildCon
     recentCommits: (included.recentCommits ?? [])
       .map((c) => c.data as ContextCommitRefSource)
       .map((c) => ({ sha: c.sha, message: c.message })),
+    recentCommands: (included.commands ?? [])
+      .map((c) => c.data as ContextCommandRefSource)
+      .map((c) => ({ cmd: c.summary ?? c.cmdRedacted, exitCode: c.exitCode })),
     decisions: (included.decisions ?? []).map((c) => c.text),
     truncated,
   };

@@ -81,7 +81,7 @@ ariadne status
 `ariadne status` prints exactly what a fresh chat session (in any assistant)
 needs to pick up where you left off — goal, latest checkpoint, open
 questions, unresolved errors, decisions, pending todos, recently touched
-files, and recent commits, trimmed to a token budget so it's cheap to paste
+files, recent commits, and recent commands, trimmed to a token budget so it's cheap to paste
 or auto-inject into a prompt.
 
 That's the whole loop: **start a task once, then keep checkpointing/
@@ -99,21 +99,35 @@ ariadne task new <title> [--goal <goal>]       # create a task, mark it current
 ariadne task list [--status <s>] [-a]          # list tasks (-a = every workspace)
 ariadne task use <id>                          # switch current task
 ariadne task pause|done|archive|reopen [id]    # change lifecycle status
+ariadne task edit [id] [--title <t>] [--goal <g>]  # rename/reword a task (curation)
 
 ariadne checkpoint <summary> [--level micro|session|milestone] [--task <id>]
-ariadne decision <text> [--rationale <text>] [--task <id>]
+ariadne decision <text> [--rationale <text>] [--task <id>]     # record a decision
+ariadne decisions list [--task <id>]                           # list decisions
+ariadne decisions edit <id> [--text <t>] [--rationale <r>] [--task <id>]
+ariadne decisions delete <id> [--task <id>]
 
 ariadne todo add <text> [--task <id>]
 ariadne todo list [--status pending|done|blocked] [--task <id>]
-ariadne todo done <id>
+ariadne todo done <id> [--task <id>]
+ariadne todo reopen <id> [--task <id>]         # set a done/blocked todo back to pending
+ariadne todo block <id> [--task <id>]
+ariadne todo edit <id> --text <text> [--task <id>]
+ariadne todo delete <id> [--task <id>]
 
 ariadne error add <message> [--task <id>]
 ariadne error list [--all] [--task <id>]
-ariadne error resolve <id> [--resolution <text>]
+ariadne error resolve <id> [--resolution <text>] [--task <id>]
+ariadne error reopen <id> [--task <id>]
+ariadne error edit <id> -m <message> [--task <id>]
+ariadne error delete <id> [--task <id>]
 
 ariadne question add <text> [--task <id>]
 ariadne question list [--all] [--task <id>]
-ariadne question resolve <id>
+ariadne question resolve <id> [--task <id>]
+ariadne question reopen <id> [--task <id>]
+ariadne question edit <id> --text <text> [--task <id>]
+ariadne question delete <id> [--task <id>]
 
 ariadne status [--task <id>] [--budget <tokens>]   # ranked context summary
 ariadne resume [--task <id>] [--budget <tokens>]   # alias of status
@@ -128,7 +142,10 @@ Run `ariadne --help` or `ariadne <command> --help` for the authoritative list
 and flags at any time.
 
 **Tip:** `--task <id>` works even for a task from a *different* workspace —
-see [§8 Cross-workspace tasks](#8-working-across-multiple-workspaces).
+see [§8 Cross-workspace tasks](#8-working-across-multiple-workspaces). The
+`edit`/`delete`/`reopen` commands above are curation operations for fixing
+typos or discarding stale entries — none of them are auto-generated, so use
+them freely without worrying about breaking passive capture.
 
 ## 6. Using an MCP client (Claude Code, Gemini CLI, Codex, custom agents, etc.)
 
@@ -151,9 +168,11 @@ directly, plus two read-only resources. Point your client at:
 set it per-project, or per-MCP-config, if your client supports that.)
 
 Once connected, the assistant can call `task_new`, `task_list`, `task_use`,
-`task_pause`/`done`/`archive`/`reopen`, `checkpoint_add`, `todo_add`/`list`/
-`done`, `decision_add`, `error_add`/`resolve`, `question_add`/`list`/
-`resolve`, `search`, `get_context`, `git_sync`, and `export_task` — see
+`task_pause`/`done`/`archive`/`reopen`, `task_edit`, `checkpoint_add`,
+`todo_add`/`list`/`done`/`reopen`/`block`/`edit`/`delete`, `decision_add`/
+`list`/`edit`/`delete`, `error_add`/`resolve`/`reopen`/`edit`/`delete`,
+`question_add`/`list`/`resolve`/`reopen`/`edit`/`delete`, `search`,
+`get_context`, `git_sync`, and `export_task` — see
 [`packages/mcp-server/README.md`](../packages/mcp-server/README.md) for the
 full reference and exact input shapes. In practice, you'd typically start a
 conversation with something like *"check my current Ariadne task before we

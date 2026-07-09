@@ -6,6 +6,7 @@ import {
   checkpointOnError,
   maybeCheckpointOnIdle,
   rollupCheckpoints,
+  setTaskStatusWithRollup,
   summarizeFileBatch,
   summarizeCommit,
   summarizeError,
@@ -160,5 +161,60 @@ describe('rollupCheckpoints', () => {
     const milestone = rollupCheckpoints(store, task.id, 'session', 'milestone');
     expect(milestone!.level).toBe('milestone');
     expect(milestone!.summary).toBe('- session A\n- session B');
+  });
+});
+
+describe('setTaskStatusWithRollup', () => {
+  let store: TaskStore;
+
+  beforeEach(() => {
+    store = new TaskStore(':memory:');
+  });
+
+  afterEach(() => {
+    store.close();
+  });
+
+  it('pausing a task updates its status and rolls up micro checkpoints into a session checkpoint', () => {
+    const task = store.createTask({ title: 'A' });
+    store.createCheckpoint({ taskId: task.id, level: 'micro', summary: 'did a thing' });
+    store.createCheckpoint({ taskId: task.id, level: 'micro', summary: 'did another thing' });
+
+    setTaskStatusWithRollup(store, task.id, 'paused');
+
+    expect(store.getTask(task.id)?.status).toBe('paused');
+    const latest = store.latestCheckpoint(task.id);
+    expect(latest?.level).toBe('session');
+    expect(latest?.summary).toBe('- did a thing\n- did another thing');
+  });
+
+  it('marking a task done rolls up both micro->session and session->milestone', () => {
+    const task = store.createTask({ title: 'A' });
+    store.createCheckpoint({ taskId: task.id, level: 'micro', summary: 'did a thing' });
+
+    setTaskStatusWithRollup(store, task.id, 'done');
+
+    expect(store.getTask(task.id)?.status).toBe('done');
+    const latest = store.latestCheckpoint(task.id);
+    expect(latest?.level).toBe('milestone');
+  });
+
+  it('reactivating a task (active) updates status without attempting any rollup', () => {
+    const task = store.createTask({ title: 'A' });
+    store.updateTaskStatus(task.id, 'paused');
+    store.createCheckpoint({ taskId: task.id, level: 'micro', summary: 'a checkpoint' });
+
+    setTaskStatusWithRollup(store, task.id, 'active');
+
+    expect(store.getTask(task.id)?.status).toBe('active');
+    // No rollup should have happened — the micro checkpoint is still the latest, unchanged.
+    expect(store.latestCheckpoint(task.id)?.level).toBe('micro');
+  });
+
+  it('is a no-op rollup-wise (but still updates status) when there is nothing to roll up', () => {
+    const task = store.createTask({ title: 'A' });
+    expect(() => setTaskStatusWithRollup(store, task.id, 'paused')).not.toThrow();
+    expect(store.getTask(task.id)?.status).toBe('paused');
+    expect(store.listCheckpoints(task.id)).toEqual([]);
   });
 });

@@ -1,6 +1,6 @@
 import type { TaskStore } from '@ariadne/core';
 import { resolveTaskAnyWorkspace } from '@ariadne/core';
-import { findWorkspaceRoot } from './workspace.js';
+import { findWorkspaceRoot, openWorkspaceStore } from './workspace.js';
 import { readCurrentTaskId } from './currentTask.js';
 
 /**
@@ -39,4 +39,26 @@ export function withResolvedTask<T>(
   } finally {
     resolved.store.close();
   }
+}
+
+/**
+ * Opens whichever store owns a sub-entity mutation (`todo done <id>`,
+ * `error resolve <id>`, `question resolve <id>`) given an optional
+ * `--task <taskId>` hint. The cross-workspace registry only indexes task
+ * ids, not sub-entity ids, so a bare todo/error/question id belonging to
+ * another workspace can't be resolved on its own — the hint tells us which
+ * task (and therefore which workspace) to open first. Without a hint,
+ * operates against the current workspace's store, unchanged from before.
+ */
+export function withScopedStore<T>(taskIdHint: string | undefined, fn: (store: TaskStore) => T): T {
+  if (!taskIdHint) {
+    const workspaceRoot = findWorkspaceRoot();
+    const store = openWorkspaceStore(workspaceRoot);
+    try {
+      return fn(store);
+    } finally {
+      store.close();
+    }
+  }
+  return withResolvedTask(taskIdHint, (store) => fn(store));
 }

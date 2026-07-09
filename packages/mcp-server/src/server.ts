@@ -112,6 +112,22 @@ export function createAriadneMcpServer(options?: { workspaceRoot?: string; store
   }
 
   server.registerTool(
+    'task_edit',
+    {
+      title: 'Edit a task',
+      description: 'Edits the current (or given) task\'s title and/or goal (curation). Leaves either unchanged if not supplied. Works even if taskId belongs to a different workspace.',
+      inputSchema: { taskId: z.string().optional(), title: z.string().optional(), goal: z.string().optional() },
+    },
+    async (args) => {
+      try {
+        return jsonResult(tools.taskEdit(store, workspaceRoot, args));
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
+
+  server.registerTool(
     'checkpoint_add',
     {
       title: 'Record a checkpoint',
@@ -163,12 +179,80 @@ export function createAriadneMcpServer(options?: { workspaceRoot?: string; store
     'todo_done',
     {
       title: 'Mark a todo done',
-      description: 'Marks the given todo as done.',
-      inputSchema: { todoId: z.string() },
+      description: 'Marks the given todo as done. Pass taskId if the todo belongs to a different workspace than the current one (the cross-workspace registry indexes tasks, not sub-entity ids).',
+      inputSchema: { todoId: z.string(), taskId: z.string().optional() },
     },
     async (args) => {
       try {
-        tools.todoDone(store, args);
+        tools.todoDone(store, workspaceRoot, args);
+        return jsonResult({ ok: true });
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    'todo_reopen',
+    {
+      title: 'Reopen a todo',
+      description: 'Sets a done/blocked todo back to pending. Pass taskId if the todo belongs to a different workspace than the current one.',
+      inputSchema: { todoId: z.string(), taskId: z.string().optional() },
+    },
+    async (args) => {
+      try {
+        tools.todoReopen(store, workspaceRoot, args);
+        return jsonResult({ ok: true });
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    'todo_block',
+    {
+      title: 'Mark a todo blocked',
+      description: 'Marks the given todo as blocked. Pass taskId if the todo belongs to a different workspace than the current one.',
+      inputSchema: { todoId: z.string(), taskId: z.string().optional() },
+    },
+    async (args) => {
+      try {
+        tools.todoBlock(store, workspaceRoot, args);
+        return jsonResult({ ok: true });
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    'todo_edit',
+    {
+      title: 'Edit a todo',
+      description: 'Edits a todo\'s text (curation). Pass taskId if the todo belongs to a different workspace than the current one.',
+      inputSchema: { todoId: z.string(), text: z.string(), taskId: z.string().optional() },
+    },
+    async (args) => {
+      try {
+        tools.todoEdit(store, workspaceRoot, args);
+        return jsonResult({ ok: true });
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    'todo_delete',
+    {
+      title: 'Delete a todo',
+      description: 'Permanently deletes a todo (curation). Pass taskId if the todo belongs to a different workspace than the current one.',
+      inputSchema: { todoId: z.string(), taskId: z.string().optional() },
+    },
+    async (args) => {
+      try {
+        tools.todoDelete(store, workspaceRoot, args);
         return jsonResult({ ok: true });
       } catch (err) {
         return errorResult(err);
@@ -186,6 +270,56 @@ export function createAriadneMcpServer(options?: { workspaceRoot?: string; store
     async (args) => {
       try {
         return jsonResult(tools.decisionAdd(store, workspaceRoot, args));
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    'decision_list',
+    {
+      title: 'List decisions',
+      description: 'Lists decisions recorded for the current (or given) task. Works even if taskId belongs to a different workspace (falls back to the cross-workspace registry).',
+      inputSchema: { taskId: z.string().optional() },
+    },
+    async (args) => {
+      try {
+        return jsonResult(tools.decisionList(store, workspaceRoot, args));
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    'decision_edit',
+    {
+      title: 'Edit a decision',
+      description: 'Edits a decision\'s text and/or rationale (curation). Pass taskId if the decision belongs to a different workspace than the current one.',
+      inputSchema: { decisionId: z.string(), text: z.string().optional(), rationale: z.string().optional(), taskId: z.string().optional() },
+    },
+    async (args) => {
+      try {
+        tools.decisionEdit(store, workspaceRoot, args);
+        return jsonResult({ ok: true });
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    'decision_delete',
+    {
+      title: 'Delete a decision',
+      description: 'Permanently deletes a decision (curation). Pass taskId if the decision belongs to a different workspace than the current one.',
+      inputSchema: { decisionId: z.string(), taskId: z.string().optional() },
+    },
+    async (args) => {
+      try {
+        tools.decisionDelete(store, workspaceRoot, args);
+        return jsonResult({ ok: true });
       } catch (err) {
         return errorResult(err);
       }
@@ -212,12 +346,63 @@ export function createAriadneMcpServer(options?: { workspaceRoot?: string; store
     'error_resolve',
     {
       title: 'Resolve an error',
-      description: 'Marks the given error as resolved, optionally with a resolution note.',
-      inputSchema: { errorId: z.string(), resolution: z.string().optional() },
+      description: 'Marks the given error as resolved, optionally with a resolution note. Pass taskId if the error belongs to a different workspace than the current one.',
+      inputSchema: { errorId: z.string(), resolution: z.string().optional(), taskId: z.string().optional() },
     },
     async (args) => {
       try {
-        tools.errorResolve(store, args);
+        tools.errorResolve(store, workspaceRoot, args);
+        return jsonResult({ ok: true });
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    'error_reopen',
+    {
+      title: 'Reopen an error',
+      description: 'Marks a previously-resolved error as unresolved again. Pass taskId if the error belongs to a different workspace than the current one.',
+      inputSchema: { errorId: z.string(), taskId: z.string().optional() },
+    },
+    async (args) => {
+      try {
+        tools.errorReopen(store, workspaceRoot, args);
+        return jsonResult({ ok: true });
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    'error_edit',
+    {
+      title: 'Edit an error',
+      description: 'Edits an error\'s message (curation). Pass taskId if the error belongs to a different workspace than the current one.',
+      inputSchema: { errorId: z.string(), message: z.string(), taskId: z.string().optional() },
+    },
+    async (args) => {
+      try {
+        tools.errorEdit(store, workspaceRoot, args);
+        return jsonResult({ ok: true });
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    'error_delete',
+    {
+      title: 'Delete an error',
+      description: 'Permanently deletes an error (curation). Pass taskId if the error belongs to a different workspace than the current one.',
+      inputSchema: { errorId: z.string(), taskId: z.string().optional() },
+    },
+    async (args) => {
+      try {
+        tools.errorDelete(store, workspaceRoot, args);
         return jsonResult({ ok: true });
       } catch (err) {
         return errorResult(err);
@@ -261,12 +446,63 @@ export function createAriadneMcpServer(options?: { workspaceRoot?: string; store
     'question_resolve',
     {
       title: 'Resolve an open question',
-      description: 'Marks the given open question as resolved.',
-      inputSchema: { questionId: z.string() },
+      description: 'Marks the given open question as resolved. Pass taskId if the question belongs to a different workspace than the current one.',
+      inputSchema: { questionId: z.string(), taskId: z.string().optional() },
     },
     async (args) => {
       try {
-        tools.questionResolve(store, args);
+        tools.questionResolve(store, workspaceRoot, args);
+        return jsonResult({ ok: true });
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    'question_reopen',
+    {
+      title: 'Reopen an open question',
+      description: 'Marks a previously-resolved open question as unresolved again. Pass taskId if the question belongs to a different workspace than the current one.',
+      inputSchema: { questionId: z.string(), taskId: z.string().optional() },
+    },
+    async (args) => {
+      try {
+        tools.questionReopen(store, workspaceRoot, args);
+        return jsonResult({ ok: true });
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    'question_edit',
+    {
+      title: 'Edit an open question',
+      description: 'Edits an open question\'s text (curation). Pass taskId if the question belongs to a different workspace than the current one.',
+      inputSchema: { questionId: z.string(), text: z.string(), taskId: z.string().optional() },
+    },
+    async (args) => {
+      try {
+        tools.questionEdit(store, workspaceRoot, args);
+        return jsonResult({ ok: true });
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    'question_delete',
+    {
+      title: 'Delete an open question',
+      description: 'Permanently deletes an open question (curation). Pass taskId if the question belongs to a different workspace than the current one.',
+      inputSchema: { questionId: z.string(), taskId: z.string().optional() },
+    },
+    async (args) => {
+      try {
+        tools.questionDelete(store, workspaceRoot, args);
         return jsonResult({ ok: true });
       } catch (err) {
         return errorResult(err);

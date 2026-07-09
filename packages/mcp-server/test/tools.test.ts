@@ -77,14 +77,14 @@ describe('mcp-server tools', () => {
 
     const todo = tools.todoAdd(store, workspaceRoot, { text: 'write tests' });
     expect(tools.todoList(store, workspaceRoot, {}).map((t) => t.id)).toContain(todo.id);
-    tools.todoDone(store, { todoId: todo.id });
+    tools.todoDone(store, workspaceRoot, { todoId: todo.id });
     expect(tools.todoList(store, workspaceRoot, { status: 'done' }).map((t) => t.id)).toContain(todo.id);
 
     const decision = tools.decisionAdd(store, workspaceRoot, { text: 'use SQLite', rationale: 'simple, local' });
     expect(decision.text).toBe('use SQLite');
 
     const error = tools.errorAdd(store, workspaceRoot, { message: 'build failed' });
-    tools.errorResolve(store, { errorId: error.id, resolution: 'fixed typo' });
+    tools.errorResolve(store, workspaceRoot, { errorId: error.id, resolution: 'fixed typo' });
     expect(store.listErrors(task.id, { resolved: false })).toHaveLength(0);
   });
 
@@ -99,7 +99,7 @@ describe('mcp-server tools', () => {
     expect(tools.questionList(store, workspaceRoot, { resolved: false }).map((x) => x.id)).toContain(q.id);
     expect(tools.questionList(store, workspaceRoot, { resolved: true }).map((x) => x.id)).not.toContain(q.id);
 
-    tools.questionResolve(store, { questionId: q.id });
+    tools.questionResolve(store, workspaceRoot, { questionId: q.id });
     expect(tools.questionList(store, workspaceRoot, { resolved: true }).map((x) => x.id)).toContain(q.id);
     expect(tools.questionList(store, workspaceRoot, { resolved: false }).map((x) => x.id)).not.toContain(q.id);
   });
@@ -163,5 +163,83 @@ describe('mcp-server tools', () => {
     expect(result.taskId).toBe(task.id);
     expect(result.markdown).toContain('# Fix login bug');
     expect(result.markdown).toContain('first checkpoint');
+  });
+
+  it('task_edit edits title and/or goal without disturbing the other', () => {
+    const task = tools.taskNew(store, workspaceRoot, { title: 'Old title', goal: 'Old goal' });
+
+    tools.taskEdit(store, workspaceRoot, { title: 'New title' });
+    expect(store.getTask(task.id)?.title).toBe('New title');
+    expect(store.getTask(task.id)?.goal).toBe('Old goal');
+
+    tools.taskEdit(store, workspaceRoot, { goal: 'New goal' });
+    expect(store.getTask(task.id)?.goal).toBe('New goal');
+  });
+
+  it('todo curation: reopen, block, edit, delete', () => {
+    tools.taskNew(store, workspaceRoot, { title: 'Task' });
+    const todo = tools.todoAdd(store, workspaceRoot, { text: 'Write tests' });
+
+    tools.todoDone(store, workspaceRoot, { todoId: todo.id });
+    expect(store.getTodo(todo.id)?.status).toBe('done');
+
+    tools.todoReopen(store, workspaceRoot, { todoId: todo.id });
+    expect(store.getTodo(todo.id)?.status).toBe('pending');
+
+    tools.todoBlock(store, workspaceRoot, { todoId: todo.id });
+    expect(store.getTodo(todo.id)?.status).toBe('blocked');
+
+    tools.todoEdit(store, workspaceRoot, { todoId: todo.id, text: 'Write more tests' });
+    expect(store.getTodo(todo.id)?.text).toBe('Write more tests');
+
+    tools.todoDelete(store, workspaceRoot, { todoId: todo.id });
+    expect(store.getTodo(todo.id)).toBeUndefined();
+  });
+
+  it('decision curation: list, edit, delete', () => {
+    tools.taskNew(store, workspaceRoot, { title: 'Task' });
+    const decision = tools.decisionAdd(store, workspaceRoot, { text: 'Use SQLite', rationale: 'simple' });
+
+    expect(tools.decisionList(store, workspaceRoot, {}).map((d) => d.id)).toEqual([decision.id]);
+
+    tools.decisionEdit(store, workspaceRoot, { decisionId: decision.id, text: 'Use Postgres' });
+    expect(store.getDecision(decision.id)?.text).toBe('Use Postgres');
+
+    tools.decisionDelete(store, workspaceRoot, { decisionId: decision.id });
+    expect(store.getDecision(decision.id)).toBeUndefined();
+  });
+
+  it('error curation: reopen, edit, delete', () => {
+    tools.taskNew(store, workspaceRoot, { title: 'Task' });
+    const error = tools.errorAdd(store, workspaceRoot, { message: 'TypeError: x is undefined' });
+
+    tools.errorResolve(store, workspaceRoot, { errorId: error.id });
+    expect(store.getError(error.id)?.resolved).toBe(true);
+
+    tools.errorReopen(store, workspaceRoot, { errorId: error.id });
+    expect(store.getError(error.id)?.resolved).toBe(false);
+
+    tools.errorEdit(store, workspaceRoot, { errorId: error.id, message: 'Fixed message' });
+    expect(store.getError(error.id)?.message).toBe('Fixed message');
+
+    tools.errorDelete(store, workspaceRoot, { errorId: error.id });
+    expect(store.getError(error.id)).toBeUndefined();
+  });
+
+  it('question curation: reopen, edit, delete', () => {
+    tools.taskNew(store, workspaceRoot, { title: 'Task' });
+    const question = tools.questionAdd(store, workspaceRoot, { text: 'Should we use X?' });
+
+    tools.questionResolve(store, workspaceRoot, { questionId: question.id });
+    expect(store.getOpenQuestion(question.id)?.resolved).toBe(true);
+
+    tools.questionReopen(store, workspaceRoot, { questionId: question.id });
+    expect(store.getOpenQuestion(question.id)?.resolved).toBe(false);
+
+    tools.questionEdit(store, workspaceRoot, { questionId: question.id, text: 'Should we use Y?' });
+    expect(store.getOpenQuestion(question.id)?.text).toBe('Should we use Y?');
+
+    tools.questionDelete(store, workspaceRoot, { questionId: question.id });
+    expect(store.getOpenQuestion(question.id)).toBeUndefined();
   });
 });

@@ -10,10 +10,11 @@ import {
   searchWorkspace,
   listTasksAcrossWorkspaces,
   searchAcrossWorkspaces,
+  setTaskStatusWithRollup,
 } from '@ariadne/core';
 import { openWorkspaceStore, findWorkspaceRoot, stateDbPath } from './workspace.js';
 import { readCurrentTaskId, setCurrentTaskId } from './currentTask.js';
-import { withResolvedTask } from './withTask.js';
+import { withResolvedTask, withScopedStore } from './withTask.js';
 
 const program = new Command();
 program.name('ariadne').description('Chats are disposable, tasks are permanent.').version('0.1.0');
@@ -110,7 +111,7 @@ task
   .description('Pause the current (or given) task')
   .action((id: string | undefined) => {
     withResolvedTask(id, (store, taskId) => {
-      store.updateTaskStatus(taskId, 'paused');
+      setTaskStatusWithRollup(store, taskId, 'paused');
       console.log(`Task ${taskId} paused.`);
     });
   });
@@ -120,7 +121,7 @@ task
   .description('Mark the current (or given) task done')
   .action((id: string | undefined) => {
     withResolvedTask(id, (store, taskId) => {
-      store.updateTaskStatus(taskId, 'done');
+      setTaskStatusWithRollup(store, taskId, 'done');
       console.log(`Task ${taskId} marked done.`);
     });
   });
@@ -130,7 +131,7 @@ task
   .description('Archive the current (or given) task')
   .action((id: string | undefined) => {
     withResolvedTask(id, (store, taskId) => {
-      store.updateTaskStatus(taskId, 'archived');
+      setTaskStatusWithRollup(store, taskId, 'archived');
       console.log(`Task ${taskId} archived.`);
     });
   });
@@ -142,6 +143,24 @@ task
     withResolvedTask(id, (store, taskId) => {
       store.updateTaskStatus(taskId, 'active');
       console.log(`Task ${taskId} reactivated.`);
+    });
+  });
+
+task
+  .command('edit [id]')
+  .description('Edit the current (or given) task\'s title and/or goal (curation — fixes bad data without recreating the task)')
+  .option('--title <title>', 'New title')
+  .option('--goal <goal>', 'New goal (pass an empty string to clear it)')
+  .action((id: string | undefined, opts: { title?: string; goal?: string }) => {
+    if (opts.title === undefined && opts.goal === undefined) {
+      console.error('Nothing to edit — pass --title and/or --goal.');
+      process.exit(1);
+    }
+    withResolvedTask(id, (store, taskId) => {
+      if (opts.title !== undefined) store.updateTaskTitle(taskId, opts.title);
+      if (opts.goal !== undefined) store.updateTaskGoal(taskId, opts.goal === '' ? null : opts.goal);
+      const updated = store.getTask(taskId)!;
+      console.log(`Task ${taskId} updated: "${updated.title}"${updated.goal ? ` (goal: ${updated.goal})` : ''}`);
     });
   });
 
@@ -174,6 +193,62 @@ program
     withResolvedTask(opts.task, (store, taskId) => {
       const created = store.recordDecision({ taskId, text, rationale: opts.rationale });
       console.log(`Recorded decision ${created.id}: ${created.text}`);
+    });
+  });
+
+// `decisions` (plural) is a separate command group from `decision <text>`
+// (singular, above) purely to avoid ambiguity — `ariadne decision list`
+// would otherwise be indistinguishable from recording a decision whose
+// text is literally "list".
+const decisions = program
+  .command('decisions')
+  .description('List, edit, or delete decisions (use "ariadne decision <text>" to add one)');
+
+decisions
+  .command('list')
+  .description('List decisions for the current (or --task) task')
+  .option('-t, --task <id>', 'Task id')
+  .action((opts: { task?: string }) => {
+    withResolvedTask(opts.task, (store, taskId) => {
+      const list = store.listDecisions(taskId);
+      if (list.length === 0) {
+        console.log('No decisions found.');
+        return;
+      }
+      for (const d of list) {
+        console.log(`${d.id}  ${d.text}${d.rationale ? `  (${d.rationale})` : ''}`);
+      }
+    });
+  });
+
+decisions
+  .command('edit <id>')
+  .description('Edit a decision\'s text and/or rationale (curation)')
+  .option('--text <text>', 'New text')
+  .option('--rationale <rationale>', 'New rationale (pass an empty string to clear it)')
+  .option('-t, --task <id>', 'Task id the decision belongs to, if not in the current workspace')
+  .action((id: string, opts: { text?: string; rationale?: string; task?: string }) => {
+    if (opts.text === undefined && opts.rationale === undefined) {
+      console.error('Nothing to edit — pass --text and/or --rationale.');
+      process.exit(1);
+    }
+    withScopedStore(opts.task, (store) => {
+      store.updateDecision(id, {
+        text: opts.text,
+        rationale: opts.rationale !== undefined ? (opts.rationale === '' ? null : opts.rationale) : undefined,
+      });
+      console.log(`Decision ${id} updated.`);
+    });
+  });
+
+decisions
+  .command('delete <id>')
+  .description('Permanently delete a decision (curation)')
+  .option('-t, --task <id>', 'Task id the decision belongs to, if not in the current workspace')
+  .action((id: string, opts: { task?: string }) => {
+    withScopedStore(opts.task, (store) => {
+      store.deleteDecision(id);
+      console.log(`Decision ${id} deleted.`);
     });
   });
 
@@ -216,10 +291,45 @@ errorCmd
   .command('resolve <id>')
   .description('Mark an error as resolved')
   .option('-r, --resolution <text>', 'Resolution note')
-  .action((id: string, opts: { resolution?: string }) => {
-    withStore((store) => {
+  .option('-t, --task <id>', 'Task id the error belongs to, if not in the current workspace')
+  .action((id: string, opts: { resolution?: string; task?: string }) => {
+    withScopedStore(opts.task, (store) => {
       store.resolveError(id, opts.resolution);
       console.log(`Marked error ${id} resolved.`);
+    });
+  });
+
+errorCmd
+  .command('reopen <id>')
+  .description('Reopen a previously-resolved error')
+  .option('-t, --task <id>', 'Task id the error belongs to, if not in the current workspace')
+  .action((id: string, opts: { task?: string }) => {
+    withScopedStore(opts.task, (store) => {
+      store.unresolveError(id);
+      console.log(`Reopened error ${id}.`);
+    });
+  });
+
+errorCmd
+  .command('edit <id>')
+  .description('Edit an error\'s recorded message (curation)')
+  .requiredOption('-m, --message <text>', 'New message')
+  .option('-t, --task <id>', 'Task id the error belongs to, if not in the current workspace')
+  .action((id: string, opts: { message: string; task?: string }) => {
+    withScopedStore(opts.task, (store) => {
+      store.updateError(id, opts.message);
+      console.log(`Error ${id} updated.`);
+    });
+  });
+
+errorCmd
+  .command('delete <id>')
+  .description('Permanently delete an error (curation)')
+  .option('-t, --task <id>', 'Task id the error belongs to, if not in the current workspace')
+  .action((id: string, opts: { task?: string }) => {
+    withScopedStore(opts.task, (store) => {
+      store.deleteError(id);
+      console.log(`Error ${id} deleted.`);
     });
   });
 
@@ -261,10 +371,56 @@ todo
 todo
   .command('done <id>')
   .description('Mark a todo as done')
-  .action((id: string) => {
-    withStore((store) => {
+  .option('-t, --task <id>', 'Task id the todo belongs to, if not in the current workspace')
+  .action((id: string, opts: { task?: string }) => {
+    withScopedStore(opts.task, (store) => {
       store.updateTodoStatus(id, 'done');
       console.log(`Marked todo ${id} done.`);
+    });
+  });
+
+todo
+  .command('reopen <id>')
+  .description('Reopen a done todo, setting it back to pending')
+  .option('-t, --task <id>', 'Task id the todo belongs to, if not in the current workspace')
+  .action((id: string, opts: { task?: string }) => {
+    withScopedStore(opts.task, (store) => {
+      store.updateTodoStatus(id, 'pending');
+      console.log(`Reopened todo ${id} (set to pending).`);
+    });
+  });
+
+todo
+  .command('block <id>')
+  .description('Mark a todo as blocked')
+  .option('-t, --task <id>', 'Task id the todo belongs to, if not in the current workspace')
+  .action((id: string, opts: { task?: string }) => {
+    withScopedStore(opts.task, (store) => {
+      store.updateTodoStatus(id, 'blocked');
+      console.log(`Marked todo ${id} blocked.`);
+    });
+  });
+
+todo
+  .command('edit <id>')
+  .description('Edit a todo\'s text (curation)')
+  .requiredOption('--text <text>', 'New text')
+  .option('-t, --task <id>', 'Task id the todo belongs to, if not in the current workspace')
+  .action((id: string, opts: { text: string; task?: string }) => {
+    withScopedStore(opts.task, (store) => {
+      store.updateTodoText(id, opts.text);
+      console.log(`Todo ${id} updated.`);
+    });
+  });
+
+todo
+  .command('delete <id>')
+  .description('Permanently delete a todo (curation)')
+  .option('-t, --task <id>', 'Task id the todo belongs to, if not in the current workspace')
+  .action((id: string, opts: { task?: string }) => {
+    withScopedStore(opts.task, (store) => {
+      store.deleteTodo(id);
+      console.log(`Todo ${id} deleted.`);
     });
   });
 
@@ -306,10 +462,45 @@ question
 question
   .command('resolve <id>')
   .description('Mark an open question as resolved')
-  .action((id: string) => {
-    withStore((store) => {
+  .option('-t, --task <id>', 'Task id the question belongs to, if not in the current workspace')
+  .action((id: string, opts: { task?: string }) => {
+    withScopedStore(opts.task, (store) => {
       store.resolveOpenQuestion(id);
       console.log(`Marked question ${id} resolved.`);
+    });
+  });
+
+question
+  .command('reopen <id>')
+  .description('Reopen a previously-resolved open question')
+  .option('-t, --task <id>', 'Task id the question belongs to, if not in the current workspace')
+  .action((id: string, opts: { task?: string }) => {
+    withScopedStore(opts.task, (store) => {
+      store.unresolveOpenQuestion(id);
+      console.log(`Reopened question ${id}.`);
+    });
+  });
+
+question
+  .command('edit <id>')
+  .description('Edit an open question\'s text (curation)')
+  .requiredOption('--text <text>', 'New text')
+  .option('-t, --task <id>', 'Task id the question belongs to, if not in the current workspace')
+  .action((id: string, opts: { text: string; task?: string }) => {
+    withScopedStore(opts.task, (store) => {
+      store.updateOpenQuestion(id, opts.text);
+      console.log(`Question ${id} updated.`);
+    });
+  });
+
+question
+  .command('delete <id>')
+  .description('Permanently delete an open question (curation)')
+  .option('-t, --task <id>', 'Task id the question belongs to, if not in the current workspace')
+  .action((id: string, opts: { task?: string }) => {
+    withScopedStore(opts.task, (store) => {
+      store.deleteOpenQuestion(id);
+      console.log(`Question ${id} deleted.`);
     });
   });
 
@@ -358,6 +549,11 @@ function printStatus(store: TaskStore, taskId: string, tokenBudget?: number): vo
   if (ctx.recentCommits.length > 0) {
     console.log(`\nRecent commits:`);
     for (const c of ctx.recentCommits) console.log(`  - ${c.sha.slice(0, 7)} ${c.message ?? ''}`);
+  }
+
+  if (ctx.recentCommands.length > 0) {
+    console.log(`\nRecent commands:`);
+    for (const c of ctx.recentCommands) console.log(`  - ${c.cmd}${c.exitCode !== null ? ` (exit ${c.exitCode})` : ''}`);
   }
 
   const truncatedEntries = Object.entries(ctx.truncated);

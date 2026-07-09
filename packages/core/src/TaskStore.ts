@@ -304,6 +304,18 @@ export class TaskStore {
     this.syncToRegistry(id);
   }
 
+  /** Renames a task's title (curation — fixing a bad/stale title without needing to recreate the task). */
+  updateTaskTitle(id: string, title: string): void {
+    this.db.prepare(`UPDATE tasks SET title = ?, updated_at = ? WHERE id = ?`).run(title, nowIso(), id);
+    this.syncToRegistry(id);
+  }
+
+  /** Updates a task's goal (pass `null` to clear it). Curation counterpart to setting the goal at creation time. */
+  updateTaskGoal(id: string, goal: string | null): void {
+    this.db.prepare(`UPDATE tasks SET goal = ?, updated_at = ? WHERE id = ?`).run(goal, nowIso(), id);
+    this.syncToRegistry(id);
+  }
+
   /** Updates a task's tracked git branch (used by GitWatcher when it detects a branch switch). */
   updateTaskBranch(id: string, branch: string | null): void {
     this.db
@@ -474,6 +486,29 @@ export class TaskStore {
     return rows.map(rowToDecision);
   }
 
+  getDecision(id: string): Decision | undefined {
+    const row = this.db.prepare(`SELECT * FROM decisions WHERE id = ?`).get(id) as DecisionRow | undefined;
+    return row ? rowToDecision(row) : undefined;
+  }
+
+  /** Curation: edit a decision's text and/or rationale (e.g. to fix a typo or add missing context) without losing its id/history. */
+  updateDecision(id: string, updates: { text?: string; rationale?: string | null }): void {
+    const existing = this.getDecision(id);
+    if (!existing) return;
+    this.db
+      .prepare(`UPDATE decisions SET text = ?, rationale = ? WHERE id = ?`)
+      .run(updates.text ?? existing.text, updates.rationale !== undefined ? updates.rationale : existing.rationale, id);
+    this.touchTask(existing.taskId);
+  }
+
+  /** Curation: permanently remove a wrongly-recorded decision. */
+  deleteDecision(id: string): void {
+    const existing = this.getDecision(id);
+    if (!existing) return;
+    this.db.prepare(`DELETE FROM decisions WHERE id = ?`).run(id);
+    this.touchTask(existing.taskId);
+  }
+
   // ---------------------------------------------------------------------
   // Todos
   // ---------------------------------------------------------------------
@@ -507,9 +542,27 @@ export class TaskStore {
   }
 
   updateTodoStatus(id: string, status: TodoStatus): void {
+    const existing = this.getTodo(id);
     this.db
       .prepare(`UPDATE todos SET status = ?, updated_at = ? WHERE id = ?`)
       .run(status, nowIso(), id);
+    if (existing) this.touchTask(existing.taskId);
+  }
+
+  /** Curation: edit a todo's text (e.g. to fix a typo or clarify scope) without losing its id/history. */
+  updateTodoText(id: string, text: string): void {
+    const existing = this.getTodo(id);
+    if (!existing) return;
+    this.db.prepare(`UPDATE todos SET text = ?, updated_at = ? WHERE id = ?`).run(text, nowIso(), id);
+    this.touchTask(existing.taskId);
+  }
+
+  /** Curation: permanently remove a wrongly-recorded todo. */
+  deleteTodo(id: string): void {
+    const existing = this.getTodo(id);
+    if (!existing) return;
+    this.db.prepare(`DELETE FROM todos WHERE id = ?`).run(id);
+    this.touchTask(existing.taskId);
   }
 
   listTodos(taskId: string, filter?: { status?: TodoStatus }): Todo[] {
@@ -586,9 +639,39 @@ export class TaskStore {
   }
 
   resolveError(id: string, resolution?: string): void {
+    const existing = this.getError(id);
     this.db
       .prepare(`UPDATE errors SET resolved = 1, resolution = ? WHERE id = ?`)
       .run(resolution ?? null, id);
+    if (existing) this.touchTask(existing.taskId);
+  }
+
+  /** Curation: reopen a previously-resolved error (e.g. it recurred, or was resolved by mistake). */
+  unresolveError(id: string): void {
+    const existing = this.getError(id);
+    this.db.prepare(`UPDATE errors SET resolved = 0, resolution = NULL WHERE id = ?`).run(id);
+    if (existing) this.touchTask(existing.taskId);
+  }
+
+  getError(id: string): TaskError | undefined {
+    const row = this.db.prepare(`SELECT * FROM errors WHERE id = ?`).get(id) as ErrorRow | undefined;
+    return row ? rowToError(row) : undefined;
+  }
+
+  /** Curation: edit an error's recorded message (e.g. to fix a typo or add detail) without losing its id/history. */
+  updateError(id: string, message: string): void {
+    const existing = this.getError(id);
+    if (!existing) return;
+    this.db.prepare(`UPDATE errors SET message = ? WHERE id = ?`).run(message, id);
+    this.touchTask(existing.taskId);
+  }
+
+  /** Curation: permanently remove a wrongly-recorded error. */
+  deleteError(id: string): void {
+    const existing = this.getError(id);
+    if (!existing) return;
+    this.db.prepare(`DELETE FROM errors WHERE id = ?`).run(id);
+    this.touchTask(existing.taskId);
   }
 
   listErrors(taskId: string, filter?: { resolved?: boolean }): TaskError[] {
@@ -631,7 +714,39 @@ export class TaskStore {
   }
 
   resolveOpenQuestion(id: string): void {
+    const existing = this.getOpenQuestion(id);
     this.db.prepare(`UPDATE open_questions SET resolved = 1 WHERE id = ?`).run(id);
+    if (existing) this.touchTask(existing.taskId);
+  }
+
+  /** Curation: reopen a previously-resolved open question (e.g. the answer turned out to be wrong). */
+  unresolveOpenQuestion(id: string): void {
+    const existing = this.getOpenQuestion(id);
+    this.db.prepare(`UPDATE open_questions SET resolved = 0 WHERE id = ?`).run(id);
+    if (existing) this.touchTask(existing.taskId);
+  }
+
+  getOpenQuestion(id: string): OpenQuestion | undefined {
+    const row = this.db.prepare(`SELECT * FROM open_questions WHERE id = ?`).get(id) as
+      | OpenQuestionRow
+      | undefined;
+    return row ? rowToOpenQuestion(row) : undefined;
+  }
+
+  /** Curation: edit an open question's text (e.g. to clarify wording) without losing its id/history. */
+  updateOpenQuestion(id: string, text: string): void {
+    const existing = this.getOpenQuestion(id);
+    if (!existing) return;
+    this.db.prepare(`UPDATE open_questions SET text = ? WHERE id = ?`).run(text, id);
+    this.touchTask(existing.taskId);
+  }
+
+  /** Curation: permanently remove a wrongly-recorded open question. */
+  deleteOpenQuestion(id: string): void {
+    const existing = this.getOpenQuestion(id);
+    if (!existing) return;
+    this.db.prepare(`DELETE FROM open_questions WHERE id = ?`).run(id);
+    this.touchTask(existing.taskId);
   }
 
   listOpenQuestions(taskId: string, filter?: { resolved?: boolean }): OpenQuestion[] {

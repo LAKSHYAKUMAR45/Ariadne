@@ -95,4 +95,49 @@ describe('mcp-server cross-workspace tools', () => {
     expect(results.some((r) => r.taskId === taskA.id)).toBe(true);
     storeB.close();
   });
+
+  it('todo_done with a taskId hint marks a todo done in a different workspace', () => {
+    const storeB = openWorkspaceStore(rootB);
+    const task = tools.taskNew(storeB, rootB, { title: 'Task in B' });
+    const todo = tools.todoAdd(storeB, rootB, { text: 'a todo', taskId: task.id });
+    storeB.close();
+
+    const storeA = openWorkspaceStore(rootA);
+    tools.todoDone(storeA, rootA, { todoId: todo.id, taskId: task.id });
+    storeA.close();
+
+    const verifyB = openWorkspaceStore(rootB);
+    expect(verifyB.listTodos(task.id).find((t) => t.id === todo.id)?.status).toBe('done');
+    verifyB.close();
+  });
+
+  it('error_resolve with a taskId hint resolves an error in a different workspace', () => {
+    const storeB = openWorkspaceStore(rootB);
+    const task = tools.taskNew(storeB, rootB, { title: 'Task in B' });
+    const err = tools.errorAdd(storeB, rootB, { message: 'boom', taskId: task.id });
+    storeB.close();
+
+    const storeA = openWorkspaceStore(rootA);
+    tools.errorResolve(storeA, rootA, { errorId: err.id, taskId: task.id });
+    storeA.close();
+
+    const verifyB = openWorkspaceStore(rootB);
+    expect(verifyB.listErrors(task.id).find((e) => e.id === err.id)?.resolved).toBe(true);
+    verifyB.close();
+  });
+
+  it('question_resolve with a taskId hint resolves a question in a different workspace', () => {
+    const storeB = openWorkspaceStore(rootB);
+    const task = tools.taskNew(storeB, rootB, { title: 'Task in B' });
+    const q = tools.questionAdd(storeB, rootB, { text: 'unix socket or TCP?', taskId: task.id });
+    storeB.close();
+
+    const storeA = openWorkspaceStore(rootA);
+    tools.questionResolve(storeA, rootA, { questionId: q.id, taskId: task.id });
+    storeA.close();
+
+    const verifyB = openWorkspaceStore(rootB);
+    expect(verifyB.listOpenQuestions(task.id, { resolved: true }).find((x) => x.id === q.id)).toBeTruthy();
+    verifyB.close();
+  });
 });

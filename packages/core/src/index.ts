@@ -22,6 +22,7 @@ export {
   checkpointOnError,
   maybeCheckpointOnIdle,
   rollupCheckpoints,
+  setTaskStatusWithRollup,
 } from './CheckpointEngine.js';
 export {
   getHeadSha,

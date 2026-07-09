@@ -176,6 +176,7 @@ it likes (system message, printed text, etc.):
   "unresolvedErrors": ["..."],
   "recentFiles": [{ "path": "...", "role": "edited" }],
   "recentCommits": [{ "sha": "...", "message": "..." }],
+  "recentCommands": [{ "cmd": "...", "exitCode": 0 }],
   "decisions": ["..."],
   "truncated": { "commands": 12, "resolvedTodos": 5 } // what was cut for budget
 }

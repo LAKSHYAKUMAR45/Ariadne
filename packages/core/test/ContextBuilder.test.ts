@@ -88,7 +88,20 @@ describe('buildContext', () => {
     expect(ctx.unresolvedErrors).toEqual(['Build failed']);
     expect(ctx.recentFiles).toEqual([{ path: 'src/a.ts', role: 'edited' }]);
     expect(ctx.openTodos).toEqual(['Write tests']);
+    expect(ctx.recentCommands).toEqual([{ cmd: '3 passed', exitCode: null }]);
     expect(ctx.truncated).toEqual({});
+  });
+
+  it('surfaces recently run commands, most-recent-first, falling back to the raw redacted command when there is no summary', () => {
+    const task = store.createTask({ title: 'A' });
+    store.recordCommand({ taskId: task.id, cmdRedacted: 'npm install', summary: undefined, exitCode: 0 });
+    store.recordCommand({ taskId: task.id, cmdRedacted: 'npm test', summary: '3 passed', exitCode: 1 });
+
+    const ctx = buildContext(store, task.id, { tokenBudget: 10_000 });
+    expect(ctx.recentCommands).toEqual([
+      { cmd: '3 passed', exitCode: 1 },
+      { cmd: 'npm install', exitCode: 0 },
+    ]);
   });
 
   it('only includes commits recorded since the latest checkpoint', async () => {

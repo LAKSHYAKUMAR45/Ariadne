@@ -97,4 +97,91 @@ describe('chat participant cross-workspace commands', () => {
     expect(result.markdown).toContain(rootA);
     storeB.close();
   });
+
+  it('/status <id> shows a task belonging to a different workspace', () => {
+    const storeB = openWorkspaceStore(rootB);
+    const task = storeB.createTask({ title: 'Task in B', goal: 'Ship the feature' });
+    storeB.close();
+
+    const storeA = openWorkspaceStore(rootA);
+    const result = handleChatCommand(storeA, { command: 'status', prompt: task.id, workspaceRoot: rootA });
+    expect(result.markdown).toContain('Task in B');
+    expect(result.markdown).toContain(rootB);
+    storeA.close();
+  });
+
+  it('/resume <id> returns an error when the id is unknown everywhere', () => {
+    const storeA = openWorkspaceStore(rootA);
+    const result = handleChatCommand(storeA, { command: 'resume', prompt: 'nonexistent-id', workspaceRoot: rootA });
+    expect(result.markdown).toContain('No task found');
+    storeA.close();
+  });
+
+  it('a plain @ariadne message with no recognized intent still falls back to the current task, ignoring the raw text as an id', () => {
+    const storeA = openWorkspaceStore(rootA);
+    const task = storeA.createTask({ title: 'Current task in A' });
+    const result = handleChatCommand(storeA, { prompt: 'some unrecognized freeform message', currentTaskId: task.id, workspaceRoot: rootA });
+    expect(result.markdown).toContain('Current task in A');
+    storeA.close();
+  });
+
+  it('/todo done <id> --task <taskId> resolves a todo belonging to a different workspace', () => {
+    const storeB = openWorkspaceStore(rootB);
+    const task = storeB.createTask({ title: 'Task in B' });
+    const todo = storeB.createTodo({ taskId: task.id, text: 'fix the thing' });
+    storeB.close();
+
+    const storeA = openWorkspaceStore(rootA);
+    const result = handleChatCommand(storeA, {
+      command: 'todo',
+      prompt: `done ${todo.id} --task ${task.id}`,
+      workspaceRoot: rootA,
+    });
+    expect(result.markdown).toContain('done');
+    storeA.close();
+
+    const verifyB = openWorkspaceStore(rootB);
+    expect(verifyB.listTodos(task.id).find((t) => t.id === todo.id)?.status).toBe('done');
+    verifyB.close();
+  });
+
+  it('/error resolve <id> --task <taskId> resolves an error belonging to a different workspace', () => {
+    const storeB = openWorkspaceStore(rootB);
+    const task = storeB.createTask({ title: 'Task in B' });
+    const err = storeB.recordError({ taskId: task.id, message: 'boom' });
+    storeB.close();
+
+    const storeA = openWorkspaceStore(rootA);
+    const result = handleChatCommand(storeA, {
+      command: 'error',
+      prompt: `resolve ${err.id} --task ${task.id}`,
+      workspaceRoot: rootA,
+    });
+    expect(result.markdown).toContain('resolved');
+    storeA.close();
+
+    const verifyB = openWorkspaceStore(rootB);
+    expect(verifyB.listErrors(task.id).find((e) => e.id === err.id)?.resolved).toBe(true);
+    verifyB.close();
+  });
+
+  it('/question resolve <id> --task <taskId> resolves a question belonging to a different workspace', () => {
+    const storeB = openWorkspaceStore(rootB);
+    const task = storeB.createTask({ title: 'Task in B' });
+    const q = storeB.recordOpenQuestion({ taskId: task.id, text: 'unix socket or TCP?' });
+    storeB.close();
+
+    const storeA = openWorkspaceStore(rootA);
+    const result = handleChatCommand(storeA, {
+      command: 'question',
+      prompt: `resolve ${q.id} --task ${task.id}`,
+      workspaceRoot: rootA,
+    });
+    expect(result.markdown).toContain('resolved');
+    storeA.close();
+
+    const verifyB = openWorkspaceStore(rootB);
+    expect(verifyB.listOpenQuestions(task.id, { resolved: true }).find((x) => x.id === q.id)).toBeTruthy();
+    verifyB.close();
+  });
 });
