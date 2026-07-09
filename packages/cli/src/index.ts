@@ -4,7 +4,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { TaskStore, TodoStatus } from '@ariadne/core';
 import { buildContext, syncTaskGit, exportTaskMarkdown, searchWorkspace } from '@ariadne/core';
-import { openWorkspaceStore, findWorkspaceRoot } from './workspace.js';
+import { openWorkspaceStore, findWorkspaceRoot, stateDbPath } from './workspace.js';
 import { readCurrentTaskId, setCurrentTaskId } from './currentTask.js';
 
 const program = new Command();
@@ -384,7 +384,9 @@ program
   .command('where')
   .description('Print the resolved workspace root and state db path')
   .action(() => {
-    console.log(findWorkspaceRoot());
+    const root = findWorkspaceRoot();
+    console.log(`Workspace root: ${root}`);
+    console.log(`State db:       ${stateDbPath(root)}`);
   });
 
 program
