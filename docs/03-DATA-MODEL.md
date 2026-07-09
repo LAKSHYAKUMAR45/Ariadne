@@ -144,20 +144,32 @@ it likes (system message, printed text, etc.):
 }
 ```
 
-## 5. Context Ranking Algorithm (v0.1)
-Priority tiers (never-trim > high > medium > low), fill greedily under
-`tokenBudget`:
-1. **Never-trim:** active task goal, latest checkpoint summary.
-2. **High:** open questions, unresolved errors, unresolved decisions.
-3. **Medium:** currently open/recently edited files + their last diff stat, pending
-   todos, commits since last checkpoint (message only).
-4. **Low:** resolved todos, historical decisions, full command log, repo
-   instructions (only if budget remains).
+## 5. Context Ranking Algorithm (v0.1, as shipped)
+Priority tiers (never-trim > high > medium > low), filled greedily under
+`tokenBudget` (implemented in `packages/core/src/ContextBuilder.ts`'s
+`buildContext`, shared by every surface):
+1. **Never-trim:** active task goal, latest checkpoint summary (always
+   included, deducted from the budget before ranking the rest).
+2. **High:** unresolved open questions, unresolved errors, and *current*
+   decisions (a decision is "current" unless a later decision's
+   `supersedes_id` points at it).
+3. **Medium:** recently touched files (path + role), pending todos, and
+   commits since the last checkpoint (message only).
+4. **Low:** resolved todos, historical (superseded) decisions, the full
+   command log.
 
-Score = `tier_weight * recency_decay * (2x if referenced by an open question or
-error)`. Ties broken by recency. This is intentionally simple/deterministic for
-MVP (matches the "rule-based, no LLM dependency" decision) — a smarter
-embedding-based ranker is a plausible future plugin, not required now.
+Within each tier, candidates are ordered most-recent-first (by `created_at`,
+or `updated_at` for resolved todos) and filled greedily until the budget
+runs out; anything that doesn't fit is counted per-category in the
+`truncated` map rather than silently dropped. Ranking is **tier + recency
+only** — no recency-decay curve and no "2x boost if referenced by an open
+question/error" scoring, and there's no "repo instructions" category (no
+such data model concept exists). Those were part of an earlier, more
+elaborate sketch of this algorithm; they were dropped in favor of the
+simpler tier+recency ordering actually implemented, since it's easier to
+reason about, fully deterministic, and sufficient for the MVP's "what am I
+working on" use case. A smarter (e.g. embedding-based, or recency-decayed)
+ranker remains a plausible future enhancement, not required now.
 
 ## 6. Checkpoint Triggers & Hierarchy
 Triggers (event-driven, not fixed-interval): N files edited since last checkpoint
@@ -182,5 +194,6 @@ touch the DB in the first place.
   chronological ordering in queries.
 - Should `files.role` distinguish AI-edited vs human-edited? Useful for future
   "what did the AI actually change" audit trail — deferred, not MVP-blocking.
-- Exact token-counting method for budget enforcement (tiktoken-style estimate vs
-  simple char/4 heuristic) — needs a decision before `ContextBuilder` is coded.
+- ~~Exact token-counting method for budget enforcement~~ — resolved: a simple
+  `chars / 4` heuristic (`estimateTokens` in `ContextBuilder.ts`), not a
+  model-specific tokenizer, to stay LLM-agnostic and fully offline/deterministic.
