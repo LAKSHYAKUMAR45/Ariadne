@@ -60,3 +60,15 @@ export {
   findTaskWorkspace,
 } from './Registry.js';
 export type { TaskIndexEntry } from './Registry.js';
+export {
+  listTasksAcrossWorkspaces,
+  listKnownWorkspaces,
+  searchAcrossWorkspaces,
+  resolveTaskAnyWorkspace,
+} from './CrossWorkspace.js';
+export type {
+  CrossWorkspaceTask,
+  CrossWorkspaceSearchResult,
+  CrossWorkspaceSearchOptions,
+  ResolvedTask,
+} from './CrossWorkspace.js';
