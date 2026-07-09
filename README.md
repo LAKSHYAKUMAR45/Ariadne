@@ -32,7 +32,7 @@ dashboard.
 ```
 ┌─────────────────┐   ┌─────────────────┐   ┌──────────────────────────┐
 │   CLI (ariadne)  │   │   MCP server    │   │  VS Code extension +    │
-│                  │   │  (planned)      │   │  Copilot Chat participant│
+│                  │   │                 │   │  Copilot Chat participant│
 └────────┬─────────┘   └────────┬────────┘   └────────────┬─────────────┘
          │                      │                          │
          └──────────────────────┼──────────────────────────┘
@@ -64,6 +64,7 @@ This is a pnpm workspace monorepo:
 |---|---|
 | [`packages/core`](packages/core) | `@ariadne/core` — the shared SQLite schema, `TaskStore`, and context-building logic used by every surface. |
 | [`packages/cli`](packages/cli) | `ariadne` — a command-line interface for managing tasks, todos, checkpoints, and status. |
+| [`packages/mcp-server`](packages/mcp-server) | `@ariadne/mcp-server` — an MCP server exposing task state as tools to any MCP-capable AI client (Claude Code, Gemini CLI, Codex, Copilot, etc.), no VS Code required. |
 | [`packages/vscode-extension`](packages/vscode-extension) | `ariadne-vscode` — a VS Code extension that adds an `@ariadne` Copilot Chat participant, commands, and passive background capture (saved files, terminal commands, git commits). |
 
 ## Getting started
@@ -91,6 +92,19 @@ Common commands: `task new <title>`, `task list`, `task use <id>`,
 `checkpoint <summary>`, `todo add <text>` / `todo list` / `todo done <id>`,
 `status`, `resume`, `where`. Run `ariadne --help` for the full list.
 
+### Using the MCP server
+
+```bash
+pnpm --filter @ariadne/core build
+pnpm --filter @ariadne/mcp-server build
+node packages/mcp-server/dist/index.js   # speaks MCP over stdio
+```
+
+Point any MCP-capable client (Claude Code, Gemini CLI, Codex, Copilot Chat's
+MCP integration, or a custom agent) at that command. See
+[`packages/mcp-server/README.md`](packages/mcp-server/README.md) for the full
+tool list.
+
 ### Using the VS Code extension
 
 ```bash
@@ -108,9 +122,9 @@ multi-platform packaging details.
 
 ## Project status
 
-Early / pre-release. The VS Code extension and CLI are functional and
-tested; the MCP server surface is planned but not yet implemented. Expect
-rough edges — see each package's README for known limitations.
+Early / pre-release. The CLI, MCP server, and VS Code extension are all
+functional and tested. Expect rough edges — see each package's README for
+known limitations.
 
 ## Contributing
 

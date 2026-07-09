@@ -30,13 +30,16 @@ jobs:
       - name: Build @ariadne/core
         run: pnpm --filter @ariadne/core run build
 
-      - name: Test @ariadne/core, cli, and vscode-extension
+      - name: Test @ariadne/core, cli, mcp-server, and vscode-extension
         run: |
           pnpm --filter @ariadne/core run test
           pnpm --filter @ariadne/core exec tsc --noEmit -p tsconfig.json
           pnpm --filter ariadne run build
           pnpm --filter ariadne run test
           pnpm --filter ariadne exec tsc --noEmit -p tsconfig.json
+          pnpm --filter @ariadne/mcp-server run build
+          pnpm --filter @ariadne/mcp-server run test
+          pnpm --filter @ariadne/mcp-server exec tsc --noEmit -p tsconfig.json
           pnpm --filter ariadne-vscode exec tsc --noEmit -p tsconfig.json
           pnpm --filter ariadne-vscode run test
 

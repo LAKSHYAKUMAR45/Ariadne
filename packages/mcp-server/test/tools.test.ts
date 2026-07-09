@@ -1,0 +1,96 @@
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import * as os from 'node:os';
+import { TaskStore } from '@ariadne/core';
+import * as tools from '../src/tools.js';
+import { readCurrentTaskId } from '../src/workspace.js';
+
+describe('mcp-server tools', () => {
+  let store: TaskStore;
+  let workspaceRoot: string;
+
+  beforeEach(() => {
+    store = new TaskStore(':memory:');
+    workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'ariadne-mcp-test-'));
+  });
+
+  afterEach(() => {
+    store.close();
+    fs.rmSync(workspaceRoot, { recursive: true, force: true });
+  });
+
+  it('task_new creates a task and sets it as current', () => {
+    const task = tools.taskNew(store, workspaceRoot, { title: 'Fix login bug', goal: 'Users cannot log in' });
+    expect(task.title).toBe('Fix login bug');
+    expect(readCurrentTaskId(workspaceRoot)).toBe(task.id);
+  });
+
+  it('task_list filters by status', () => {
+    const a = tools.taskNew(store, workspaceRoot, { title: 'A' });
+    const b = tools.taskNew(store, workspaceRoot, { title: 'B' });
+    store.updateTaskStatus(b.id, 'done');
+
+    expect(tools.taskList(store, { status: 'active' }).map((t) => t.id)).toEqual([a.id]);
+    expect(tools.taskList(store, {}).map((t) => t.id).sort()).toEqual([a.id, b.id].sort());
+  });
+
+  it('task_use switches the current task and rejects unknown ids', () => {
+    const a = tools.taskNew(store, workspaceRoot, { title: 'A' });
+    const b = tools.taskNew(store, workspaceRoot, { title: 'B' }); // becomes current
+    expect(readCurrentTaskId(workspaceRoot)).toBe(b.id);
+
+    tools.taskUse(store, workspaceRoot, { taskId: a.id });
+    expect(readCurrentTaskId(workspaceRoot)).toBe(a.id);
+
+    expect(() => tools.taskUse(store, workspaceRoot, { taskId: 'nope' })).toThrow(/No task found/);
+  });
+
+  it('checkpoint_add, todo_add/list/done, decision_add, error_add/resolve operate on the current task', () => {
+    const task = tools.taskNew(store, workspaceRoot, { title: 'A' });
+
+    const cp = tools.checkpointAdd(store, workspaceRoot, { summary: 'did stuff' });
+    expect(cp.taskId).toBe(task.id);
+    expect(cp.level).toBe('micro');
+
+    const todo = tools.todoAdd(store, workspaceRoot, { text: 'write tests' });
+    expect(tools.todoList(store, workspaceRoot, {}).map((t) => t.id)).toContain(todo.id);
+    tools.todoDone(store, { todoId: todo.id });
+    expect(tools.todoList(store, workspaceRoot, { status: 'done' }).map((t) => t.id)).toContain(todo.id);
+
+    const decision = tools.decisionAdd(store, workspaceRoot, { text: 'use SQLite', rationale: 'simple, local' });
+    expect(decision.text).toBe('use SQLite');
+
+    const error = tools.errorAdd(store, workspaceRoot, { message: 'build failed' });
+    tools.errorResolve(store, { errorId: error.id, resolution: 'fixed typo' });
+    expect(store.listErrors(task.id, { resolved: false })).toHaveLength(0);
+  });
+
+  it('resolveTaskId throws with no current task and no explicit id', () => {
+    expect(() => tools.resolveTaskId(store, workspaceRoot, undefined)).toThrow(/No task specified/);
+  });
+
+  it('search matches task titles and goals case-insensitively', () => {
+    tools.taskNew(store, workspaceRoot, { title: 'Fix login bug', goal: 'Users cannot log in' });
+    tools.taskNew(store, workspaceRoot, { title: 'Add dark mode' });
+
+    expect(tools.searchTasks(store, { query: 'LOGIN' }).map((t) => t.title)).toEqual(['Fix login bug']);
+    expect(tools.searchTasks(store, { query: 'dark' }).map((t) => t.title)).toEqual(['Add dark mode']);
+    expect(tools.searchTasks(store, { query: 'nonexistent' })).toEqual([]);
+  });
+
+  it('get_context assembles the full task context as structured data', () => {
+    const task = tools.taskNew(store, workspaceRoot, { title: 'Fix login bug' });
+    tools.checkpointAdd(store, workspaceRoot, { summary: 'first checkpoint' });
+    tools.todoAdd(store, workspaceRoot, { text: 'write tests' });
+    tools.errorAdd(store, workspaceRoot, { message: 'build failed' });
+    tools.decisionAdd(store, workspaceRoot, { text: 'use SQLite' });
+
+    const ctx = tools.getContext(store, workspaceRoot, {});
+    expect(ctx.task.id).toBe(task.id);
+    expect(ctx.latestCheckpoint?.summary).toBe('first checkpoint');
+    expect(ctx.pendingTodos).toHaveLength(1);
+    expect(ctx.unresolvedErrors).toHaveLength(1);
+    expect(ctx.recentDecisions).toHaveLength(1);
+  });
+});

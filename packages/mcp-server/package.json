@@ -1,0 +1,32 @@
+{
+  "name": "@ariadne/mcp-server",
+  "version": "0.1.0",
+  "description": "MCP (Model Context Protocol) server for Ariadne — exposes task state as tools/resources to any MCP-capable AI client.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/LAKSHYAKUMAR45/Ariadne.git",
+    "directory": "packages/mcp-server"
+  },
+  "type": "commonjs",
+  "bin": {
+    "ariadne-mcp-server": "dist/index.js"
+  },
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "lint": "echo \"(no lint configured yet)\""
+  },
+  "dependencies": {
+    "@ariadne/core": "workspace:*",
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "typescript": "^5.5.4",
+    "vitest": "^2.1.1"
+  }
+}

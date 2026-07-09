@@ -1,0 +1,191 @@
+import type {
+  Checkpoint,
+  CheckpointLevel,
+  Decision,
+  Task,
+  TaskError,
+  TaskStatus,
+  TaskStore,
+  Todo,
+  TodoStatus,
+} from '@ariadne/core';
+import { readCurrentTaskId, setCurrentTaskId } from './workspace.js';
+
+/**
+ * Pure, MCP-transport-agnostic implementations of every tool this server
+ * exposes. Kept separate from `server.ts` (which only wires these into the
+ * MCP SDK's tool-registration API) so they're directly unit-testable and so
+ * the same logic could be reused by another surface later without pulling in
+ * the MCP SDK.
+ */
+
+/** Resolves which task id to operate on: explicit id wins, else the workspace's current task. Throws if neither is available. */
+export function resolveTaskId(store: TaskStore, workspaceRoot: string, explicitId: string | undefined): string {
+  const id = explicitId ?? readCurrentTaskId(workspaceRoot);
+  if (!id) {
+    throw new Error('No task specified and no current task set. Call task_new first, or pass a taskId.');
+  }
+  const task = store.getTask(id);
+  if (!task) {
+    throw new Error(`No task found with id "${id}".`);
+  }
+  return id;
+}
+
+export interface TaskNewArgs {
+  title: string;
+  goal?: string;
+}
+
+export function taskNew(store: TaskStore, workspaceRoot: string, args: TaskNewArgs): Task {
+  const created = store.createTask({ title: args.title, goal: args.goal });
+  setCurrentTaskId(created.id, workspaceRoot);
+  return created;
+}
+
+export interface TaskListArgs {
+  status?: TaskStatus;
+}
+
+export function taskList(store: TaskStore, args: TaskListArgs): Task[] {
+  return store.listTasks(args.status ? { status: args.status } : undefined);
+}
+
+export interface TaskUseArgs {
+  taskId: string;
+}
+
+export function taskUse(store: TaskStore, workspaceRoot: string, args: TaskUseArgs): Task {
+  const task = store.getTask(args.taskId);
+  if (!task) {
+    throw new Error(`No task found with id "${args.taskId}".`);
+  }
+  setCurrentTaskId(args.taskId, workspaceRoot);
+  return task;
+}
+
+export interface CheckpointAddArgs {
+  summary: string;
+  level?: CheckpointLevel;
+  taskId?: string;
+}
+
+export function checkpointAdd(store: TaskStore, workspaceRoot: string, args: CheckpointAddArgs): Checkpoint {
+  const taskId = resolveTaskId(store, workspaceRoot, args.taskId);
+  return store.createCheckpoint({ taskId, level: args.level ?? 'micro', summary: args.summary });
+}
+
+export interface TodoAddArgs {
+  text: string;
+  taskId?: string;
+}
+
+export function todoAdd(store: TaskStore, workspaceRoot: string, args: TodoAddArgs): Todo {
+  const taskId = resolveTaskId(store, workspaceRoot, args.taskId);
+  return store.createTodo({ taskId, text: args.text });
+}
+
+export interface TodoListArgs {
+  status?: TodoStatus;
+  taskId?: string;
+}
+
+export function todoList(store: TaskStore, workspaceRoot: string, args: TodoListArgs): Todo[] {
+  const taskId = resolveTaskId(store, workspaceRoot, args.taskId);
+  return store.listTodos(taskId, args.status ? { status: args.status } : undefined);
+}
+
+export interface TodoDoneArgs {
+  todoId: string;
+}
+
+export function todoDone(store: TaskStore, args: TodoDoneArgs): void {
+  store.updateTodoStatus(args.todoId, 'done');
+}
+
+export interface DecisionAddArgs {
+  text: string;
+  rationale?: string;
+  taskId?: string;
+}
+
+export function decisionAdd(store: TaskStore, workspaceRoot: string, args: DecisionAddArgs): Decision {
+  const taskId = resolveTaskId(store, workspaceRoot, args.taskId);
+  return store.recordDecision({ taskId, text: args.text, rationale: args.rationale });
+}
+
+export interface ErrorAddArgs {
+  message: string;
+  taskId?: string;
+}
+
+export function errorAdd(store: TaskStore, workspaceRoot: string, args: ErrorAddArgs): TaskError {
+  const taskId = resolveTaskId(store, workspaceRoot, args.taskId);
+  return store.recordError({ taskId, message: args.message });
+}
+
+export interface ErrorResolveArgs {
+  errorId: string;
+  resolution?: string;
+}
+
+export function errorResolve(store: TaskStore, args: ErrorResolveArgs): void {
+  store.resolveError(args.errorId, args.resolution);
+}
+
+export interface SearchArgs {
+  query: string;
+}
+
+/** Simple substring search over task titles/goals — a placeholder until `core-context-builder` ships ranked search. */
+export function searchTasks(store: TaskStore, args: SearchArgs): Task[] {
+  const needle = args.query.toLowerCase();
+  return store
+    .listTasks()
+    .filter((t) => t.title.toLowerCase().includes(needle) || (t.goal ?? '').toLowerCase().includes(needle));
+}
+
+export interface GetContextArgs {
+  taskId?: string;
+}
+
+export interface TaskContext {
+  task: Task;
+  latestCheckpoint: Checkpoint | null;
+  openQuestions: string[];
+  unresolvedErrors: TaskError[];
+  pendingTodos: Todo[];
+  recentFiles: { path: string; role: string }[];
+  recentCommits: { sha: string; message: string | null }[];
+  recentDecisions: Decision[];
+}
+
+/**
+ * Assembles the same "status" data the CLI's `status`/`resume` commands
+ * print, but as structured JSON — this is the `task.getContext` tool from
+ * the architecture doc. Not yet ranked/token-budgeted (see the
+ * `core-context-builder` todo); it currently returns everything, capped by
+ * the same fixed limits the CLI uses.
+ */
+export function getContext(store: TaskStore, workspaceRoot: string, args: GetContextArgs): TaskContext {
+  const taskId = resolveTaskId(store, workspaceRoot, args.taskId);
+  const task = store.getTask(taskId)!;
+  const latestCheckpoint = store.latestCheckpoint(taskId) ?? null;
+  const openQuestions = store.listOpenQuestions(taskId, { resolved: false }).map((q) => q.text);
+  const unresolvedErrors = store.listErrors(taskId, { resolved: false });
+  const pendingTodos = store.listTodos(taskId, { status: 'pending' });
+  const recentFiles = store.listFiles(taskId, 10).map((f) => ({ path: f.path, role: f.role }));
+  const recentCommits = store.listCommits(taskId, 5).map((c) => ({ sha: c.sha, message: c.message }));
+  const recentDecisions = store.listDecisions(taskId, 5);
+
+  return {
+    task,
+    latestCheckpoint,
+    openQuestions,
+    unresolvedErrors,
+    pendingTodos,
+    recentFiles,
+    recentCommits,
+    recentDecisions,
+  };
+}
