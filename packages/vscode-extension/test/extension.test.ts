@@ -12,8 +12,30 @@ vi.mock('vscode', () => {
   class ThemeIcon {
     constructor(public id: string) {}
   }
+  class TreeItem {
+    description?: string;
+    contextValue?: string;
+    iconPath?: unknown;
+    constructor(
+      public label: string,
+      public collapsibleState?: number,
+    ) {}
+  }
+  class EventEmitter<T> {
+    private listeners: Array<(e: T) => void> = [];
+    event = (listener: (e: T) => void) => {
+      this.listeners.push(listener);
+      return { dispose: () => {} };
+    };
+    fire(e: T): void {
+      for (const listener of this.listeners) listener(e);
+    }
+  }
   return {
     ThemeIcon,
+    TreeItem,
+    EventEmitter,
+    TreeItemCollapsibleState: { None: 0, Collapsed: 1, Expanded: 2 },
     StatusBarAlignment: { Left: 1, Right: 2 },
     chat: {
       createChatParticipant: (_id: string, handler: unknown) => {
@@ -34,6 +56,7 @@ vi.mock('vscode', () => {
         tooltip: '',
         command: undefined,
       }),
+      registerTreeDataProvider: () => ({ dispose: () => {} }),
       onDidChangeActiveTextEditor: () => ({ dispose: () => {} }),
       showWarningMessage: vi.fn(),
       showErrorMessage: vi.fn(),

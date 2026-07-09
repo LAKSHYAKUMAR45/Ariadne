@@ -69,8 +69,40 @@
       {
         "command": "ariadne.selectWorkspaceFolder",
         "title": "Ariadne: Select Workspace Folder"
+      },
+      {
+        "command": "ariadne.refreshTreeView",
+        "title": "Ariadne: Refresh Task Tree",
+        "icon": "$(refresh)"
       }
     ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "ariadne",
+          "title": "Ariadne",
+          "icon": "resources/icon.png"
+        }
+      ]
+    },
+    "views": {
+      "ariadne": [
+        {
+          "id": "ariadneTasks",
+          "name": "Tasks",
+          "contextualTitle": "Ariadne Tasks"
+        }
+      ]
+    },
+    "menus": {
+      "view/title": [
+        {
+          "command": "ariadne.refreshTreeView",
+          "when": "view == ariadneTasks",
+          "group": "navigation"
+        }
+      ]
+    },
     "configuration": {
       "title": "Ariadne",
       "properties": {

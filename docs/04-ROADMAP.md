@@ -34,9 +34,16 @@
       resolution via `~/.ariadne/registry.db` (dependency graph UI remains
       deferred; the underlying `todo_deps`-style data model ships).
 
-## 3. Explicitly Deferred (Stretch Goals) — still not started
-- Tree view / timeline / knowledge-base browser UI (secondary per product
-  direction; can ship in v1.1 once core loop is validated).
+## 3. Explicitly Deferred (Stretch Goals)
+- ~~Tree view / timeline / knowledge-base browser UI~~ — **a minimal
+  read-only version shipped**: `packages/vscode-extension/src/treeView.ts`'s
+  `AriadneTreeDataProvider` contributes an "Ariadne" activity-bar view
+  (`ariadneTasks`) showing every task in the current workspace, expandable
+  into Checkpoints/Todos/Decisions/Errors/Open Questions per task, with a
+  refresh command/button. It's intentionally read-only (browse only; use the
+  chat participant or CLI to mutate). A richer timeline/knowledge-base view
+  (cross-task chronological view, filtering, search) remains out of scope
+  for now.
 - LLM-assisted summarization plugin (opt-in, bring-your-own-model) —
   **the pluggable hook now exists**: `CheckpointSummarizer`
   (`packages/core/src/CheckpointEngine.ts`) is an interface any summarizer
@@ -85,7 +92,8 @@
    categories, license all present) but has **not actually been submitted to
    the VS Code Marketplace yet** (needs an Azure DevOps PAT + publisher
    account) — deferred by choice, not blocked. The minimal read-only tree
-   view was not built (folded into the deferred UI work in §3).
+   view has since shipped (see §3) rather than being folded indefinitely
+   into deferred UI work.
 6. 🟡 **Phase 5 (post-MVP) — Plugin platform: interface shipped, no real
    plugins yet.** `PluginRegistry` (`packages/core/src/PluginRegistry.ts`) is
    a minimal in-process event bus — plugins implement `AriadnePlugin.activate()`
@@ -193,8 +201,10 @@ what's next*, not building the core loop:
    real external system. Picking one thin real plugin (e.g. GitHub Issues
    sync on `todo.added`, or an actual LLM-backed `CheckpointSummarizer`)
    would validate both interface shapes before more are built against them.
-3. **Decide on the tree-view/timeline UI** (§3): still deferred: confirm it's
-   still out of scope for v1.1, or scope a minimal read-only version.
+3. **Decide on a richer timeline/knowledge-base view** (§3): the minimal
+   read-only tree view (`ariadneTasks`) has shipped; a cross-task
+   chronological timeline or full-text search/filter view remains
+   optional/deferred.
 4. **Broaden integration-test coverage** on the lighter-tested surfaces (CLI,
    MCP server, VS Code extension) now that the core loop is stable, rather
    than continuing to add core-only tests.

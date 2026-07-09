@@ -3,10 +3,12 @@ import { openStoreForCurrentWorkspace, getCurrentTaskId, setCurrentTask, initWor
 import { handleChatCommand, progressMessageFor, formatStatusBarItem } from './commands.js';
 import { closeAllStores, closeStore } from './storeCache.js';
 import { registerPassiveCapture } from './passiveCapture.js';
+import { AriadneTreeDataProvider } from './treeView.js';
 import { findWorkspaceRoot } from '@ariadne-dev/core';
 
 let output: vscode.OutputChannel;
 let statusBarItem: vscode.StatusBarItem | undefined;
+let treeDataProvider: AriadneTreeDataProvider | undefined;
 
 function logError(context: string, err: unknown): string {
   const message = err instanceof Error ? (err.stack ?? err.message) : String(err);
@@ -41,6 +43,11 @@ function refreshStatusBar(): void {
   }
 }
 
+/** Refreshes the (read-only) task tree view alongside the status bar — see `refreshStatusBar`'s call sites. */
+function refreshTreeView(): void {
+  treeDataProvider?.refresh();
+}
+
 export function activate(context: vscode.ExtensionContext): void {
   output = vscode.window.createOutputChannel('Ariadne');
   context.subscriptions.push(output);
@@ -58,6 +65,10 @@ export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(statusBarItem);
   refreshStatusBar();
 
+  treeDataProvider = new AriadneTreeDataProvider(openStoreForCurrentWorkspace, getCurrentTaskId);
+  context.subscriptions.push(vscode.window.registerTreeDataProvider('ariadneTasks', treeDataProvider));
+  context.subscriptions.push(vscode.commands.registerCommand('ariadne.refreshTreeView', () => refreshTreeView()));
+
   context.subscriptions.push(vscode.window.onDidChangeActiveTextEditor(() => refreshStatusBar()));
 
   if (vscode.workspace.getConfiguration('ariadne').get<boolean>('passiveCapture.enabled', true)) {
@@ -71,6 +82,7 @@ export function activate(context: vscode.ExtensionContext): void {
         closeStore(findWorkspaceRoot(removed.uri.fsPath));
       }
       refreshStatusBar();
+      refreshTreeView();
     }),
   );
 
@@ -95,6 +107,7 @@ export function activate(context: vscode.ExtensionContext): void {
         const task = store.createTask({ title });
         setCurrentTask(task.id);
         refreshStatusBar();
+        refreshTreeView();
         void vscode.window.showInformationMessage(`Ariadne: created task "${task.title}".`);
       } catch (err) {
         const message = logError('ariadne.newTask', err);
@@ -174,6 +187,7 @@ async function handleRequest(
     // task/status label accurate after e.g. /task pause|done|archive too,
     // not just after an explicit task switch.
     refreshStatusBar();
+    refreshTreeView();
 
     if (result.sections && result.sections.length > 1) {
       // Stream section-by-section (with a microtask yield between each) so
