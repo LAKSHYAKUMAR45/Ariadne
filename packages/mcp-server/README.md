@@ -27,21 +27,35 @@ directory), and reads/writes `<workspace-root>/.ariadne/state.db`.
 | Tool | What it does |
 |---|---|
 | `task_new` | Creates a new task and marks it current. |
-| `task_list` | Lists tasks, optionally filtered by status. |
-| `task_use` | Switches the current task. |
+| `task_list` | Lists tasks, optionally filtered by status. Pass `allWorkspaces: true` to list tasks from every workspace Ariadne has ever seen, each tagged with its `workspaceRoot`. |
+| `task_use` | Switches the current task (always scoped to this workspace — "current task" is a per-workspace concept). |
 | `task_pause` / `task_done` / `task_archive` / `task_reopen` | Change the current (or given) task's lifecycle status. |
 | `checkpoint_add` | Records a checkpoint summary. |
 | `todo_add` / `todo_list` / `todo_done` | Manage todos. |
 | `decision_add` | Records a decision (with optional rationale). |
 | `error_add` / `error_resolve` | Record or resolve an error. |
 | `question_add` / `question_list` / `question_resolve` | Record, list, or resolve an open question blocking the task. |
-| `search` | Cross-entity search over task titles/goals, checkpoints, decisions, todos, errors, open questions, files, and commits — returns tasks ranked by match count, each with its matching entities. |
+| `search` | Cross-entity search over task titles/goals, checkpoints, decisions, todos, errors, open questions, files, and commits — returns tasks ranked by match count, each with its matching entities. Pass `allWorkspaces: true` to search every known workspace, with each result tagged by its `workspaceRoot`. |
 | `get_context` | Returns the current (or given) task's full context — goal, latest checkpoint, open questions, unresolved errors, pending todos, recent files, commits, and decisions — as structured JSON, ranked and trimmed to fit an optional `tokenBudget` (default 2000). Equivalent to the CLI's `status`/`resume`. |
 | `git_sync` | Syncs the current git branch and any new commits into the current (or given) task by shelling out to `git` directly — works without any editor's git integration open. Equivalent to the CLI's `git-sync`. |
 | `export_task` | Renders the current (or given) task's full history as a Markdown document (text in the response) — for sharing or pasting into a PR description. Equivalent to the CLI's `export` (which additionally writes the file to `.ariadne/export/<task-id>.md`). |
 
 All tools that need a task default to the workspace's "current task" (the
 same one `ariadne task use` sets) when no explicit `taskId` is given.
+
+### Cross-workspace task resolution
+
+Every tool that accepts a `taskId` (`task_pause`/`done`/`archive`/`reopen`,
+`checkpoint_add`, `todo_add`/`list`, `decision_add`, `error_add`,
+`question_add`/`list`, `get_context`, `git_sync`, `export_task`) will
+transparently operate on that task even if it doesn't belong to this
+server's workspace: it falls back to the global cross-workspace registry
+(`~/.ariadne/registry.db`, maintained automatically as any surface uses
+Ariadne) to find and open the real owning workspace's `state.db`. Nothing
+is copied between workspaces — each workspace's own database stays the
+source of truth for its own tasks; the registry is just an index that
+saves the caller from having to know or guess which workspace a task id
+lives in.
 
 ## Resources
 

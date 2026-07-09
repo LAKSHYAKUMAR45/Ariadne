@@ -58,8 +58,10 @@ export function createAriadneMcpServer(options?: { workspaceRoot?: string; store
     'task_list',
     {
       title: 'List tasks',
-      description: 'Lists tasks in this workspace, optionally filtered by status.',
-      inputSchema: { status: TASK_STATUS.optional() },
+      description:
+        'Lists tasks in this workspace, optionally filtered by status. Pass allWorkspaces: true to list ' +
+        'tasks across every workspace Ariadne has ever seen on this machine (each tagged with its workspaceRoot).',
+      inputSchema: { status: TASK_STATUS.optional(), allWorkspaces: z.boolean().optional() },
     },
     async (args) => {
       try {
@@ -96,7 +98,7 @@ export function createAriadneMcpServer(options?: { workspaceRoot?: string; store
       name,
       {
         title: `${status === 'active' ? 'Reopen' : status === 'paused' ? 'Pause' : status === 'done' ? 'Complete' : 'Archive'} a task`,
-        description: `Sets the current (or given) task's status to "${status}".`,
+        description: `Sets the current (or given) task's status to "${status}".` + ' Works even if taskId belongs to a different workspace (falls back to the cross-workspace registry).',
         inputSchema: { taskId: z.string().optional() },
       },
       async (args) => {
@@ -113,7 +115,7 @@ export function createAriadneMcpServer(options?: { workspaceRoot?: string; store
     'checkpoint_add',
     {
       title: 'Record a checkpoint',
-      description: 'Records a checkpoint summary for the current (or given) task.',
+      description: 'Records a checkpoint summary for the current (or given) task. Works even if taskId belongs to a different workspace (falls back to the cross-workspace registry).',
       inputSchema: { summary: z.string(), level: CHECKPOINT_LEVEL.optional(), taskId: z.string().optional() },
     },
     async (args) => {
@@ -129,7 +131,7 @@ export function createAriadneMcpServer(options?: { workspaceRoot?: string; store
     'todo_add',
     {
       title: 'Add a todo',
-      description: 'Adds a todo to the current (or given) task.',
+      description: 'Adds a todo to the current (or given) task. Works even if taskId belongs to a different workspace (falls back to the cross-workspace registry).',
       inputSchema: { text: z.string(), taskId: z.string().optional() },
     },
     async (args) => {
@@ -145,7 +147,7 @@ export function createAriadneMcpServer(options?: { workspaceRoot?: string; store
     'todo_list',
     {
       title: 'List todos',
-      description: 'Lists todos for the current (or given) task, optionally filtered by status.',
+      description: 'Lists todos for the current (or given) task, optionally filtered by status. Works even if taskId belongs to a different workspace (falls back to the cross-workspace registry).',
       inputSchema: { status: TODO_STATUS.optional(), taskId: z.string().optional() },
     },
     async (args) => {
@@ -178,7 +180,7 @@ export function createAriadneMcpServer(options?: { workspaceRoot?: string; store
     'decision_add',
     {
       title: 'Record a decision',
-      description: 'Records a decision (with optional rationale) for the current (or given) task.',
+      description: 'Records a decision (with optional rationale) for the current (or given) task. Works even if taskId belongs to a different workspace (falls back to the cross-workspace registry).',
       inputSchema: { text: z.string(), rationale: z.string().optional(), taskId: z.string().optional() },
     },
     async (args) => {
@@ -194,7 +196,7 @@ export function createAriadneMcpServer(options?: { workspaceRoot?: string; store
     'error_add',
     {
       title: 'Record an error',
-      description: 'Records an unresolved error message for the current (or given) task.',
+      description: 'Records an unresolved error message for the current (or given) task. Works even if taskId belongs to a different workspace (falls back to the cross-workspace registry).',
       inputSchema: { message: z.string(), taskId: z.string().optional() },
     },
     async (args) => {
@@ -227,7 +229,7 @@ export function createAriadneMcpServer(options?: { workspaceRoot?: string; store
     'question_add',
     {
       title: 'Record an open question',
-      description: 'Records an open question for the current (or given) task.',
+      description: 'Records an open question for the current (or given) task. Works even if taskId belongs to a different workspace (falls back to the cross-workspace registry).',
       inputSchema: { text: z.string(), taskId: z.string().optional() },
     },
     async (args) => {
@@ -243,7 +245,7 @@ export function createAriadneMcpServer(options?: { workspaceRoot?: string; store
     'question_list',
     {
       title: 'List open questions',
-      description: 'Lists open questions for the current (or given) task, optionally filtered by resolved status.',
+      description: 'Lists open questions for the current (or given) task, optionally filtered by resolved status. Works even if taskId belongs to a different workspace (falls back to the cross-workspace registry).',
       inputSchema: { taskId: z.string().optional(), resolved: z.boolean().optional() },
     },
     async (args) => {
@@ -279,8 +281,9 @@ export function createAriadneMcpServer(options?: { workspaceRoot?: string; store
       description:
         'Cross-entity search over this workspace: task titles/goals, checkpoints, decisions, todos, ' +
         'errors, open questions, files, and commits. Returns tasks ranked by number of matches, each with ' +
-        'the matching entities.',
-      inputSchema: { query: z.string(), limit: z.number().int().positive().optional() },
+        'the matching entities. Pass allWorkspaces: true to search every workspace Ariadne has ever seen ' +
+        'on this machine, with each result tagged by its workspaceRoot.',
+      inputSchema: { query: z.string(), limit: z.number().int().positive().optional(), allWorkspaces: z.boolean().optional() },
     },
     async (args) => {
       try {
@@ -298,7 +301,8 @@ export function createAriadneMcpServer(options?: { workspaceRoot?: string; store
       description:
         'Returns the current (or given) task\'s ranked, token-budgeted context: goal, latest checkpoint, ' +
         'open questions, unresolved errors, current decisions, pending todos, recent files, and commits ' +
-        'since the last checkpoint. Equivalent to the CLI\'s "status"/"resume" commands, as structured JSON.',
+        'since the last checkpoint. Equivalent to the CLI\'s "status"/"resume" commands, as structured JSON. ' +
+        'Works even if taskId belongs to a different workspace (falls back to the cross-workspace registry).',
       inputSchema: { taskId: z.string().optional(), tokenBudget: z.number().int().positive().optional() },
     },
     async (args) => {
@@ -316,7 +320,8 @@ export function createAriadneMcpServer(options?: { workspaceRoot?: string; store
       title: 'Sync git state',
       description:
         'Syncs the current git branch and any new commits (since what\'s already recorded) into the ' +
-        'current (or given) task, by shelling out to `git` directly — works without any editor open.',
+        'current (or given) task, by shelling out to `git` directly — works without any editor open. ' +
+        'Runs against the task\'s actual owning workspace, even if it differs from this server\'s workspace.',
       inputSchema: { taskId: z.string().optional() },
     },
     async (args) => {
@@ -335,7 +340,8 @@ export function createAriadneMcpServer(options?: { workspaceRoot?: string; store
       description:
         'Renders the current (or given) task\'s full history (goal, checkpoints, todos, decisions, ' +
         'open questions, errors, files, commits, command log) as a Markdown document, for sharing or ' +
-        'pasting into a PR description. Equivalent to the CLI\'s "export" command.',
+        'pasting into a PR description. Equivalent to the CLI\'s "export" command. Works even if taskId ' +
+        'belongs to a different workspace (falls back to the cross-workspace registry).',
       inputSchema: { taskId: z.string().optional() },
     },
     async (args) => {
