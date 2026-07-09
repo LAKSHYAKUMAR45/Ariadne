@@ -170,6 +170,8 @@ it likes (system message, printed text, etc.):
 {
   "taskId": "...",
   "goal": "...",
+  "branch": "feature/xyz",          // task's last known tracked git branch, or null
+  "workspaceRoot": "/path/to/repo", // the workspace this task's store was opened from, if the caller supplied it (null otherwise) — especially useful for cross-workspace results
   "latestSummary": "...",           // most recent checkpoint, never trimmed
   "openQuestions": ["..."],
   "openTodos": ["..."],

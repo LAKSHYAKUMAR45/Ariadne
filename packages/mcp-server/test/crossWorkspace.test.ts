@@ -64,6 +64,7 @@ describe('mcp-server cross-workspace tools', () => {
     const context = tools.getContext(storeA, rootA, { taskId: task.id });
     expect(context.taskId).toBe(task.id);
     expect(context.goal).toBe('demo goal');
+    expect(context.workspaceRoot).toBe(rootB);
 
     const exported = tools.exportTask(storeA, rootA, { taskId: task.id });
     expect(exported.markdown).toContain('Task in B');

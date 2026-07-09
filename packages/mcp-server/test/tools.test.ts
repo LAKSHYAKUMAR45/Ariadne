@@ -139,6 +139,17 @@ describe('mcp-server tools', () => {
     expect(ctx.openTodos).toHaveLength(1);
     expect(ctx.unresolvedErrors).toHaveLength(1);
     expect(ctx.decisions).toHaveLength(1);
+    expect(ctx.workspaceRoot).toBe(workspaceRoot);
+  });
+
+  it('get_context surfaces the task\'s tracked git branch, and null when none is set yet', () => {
+    const task = tools.taskNew(store, workspaceRoot, { title: 'Branch-visible task' });
+    const before = tools.getContext(store, workspaceRoot, {});
+    expect(before.branch).toBeNull();
+
+    store.updateTaskBranch(task.id, 'feature/xyz');
+    const after = tools.getContext(store, workspaceRoot, {});
+    expect(after.branch).toBe('feature/xyz');
   });
 
   it('git_sync records commits from a real git repo at the workspace root', () => {

@@ -494,8 +494,8 @@ export interface GetContextArgs {
  * cross-workspace registry if `taskId` belongs to a different workspace.
  */
 export function getContext(store: TaskStore, workspaceRoot: string, args: GetContextArgs): ContextPackage {
-  return withTaskStore(store, workspaceRoot, args.taskId, (s, taskId) =>
-    buildContext(s, taskId, args.tokenBudget ? { tokenBudget: args.tokenBudget } : undefined),
+  return withTaskStore(store, workspaceRoot, args.taskId, (s, taskId, ownerRoot) =>
+    buildContext(s, taskId, { workspaceRoot: ownerRoot, ...(args.tokenBudget ? { tokenBudget: args.tokenBudget } : {}) }),
   );
 }
 

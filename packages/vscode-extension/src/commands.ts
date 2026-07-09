@@ -215,14 +215,21 @@ function extractFlagValue(prompt: string, flag: string): { value: string | undef
  * three surfaces show identical "what am I working on" context instead of
  * the chat participant reimplementing its own ad-hoc query/formatting.
  */
-export function formatStatusSections(store: TaskStore, taskId: string, tokenBudget?: number): string[] {
+export function formatStatusSections(
+  store: TaskStore,
+  taskId: string,
+  tokenBudget?: number,
+  workspaceRoot?: string,
+): string[] {
   const t = store.getTask(taskId);
   if (!t) return [`No task found with id \`${taskId}\`.`];
 
-  const ctx = buildContext(store, taskId, tokenBudget ? { tokenBudget } : undefined);
+  const ctx = buildContext(store, taskId, { workspaceRoot, ...(tokenBudget ? { tokenBudget } : {}) });
   const sections: string[] = [];
 
   let header = `### ${t.title}  \`${t.status}\``;
+  if (ctx.workspaceRoot) header += `\n**Workspace:** \`${ctx.workspaceRoot}\``;
+  if (ctx.branch) header += `\n**Branch:** \`${ctx.branch}\``;
   if (ctx.goal) header += `\n**Goal:** ${ctx.goal}`;
   sections.push(header);
 
@@ -716,17 +723,16 @@ export function handleChatCommand(store: TaskStore, input: ChatCommandInput): Ch
       const explicitId = promptWithoutBudget.trim() || undefined;
       if (explicitId) {
         if (store.getTask(explicitId)) {
-          const sections = formatStatusSections(store, explicitId, budget);
+          const sections = formatStatusSections(store, explicitId, budget, input.workspaceRoot);
           return { markdown: sections.join('\n\n'), sections };
         }
         const resolved = resolveCrossWorkspaceTask(input.workspaceRoot, explicitId);
         if (!resolved) return { markdown: `No task found with id \`${explicitId}\`.` };
-        const sections = formatStatusSections(resolved.store, explicitId, budget);
-        sections.push(`_(from workspace \`${resolved.workspaceRoot}\`)_`);
+        const sections = formatStatusSections(resolved.store, explicitId, budget, resolved.workspaceRoot);
         return { markdown: sections.join('\n\n'), sections };
       }
       if (!taskId) return { markdown: noCurrentTaskMessage() };
-      const sections = formatStatusSections(store, taskId, budget);
+      const sections = formatStatusSections(store, taskId, budget, input.workspaceRoot);
       return { markdown: sections.join('\n\n'), sections };
     }
 
@@ -764,7 +770,7 @@ export function handleChatCommand(store: TaskStore, input: ChatCommandInput): Ch
 
     default: {
       if (!taskId) return { markdown: noCurrentTaskMessage() };
-      const sections = formatStatusSections(store, taskId);
+      const sections = formatStatusSections(store, taskId, undefined, input.workspaceRoot);
       return { markdown: sections.join('\n\n'), sections };
     }
   }

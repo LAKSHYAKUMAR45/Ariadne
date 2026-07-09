@@ -514,11 +514,13 @@ question
 // status / resume
 // ---------------------------------------------------------------------
 
-function printStatus(store: TaskStore, taskId: string, tokenBudget?: number): void {
+function printStatus(store: TaskStore, taskId: string, workspaceRoot: string, tokenBudget?: number): void {
   const t = store.getTask(taskId)!;
   console.log(`Task: ${t.title}  (${t.status})`);
+  console.log(`Workspace: ${workspaceRoot}`);
+  if (t.branch) console.log(`Branch: ${t.branch}`);
 
-  const ctx = buildContext(store, taskId, tokenBudget ? { tokenBudget } : undefined);
+  const ctx = buildContext(store, taskId, { workspaceRoot, ...(tokenBudget ? { tokenBudget } : {}) });
 
   if (ctx.goal) console.log(`Goal: ${ctx.goal}`);
 
@@ -591,8 +593,8 @@ program
   .option('-t, --task <id>', 'Task id')
   .option('-b, --budget <tokens>', 'Token budget for context ranking (default: 2000)', (v) => parseInt(v, 10))
   .action((opts: { task?: string; budget?: number }) => {
-    withResolvedTask(opts.task, (store, taskId) => {
-      printStatus(store, taskId, opts.budget);
+    withResolvedTask(opts.task, (store, taskId, workspaceRoot) => {
+      printStatus(store, taskId, workspaceRoot, opts.budget);
     });
   });
 
@@ -602,8 +604,8 @@ program
   .option('-t, --task <id>', 'Task id')
   .option('-b, --budget <tokens>', 'Token budget for context ranking (default: 2000)', (v) => parseInt(v, 10))
   .action((opts: { task?: string; budget?: number }) => {
-    withResolvedTask(opts.task, (store, taskId) => {
-      printStatus(store, taskId, opts.budget);
+    withResolvedTask(opts.task, (store, taskId, workspaceRoot) => {
+      printStatus(store, taskId, workspaceRoot, opts.budget);
     });
   });
 

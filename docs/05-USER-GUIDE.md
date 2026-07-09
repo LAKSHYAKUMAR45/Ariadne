@@ -79,10 +79,11 @@ ariadne status
 ```
 
 `ariadne status` prints exactly what a fresh chat session (in any assistant)
-needs to pick up where you left off — goal, latest checkpoint, open
-questions, unresolved errors, blocked todos, decisions, pending todos, recently touched
-files, recent commits, and recent commands, trimmed to a token budget so it's cheap to paste
-or auto-inject into a prompt.
+needs to pick up where you left off — workspace root, tracked git branch,
+goal, latest checkpoint, open questions, unresolved errors, blocked todos,
+decisions, pending todos, recently touched files, recent commits, and recent
+commands, trimmed to a token budget so it's cheap to paste or auto-inject
+into a prompt.
 
 That's the whole loop: **start a task once, then keep checkpointing/
 recording as you go, and reload with `status`/`resume` whenever you (or a

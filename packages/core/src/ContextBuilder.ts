@@ -58,6 +58,16 @@ interface ContextCommandRefSource {
 export interface ContextPackage {
   taskId: string;
   goal: string | null;
+  /** This task's last known tracked git branch (updated by passive capture or `git-sync`); null if never set. */
+  branch: string | null;
+  /**
+   * The workspace root this task's store was opened from, if the caller
+   * knows it (surfaces pass this in explicitly since `buildContext` itself
+   * is store-scoped and workspace-agnostic). Especially useful for
+   * cross-workspace results, where it isn't otherwise obvious which
+   * workspace's repo/state a task's status refers to.
+   */
+  workspaceRoot: string | null;
   latestSummary: string | null;
   openQuestions: string[];
   openTodos: string[];
@@ -75,6 +85,8 @@ export interface ContextPackage {
 
 export interface BuildContextOptions {
   tokenBudget?: number;
+  /** The workspace root this task's store was opened from, if known — passed through unchanged into `ContextPackage.workspaceRoot`. */
+  workspaceRoot?: string;
 }
 
 type Tier = 'high' | 'medium' | 'low';
@@ -203,6 +215,8 @@ export function buildContext(store: TaskStore, taskId: string, options: BuildCon
   return {
     taskId,
     goal,
+    branch: task.branch ?? null,
+    workspaceRoot: options.workspaceRoot ?? null,
     latestSummary,
     openQuestions: (included.openQuestions ?? []).map((c) => c.text),
     openTodos: (included.pendingTodos ?? []).map((c) => c.text),

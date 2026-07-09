@@ -356,6 +356,38 @@ describe('chat participant command logic', () => {
     expect(budgeted).toContain('Trimmed to fit token budget');
   });
 
+  it('formatStatusSections shows the workspace root and tracked branch when known', () => {
+    const task = store.createTask({ title: 'Branch-visible task' });
+    store.updateTaskBranch(task.id, 'feature/xyz');
+
+    const sections = formatStatusSections(store, task.id, undefined, '/repo/root');
+
+    expect(sections[0]).toContain('**Workspace:** `/repo/root`');
+    expect(sections[0]).toContain('**Branch:** `feature/xyz`');
+  });
+
+  it('formatStatusSections omits workspace/branch lines when not known', () => {
+    const task = store.createTask({ title: 'No branch task' });
+
+    const sections = formatStatusSections(store, task.id);
+
+    expect(sections[0]).not.toContain('**Workspace:**');
+    expect(sections[0]).not.toContain('**Branch:**');
+  });
+
+  it('/status shows the workspace root for a task in a different workspace', () => {
+    // Covered end-to-end in crossWorkspace.test.ts; this just confirms the
+    // same-workspace case also renders a workspace line when a root is given.
+    const task = store.createTask({ title: 'Same workspace task' });
+    const result = handleChatCommand(store, {
+      command: 'status',
+      prompt: '',
+      currentTaskId: task.id,
+      workspaceRoot: '/repo/root',
+    });
+    expect(result.markdown).toContain('**Workspace:** `/repo/root`');
+  });
+
   it('/status --budget <n> trims output the same way formatStatusSections(..., budget) does', () => {
     const task = store.createTask({ title: 'Budget task', goal: 'Ship the thing' });
     for (let i = 0; i < 20; i++) {

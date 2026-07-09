@@ -40,7 +40,7 @@ commands below — or just describe what you want in plain language (e.g.
 
 | Command | What it does |
 |---|---|
-| `/status [id] [--budget <tokens>]` (default) | Show a task's goal, latest checkpoint, open questions, unresolved errors, blocked todos, pending todos, recent files, recent commits, and recent commands. Defaults to the current task; an explicit id works even if it belongs to a different workspace. `--budget` trims the output to fit a token budget, like the CLI/MCP surfaces. |
+| `/status [id] [--budget <tokens>]` (default) | Show a task's workspace root, tracked git branch, goal, latest checkpoint, open questions, unresolved errors, blocked todos, pending todos, recent files, recent commits, and recent commands. Defaults to the current task; an explicit id works even if it belongs to a different workspace. `--budget` trims the output to fit a token budget, like the CLI/MCP surfaces. |
 | `/resume [id] [--budget <tokens>]` | Alias of `/status`. |
 | `/checkpoint <summary>` | Record a checkpoint summary for the current task. |
 | `/todo add <text>` / `/todo list` / `/todo done <id>` / `/todo reopen <id>` / `/todo block <id>` / `/todo edit <id> --text <t>` / `/todo delete <id>` (all `[--task <taskId>]`) | Manage todos, including curation (edit/delete) and reopening/blocking. `--task` tells id-based subcommands which task/workspace the todo belongs to, if not the current one. |
