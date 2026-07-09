@@ -1,4 +1,8 @@
-# Ariadne — Roadmap, MVP Scope, Risks (Draft v0.1)
+# Ariadne — Roadmap, MVP Scope, Risks (v0.2 — updated post-MVP)
+
+> **Status: MVP is shipped.** All items in §2 below are implemented and tested
+> across `@ariadne-dev/core`, `@ariadne-dev/cli`, `@ariadne-dev/mcp-server`, and
+> the (unpublished) VS Code extension. See §8 for what's actually left.
 
 ## 1. Locked Decisions (recap)
 - Summarization/checkpoints: **rule-based only for MVP**, no LLM dependency. LLM
@@ -8,29 +12,35 @@
 - v1 ships **all three surfaces together**: Copilot Chat participant, MCP server,
   and CLI — all wrapping one shared `@ariadne-dev/core`.
 
-## 2. MVP Feature List
-- [ ] `@ariadne-dev/core`: TaskStore (SQLite), ContextBuilder (ranked, budgeted),
-      CheckpointEngine (rule-based, hierarchical), GitWatcher, Redactor.
-- [ ] `@ariadne-dev/mcp-server`: exposes `task.start/switch/list/checkpoint/
-      getContext/addDecision/addTodo/resolveError/search` as MCP tools.
-- [ ] `@ariadne-dev/cli` (`ariadne` binary): same operations as plain commands,
+## 2. MVP Feature List — all shipped
+- [x] `@ariadne-dev/core`: TaskStore (SQLite), ContextBuilder (ranked, budgeted),
+      CheckpointEngine (rule-based, hierarchical), GitWatcher, Redactor, Exporter,
+      cross-workspace Registry. (`packages/core/src/*`, 13 test files.)
+- [x] `@ariadne-dev/mcp-server`: exposes task/checkpoint/todo/decision/error/
+      question/search/export/context tools, including cross-workspace variants.
+      (`packages/mcp-server/src/tools.ts`, `server.ts`.)
+- [x] `@ariadne-dev/cli` (`ariadne` binary): full command surface (`task`,
+      `status`, `resume`, `checkpoint`, `todo`, `decision`, `error`, `question`,
+      `search`, `export`, `git-sync`, `workspace`, `exec`, `backup`/`restore`),
       usable by any agent/CLI (Copilot CLI included) without VS Code.
-- [ ] `@ariadne-dev/vscode-extension`:
-  - Registers `@ariadne` Copilot Chat participant (`/start /checkpoint /resume
-    /status /decide /context /switch`).
-  - Spawns/registers the MCP server for Copilot Chat's MCP integration.
+- [x] `ariadne-vscode` extension:
+  - Registers `@ariadne` Copilot Chat participant with the full command set
+    above, plus a status-bar guardrail showing the current task.
   - Background passive capture: file saves, git commits/branch switches, terminal
-    command+exit code (redacted), diagnostics.
-- [ ] `ariadne export` → Markdown export command (opt-in, for sharing/PRs).
-- [ ] Baseline redaction of secrets in captured terminal output.
-- [ ] Single active task + basic task switching (nested/dependency graph UI is
-      stretch — dependency *data model* ships in MVP even if no UI surfaces it).
+    command+exit code (redacted), diagnostics — all opt-out via settings.
+- [x] `ariadne export` → Markdown export command (opt-in, for sharing/PRs).
+- [x] Baseline redaction of secrets in captured terminal output (`Redactor.ts`).
+- [x] Single active task + task switching, including cross-workspace task
+      resolution via `~/.ariadne/registry.db` (dependency graph UI remains
+      deferred; the underlying `todo_deps`-style data model ships).
 
-## 3. Explicitly Deferred (Stretch Goals)
+## 3. Explicitly Deferred (Stretch Goals) — still not started
 - Tree view / timeline / knowledge-base browser UI (secondary per product
   direction; can ship in v1.1 once core loop is validated).
 - LLM-assisted summarization plugin (opt-in, bring-your-own-model).
-- Plugins: Jira, GitHub Issues, Linear, Slack, Obsidian export, local LLM backends.
+- Plugin platform/interface itself, plus reference plugins (Jira, GitHub Issues,
+  Linear, Slack, Obsidian export, local LLM backends) — no `PluginRegistry` or
+  plugin loading mechanism exists yet.
 - Cloud sync / team-shared task graph.
 - True cross-repo tasks (one task entity spanning multiple repos as a single
   linked unit). Note: cross-workspace *discovery and operation* of
@@ -38,44 +48,58 @@
   (`~/.ariadne/registry.db`, see `02-ARCHITECTURE.md` §4a) — this line is
   specifically about merging multiple repos' tasks into one logical task,
   which remains deferred.
-- Smarter (embedding-based) context ranking beyond the rule-based v0.1 scorer.
+- Smarter (embedding-based) context ranking beyond the rule-based v0.1 scorer
+  (token counting is shipped as a `chars / 4` heuristic in `ContextBuilder.ts`,
+  not embedding-based ranking).
 
-## 4. Technical Roadmap (Phased)
-1. **Phase 0 — Core skeleton:** SQLite schema + TaskStore CRUD + unit tests. No
-   AI/editor integration yet. Validates data model independently.
-2. **Phase 1 — Context loop:** ContextBuilder + CheckpointEngine (rule-based) on
-   top of Phase 0, driven purely by CLI for fast iteration (no VS Code needed to
-   test the hardest logic).
-3. **Phase 2 — Surfaces:** MCP server wrapping core; VS Code extension wiring
-   background capture + chat participant + MCP registration. This is where
-   Copilot Chat / Copilot CLI integration becomes real.
-4. **Phase 3 — Git integration & redaction hardening:** GitWatcher, commit
-   linking, branch-switch detection, secret redaction test suite.
-5. **Phase 4 — Polish + optional UI:** Markdown export, minimal read-only tree
-   view, docs, packaging for the VS Code Marketplace + npm (CLI).
-6. **Phase 5 (post-MVP) — Plugin platform:** formalize plugin interface, ship one
-   reference plugin (e.g. GitHub Issues) to prove extensibility.
+## 4. Technical Roadmap (Phased) — Phases 0–4 complete, Phase 5 not started
+1. ✅ **Phase 0 — Core skeleton:** SQLite schema + TaskStore CRUD + unit tests.
+   Shipped (`packages/core/src/TaskStore.ts` + tests).
+2. ✅ **Phase 1 — Context loop:** ContextBuilder + CheckpointEngine (rule-based).
+   Shipped (`packages/core/src/ContextBuilder.ts`, `CheckpointEngine.ts`).
+3. ✅ **Phase 2 — Surfaces:** MCP server wrapping core; VS Code extension wiring
+   background capture + chat participant. Shipped, but note the VS Code chat
+   participant calls `@ariadne-dev/core` in-process rather than hopping through
+   the MCP server — MCP is used for external clients (Copilot CLI, other
+   editors), not as an internal transport within the extension itself.
+4. ✅ **Phase 3 — Git integration & redaction hardening:** GitWatcher, commit
+   linking, branch-switch detection, secret redaction test suite. Shipped
+   (`GitWatcher.ts`, `Redactor.ts`, `/git-sync` command).
+5. ✅ **Phase 4 — Polish + optional UI:** Markdown export shipped (`Exporter.ts`,
+   `ariadne export`). Packaging scripts for the VS Code extension (`vsce
+   package`) and npm (CLI/core/mcp-server via Changesets) are in place and the
+   release workflows are green — but the extension has **not actually been
+   published to the VS Code Marketplace yet** (`packages/vscode-extension/
+   package.json` is still `"private": true`), and the minimal read-only tree
+   view was not built (folded into the deferred UI work in §3).
+6. ⬜ **Phase 5 (post-MVP) — Plugin platform:** not started. No plugin
+   interface or `PluginRegistry` exists yet.
 
 ## 5. Repo / OSS Structure
-- **Monorepo** (pnpm workspaces + Turborepo or Nx): `packages/core`, `packages/cli`,
-  `packages/mcp-server`, `packages/vscode-extension`, `packages/plugins/*`,
-  `docs/`. Justification: shared core changes constantly touch all surfaces during
-  early development — multi-repo coordination overhead isn't worth it pre-1.0.
-- CI: per-package lint/typecheck/test on PR (Turborepo caching to keep it fast);
-  build + package VS Code extension (`vsce package`) and publish CLI to npm on
-  tagged release.
+- **Monorepo** (pnpm workspaces): `packages/core`, `packages/cli`,
+  `packages/mcp-server`, `packages/vscode-extension`, `docs/`. (No
+  `packages/plugins/*` yet — added if/when Phase 5 starts.) Justification:
+  shared core changes constantly touch all surfaces during early development —
+  multi-repo coordination overhead isn't worth it pre-1.0.
+- CI: per-package build/test/typecheck on push (`.github/workflows/ci.yml`,
+  `release.yml`); `release.yml` also builds and packages the VS Code extension
+  `.vsix` on tagged release.
 - Versioning/release: [Changesets](https://github.com/changesets/changesets),
   independent semver per package, since CLI/MCP server may need to move faster
-  than the VS Code extension (marketplace review lag). Shipped: `.changeset/config.json`,
-  root `pnpm changeset` / `pnpm version-packages` / `pnpm release` scripts, and
+  than the VS Code extension (marketplace review lag). Shipped and **verified
+  working end-to-end**: `.changeset/config.json`, root `pnpm changeset` /
+  `pnpm version-packages` / `pnpm release` scripts, and
   `.github/workflows/packages-release.yml` (opens/updates a "Version Packages"
-  PR on master, publishes to npm once merged — the VS Code extension is
-  excluded since it ships as a `.vsix` via `release.yml` instead). Publishing
-  is a no-op until an `NPM_TOKEN` secret and the packages' first real release
-  are in place.
+  PR on master, publishes to npm once merged). The npm scope is
+  **`@ariadne-dev`** (not `@ariadne` — that name/org was already taken on npm),
+  and the CLI package is `@ariadne-dev/cli` (not the unscoped `ariadne` — also
+  taken). `core@0.1.0`, `cli@0.1.0`, and `mcp-server@0.1.0` have been published
+  to npm. `NPM_TOKEN` is a granular access token with 2FA-bypass enabled.
 - Testing: unit tests for core (ContextBuilder ranking, CheckpointEngine rollup,
-  Redactor patterns) are the highest-value tests — prioritize these over
-  extension-level integration tests early on.
+  Redactor patterns) are the highest-value tests and have the deepest coverage
+  (13 test files in `packages/core`); CLI (5), MCP server (3), and the VS Code
+  extension (5) have lighter but real coverage, including cross-workspace
+  integration tests per surface.
 
 ## 6. Risk Analysis
 
@@ -85,26 +109,51 @@
 | MCP spec/client support still maturing | Medium (integration risk) | CLI remains a fully independent fallback path; don't couple core to MCP internals |
 | Rule-based summaries feel "dumb" vs LLM summaries | Medium (perceived value) | Make LLM summarization a clean opt-in plugin point early so power users can upgrade without core rework |
 | Scope creep into "another AI chat UI" | High (identity risk) | Explicit non-goals section in PRD; UI work gated behind "is this required for the core loop?" test |
-| SQLite multi-process contention (extension + CLI + MCP server) | Medium (reliability) | Single daemon owns the DB; others talk via IPC, not direct file access; WAL mode |
+| SQLite multi-process contention (extension + CLI + MCP server) | Medium (reliability) | **Resolved differently than originally planned:** no daemon/IPC layer was built — each surface opens the workspace's SQLite DB directly in WAL mode (`packages/core/src/db.ts`), which has proven sufficient so far. Revisit only if real contention issues surface. |
 | Token-budget context still too large for very long-running tasks | Medium (value delivery) | Hierarchical checkpoint rollup keeps summaries compact even as task history grows |
 
-## 7. Open Questions Still Requiring Decisions
-1. Automatic vs explicit task detection (heuristic new-branch/new-file-cluster vs.
-   always user-named) — PRD flags this; needs a decision before Phase 2.
-2. IPC transport choice (unix socket vs named pipe vs loopback TCP) — needed before
-   CLI/daemon implementation (Phase 0/2 boundary).
-3. Token-counting method for budget enforcement — needed before ContextBuilder
-   implementation (Phase 1).
-4. Daemon lifecycle policy (idle-timeout value, explicit stop command) — needed
-   before Phase 2.
+## 7. Open Questions — resolution status
+1. ~~Automatic vs explicit task detection~~ — **resolved: explicit-only.**
+   Passive capture (file saves, git activity, terminal commands) never
+   auto-creates or auto-switches the current task; the user always sets it
+   explicitly via `/task new`, `ariadne task new`, or `task_new`. See the
+   "Known limitations" note in `docs/05-USER-GUIDE.md` and
+   `packages/vscode-extension/src/passiveCapture.ts`.
+2. ~~IPC transport choice~~ — **resolved: no IPC/daemon at all.** Each surface
+   (CLI, MCP server, VS Code extension) opens the workspace's SQLite DB
+   directly (`packages/core/src/db.ts`, WAL mode), sidestepping the daemon
+   question entirely. See §6's updated risk mitigation above.
+3. ~~Token-counting method~~ — **resolved: `chars / 4` heuristic** in
+   `packages/core/src/ContextBuilder.ts`, not a real tokenizer. Simple and
+   good enough for budget enforcement so far; embedding/tokenizer-based
+   ranking remains a stretch goal (§3).
+4. ~~Daemon lifecycle policy~~ — **moot**, since no daemon was built (see #2).
 5. ~~Multi-repo task support~~ — **resolved for the cross-workspace
    discovery/operation case**: the `tasks` table never assumed a single
    global workspace root (each workspace already had its own DB), and the
-   new `~/.ariadne/registry.db` (see `02-ARCHITECTURE.md` §4a) lets any
+   `~/.ariadne/registry.db` (see `02-ARCHITECTURE.md` §4a) lets any
    surface find and operate on a task from any workspace it's ever seen.
    True single-task-spans-multiple-repos linking remains deferred (§3).
 
-## 8. Suggested Immediate Next Step
-Start **Phase 0** (`packages/core` schema + TaskStore) since every other surface
-depends on it, and it's fully testable without any editor/AI integration — fastest
-path to a concrete, verifiable artifact.
+All five original open questions are now resolved (mostly by turning out to be
+non-issues once the no-daemon, direct-SQLite-access architecture was chosen).
+No new open architectural questions have surfaced since.
+
+## 8. Suggested Immediate Next Steps (post-MVP)
+The MVP (§2) is done and the release pipeline (npm + VS Code packaging) is
+verified working. Remaining work is about *shipping what exists* and *choosing
+what's next*, not building the core loop:
+
+1. **Publish the VS Code extension to the Marketplace.** It's currently
+   `"private": true` in `packages/vscode-extension/package.json` with no
+   Marketplace listing — decide on a publish date and flip this, or document
+   why it's staying VSIX-only for now.
+2. **Decide the Phase 5 plugin platform's shape** (if pursuing it next):
+   what's the minimal interface a plugin needs (e.g. GitHub Issues sync), and
+   should `packages/plugins/*` be added to the workspace now or deferred
+   further.
+3. **Decide on the tree-view/timeline UI** (§3): still deferred: confirm it's
+   still out of scope for v1.1, or scope a minimal read-only version.
+4. **Broaden integration-test coverage** on the lighter-tested surfaces (CLI,
+   MCP server, VS Code extension) now that the core loop is stable, rather
+   than continuing to add core-only tests.
