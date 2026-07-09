@@ -201,6 +201,55 @@ export function createAriadneMcpServer(options?: { workspaceRoot?: string; store
   );
 
   server.registerTool(
+    'question_add',
+    {
+      title: 'Record an open question',
+      description: 'Records an open question for the current (or given) task.',
+      inputSchema: { text: z.string(), taskId: z.string().optional() },
+    },
+    async (args) => {
+      try {
+        return jsonResult(tools.questionAdd(store, workspaceRoot, args));
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    'question_list',
+    {
+      title: 'List open questions',
+      description: 'Lists open questions for the current (or given) task, optionally filtered by resolved status.',
+      inputSchema: { taskId: z.string().optional(), resolved: z.boolean().optional() },
+    },
+    async (args) => {
+      try {
+        return jsonResult(tools.questionList(store, workspaceRoot, args));
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    'question_resolve',
+    {
+      title: 'Resolve an open question',
+      description: 'Marks the given open question as resolved.',
+      inputSchema: { questionId: z.string() },
+    },
+    async (args) => {
+      try {
+        tools.questionResolve(store, args);
+        return jsonResult({ ok: true });
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
+
+  server.registerTool(
     'search',
     {
       title: 'Search tasks',

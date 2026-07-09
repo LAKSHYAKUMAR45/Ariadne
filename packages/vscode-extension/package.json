@@ -40,7 +40,8 @@
           { "name": "todo", "description": "Add, list, or complete todos" },
           { "name": "task", "description": "Create, list, or switch tasks" },
           { "name": "decision", "description": "Record a decision" },
-          { "name": "error", "description": "Record or resolve an error" }
+          { "name": "error", "description": "Record or resolve an error" },
+          { "name": "question", "description": "Add, list, or resolve open questions" }
         ]
       }
     ],

@@ -147,6 +147,53 @@ todo
   });
 
 // ---------------------------------------------------------------------
+// question
+// ---------------------------------------------------------------------
+
+const question = program.command('question').description('Manage open questions');
+
+question
+  .command('add <text>')
+  .description('Add an open question to the current (or --task) task')
+  .option('-t, --task <id>', 'Task id')
+  .action((text: string, opts: { task?: string }) => {
+    withStore((store) => {
+      const taskId = resolveTaskId(store, opts.task);
+      const created = store.recordOpenQuestion({ taskId, text });
+      console.log(`Added open question ${created.id}: ${created.text}`);
+    });
+  });
+
+question
+  .command('list')
+  .description('List open questions for the current (or --task) task')
+  .option('-t, --task <id>', 'Task id')
+  .option('-a, --all', 'Include resolved questions (default: unresolved only)')
+  .action((opts: { task?: string; all?: boolean }) => {
+    withStore((store) => {
+      const taskId = resolveTaskId(store, opts.task);
+      const questions = store.listOpenQuestions(taskId, opts.all ? undefined : { resolved: false });
+      if (questions.length === 0) {
+        console.log('No open questions found.');
+        return;
+      }
+      for (const q of questions) {
+        console.log(`[${q.resolved ? 'resolved' : 'open'}] ${q.id}  ${q.text}`);
+      }
+    });
+  });
+
+question
+  .command('resolve <id>')
+  .description('Mark an open question as resolved')
+  .action((id: string) => {
+    withStore((store) => {
+      store.resolveOpenQuestion(id);
+      console.log(`Marked question ${id} resolved.`);
+    });
+  });
+
+// ---------------------------------------------------------------------
 // status / resume
 // ---------------------------------------------------------------------
 

@@ -5,7 +5,7 @@ describe('ariadne CLI surface', () => {
   it('registers the expected top-level commands', () => {
     const names = program.commands.map((c) => c.name());
     expect(names).toEqual(
-      expect.arrayContaining(['task', 'checkpoint', 'todo', 'status', 'resume', 'where', 'git-sync', 'export']),
+      expect.arrayContaining(['task', 'checkpoint', 'todo', 'question', 'status', 'resume', 'where', 'git-sync', 'export']),
     );
   });
 
@@ -15,5 +15,10 @@ describe('ariadne CLI surface', () => {
 
     const todoCmd = program.commands.find((c) => c.name() === 'todo')!;
     expect(todoCmd.commands.map((c) => c.name())).toEqual(expect.arrayContaining(['add', 'list', 'done']));
+  });
+
+  it('registers question subcommands', () => {
+    const questionCmd = program.commands.find((c) => c.name() === 'question')!;
+    expect(questionCmd.commands.map((c) => c.name())).toEqual(expect.arrayContaining(['add', 'list', 'resolve']));
   });
 });

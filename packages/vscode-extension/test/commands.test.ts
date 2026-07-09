@@ -67,6 +67,23 @@ describe('chat participant command logic', () => {
     expect(store.listErrors(task.id, { resolved: false })).toHaveLength(0);
   });
 
+  it('adds, lists, and resolves an open question via /question', () => {
+    const task = store.createTask({ title: 'Task with questions' });
+    const added = handleChatCommand(store, {
+      command: 'question',
+      prompt: 'add Unix socket or TCP for IPC?',
+      currentTaskId: task.id,
+    });
+    const questionId = added.markdown.match(/`([0-9A-Z]+)`/)![1];
+    expect(formatStatus(store, task.id)).toContain('Unix socket or TCP for IPC?');
+
+    const list = handleChatCommand(store, { command: 'question', prompt: 'list', currentTaskId: task.id });
+    expect(list.markdown).toContain('Unix socket or TCP for IPC?');
+
+    handleChatCommand(store, { command: 'question', prompt: `resolve ${questionId}`, currentTaskId: task.id });
+    expect(store.listOpenQuestions(task.id, { resolved: false })).toHaveLength(0);
+  });
+
   it('falls back to status for a plain @ariadne message with no slash command', () => {
     const task = store.createTask({ title: 'Plain message task', goal: 'Just chat' });
     const result = handleChatCommand(store, { prompt: 'what are we doing again?', currentTaskId: task.id });
@@ -119,6 +136,21 @@ describe('chat participant command logic', () => {
       const task = store.createTask({ title: 'Task with errors' });
       handleChatCommand(store, { prompt: 'error: build fails on CI', currentTaskId: task.id });
       expect(formatStatus(store, task.id)).toContain('build fails on CI');
+    });
+
+    it('records an open question from "question: <text>" phrasing', () => {
+      const task = store.createTask({ title: 'Task with questions' });
+      handleChatCommand(store, { prompt: 'question: does this support multi-repo?', currentTaskId: task.id });
+      expect(store.listOpenQuestions(task.id).some((q) => q.text === 'does this support multi-repo?')).toBe(true);
+    });
+
+    it('resolves an open question from "resolve question <id>" phrasing', () => {
+      const task = store.createTask({ title: 'Task with questions' });
+      const added = handleChatCommand(store, { command: 'question', prompt: 'add pick a transport', currentTaskId: task.id });
+      const questionId = added.markdown.match(/`([0-9A-Z]+)`/)![1];
+
+      handleChatCommand(store, { prompt: `resolve question ${questionId}`, currentTaskId: task.id });
+      expect(store.listOpenQuestions(task.id, { resolved: false })).toHaveLength(0);
     });
 
     it('routes "status"/"how\'s it going" to the status view', () => {

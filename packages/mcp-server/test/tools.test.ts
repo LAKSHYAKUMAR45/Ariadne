@@ -67,6 +67,22 @@ describe('mcp-server tools', () => {
     expect(store.listErrors(task.id, { resolved: false })).toHaveLength(0);
   });
 
+  it('question_add/list/resolve operate on the current task', () => {
+    const task = tools.taskNew(store, workspaceRoot, { title: 'A' });
+
+    const q = tools.questionAdd(store, workspaceRoot, { text: 'Unix socket or TCP for IPC?' });
+    expect(q.taskId).toBe(task.id);
+    expect(q.resolved).toBe(false);
+
+    expect(tools.questionList(store, workspaceRoot, {}).map((x) => x.id)).toContain(q.id);
+    expect(tools.questionList(store, workspaceRoot, { resolved: false }).map((x) => x.id)).toContain(q.id);
+    expect(tools.questionList(store, workspaceRoot, { resolved: true }).map((x) => x.id)).not.toContain(q.id);
+
+    tools.questionResolve(store, { questionId: q.id });
+    expect(tools.questionList(store, workspaceRoot, { resolved: true }).map((x) => x.id)).toContain(q.id);
+    expect(tools.questionList(store, workspaceRoot, { resolved: false }).map((x) => x.id)).not.toContain(q.id);
+  });
+
   it('resolveTaskId throws with no current task and no explicit id', () => {
     expect(() => tools.resolveTaskId(store, workspaceRoot, undefined)).toThrow(/No task specified/);
   });

@@ -3,6 +3,7 @@ import type {
   CheckpointLevel,
   ContextPackage,
   Decision,
+  OpenQuestion,
   SyncGitResult,
   Task,
   TaskError,
@@ -134,6 +135,34 @@ export interface ErrorResolveArgs {
 
 export function errorResolve(store: TaskStore, args: ErrorResolveArgs): void {
   store.resolveError(args.errorId, args.resolution);
+}
+
+export interface QuestionAddArgs {
+  text: string;
+  taskId?: string;
+}
+
+export function questionAdd(store: TaskStore, workspaceRoot: string, args: QuestionAddArgs): OpenQuestion {
+  const taskId = resolveTaskId(store, workspaceRoot, args.taskId);
+  return store.recordOpenQuestion({ taskId, text: args.text });
+}
+
+export interface QuestionListArgs {
+  taskId?: string;
+  resolved?: boolean;
+}
+
+export function questionList(store: TaskStore, workspaceRoot: string, args: QuestionListArgs): OpenQuestion[] {
+  const taskId = resolveTaskId(store, workspaceRoot, args.taskId);
+  return store.listOpenQuestions(taskId, args.resolved !== undefined ? { resolved: args.resolved } : undefined);
+}
+
+export interface QuestionResolveArgs {
+  questionId: string;
+}
+
+export function questionResolve(store: TaskStore, args: QuestionResolveArgs): void {
+  store.resolveOpenQuestion(args.questionId);
 }
 
 export interface SearchArgs {

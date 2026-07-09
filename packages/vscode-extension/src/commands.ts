@@ -167,6 +167,21 @@ export function inferIntent(rawPrompt: string): InferredIntent | undefined {
       re: /^(?:resolve|fixed)\s+error\s+(\S+)$/i,
       build: (m) => ({ command: 'error', prompt: `resolve ${m[1]}` }),
     },
+    // "question: does X support Y?" / "open question: ..." / "not sure whether ..." / "unsure if ..."
+    {
+      re: /^(?:open question|question|not sure (?:whether|if)|unsure (?:whether|if))\s*[:\-]?\s*(.+)$/i,
+      build: (m) => ({ command: 'question', prompt: `add ${m[1].trim()}` }),
+    },
+    // "resolve question abc123" / "answered question abc123"
+    {
+      re: /^(?:resolve|answered)\s+question\s+(\S+)$/i,
+      build: (m) => ({ command: 'question', prompt: `resolve ${m[1]}` }),
+    },
+    // "list open questions" / "show open questions" / "what questions are open"
+    {
+      re: /^(?:list|show)\s+open\s+questions|what\s+questions(?: are open)?\??$/i,
+      build: () => ({ command: 'question', prompt: 'list' }),
+    },
     // "checkpoint: got auth working" / "record checkpoint: got auth working"
     {
       re: /^(?:record\s+)?checkpoint\s*[:\-]?\s*(.+)$/i,
@@ -275,6 +290,31 @@ export function handleChatCommand(store: TaskStore, input: ChatCommandInput): Ch
       return { markdown: `Recorded error \`${err.id}\`.` };
     }
 
+    case 'question': {
+      if (!taskId) return { markdown: noCurrentTaskMessage() };
+      const { sub, rest } = splitSubcommand(prompt);
+      if (sub === 'add') {
+        if (!rest) return { markdown: 'Usage: `/question add <text>`.' };
+        const created = store.recordOpenQuestion({ taskId, text: rest });
+        return { markdown: `Added open question \`${created.id}\`: ${created.text}` };
+      }
+      if (sub === 'resolve') {
+        if (!rest) return { markdown: 'Usage: `/question resolve <id>`.' };
+        store.resolveOpenQuestion(rest);
+        return { markdown: `Marked question \`${rest}\` resolved.` };
+      }
+      if (sub === 'list' || !prompt.trim()) {
+        const questions = store.listOpenQuestions(taskId, { resolved: false });
+        if (questions.length === 0) return { markdown: 'No open questions found.' };
+        return {
+          markdown: questions.map((q) => `- \`${q.id}\` ${q.text}`).join('\n'),
+        };
+      }
+      // Bare text with no recognized sub-command is treated as shorthand for "add".
+      const created = store.recordOpenQuestion({ taskId, text: prompt.trim() });
+      return { markdown: `Added open question \`${created.id}\`: ${created.text}` };
+    }
+
     case 'resume':
     case 'status':
     default: {
@@ -302,6 +342,8 @@ export function progressMessageFor(command: string | undefined): string {
       return 'Recording decision…';
     case 'error':
       return 'Recording error…';
+    case 'question':
+      return 'Updating open questions…';
     case 'resume':
       return 'Resuming task context…';
     case 'status':
