@@ -108,4 +108,14 @@ describe('mcp-server tools', () => {
     expect(result.recordedCommits).toHaveLength(1);
     expect(result.recordedCommits[0].message).toBe('Initial commit');
   });
+
+  it('export_task renders the current task as Markdown', () => {
+    const task = tools.taskNew(store, workspaceRoot, { title: 'Fix login bug' });
+    tools.checkpointAdd(store, workspaceRoot, { summary: 'first checkpoint' });
+
+    const result = tools.exportTask(store, workspaceRoot, {});
+    expect(result.taskId).toBe(task.id);
+    expect(result.markdown).toContain('# Fix login bug');
+    expect(result.markdown).toContain('first checkpoint');
+  });
 });

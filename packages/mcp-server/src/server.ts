@@ -253,5 +253,24 @@ export function createAriadneMcpServer(options?: { workspaceRoot?: string; store
     },
   );
 
+  server.registerTool(
+    'export_task',
+    {
+      title: 'Export task to Markdown',
+      description:
+        'Renders the current (or given) task\'s full history (goal, checkpoints, todos, decisions, ' +
+        'open questions, errors, files, commits, command log) as a Markdown document, for sharing or ' +
+        'pasting into a PR description. Equivalent to the CLI\'s "export" command.',
+      inputSchema: { taskId: z.string().optional() },
+    },
+    async (args) => {
+      try {
+        return jsonResult(tools.exportTask(store, workspaceRoot, args));
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
+
   return server;
 }

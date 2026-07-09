@@ -90,7 +90,7 @@ node packages/cli/dist/index.js status
 
 Common commands: `task new <title>`, `task list`, `task use <id>`,
 `checkpoint <summary>`, `todo add <text>` / `todo list` / `todo done <id>`,
-`status`, `resume`, `where`. Run `ariadne --help` for the full list.
+`status`, `resume`, `git-sync`, `export`, `where`. Run `ariadne --help` for the full list.
 
 ### Using the MCP server
 

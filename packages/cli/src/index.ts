@@ -1,7 +1,9 @@
 #!/usr/bin/env node
 import { Command } from 'commander';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 import type { TaskStore, TodoStatus } from '@ariadne/core';
-import { buildContext, syncTaskGit } from '@ariadne/core';
+import { buildContext, syncTaskGit, exportTaskMarkdown } from '@ariadne/core';
 import { openWorkspaceStore, findWorkspaceRoot } from './workspace.js';
 import { readCurrentTaskId, setCurrentTaskId } from './currentTask.js';
 
@@ -246,6 +248,23 @@ program
       } else {
         console.log('No new commits.');
       }
+    });
+  });
+
+program
+  .command('export')
+  .description('Render a task to Markdown at .ariadne/export/<task-id>.md (opt-in, for sharing/PRs)')
+  .option('-t, --task <id>', 'Task id')
+  .option('-o, --out <path>', 'Output file path (defaults to .ariadne/export/<task-id>.md)')
+  .action((opts: { task?: string; out?: string }) => {
+    withStore((store) => {
+      const taskId = resolveTaskId(store, opts.task);
+      const markdown = exportTaskMarkdown(store, taskId);
+      const root = findWorkspaceRoot();
+      const outPath = opts.out ?? path.join(root, '.ariadne', 'export', `${taskId}.md`);
+      fs.mkdirSync(path.dirname(outPath), { recursive: true });
+      fs.writeFileSync(outPath, markdown, 'utf8');
+      console.log(`Exported task ${taskId} to ${outPath}`);
     });
   });
 

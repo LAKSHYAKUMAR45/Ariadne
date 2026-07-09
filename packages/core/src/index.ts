@@ -35,6 +35,7 @@ export {
   redactCommand,
 } from './Redactor.js';
 export type { RedactionRule } from './Redactor.js';
+export { exportTaskMarkdown } from './Exporter.js';
 export {
   findWorkspaceRoot,
   stateDbPath,

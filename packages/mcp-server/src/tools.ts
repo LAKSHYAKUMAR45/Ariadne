@@ -11,7 +11,7 @@ import type {
   Todo,
   TodoStatus,
 } from '@ariadne/core';
-import { buildContext, syncTaskGit } from '@ariadne/core';
+import { buildContext, syncTaskGit, exportTaskMarkdown } from '@ariadne/core';
 import { readCurrentTaskId, setCurrentTaskId } from './workspace.js';
 
 /**
@@ -179,4 +179,20 @@ export interface GitSyncArgs {
 export function gitSync(store: TaskStore, workspaceRoot: string, args: GitSyncArgs): SyncGitResult {
   const taskId = resolveTaskId(store, workspaceRoot, args.taskId);
   return syncTaskGit(store, taskId, workspaceRoot);
+}
+
+export interface ExportTaskArgs {
+  taskId?: string;
+}
+
+/**
+ * Renders a task to Markdown as structured text — for a client to save,
+ * paste into a PR description, or hand to a human. Mirrors the CLI's
+ * `ariadne export` (which additionally writes the result to
+ * `.ariadne/export/<task-id>.md`; the MCP tool just returns the text so the
+ * calling client/editor decides where, if anywhere, to persist it).
+ */
+export function exportTask(store: TaskStore, workspaceRoot: string, args: ExportTaskArgs): { taskId: string; markdown: string } {
+  const taskId = resolveTaskId(store, workspaceRoot, args.taskId);
+  return { taskId, markdown: exportTaskMarkdown(store, taskId) };
 }
