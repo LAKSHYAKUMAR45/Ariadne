@@ -46,6 +46,7 @@ export {
   findWorkspaceRoot,
   stateDbPath,
   openWorkspaceStore,
+  openWorkspaceStoreReadOnly,
   readCurrentTaskId,
   setCurrentTaskId,
 } from './workspace.js';

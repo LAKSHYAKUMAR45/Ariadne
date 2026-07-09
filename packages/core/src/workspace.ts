@@ -39,6 +39,14 @@ export function stateDbPath(workspaceRoot: string): string {
  * Also ensures `.ariadne/` is gitignored (best-effort, see gitignore.ts) —
  * every surface opens its store through this one function, so this is the
  * single place that enforces the "gitignored by default" decision.
+ *
+ * Only use this for the workspace the caller is *actively working in*
+ * (task new/checkpoint/status of the current workspace, etc). For opens of
+ * *other* workspaces purely to read data — cross-workspace search, status
+ * of a task in a different workspace, `get_context` on someone else's
+ * task — use `openWorkspaceStoreReadOnly()` instead, so viewing another
+ * workspace's data never has the side effect of writing to its
+ * `.gitignore` or backfilling its tasks into the registry.
  */
 export function openWorkspaceStore(workspaceRoot: string): TaskStore {
   ensureGitignored(workspaceRoot);
@@ -55,6 +63,25 @@ export function openWorkspaceStore(workspaceRoot: string): TaskStore {
     // ignore — registry sync is a convenience, not a correctness requirement
   }
   return store;
+}
+
+/**
+ * Read-only counterpart to `openWorkspaceStore()`: opens the TaskStore for
+ * `workspaceRoot` without touching that workspace at all — no `.gitignore`
+ * enforcement, no registry backfill sync. Intended for opens of workspaces
+ * the caller isn't actively working in, purely to read data out of them
+ * (cross-workspace search, resolving/viewing a task that lives in another
+ * workspace, `get_context` on a cross-workspace id). The store returned is
+ * still fully functional for reads; callers simply shouldn't rely on it to
+ * have side-effected the target workspace the way `openWorkspaceStore()`
+ * does — and, by convention, shouldn't use it to *mutate* another
+ * workspace's data either (registry sync of new/changed tasks then
+ * wouldn't happen). Still linked to the registry for individual mutation
+ * syncing (via `TaskStore`'s constructor), since that's the mechanism that
+ * makes e.g. a cross-workspace `/todo done` immediately visible elsewhere.
+ */
+export function openWorkspaceStoreReadOnly(workspaceRoot: string): TaskStore {
+  return new TaskStore(stateDbPath(workspaceRoot), workspaceRoot);
 }
 
 

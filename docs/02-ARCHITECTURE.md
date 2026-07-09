@@ -142,7 +142,15 @@ hiccup never blocks the actual workspace write):
 2. `openWorkspaceStore()` does a full bulk backfill of that workspace's
    existing tasks into the registry every time it's opened — covering
    tasks created before the registry existed, and read-only sessions where
-   no mutation happens.
+   no mutation happens. Reserved for the workspace the caller is *actively
+   working in* (task new/checkpoint/etc, or the user's first explicit
+   open). Purely-reading opens of *other* workspaces — cross-workspace
+   search, resolving/viewing a task that lives elsewhere,
+   `get_context`/status on a cross-workspace id — go through
+   `openWorkspaceStoreReadOnly()` instead, which skips both the
+   `.gitignore` enforcement and the bulk backfill, so viewing another
+   workspace's data never has the side effect of writing to its files or
+   syncing its full task list into the registry.
 
 **Orchestration layer** — `packages/core/src/CrossWorkspace.ts` — builds on
 the registry to offer:

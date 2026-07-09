@@ -131,4 +131,45 @@ describe('CrossWorkspace (orchestration over Registry + real per-workspace store
 
     expect(resolveTaskAnyWorkspace('does-not-exist', rootA)).toBeUndefined();
   });
+
+  it('searchAcrossWorkspaces does not write a .gitignore into workspaces it only reads from', () => {
+    const rootA = makeWorkspace('ws-a');
+    const rootB = makeWorkspace('ws-b');
+
+    const storeA = openWorkspaceStore(rootA);
+    storeA.createTask({ title: 'Fix login bug', goal: null });
+    storeA.close();
+    const storeB = openWorkspaceStore(rootB);
+    storeB.createTask({ title: 'Unrelated task', goal: null });
+    storeB.close();
+
+    // openWorkspaceStore() above already wrote .gitignore once for each
+    // workspace (that's the normal "actively working in it" path) — delete
+    // both so we can tell whether the read-only cross-workspace search path
+    // re-creates them, which it must not.
+    fs.rmSync(path.join(rootA, '.gitignore'), { force: true });
+    fs.rmSync(path.join(rootB, '.gitignore'), { force: true });
+
+    searchAcrossWorkspaces('login');
+
+    expect(fs.existsSync(path.join(rootA, '.gitignore'))).toBe(false);
+    expect(fs.existsSync(path.join(rootB, '.gitignore'))).toBe(false);
+  });
+
+  it('resolveTaskAnyWorkspace does not write a .gitignore into the other workspace it transparently opens', () => {
+    const rootA = makeWorkspace('ws-a');
+    const rootB = makeWorkspace('ws-b');
+
+    const storeB = openWorkspaceStore(rootB);
+    const task = storeB.createTask({ title: 'Task only in B', goal: null });
+    storeB.close();
+    openWorkspaceStore(rootA).close();
+
+    fs.rmSync(path.join(rootB, '.gitignore'), { force: true });
+
+    const resolved = resolveTaskAnyWorkspace(task.id, rootA);
+    resolved?.store.close();
+
+    expect(fs.existsSync(path.join(rootB, '.gitignore'))).toBe(false);
+  });
 });

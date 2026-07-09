@@ -1,4 +1,4 @@
-import { openWorkspaceStore } from './workspace.js';
+import { openWorkspaceStore, openWorkspaceStoreReadOnly } from './workspace.js';
 import { openRegistry, listAllTasks, listWorkspaces, findTaskWorkspace, type TaskIndexEntry } from './Registry.js';
 import { searchWorkspace, type SearchResult } from './Search.js';
 import type { TaskStore } from './TaskStore.js';
@@ -66,7 +66,7 @@ export function searchAcrossWorkspaces(
   for (const { root } of workspaces) {
     let store: TaskStore | undefined;
     try {
-      store = openWorkspaceStore(root);
+      store = openWorkspaceStoreReadOnly(root);
       const matches = searchWorkspace(store, query, {
         limit: options.limit,
         maxMatchesPerTask: options.maxMatchesPerTask,
@@ -128,7 +128,7 @@ export function resolveTaskAnyWorkspace(taskId: string, currentWorkspaceRoot: st
   if (!otherRoot || otherRoot === currentWorkspaceRoot) return undefined;
 
   try {
-    const otherStore = openWorkspaceStore(otherRoot);
+    const otherStore = openWorkspaceStoreReadOnly(otherRoot);
     const task = otherStore.getTask(taskId);
     if (!task) {
       otherStore.close();
