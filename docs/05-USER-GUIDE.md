@@ -5,6 +5,19 @@ rationale and internals, see the other files in [`docs/`](.); for
 contributor/build details, see the top-level [README](../README.md) and each
 package's own README.*
 
+**Contents:**
+[1. What Ariadne does](#1-what-ariadne-actually-does-for-you) ·
+[2. Three surfaces](#2-the-three-ways-to-use-it) ·
+[3. Installing](#3-installing) ·
+[4. Quick start](#4-quick-start) ·
+[5. CLI](#5-using-the-cli) ·
+[6. MCP client](#6-using-an-mcp-client-claude-code-gemini-cli-codex-custom-agents-etc) ·
+[7. VS Code + Copilot Chat](#7-using-the-vs-code-extension-copilot-chat) ·
+[8. Cross-workspace](#8-working-across-multiple-workspaces) ·
+[9. Data & privacy](#9-data-privacy) ·
+[10. Troubleshooting](#10-troubleshooting) ·
+[11. Project status](#11-project-status)
+
 ## 1. What Ariadne actually does for you
 
 Every AI coding assistant forgets everything the moment you close the chat,

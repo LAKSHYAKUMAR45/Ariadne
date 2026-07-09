@@ -22,6 +22,55 @@ you're re-explaining everything from scratch. Ariadne's answer: stop treating
 the chat as the source of truth. Treat the **task** as the source of truth,
 and let any assistant read and write to it.
 
+## Features
+
+- **Task lifecycle** — create, list, switch, pause, complete, archive, and
+  reopen tasks; edit a task's title/goal after the fact (curation).
+- **Goals & checkpoints** — set a goal per task, and record leveled
+  checkpoint summaries (`micro`/`session`/`milestone`) as you make progress.
+- **Decisions** — record decisions with an optional rationale; list, edit,
+  or delete them; supersede an older decision with a newer one.
+- **Todos** — add, list, complete, reopen, block, edit, and delete todos;
+  blocked todos are surfaced separately from merely-pending ones.
+- **Errors** — record errors, mark them resolved/reopened, edit, or delete
+  them; list defaults to unresolved-only, with an `--all`/`all:true` option
+  to see everything.
+- **Open questions** — track things blocking progress that you're unsure
+  about, and resolve/reopen/edit/delete them like todos/errors.
+- **Ranked, token-budgeted status/resume** — `status`/`resume` (and the
+  `get_context`/`/status` equivalents) assemble goal, latest checkpoint,
+  open questions, unresolved errors, blocked todos, decisions, pending
+  todos, recent files, commits, and commands into one ranked summary,
+  trimmed to a token budget — fully rule-based, no LLM calls.
+- **Workspace + branch visibility** — status output shows which workspace
+  root and git branch a task belongs to, so cross-workspace results are
+  never ambiguous about where they came from.
+- **Search** — substring search across task titles/goals, checkpoints,
+  decisions, todos, errors, open questions, files, and commits.
+- **Passive capture (VS Code)** — saved files, terminal commands (secret-
+  redacted), and diagnostics (new/resolved errors) are recorded against the
+  current task automatically, with guardrails for "no current task" and
+  git branch/task mismatches.
+- **`ariadne exec`** — a CLI-native passive-capture equivalent for
+  non-VS Code workflows: runs a command live and auto-records it (and any
+  failure) against the current task.
+- **Git integration** — `git-sync`/`/git-sync`/`git_sync` records the
+  current branch and any new commits into a task on demand, for workflows
+  where the background watcher hasn't run yet.
+- **Markdown export** — render a task to Markdown (`export`/`/export`/
+  `export_task`), the only opt-in way task history leaves the SQLite
+  database (e.g. to paste into a PR description).
+- **Cross-workspace task discovery** — a global registry (`~/.ariadne/registry.db`)
+  lets you list/search/act on tasks from *any* workspace you've used Ariadne
+  in, without needing to `cd` there first — while each workspace's own
+  database stays the sole source of truth for its own tasks.
+- **Registry maintenance & backup** — `workspace list`/`prune`/`forget` to
+  manage the cross-workspace index, and `backup`/`restore` to snapshot and
+  recover a workspace's state database.
+- **Three interchangeable surfaces, one shared core** — CLI, MCP server,
+  and VS Code chat participant all read/write the exact same
+  `@ariadne/core` data, so nothing is surface-specific or out of sync.
+
 ## How it works
 
 One shared core library, wrapped by three thin, interchangeable surfaces —
