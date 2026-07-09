@@ -52,6 +52,10 @@
       {
         "command": "ariadne.status",
         "title": "Ariadne: Show Task Status"
+      },
+      {
+        "command": "ariadne.selectWorkspaceFolder",
+        "title": "Ariadne: Select Workspace Folder"
       }
     ]
   },

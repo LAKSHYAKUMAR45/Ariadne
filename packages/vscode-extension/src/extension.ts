@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { openStoreForCurrentWorkspace, getCurrentTaskId, setCurrentTask } from './workspace.js';
+import { openStoreForCurrentWorkspace, getCurrentTaskId, setCurrentTask, initWorkspaceResolution, promptSelectWorkspaceFolder } from './workspace.js';
 import { handleChatCommand } from './commands.js';
 import { closeAllStores, closeStore } from './storeCache.js';
 import { findWorkspaceRoot } from '@ariadne/core';
@@ -15,10 +15,15 @@ function logError(context: string, err: unknown): string {
 export function activate(context: vscode.ExtensionContext): void {
   output = vscode.window.createOutputChannel('Ariadne');
   context.subscriptions.push(output);
+  initWorkspaceResolution(context);
 
   const participant = vscode.chat.createChatParticipant('ariadne.chat', handleRequest);
   participant.iconPath = new vscode.ThemeIcon('compass');
   context.subscriptions.push(participant);
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('ariadne.selectWorkspaceFolder', () => promptSelectWorkspaceFolder()),
+  );
 
   // Close (and evict) the cached store for any folder removed from the workspace.
   context.subscriptions.push(
