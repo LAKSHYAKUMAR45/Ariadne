@@ -15,13 +15,22 @@
     "url": "https://github.com/LAKSHYAKUMAR45/Ariadne/issues"
   },
   "homepage": "https://github.com/LAKSHYAKUMAR45/Ariadne#readme",
-  "private": true,
+  "private": false,
   "engines": {
     "vscode": "^1.93.0"
   },
   "categories": [
     "Chat",
     "Other"
+  ],
+  "keywords": [
+    "copilot",
+    "copilot chat",
+    "task management",
+    "context",
+    "mcp",
+    "ai agent",
+    "productivity"
   ],
   "activationEvents": [],
   "main": "./dist/extension.js",
