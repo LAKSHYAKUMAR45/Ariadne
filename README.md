@@ -53,7 +53,9 @@ dashboard.
   and write the same task state, so switching AI assistants doesn't lose
   anything.
 
-See [`docs/`](docs/) for the full design docs (product requirements,
+New to Ariadne? Read [`docs/05-USER-GUIDE.md`](docs/05-USER-GUIDE.md) for a
+practical walkthrough of installing and using all three surfaces. See
+[`docs/`](docs/) for the full design docs (product requirements,
 architecture, data model, and roadmap).
 
 ## Packages
