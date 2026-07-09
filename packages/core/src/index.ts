@@ -23,7 +23,13 @@ export {
   maybeCheckpointOnIdle,
   rollupCheckpoints,
   setTaskStatusWithRollup,
+  ruleBasedSummarizer,
+  maybeCheckpointOnFileActivityWithSummarizer,
+  checkpointOnCommitWithSummarizer,
+  checkpointOnErrorWithSummarizer,
+  maybeCheckpointOnIdleWithSummarizer,
 } from './CheckpointEngine.js';
+export type { CheckpointSummarizer } from './CheckpointEngine.js';
 export {
   getHeadSha,
   getCurrentBranch,

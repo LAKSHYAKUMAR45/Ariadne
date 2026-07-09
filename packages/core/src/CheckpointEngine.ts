@@ -39,6 +39,50 @@ export function summarizeIdle(filesTouched: number): string {
 }
 
 // ---------------------------------------------------------------------
+// Pluggable summarizer hook (docs/04-ROADMAP.md Phase 5)
+// ---------------------------------------------------------------------
+
+/**
+ * The interface an LLM (or any other non-rule-based) summarizer plugs into.
+ * Every method mirrors one of the rule-based `summarize*` functions above
+ * but returns a `Promise<string>`, since a real summarizer will typically
+ * make a network call. `ruleBasedSummarizer` below is the MVP's default
+ * implementation, wired in automatically by the `*WithSummarizer` triggers
+ * unless a caller supplies its own (e.g. a `CheckpointSummarizer` backed by
+ * an LLM, provided by a plugin from `packages/plugins/*`).
+ *
+ * This is a plain interface, not routed through `PluginRegistry`
+ * (`PluginRegistry.ts`) — a plugin that wants to provide LLM summaries can
+ * simply export an object satisfying this interface, and the *caller*
+ * (CLI/MCP server/VS Code extension) decides whether to pass it to the
+ * `*WithSummarizer` triggers instead of relying on the rule-based default.
+ * Nothing calls these triggers automatically yet (see roadmap §8).
+ */
+export interface CheckpointSummarizer {
+  summarizeFileBatch(paths: string[]): Promise<string>;
+  summarizeCommit(sha: string, message: string | null): Promise<string>;
+  summarizeError(message: string): Promise<string>;
+  summarizeIdle(filesTouched: number): Promise<string>;
+}
+
+/** The MVP default: wraps the plain rule-based `summarize*` functions above in `CheckpointSummarizer`'s async shape. */
+export const ruleBasedSummarizer: CheckpointSummarizer = {
+  async summarizeFileBatch(paths) {
+    return summarizeFileBatch(paths);
+  },
+  async summarizeCommit(sha, message) {
+    return summarizeCommit(sha, message);
+  },
+  async summarizeError(message) {
+    return summarizeError(message);
+  },
+  async summarizeIdle(filesTouched) {
+    return summarizeIdle(filesTouched);
+  },
+};
+
+
+// ---------------------------------------------------------------------
 // Triggers
 // ---------------------------------------------------------------------
 
@@ -96,6 +140,80 @@ export function maybeCheckpointOnIdle(
   if (sinceMs < idleMinutes * 60_000) return null;
 
   return store.createCheckpoint({ taskId, level: 'micro', summary: summarizeIdle(touchedSince.length) });
+}
+
+// ---------------------------------------------------------------------
+// Summarizer-aware triggers (opt-in; same rules, pluggable summary source)
+// ---------------------------------------------------------------------
+//
+// These mirror the four triggers above exactly (same trigger conditions,
+// same checkpoint level), but call into a `CheckpointSummarizer` to produce
+// the summary text instead of always using the rule-based templates, and
+// are therefore async. No caller uses these yet — the CLI, MCP server, and
+// VS Code extension's passive-capture surface all still call the
+// synchronous rule-based triggers above, since the rule-based summarizer
+// remains the MVP default (docs/04-ROADMAP.md §1). A caller that wants LLM
+// (or otherwise non-rule-based) summaries opts in per-call-site by passing
+// its own `CheckpointSummarizer` here instead.
+
+/** Summarizer-aware equivalent of `maybeCheckpointOnFileActivity`. */
+export async function maybeCheckpointOnFileActivityWithSummarizer(
+  store: TaskStore,
+  taskId: string,
+  summarizer: CheckpointSummarizer = ruleBasedSummarizer,
+  options: { threshold?: number } = {},
+): Promise<Checkpoint | null> {
+  const threshold = options.threshold ?? DEFAULT_FILE_TRIGGER_THRESHOLD;
+  const latest = store.latestCheckpoint(taskId);
+  const files = store.listFiles(taskId);
+  const touchedSince = latest ? files.filter((f) => f.lastTouched > latest.createdAt) : files;
+  if (touchedSince.length < threshold) return null;
+  const summary = await summarizer.summarizeFileBatch(touchedSince.map((f) => f.path));
+  return store.createCheckpoint({ taskId, level: 'micro', summary });
+}
+
+/** Summarizer-aware equivalent of `checkpointOnCommit`. */
+export async function checkpointOnCommitWithSummarizer(
+  store: TaskStore,
+  taskId: string,
+  sha: string,
+  message: string | null,
+  summarizer: CheckpointSummarizer = ruleBasedSummarizer,
+): Promise<Checkpoint> {
+  const summary = await summarizer.summarizeCommit(sha, message);
+  return store.createCheckpoint({ taskId, level: 'micro', summary });
+}
+
+/** Summarizer-aware equivalent of `checkpointOnError`. */
+export async function checkpointOnErrorWithSummarizer(
+  store: TaskStore,
+  taskId: string,
+  message: string,
+  summarizer: CheckpointSummarizer = ruleBasedSummarizer,
+): Promise<Checkpoint> {
+  const summary = await summarizer.summarizeError(message);
+  return store.createCheckpoint({ taskId, level: 'micro', summary });
+}
+
+/** Summarizer-aware equivalent of `maybeCheckpointOnIdle`. */
+export async function maybeCheckpointOnIdleWithSummarizer(
+  store: TaskStore,
+  taskId: string,
+  summarizer: CheckpointSummarizer = ruleBasedSummarizer,
+  options: { idleMinutes?: number; now?: Date } = {},
+): Promise<Checkpoint | null> {
+  const idleMinutes = options.idleMinutes ?? DEFAULT_IDLE_TRIGGER_MINUTES;
+  const now = options.now ?? new Date();
+  const latest = store.latestCheckpoint(taskId);
+  const files = store.listFiles(taskId);
+  const touchedSince = latest ? files.filter((f) => f.lastTouched > latest.createdAt) : files;
+  if (touchedSince.length === 0) return null;
+
+  const sinceMs = latest ? now.getTime() - new Date(latest.createdAt).getTime() : Infinity;
+  if (sinceMs < idleMinutes * 60_000) return null;
+
+  const summary = await summarizer.summarizeIdle(touchedSince.length);
+  return store.createCheckpoint({ taskId, level: 'micro', summary });
 }
 
 // ---------------------------------------------------------------------

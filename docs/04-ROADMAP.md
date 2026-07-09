@@ -37,9 +37,18 @@
 ## 3. Explicitly Deferred (Stretch Goals) — still not started
 - Tree view / timeline / knowledge-base browser UI (secondary per product
   direction; can ship in v1.1 once core loop is validated).
-- LLM-assisted summarization plugin (opt-in, bring-your-own-model) — can now
-  be built as an `AriadnePlugin` subscribed to `checkpoint.created` (see §4
-  Phase 5), but hasn't been.
+- LLM-assisted summarization plugin (opt-in, bring-your-own-model) —
+  **the pluggable hook now exists**: `CheckpointSummarizer`
+  (`packages/core/src/CheckpointEngine.ts`) is an interface any summarizer
+  (rule-based or LLM-backed) can implement, and `ruleBasedSummarizer` is the
+  MVP default. The `*WithSummarizer` triggers (`maybeCheckpointOnFileActivityWithSummarizer`,
+  `checkpointOnCommitWithSummarizer`, `checkpointOnErrorWithSummarizer`,
+  `maybeCheckpointOnIdleWithSummarizer`) accept a custom summarizer and are
+  otherwise identical to the existing sync rule-based triggers. **Not yet
+  done:** no actual LLM-backed `CheckpointSummarizer` implementation exists,
+  and no call site (CLI/MCP server/VS Code extension) opts into the
+  `*WithSummarizer` triggers yet — they all still call the original
+  synchronous rule-based triggers.
 - Reference plugins beyond `console-logger` (Jira, GitHub Issues, Linear,
   Slack, Obsidian export, local LLM backends) — the `PluginRegistry`
   interface exists (§4 Phase 5) but none of these have been built, and no
@@ -55,7 +64,7 @@
   (token counting is shipped as a `chars / 4` heuristic in `ContextBuilder.ts`,
   not embedding-based ranking).
 
-## 4. Technical Roadmap (Phased) — Phases 0–4 complete, Phase 5 not started
+## 4. Technical Roadmap (Phased) — Phases 0–4 complete, Phase 5 interfaces shipped
 1. ✅ **Phase 0 — Core skeleton:** SQLite schema + TaskStore CRUD + unit tests.
    Shipped (`packages/core/src/TaskStore.ts` + tests).
 2. ✅ **Phase 1 — Context loop:** ContextBuilder + CheckpointEngine (rule-based).
@@ -90,6 +99,14 @@
    (CLI/MCP server/VS Code extension never construct one or call `emit(...)`
    today), and no real-world plugin (Jira/GitHub Issues/Linear/Slack sync,
    Obsidian export, LLM summarization) has been built against it yet.
+7. 🟡 **LLM summarization hook: interface shipped, no LLM implementation
+   yet.** `CheckpointSummarizer` and the `*WithSummarizer` triggers
+   (`packages/core/src/CheckpointEngine.ts`) let a caller swap in a custom
+   summarizer (e.g. LLM-backed) in place of the rule-based default,
+   independently of `PluginRegistry`. **Not yet done:** no LLM-backed
+   `CheckpointSummarizer` exists, and no call site opts into the
+   `*WithSummarizer` triggers — everything still uses the original
+   synchronous rule-based triggers.
 
 ## 5. Repo / OSS Structure
 - **Monorepo** (pnpm workspaces): `packages/core`, `packages/cli`,
@@ -166,14 +183,16 @@ what's next*, not building the core loop:
    categories, license) — the remaining step is obtaining an Azure DevOps PAT
    and publisher account and deciding on a publish date, or documenting why
    it's staying VSIX-only for now.
-2. **Wire `PluginRegistry` into a real call site and build one real plugin.**
-   The interface and reference `console-logger` plugin are shipped
-   (`packages/core/src/PluginRegistry.ts`, `packages/plugins/console-logger`)
-   but nothing in the CLI/MCP server/VS Code extension constructs a registry
-   or calls `emit(...)` yet, and no plugin talks to a real external system.
-   Picking one thin real plugin (e.g. GitHub Issues sync on `todo.added`, or
-   an LLM summarizer subscribed to `checkpoint.created`) would validate the
-   interface shape before more plugins are built against it.
+2. **Wire `PluginRegistry` (and/or `CheckpointSummarizer`) into a real call
+   site, and build one real, non-reference implementation.** Both
+   interfaces are shipped (`packages/core/src/PluginRegistry.ts`,
+   `CheckpointEngine.ts`'s `CheckpointSummarizer` + `*WithSummarizer`
+   triggers; reference `packages/plugins/console-logger`), but nothing in
+   the CLI/MCP server/VS Code extension constructs a `PluginRegistry` or
+   opts into the `*WithSummarizer` triggers yet, and no plugin talks to a
+   real external system. Picking one thin real plugin (e.g. GitHub Issues
+   sync on `todo.added`, or an actual LLM-backed `CheckpointSummarizer`)
+   would validate both interface shapes before more are built against them.
 3. **Decide on the tree-view/timeline UI** (§3): still deferred: confirm it's
    still out of scope for v1.1, or scope a minimal read-only version.
 4. **Broaden integration-test coverage** on the lighter-tested surfaces (CLI,
