@@ -19,7 +19,17 @@ describe('ariadne CLI surface', () => {
         'search',
         'git-sync',
         'export',
+        'workspace',
+        'backup',
+        'restore',
       ]),
+    );
+  });
+
+  it('registers workspace subcommands', () => {
+    const workspaceCmd = program.commands.find((c) => c.name() === 'workspace')!;
+    expect(workspaceCmd.commands.map((c) => c.name())).toEqual(
+      expect.arrayContaining(['list', 'prune', 'forget']),
     );
   });
 

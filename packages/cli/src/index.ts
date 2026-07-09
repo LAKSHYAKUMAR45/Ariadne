@@ -11,6 +11,11 @@ import {
   listTasksAcrossWorkspaces,
   searchAcrossWorkspaces,
   setTaskStatusWithRollup,
+  openRegistry,
+  getRegistryPath,
+  listWorkspaces,
+  forgetWorkspace,
+  pruneMissingWorkspaces,
 } from '@ariadne/core';
 import { openWorkspaceStore, findWorkspaceRoot, stateDbPath } from './workspace.js';
 import { readCurrentTaskId, setCurrentTaskId } from './currentTask.js';
@@ -680,6 +685,95 @@ program
       fs.writeFileSync(outPath, markdown, 'utf8');
       console.log(`Exported task ${taskId} to ${outPath}`);
     });
+  });
+
+const workspace = program.command('workspace').description('Manage the cross-workspace registry (~/.ariadne/registry.db)');
+
+workspace
+  .command('list')
+  .description('List every workspace root Ariadne has ever seen, most recently used first')
+  .action(() => {
+    const registryDb = openRegistry();
+    const workspaces = listWorkspaces(registryDb);
+    if (workspaces.length === 0) {
+      console.log('No known workspaces yet.');
+      return;
+    }
+    for (const w of workspaces) {
+      const exists = fs.existsSync(w.root) ? '' : '  (missing on disk)';
+      console.log(`  ${w.root}  (last seen ${w.lastSeenAt})${exists}`);
+    }
+  });
+
+workspace
+  .command('prune')
+  .description('Remove registry entries for workspace roots that no longer exist on disk')
+  .action(() => {
+    const registryDb = openRegistry();
+    const pruned = pruneMissingWorkspaces(registryDb);
+    if (pruned.length === 0) {
+      console.log('Nothing to prune — every known workspace still exists on disk.');
+      return;
+    }
+    console.log(`Pruned ${pruned.length} workspace(s) whose directory no longer exists:`);
+    for (const root of pruned) console.log(`  - ${root}`);
+  });
+
+workspace
+  .command('forget <root>')
+  .description('Remove a workspace root (and its indexed tasks) from the registry outright, without checking whether it still exists on disk')
+  .action((root: string) => {
+    const registryDb = openRegistry();
+    const resolvedRoot = path.resolve(root);
+    forgetWorkspace(registryDb, resolvedRoot);
+    console.log(`Forgot workspace ${resolvedRoot}. Its own .ariadne/state.db (if it still exists) is untouched.`);
+  });
+
+program
+  .command('backup')
+  .description("Copy the current workspace's state.db (and the shared registry) to a timestamped snapshot")
+  .option('-o, --out <dir>', 'Output directory (defaults to <workspace-root>/.ariadne/backups)')
+  .action((opts: { out?: string }) => {
+    const root = findWorkspaceRoot();
+    const dbPath = stateDbPath(root);
+    if (!fs.existsSync(dbPath)) {
+      console.error(`No state db found at ${dbPath} — nothing to back up.`);
+      process.exit(1);
+    }
+    const outDir = opts.out ?? path.join(root, '.ariadne', 'backups');
+    fs.mkdirSync(outDir, { recursive: true });
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const statePath = path.join(outDir, `state-${timestamp}.db`);
+    fs.copyFileSync(dbPath, statePath);
+    console.log(`Backed up workspace state db to ${statePath}`);
+
+    const registryPath = getRegistryPath();
+    if (fs.existsSync(registryPath)) {
+      const registryBackupPath = path.join(outDir, `registry-${timestamp}.db`);
+      fs.copyFileSync(registryPath, registryBackupPath);
+      console.log(`Backed up cross-workspace registry to ${registryBackupPath}`);
+    }
+  });
+
+program
+  .command('restore <path>')
+  .description('Restore a workspace state db (or registry db) snapshot created by "ariadne backup"')
+  .option('--registry', 'Restore into the shared cross-workspace registry instead of this workspace\'s state db')
+  .action((snapshotPath: string, opts: { registry?: boolean }) => {
+    const resolvedSnapshot = path.resolve(snapshotPath);
+    if (!fs.existsSync(resolvedSnapshot)) {
+      console.error(`Snapshot not found: ${resolvedSnapshot}`);
+      process.exit(1);
+    }
+    const target = opts.registry ? getRegistryPath() : stateDbPath(findWorkspaceRoot());
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    if (fs.existsSync(target)) {
+      const preRestoreBackup = `${target}.pre-restore-${Date.now()}.bak`;
+      fs.copyFileSync(target, preRestoreBackup);
+      console.log(`Existing db backed up to ${preRestoreBackup} before restoring.`);
+    }
+    fs.copyFileSync(resolvedSnapshot, target);
+    console.log(`Restored ${resolvedSnapshot} to ${target}`);
   });
 
 export { program };

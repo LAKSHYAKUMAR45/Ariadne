@@ -12,6 +12,8 @@ import {
   findTaskWorkspace,
   upsertTaskIndex,
   syncWorkspaceTasks,
+  forgetWorkspace,
+  pruneMissingWorkspaces,
 } from '../src/Registry.js';
 
 describe('Registry (cross-workspace task index)', () => {
@@ -175,6 +177,62 @@ describe('Registry (cross-workspace task index)', () => {
       expect(roots).toEqual([rootA, rootB].sort());
 
       expect(findTaskWorkspace(registryDb, taskA.id)).toBe(rootA);
+      expect(findTaskWorkspace(registryDb, taskB.id)).toBe(rootB);
+    } finally {
+      process.env.ARIADNE_REGISTRY_PATH = previousRegistryPath;
+      closeRegistry();
+    }
+  });
+
+  it('forgetWorkspace removes a workspace root and all of its indexed tasks', () => {
+    const previousRegistryPath = process.env.ARIADNE_REGISTRY_PATH;
+    process.env.ARIADNE_REGISTRY_PATH = registryPath;
+    closeRegistry();
+    try {
+      const rootA = path.join(tmpDir, 'ws-a');
+      const rootB = path.join(tmpDir, 'ws-b');
+      const storeA = openWorkspaceStore(rootA);
+      const taskA = storeA.createTask({ title: 'Task A', goal: null });
+      storeA.close();
+      const storeB = openWorkspaceStore(rootB);
+      const taskB = storeB.createTask({ title: 'Task B', goal: null });
+      storeB.close();
+
+      const registryDb = openRegistry(registryPath);
+      forgetWorkspace(registryDb, rootA);
+
+      expect(listWorkspaces(registryDb).map((w) => w.root)).toEqual([rootB]);
+      expect(findTaskWorkspace(registryDb, taskA.id)).toBeUndefined();
+      expect(findTaskWorkspace(registryDb, taskB.id)).toBe(rootB);
+    } finally {
+      process.env.ARIADNE_REGISTRY_PATH = previousRegistryPath;
+      closeRegistry();
+    }
+  });
+
+  it('pruneMissingWorkspaces removes only workspaces whose directory no longer exists on disk', () => {
+    const previousRegistryPath = process.env.ARIADNE_REGISTRY_PATH;
+    process.env.ARIADNE_REGISTRY_PATH = registryPath;
+    closeRegistry();
+    try {
+      const rootA = path.join(tmpDir, 'ws-a');
+      const rootB = path.join(tmpDir, 'ws-b');
+      const storeA = openWorkspaceStore(rootA);
+      const taskA = storeA.createTask({ title: 'Task A', goal: null });
+      storeA.close();
+      const storeB = openWorkspaceStore(rootB);
+      const taskB = storeB.createTask({ title: 'Task B', goal: null });
+      storeB.close();
+
+      // Simulate rootA having been deleted from disk since it was last seen.
+      fs.rmSync(rootA, { recursive: true, force: true });
+
+      const registryDb = openRegistry(registryPath);
+      const pruned = pruneMissingWorkspaces(registryDb);
+
+      expect(pruned).toEqual([rootA]);
+      expect(listWorkspaces(registryDb).map((w) => w.root)).toEqual([rootB]);
+      expect(findTaskWorkspace(registryDb, taskA.id)).toBeUndefined();
       expect(findTaskWorkspace(registryDb, taskB.id)).toBe(rootB);
     } finally {
       process.env.ARIADNE_REGISTRY_PATH = previousRegistryPath;

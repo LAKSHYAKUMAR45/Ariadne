@@ -202,3 +202,36 @@ export function findTaskWorkspace(registryDb: DatabaseType, taskId: string): str
     | undefined;
   return row?.workspace_root;
 }
+
+/**
+ * Removes a workspace root (and every task indexed under it) from the
+ * registry outright — an explicit "forget this workspace" operation, e.g.
+ * after intentionally deleting or relocating a workspace's directory. This
+ * only touches the registry index; it never touches the workspace's own
+ * `.ariadne/state.db` (which may not even exist any more).
+ */
+export function forgetWorkspace(registryDb: DatabaseType, workspaceRoot: string): void {
+  const forget = registryDb.transaction((root: string) => {
+    registryDb.prepare(`DELETE FROM tasks_index WHERE workspace_root = ?`).run(root);
+    registryDb.prepare(`DELETE FROM workspaces WHERE root = ?`).run(root);
+  });
+  forget(workspaceRoot);
+}
+
+/**
+ * Removes every registry entry (workspace + its indexed tasks) whose root
+ * no longer exists on disk — the registry's prune/gc story for workspaces
+ * that were deleted or moved without ever calling `forgetWorkspace`
+ * explicitly. Safe to call opportunistically (e.g. before `task list
+ * --all-workspaces` / `search --all-workspaces`), since a missing directory
+ * can only mean the workspace is genuinely gone (or on unmounted storage —
+ * in which case this errs on the side of pruning it; it'll simply get
+ * re-added the next time that workspace's store is opened again). Returns
+ * the list of roots that were pruned, for reporting to the user.
+ */
+export function pruneMissingWorkspaces(registryDb: DatabaseType): string[] {
+  const roots = listWorkspaces(registryDb).map((w) => w.root);
+  const missing = roots.filter((root) => !fs.existsSync(root));
+  for (const root of missing) forgetWorkspace(registryDb, root);
+  return missing;
+}

@@ -60,6 +60,8 @@ export {
   listWorkspaces,
   listAllTasks,
   findTaskWorkspace,
+  forgetWorkspace,
+  pruneMissingWorkspaces,
 } from './Registry.js';
 export type { TaskIndexEntry } from './Registry.js';
 export {

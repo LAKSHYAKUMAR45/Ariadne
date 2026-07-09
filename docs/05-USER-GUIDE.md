@@ -138,6 +138,12 @@ ariadne export [--task <id>] [--out <path>]    # render task to Markdown
 ariadne where                                  # print resolved workspace root + db path
 
 ariadne exec -- <command> [args...]            # run a command, auto-recording it and any failure
+
+ariadne workspace list                         # list every known workspace (cross-workspace registry)
+ariadne workspace prune                        # remove registry entries for deleted workspaces
+ariadne workspace forget <root>                # remove one workspace from the registry explicitly
+ariadne backup [--out <dir>]                   # snapshot state.db + registry.db
+ariadne restore <path> [--registry]            # restore a snapshot
 ```
 
 Run `ariadne --help` or `ariadne <command> --help` for the authoritative list
@@ -287,6 +293,28 @@ current task in workspace A never affects workspace B.
 - Deleting `.ariadne/` in a workspace removes all of that workspace's task
   history; it will also just stop showing up in cross-workspace results
   the next time the registry is consulted.
+
+**Registry maintenance:**
+```bash
+ariadne workspace list                  # every workspace root ever seen, flags ones missing on disk
+ariadne workspace prune                 # forget every workspace whose directory no longer exists
+ariadne workspace forget <root>         # forget one workspace root explicitly (its own state.db is untouched)
+```
+The registry (`~/.ariadne/registry.db`) is just an index — forgetting or
+pruning a workspace only removes it from cross-workspace discovery; it
+never touches that workspace's own `.ariadne/state.db`. A forgotten
+workspace's tasks reappear automatically the next time its store is opened
+again (e.g. `cd`-ing back into it and running any command).
+
+**Backup & restore:**
+```bash
+ariadne backup [--out <dir>]            # copy state.db + registry.db to a timestamped snapshot
+ariadne restore <path> [--registry]     # restore a snapshot over state.db (or the registry, with --registry)
+```
+`backup` defaults to `<workspace-root>/.ariadne/backups/`. `restore` always
+backs up whatever db is currently at the target path first (as
+`<path>.pre-restore-<timestamp>.bak`), so a bad restore is itself
+recoverable.
 
 ## 10. Troubleshooting
 
