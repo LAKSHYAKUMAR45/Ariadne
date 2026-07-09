@@ -1,5 +1,7 @@
 export { TaskStore } from './TaskStore.js';
 export { openDatabase } from './db.js';
+export { runMigrations, MIGRATIONS } from './migrations.js';
+export type { Migration } from './migrations.js';
 export { SCHEMA_SQL, SCHEMA_VERSION } from './schema.js';
 export * from './types.js';
 export {

@@ -114,6 +114,16 @@ CREATE TABLE open_questions (
 Indexes: `(task_id, created_at)` on every child table for fast "most recent N"
 queries used heavily by the context builder.
 
+**Schema migrations.** A `schema_meta(key, value)` table tracks the current
+`schema_version`. `packages/core/src/migrations.ts` exports an ordered
+`MIGRATIONS` list and a `runMigrations(db)` runner that's called from every
+`openDatabase()` (i.e. transparently for every surface — CLI, MCP server,
+extension), applying any pending migration (by version, ascending) inside
+its own transaction and bumping `schema_version` after each. Currently
+`MIGRATIONS` is empty — v1 is still the only schema version shipped — but
+the runner itself is fully implemented and tested, so future schema changes
+just append an entry rather than needing new infrastructure.
+
 ## 4. Context Package (Output Shape)
 `task.getContext(taskId, tokenBudget)` returns a structured object — not raw
 Markdown — so each client (chat participant, CLI, MCP resource) can render it how
