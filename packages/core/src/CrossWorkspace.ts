@@ -42,17 +42,33 @@ export interface CrossWorkspaceSearchOptions {
   maxMatchesPerTask?: number;
   /** Cap on how many tasks to return across ALL workspaces combined (applied after merging). Default 20. */
   totalLimit?: number;
+  /** Search only this many most-recently-touched workspaces by default. Ignored when `allWorkspaces` is true. Default 20. */
+  recentOnly?: number;
+  /** Force an exhaustive scan of every known workspace, even older ones outside the default recent window. */
+  allWorkspaces?: boolean;
 }
 
+const DEFAULT_RECENT_WORKSPACES = 20;
+
 /**
- * Searches every known workspace's real store (not just registry metadata),
- * so this reuses the full cross-entity `searchWorkspace()` — checkpoints,
+ * Searches known workspaces' real stores (not just registry metadata), so
+ * this reuses the full cross-entity `searchWorkspace()` — checkpoints,
  * decisions, todos, errors, open questions, files, commits, not just titles.
- * Opens and closes a short-lived `TaskStore` per known workspace; at
- * solo-dev scale (a handful to dozens of workspaces) this is cheap enough
- * to do synchronously on every call rather than needing to cache anything.
- * A workspace whose store fails to open (e.g. deleted from disk since it
- * was last seen) is skipped rather than failing the whole search.
+ *
+ * By default this only opens the most recently touched workspaces (currently
+ * 20, ordered by `listWorkspaces()` / `lastSeenAt`) so the common case stays
+ * cheap as the registry grows. Pass `{ recentOnly: N }` to widen or narrow
+ * that window, or `{ allWorkspaces: true }` to force an exhaustive scan of
+ * every known workspace.
+ *
+ * We intentionally do NOT use the registry's task-title index to exclude
+ * older workspaces before opening them: the registry does not index
+ * checkpoints, decisions, todos, errors, questions, files, or commits, so
+ * title-only exclusion would create false negatives for legitimate matches
+ * that live only in a workspace's real `state.db`.
+ *
+ * A workspace whose store fails to open (e.g. deleted from disk since it was
+ * last seen) is skipped rather than failing the whole search.
  */
 export function searchAcrossWorkspaces(
   query: string,
@@ -60,10 +76,13 @@ export function searchAcrossWorkspaces(
 ): CrossWorkspaceSearchResult[] {
   const registryDb = openRegistry();
   const workspaces = listWorkspaces(registryDb);
+  const workspacesToSearch = options.allWorkspaces
+    ? workspaces
+    : workspaces.slice(0, Math.max(0, options.recentOnly ?? DEFAULT_RECENT_WORKSPACES));
   const totalLimit = options.totalLimit ?? 20;
 
   const results: CrossWorkspaceSearchResult[] = [];
-  for (const { root } of workspaces) {
+  for (const { root } of workspacesToSearch) {
     let store: TaskStore | undefined;
     try {
       store = openWorkspaceStoreReadOnly(root);

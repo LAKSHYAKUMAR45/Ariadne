@@ -456,7 +456,7 @@ export function handleChatCommand(store: TaskStore, input: ChatCommandInput): Ch
       const { allWorkspaces, rest: query } = extractAllWorkspacesFlag(prompt);
       if (!query.trim()) return { markdown: 'Usage: `/search <query> [--all-workspaces]`.' };
       if (allWorkspaces) {
-        const crossResults = searchAcrossWorkspaces(query.trim());
+        const crossResults = searchAcrossWorkspaces(query.trim(), { allWorkspaces: true });
         if (crossResults.length === 0) return { markdown: `No matches for "${query.trim()}" in any known workspace.` };
         const lines = crossResults.map((r) => {
           const matchLines = r.matches.map((m) => `  - (${m.category}) ${m.text}`).join('\n');

@@ -606,7 +606,7 @@ program
   .option('-a, --all-workspaces', 'Search every known workspace, not just this one')
   .action((query: string, opts: { limit?: number; allWorkspaces?: boolean }) => {
     if (opts.allWorkspaces) {
-      const results = searchAcrossWorkspaces(query, opts.limit ? { totalLimit: opts.limit } : undefined);
+      const results = searchAcrossWorkspaces(query, { allWorkspaces: true, ...(opts.limit ? { totalLimit: opts.limit } : {}) });
       if (results.length === 0) {
         console.log('No matches found in any known workspace.');
         return;

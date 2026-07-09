@@ -463,7 +463,7 @@ export function searchTasks(
   args: SearchArgs,
 ): SearchResult[] | CrossWorkspaceSearchResult[] {
   if (args.allWorkspaces) {
-    return searchAcrossWorkspaces(args.query, args.limit ? { limit: args.limit } : undefined);
+    return searchAcrossWorkspaces(args.query, { allWorkspaces: true, ...(args.limit ? { limit: args.limit } : {}) });
   }
   return searchWorkspace(store, args.query, args.limit ? { limit: args.limit } : undefined);
 }

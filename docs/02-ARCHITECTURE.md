@@ -156,10 +156,20 @@ hiccup never blocks the actual workspace write):
 the registry to offer:
 - `listTasksAcrossWorkspaces()` / `listKnownWorkspaces()` — fast, registry-only
   reads, no per-workspace store opens.
-- `searchAcrossWorkspaces(query)` — opens every known workspace's real store
+- `searchAcrossWorkspaces(query)` — by default opens only the 20 most
+  recently-touched known workspaces' real stores (via `openWorkspaceStoreReadOnly`)
   and reuses the existing single-workspace `searchWorkspace()`, merging and
   re-ranking results tagged with `workspaceRoot`; silently skips a workspace
-  whose directory no longer exists on disk.
+  whose directory no longer exists on disk. Pass `{ recentOnly: N }` to widen
+  the window or `{ allWorkspaces: true }` to force an exhaustive scan of
+  every known workspace (this is what every surface's explicit
+  `--all-workspaces` flag/option maps to, preserving the "search literally
+  everywhere" guarantee that flag implies). The registry's own indexed
+  fields (task titles) are deliberately never used to *exclude* older
+  workspaces from a search — the registry doesn't index checkpoints,
+  decisions, todos, errors, or questions, so a title-only prefilter could
+  produce false negatives for real matches living only in a workspace's own
+  `state.db`.
 - `resolveTaskAnyWorkspace(taskId, currentWorkspaceRoot)` — tries the current
   workspace first; if the id isn't found there, consults the registry to
   find the real owning workspace and transparently opens *that* workspace's

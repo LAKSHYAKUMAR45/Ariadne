@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
@@ -23,6 +23,7 @@ describe('CrossWorkspace (orchestration over Registry + real per-workspace store
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     process.env.ARIADNE_REGISTRY_PATH = previousRegistryPath;
     closeRegistry();
     fs.rmSync(tmpDir, { recursive: true, force: true });
@@ -93,6 +94,48 @@ describe('CrossWorkspace (orchestration over Registry + real per-workspace store
 
     const results = searchAcrossWorkspaces('login');
     expect(results.map((r) => r.workspaceRoot)).toEqual([rootA]);
+  });
+
+  it('searchAcrossWorkspaces defaults to recent workspaces only, but can explicitly scan everything', () => {
+    vi.useFakeTimers();
+    try {
+      const workspaceCount = 35;
+      const query = 'needle';
+      const oldMatchingRoots: string[] = [];
+      const recentMatchingRoots: string[] = [];
+      const baseTime = Date.parse('2024-01-01T00:00:00.000Z');
+
+      for (let i = 0; i < workspaceCount; i += 1) {
+        vi.setSystemTime(new Date(baseTime + i * 1000));
+        const root = makeWorkspace(`ws-${String(i).padStart(2, '0')}`);
+        const store = openWorkspaceStore(root);
+
+        if (i === 5) {
+          const task = store.createTask({ title: 'Legacy workspace task', goal: null });
+          store.createCheckpoint({ taskId: task.id, level: 'session', summary: 'Captured legacy needle detail' });
+          oldMatchingRoots.push(root);
+        } else if (i >= workspaceCount - 2) {
+          store.createTask({ title: `Recent ${query} task ${i}`, goal: null });
+          recentMatchingRoots.push(root);
+        } else {
+          store.createTask({ title: `Unrelated task ${i}`, goal: null });
+        }
+
+        store.close();
+      }
+
+      const defaultResults = searchAcrossWorkspaces(query, { totalLimit: 10 });
+      expect(defaultResults).toHaveLength(recentMatchingRoots.length);
+      expect(defaultResults.map((r) => r.workspaceRoot).sort()).toEqual(recentMatchingRoots.sort());
+      expect(defaultResults.some((r) => oldMatchingRoots.includes(r.workspaceRoot))).toBe(false);
+
+      const allResults = searchAcrossWorkspaces(query, { allWorkspaces: true, totalLimit: 10 });
+      expect(allResults).toHaveLength(oldMatchingRoots.length + recentMatchingRoots.length);
+      expect(allResults.some((r) => oldMatchingRoots.includes(r.workspaceRoot))).toBe(true);
+      expect(allResults.filter((r) => recentMatchingRoots.includes(r.workspaceRoot))).toHaveLength(recentMatchingRoots.length);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('resolveTaskAnyWorkspace finds a task in the current workspace without touching the registry fallback', () => {
