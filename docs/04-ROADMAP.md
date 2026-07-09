@@ -62,11 +62,17 @@
   call site wires the registry in yet.
 - Cloud sync / team-shared task graph.
 - True cross-repo tasks (one task entity spanning multiple repos as a single
-  linked unit). Note: cross-workspace *discovery and operation* of
-  independent per-workspace tasks already shipped via the global registry
-  (`~/.ariadne/registry.db`, see `02-ARCHITECTURE.md` §4a) — this line is
-  specifically about merging multiple repos' tasks into one logical task,
-  which remains deferred.
+  linked unit) — **the data model now exists**:
+  `packages/core/src/CrossRepoLinks.ts` adds `task_link_groups`/`task_links`
+  tables to the shared `~/.ariadne/registry.db`, letting independent tasks
+  in different workspaces (each still a normal task in its own
+  `.ariadne/state.db`) be grouped as members of one logical "link group"
+  (`createTaskLinkGroup`/`linkTaskToGroup`/`listGroupMembers`/
+  `findGroupsForTask`/`deleteTaskLinkGroup`). **Not yet done:** no CLI/MCP
+  server/VS Code extension surface exposes link groups yet (no `ariadne
+  link` command, no chat participant support, no tree-view grouping) — this
+  is data-model-only for now, deliberately validated before building UI on
+  top of it.
 - Smarter (embedding-based) context ranking beyond the rule-based v0.1 scorer
   (token counting is shipped as a `chars / 4` heuristic in `ContextBuilder.ts`,
   not embedding-based ranking).
@@ -205,6 +211,11 @@ what's next*, not building the core loop:
    read-only tree view (`ariadneTasks`) has shipped; a cross-task
    chronological timeline or full-text search/filter view remains
    optional/deferred.
-4. **Broaden integration-test coverage** on the lighter-tested surfaces (CLI,
+4. **Wire cross-repo task linking into a real surface** (§3):
+   `CrossRepoLinks.ts`'s data model is shipped but unreachable from any
+   surface — a minimal CLI (`ariadne link create/add/list`) would be the
+   thinnest way to validate it before deciding whether the tree view or
+   chat participant should also show link groups.
+5. **Broaden integration-test coverage** on the lighter-tested surfaces (CLI,
    MCP server, VS Code extension) now that the core loop is stable, rather
    than continuing to add core-only tests.

@@ -82,6 +82,17 @@ export type {
   CrossWorkspaceSearchOptions,
   ResolvedTask,
 } from './CrossWorkspace.js';
+export {
+  createTaskLinkGroup,
+  getTaskLinkGroup,
+  listTaskLinkGroups,
+  linkTaskToGroup,
+  unlinkTaskFromGroup,
+  listGroupMembers,
+  findGroupsForTask,
+  deleteTaskLinkGroup,
+} from './CrossRepoLinks.js';
+export type { TaskLinkGroup, TaskLinkMember } from './CrossRepoLinks.js';
 export { PluginRegistry } from './PluginRegistry.js';
 export type {
   AriadnePlugin,

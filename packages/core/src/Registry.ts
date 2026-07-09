@@ -34,6 +34,28 @@ CREATE TABLE IF NOT EXISTS tasks_index (
 
 CREATE INDEX IF NOT EXISTS idx_tasks_index_workspace ON tasks_index(workspace_root);
 CREATE INDEX IF NOT EXISTS idx_tasks_index_updated_at ON tasks_index(updated_at);
+
+-- Cross-repo task linking (docs/04-ROADMAP.md §3): a "link group" is a
+-- logical task that spans multiple repos/workspaces, expressed as a set of
+-- member (task_id, workspace_root) pairs. See CrossRepoLinks.ts. Lives in
+-- the same registry db as tasks_index since that's the only db visible
+-- across workspaces; per-workspace state.db files are unaffected and
+-- unaware of link groups.
+CREATE TABLE IF NOT EXISTS task_link_groups (
+  id TEXT PRIMARY KEY,
+  label TEXT,
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS task_links (
+  group_id TEXT NOT NULL REFERENCES task_link_groups(id),
+  task_id TEXT NOT NULL,
+  workspace_root TEXT NOT NULL,
+  linked_at TEXT NOT NULL,
+  PRIMARY KEY (group_id, task_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_task_links_task_id ON task_links(task_id);
 `;
 
 export interface TaskIndexEntry {
