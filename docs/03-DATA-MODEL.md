@@ -124,6 +124,43 @@ its own transaction and bumping `schema_version` after each. Currently
 the runner itself is fully implemented and tested, so future schema changes
 just append an entry rather than needing new infrastructure.
 
+## 3a. Cross-Workspace Registry Schema
+
+In addition to each workspace's own `.ariadne/state.db` above, a single
+machine-wide registry database lives at `~/.ariadne/registry.db`
+(overridable via `ARIADNE_REGISTRY_PATH`, mainly for test isolation), so any
+surface can discover which workspace owns a given task without scanning the
+filesystem or opening every workspace's `state.db` up front. See
+`packages/core/src/Registry.ts` and `02-ARCHITECTURE.md` §4a for the full
+design rationale.
+
+```sql
+CREATE TABLE workspaces (
+  root          TEXT PRIMARY KEY,          -- absolute workspace root path
+  last_seen_at  TEXT NOT NULL
+);
+
+CREATE TABLE tasks_index (
+  task_id        TEXT PRIMARY KEY,         -- same id as tasks.id in that workspace's state.db
+  workspace_root TEXT NOT NULL REFERENCES workspaces(root),
+  title          TEXT NOT NULL,
+  goal           TEXT,
+  status         TEXT NOT NULL,
+  updated_at     TEXT NOT NULL
+);
+```
+
+This is a denormalized **index**, not a copy of task history — no
+checkpoints, todos, decisions, errors, or open questions live here, only
+enough of `tasks` to list/search/locate a task and route a request to the
+workspace that actually owns it. It is kept in sync automatically (upserted
+on every task mutation, and bulk-backfilled whenever a workspace store is
+opened) and is treated as disposable/best-effort: if it's ever deleted or
+falls out of sync, the worst case is a task temporarily not showing up in
+cross-workspace listing/search until that workspace is opened again — no
+per-workspace data is ever at risk, since `tasks_index` is never the
+authoritative copy of anything.
+
 ## 4. Context Package (Output Shape)
 `task.getContext(taskId, tokenBudget)` returns a structured object — not raw
 Markdown — so each client (chat participant, CLI, MCP resource) can render it how

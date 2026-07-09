@@ -32,7 +32,12 @@
 - LLM-assisted summarization plugin (opt-in, bring-your-own-model).
 - Plugins: Jira, GitHub Issues, Linear, Slack, Obsidian export, local LLM backends.
 - Cloud sync / team-shared task graph.
-- Cross-repo / multi-workspace tasks.
+- True cross-repo tasks (one task entity spanning multiple repos as a single
+  linked unit). Note: cross-workspace *discovery and operation* of
+  independent per-workspace tasks already shipped via the global registry
+  (`~/.ariadne/registry.db`, see `02-ARCHITECTURE.md` §4a) — this line is
+  specifically about merging multiple repos' tasks into one logical task,
+  which remains deferred.
 - Smarter (embedding-based) context ranking beyond the rule-based v0.1 scorer.
 
 ## 4. Technical Roadmap (Phased)
@@ -92,9 +97,12 @@
    implementation (Phase 1).
 4. Daemon lifecycle policy (idle-timeout value, explicit stop command) — needed
    before Phase 2.
-5. Multi-repo task support — explicitly deferred, but worth a one-line design note
-   so the schema doesn't accidentally preclude it later (e.g. avoid assuming a
-   single workspace root in `tasks` table).
+5. ~~Multi-repo task support~~ — **resolved for the cross-workspace
+   discovery/operation case**: the `tasks` table never assumed a single
+   global workspace root (each workspace already had its own DB), and the
+   new `~/.ariadne/registry.db` (see `02-ARCHITECTURE.md` §4a) lets any
+   surface find and operate on a task from any workspace it's ever seen.
+   True single-task-spans-multiple-repos linking remains deferred (§3).
 
 ## 8. Suggested Immediate Next Step
 Start **Phase 0** (`packages/core` schema + TaskStore) since every other surface

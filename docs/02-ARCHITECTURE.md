@@ -40,7 +40,10 @@ each surface is a thin adapter over `@ariadne/core`.
 Each of the three surfaces above opens its own connection directly to
 `.ariadne/state.db` via `@ariadne/core`'s `TaskStore` (no daemon, no IPC — see
 §4). They agree on shared state purely because they all read/write the same
-SQLite file using the same shared library.
+SQLite file using the same shared library. In addition, every surface also
+syncs a lightweight entry into a single machine-wide registry at
+`~/.ariadne/registry.db` (see §4a) so a task can be found and operated on
+from any workspace, not just the one it was created in.
 
 ## 3. Why MCP Is the Integration Backbone
 - MCP is already the emerging standard for "expose tools/resources to any AI client."
@@ -96,7 +99,76 @@ shows up (e.g., very high-frequency passive-capture writes racing a large
 without an explicit `--task` know what to act on) also lives in `state.db`
 (the `schema_meta` table), not a side file — see `packages/core/src/workspace.ts`.
 This was previously a separate flat file; moving it into the same DB removed
-one more place surfaces could drift out of sync with each other.
+one more place surfaces could drift out of sync with each other. "Current
+task" is deliberately a **per-workspace** concept and is never resolved
+cross-workspace (see §4a) — switching workspaces always leaves you on that
+workspace's own current task, not one you were looking at elsewhere.
+
+## 4a. Cross-Workspace Task Registry
+
+Each workspace's `.ariadne/state.db` remains the sole source of truth for
+that workspace's tasks (checkpoints, todos, decisions, errors, questions,
+etc.) — nothing about that changes. But a single developer routinely works
+across more than one repo/workspace, and a task started in one workspace
+should still be discoverable and fully operable (read *and* write) from a
+chat session, CLI invocation, or MCP call running in a different workspace,
+without the user needing to remember or `cd`/switch folders to find it.
+
+This is solved with a small, best-effort, machine-wide **registry** —
+`~/.ariadne/registry.db` (overridable via `ARIADNE_REGISTRY_PATH`, primarily
+for test isolation) — implemented in `packages/core/src/Registry.ts`. It has
+two tables:
+- `workspaces` — every workspace root Ariadne has ever opened, with a
+  last-seen timestamp.
+- `tasks_index` — one row per known task: `task_id`, `workspace_root`,
+  `title`, `goal`, `status`, `updated_at`. This is a denormalized *index*,
+  not a copy of the task's full history — no checkpoints, todos, decisions,
+  etc. live here.
+
+**It is explicitly not the source of truth and not a sync mechanism.**
+Nothing is copied *between* workspaces; the registry only ever mirrors
+metadata *out of* each workspace's own `state.db` so it can be searched
+without opening every workspace's database up front. If a workspace's
+directory is later deleted, its registry rows simply go stale and are
+skipped by lookups — same-machine only, no network involved, no
+distributed-consistency concerns.
+
+**Sync points** (all best-effort, wrapped in try/catch so a registry
+hiccup never blocks the actual workspace write):
+1. `TaskStore.createTask` / `updateTaskStatus` / `updateTaskBranch` /
+   `touchTask` each upsert the affected task into `tasks_index` — and
+   `touchTask` is invoked by every checkpoint/todo/decision/error/question
+   mutation, so this one hook covers virtually all task activity.
+2. `openWorkspaceStore()` does a full bulk backfill of that workspace's
+   existing tasks into the registry every time it's opened — covering
+   tasks created before the registry existed, and read-only sessions where
+   no mutation happens.
+
+**Orchestration layer** — `packages/core/src/CrossWorkspace.ts` — builds on
+the registry to offer:
+- `listTasksAcrossWorkspaces()` / `listKnownWorkspaces()` — fast, registry-only
+  reads, no per-workspace store opens.
+- `searchAcrossWorkspaces(query)` — opens every known workspace's real store
+  and reuses the existing single-workspace `searchWorkspace()`, merging and
+  re-ranking results tagged with `workspaceRoot`; silently skips a workspace
+  whose directory no longer exists on disk.
+- `resolveTaskAnyWorkspace(taskId, currentWorkspaceRoot)` — tries the current
+  workspace first; if the id isn't found there, consults the registry to
+  find the real owning workspace and transparently opens *that* workspace's
+  store for full read/write access. The caller always owns and must close
+  the returned store.
+
+All three surfaces build on this the same way: the CLI's `withResolvedTask`,
+the MCP server's `withTaskStore`, and the chat participant's
+`resolveCrossWorkspaceTask` each resolve an explicit task id against the
+current workspace first, falling back to `resolveTaskAnyWorkspace` (or the
+extension's own long-lived store cache, keyed by workspace root, to avoid
+reopening a connection on every chat turn) only when it isn't found
+locally — so e.g. `ariadne status --task <id>`, an MCP `git_sync` call, or a
+`/task done <id>` chat command all work identically regardless of which
+workspace the caller happens to be sitting in. "Current task," `task use`,
+and sub-entity ids (checkpoint/todo/decision/error/question ids) remain
+workspace-scoped only — the registry indexes task ids, not sub-entity ids.
 
 ## 5. Component Responsibilities
 
@@ -186,9 +258,13 @@ The plain CLI's `ariadne status`/`ariadne resume` commands take the same
   commands that MCP already exposes — tracked as `cli-parity-commands`.)
 
 ## 10. Open Architecture Questions
-- Multi-workspace/multi-repo support: today each workspace root gets its own
-  independent `.ariadne/state.db`; there's no cross-repo task linking. Revisit
-  if/when a real multi-repo use case shows up.
+- ~~Multi-workspace/multi-repo support~~ — **resolved**: each workspace root
+  still gets its own independent `.ariadne/state.db` as source of truth, but
+  a machine-wide registry (`~/.ariadne/registry.db`, §4a) now lets any
+  surface discover and transparently operate on a task from a different
+  workspace. There's still no cross-repo *task linking* (e.g. one task
+  spanning two repos as a single entity) — that remains out of scope unless
+  a real use case shows up.
 - If passive-capture write volume or `ariadne export`-style long reads ever
   contend meaningfully under WAL mode, reconsider a daemon — but this is
   explicitly **not** a v1 concern given the single-developer, single-workspace
