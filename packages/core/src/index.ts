@@ -48,3 +48,15 @@ export {
   readCurrentTaskId,
   setCurrentTaskId,
 } from './workspace.js';
+export {
+  getRegistryPath,
+  openRegistry,
+  closeRegistry,
+  touchWorkspace,
+  upsertTaskIndex,
+  syncWorkspaceTasks,
+  listWorkspaces,
+  listAllTasks,
+  findTaskWorkspace,
+} from './Registry.js';
+export type { TaskIndexEntry } from './Registry.js';

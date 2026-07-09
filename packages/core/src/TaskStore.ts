@@ -1,6 +1,7 @@
 import type { Database as DatabaseType } from 'better-sqlite3';
 import { ulid } from 'ulid';
 import { openDatabase } from './db.js';
+import { openRegistry, upsertTaskIndex } from './Registry.js';
 import type {
   Task,
   NewTask,
@@ -218,14 +219,39 @@ function rowToOpenQuestion(row: OpenQuestionRow): OpenQuestion {
  */
 export class TaskStore {
   private readonly db: DatabaseType;
+  private readonly workspaceRoot?: string;
 
-  constructor(dbPath: string) {
+  /**
+   * `workspaceRoot`, when given, links this store to the global
+   * cross-workspace registry (`Registry.ts` / `~/.ariadne/registry.db`):
+   * every mutation that changes a task's title/goal/status/updatedAt keeps
+   * that task's registry entry in sync automatically, so `task list
+   * --all-workspaces` / `search --all-workspaces` and friends see live data
+   * from any surface (CLI, MCP server, VS Code extension) without each of
+   * them having to remember to call into the registry themselves. Omit it
+   * (e.g. in tests using `:memory:`) to opt out of registry syncing entirely.
+   */
+  constructor(dbPath: string, workspaceRoot?: string) {
     this.db = openDatabase(dbPath);
+    this.workspaceRoot = workspaceRoot;
   }
 
   /** Closes the underlying database connection. */
   close(): void {
     this.db.close();
+  }
+
+  /** Upserts `taskId`'s current row into the global registry, if this store is linked to one (see constructor). No-op otherwise. */
+  private syncToRegistry(taskId: string): void {
+    if (!this.workspaceRoot) return;
+    const task = this.getTask(taskId);
+    if (!task) return;
+    try {
+      upsertTaskIndex(openRegistry(), this.workspaceRoot, task);
+    } catch {
+      // Best-effort only — a registry write failure (e.g. unwritable home
+      // dir) must never break the actual mutation this store just made.
+    }
   }
 
   // ---------------------------------------------------------------------
@@ -250,7 +276,9 @@ export class TaskStore {
         createdAt: ts,
         updatedAt: ts,
       });
-    return this.getTask(id)!;
+    const task = this.getTask(id)!;
+    this.syncToRegistry(id);
+    return task;
   }
 
   getTask(id: string): Task | undefined {
@@ -273,6 +301,7 @@ export class TaskStore {
     this.db
       .prepare(`UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?`)
       .run(status, nowIso(), id);
+    this.syncToRegistry(id);
   }
 
   /** Updates a task's tracked git branch (used by GitWatcher when it detects a branch switch). */
@@ -280,10 +309,12 @@ export class TaskStore {
     this.db
       .prepare(`UPDATE tasks SET branch = ?, updated_at = ? WHERE id = ?`)
       .run(branch, nowIso(), id);
+    this.syncToRegistry(id);
   }
 
   touchTask(id: string): void {
     this.db.prepare(`UPDATE tasks SET updated_at = ? WHERE id = ?`).run(nowIso(), id);
+    this.syncToRegistry(id);
   }
 
   addTaskDependency(taskId: string, dependsOn: string): void {

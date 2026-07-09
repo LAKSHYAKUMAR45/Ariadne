@@ -2,6 +2,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { TaskStore } from './TaskStore.js';
 import { ensureGitignored } from './gitignore.js';
+import { openRegistry, syncWorkspaceTasks } from './Registry.js';
 
 const STATE_DIR = '.ariadne';
 const STATE_FILE = 'state.db';
@@ -41,7 +42,19 @@ export function stateDbPath(workspaceRoot: string): string {
  */
 export function openWorkspaceStore(workspaceRoot: string): TaskStore {
   ensureGitignored(workspaceRoot);
-  return new TaskStore(stateDbPath(workspaceRoot));
+  const store = new TaskStore(stateDbPath(workspaceRoot), workspaceRoot);
+  // Backfill this workspace's full task list into the global registry every
+  // time its store is opened (not just on individual mutations) — cheap at
+  // solo-dev scale, and it's what makes tasks created before the registry
+  // existed (or by an older Ariadne version) show up in cross-workspace
+  // discovery without needing to be individually touched first. Best-effort:
+  // never let a registry hiccup block opening the workspace's own store.
+  try {
+    syncWorkspaceTasks(openRegistry(), workspaceRoot, store.listTasks());
+  } catch {
+    // ignore — registry sync is a convenience, not a correctness requirement
+  }
+  return store;
 }
 
 
