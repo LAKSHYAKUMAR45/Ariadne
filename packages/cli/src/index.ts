@@ -100,6 +100,71 @@ program
   });
 
 // ---------------------------------------------------------------------
+// decision
+// ---------------------------------------------------------------------
+
+program
+  .command('decision <text>')
+  .description('Record a decision for the current (or --task) task')
+  .option('-t, --task <id>', 'Task id')
+  .option('-r, --rationale <rationale>', 'Why this decision was made')
+  .action((text: string, opts: { task?: string; rationale?: string }) => {
+    withStore((store) => {
+      const taskId = resolveTaskId(store, opts.task);
+      const created = store.recordDecision({ taskId, text, rationale: opts.rationale });
+      console.log(`Recorded decision ${created.id}: ${created.text}`);
+    });
+  });
+
+// ---------------------------------------------------------------------
+// error
+// ---------------------------------------------------------------------
+
+const errorCmd = program.command('error').description('Manage unresolved errors');
+
+errorCmd
+  .command('add <message>')
+  .description('Record an error against the current (or --task) task')
+  .option('-t, --task <id>', 'Task id')
+  .action((message: string, opts: { task?: string }) => {
+    withStore((store) => {
+      const taskId = resolveTaskId(store, opts.task);
+      const created = store.recordError({ taskId, message });
+      console.log(`Recorded error ${created.id}.`);
+    });
+  });
+
+errorCmd
+  .command('list')
+  .description('List errors for the current (or --task) task')
+  .option('-t, --task <id>', 'Task id')
+  .option('-a, --all', 'Include resolved errors (default: unresolved only)')
+  .action((opts: { task?: string; all?: boolean }) => {
+    withStore((store) => {
+      const taskId = resolveTaskId(store, opts.task);
+      const errors = store.listErrors(taskId, opts.all ? undefined : { resolved: false });
+      if (errors.length === 0) {
+        console.log('No errors found.');
+        return;
+      }
+      for (const e of errors) {
+        console.log(`[${e.resolved ? 'resolved' : 'open'}] ${e.id}  ${e.message}`);
+      }
+    });
+  });
+
+errorCmd
+  .command('resolve <id>')
+  .description('Mark an error as resolved')
+  .option('-r, --resolution <text>', 'Resolution note')
+  .action((id: string, opts: { resolution?: string }) => {
+    withStore((store) => {
+      store.resolveError(id, opts.resolution);
+      console.log(`Marked error ${id} resolved.`);
+    });
+  });
+
+// ---------------------------------------------------------------------
 // todo
 // ---------------------------------------------------------------------
 
@@ -276,6 +341,27 @@ program
   .description('Print the resolved workspace root and state db path')
   .action(() => {
     console.log(findWorkspaceRoot());
+  });
+
+program
+  .command('search <query>')
+  .description('Search task titles and goals in this workspace for a substring match')
+  .action((query: string) => {
+    withStore((store) => {
+      const needle = query.toLowerCase();
+      const matches = store
+        .listTasks()
+        .filter((t) => t.title.toLowerCase().includes(needle) || (t.goal ?? '').toLowerCase().includes(needle));
+      if (matches.length === 0) {
+        console.log('No matching tasks found.');
+        return;
+      }
+      const current = readCurrentTaskId();
+      for (const t of matches) {
+        const marker = t.id === current ? '*' : ' ';
+        console.log(`${marker} [${t.status}] ${t.id}  ${t.title}`);
+      }
+    });
   });
 
 program
