@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import * as path from 'node:path';
-import { findWorkspaceRoot, readCurrentTaskId, redactCommand } from '@ariadne/core';
+import { findWorkspaceRoot, redactCommand } from '@ariadne/core';
 import { getOrOpenStore } from './storeCache.js';
 
 /**
@@ -78,7 +78,10 @@ function resolveTaskContext(uri: vscode.Uri): { root: string; taskId: string } |
   const folder = vscode.workspace.getWorkspaceFolder(uri);
   if (!folder) return undefined;
   const root = findWorkspaceRoot(folder.uri.fsPath);
-  const taskId = readCurrentTaskId(root);
+  // Use the cached store (same connection recordCommand/touchFile etc. below
+  // will use) instead of readCurrentTaskId(root), which would open its own
+  // short-lived connection — this runs on a hot path (every file save).
+  const taskId = getOrOpenStore(root).getCurrentTaskId();
   if (!taskId) return undefined;
   return { root, taskId };
 }

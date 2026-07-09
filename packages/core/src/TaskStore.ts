@@ -615,4 +615,27 @@ export class TaskStore {
           .all(taskId) as OpenQuestionRow[]);
     return rows.map(rowToOpenQuestion);
   }
+
+  // ---------------------------------------------------------------------
+  // Workspace-level state (stored in this same DB so it's part of the one
+  // source of truth, instead of a separate flat file next to state.db).
+  // ---------------------------------------------------------------------
+
+  /** Reads the id of the "current" task for this workspace, if one is set. */
+  getCurrentTaskId(): string | undefined {
+    const row = this.db
+      .prepare(`SELECT value FROM schema_meta WHERE key = 'current_task_id'`)
+      .get() as { value: string } | undefined;
+    return row?.value;
+  }
+
+  /** Marks `taskId` as the current task for this workspace (used when no explicit task id is given). */
+  setCurrentTaskId(taskId: string): void {
+    this.db
+      .prepare(
+        `INSERT INTO schema_meta (key, value) VALUES ('current_task_id', ?)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+      )
+      .run(taskId);
+  }
 }

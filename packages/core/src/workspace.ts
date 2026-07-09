@@ -4,7 +4,9 @@ import { TaskStore } from './TaskStore.js';
 
 const STATE_DIR = '.ariadne';
 const STATE_FILE = 'state.db';
-const CURRENT_TASK_FILE = 'current-task';
+// Legacy location from before "current task" moved into SQLite (schema_meta
+// table) — kept only so any pre-existing workspaces get migrated in place.
+const LEGACY_CURRENT_TASK_FILE = 'current-task';
 
 /**
  * Finds the workspace root: the nearest ancestor directory (starting at
@@ -35,17 +37,49 @@ export function openWorkspaceStore(workspaceRoot: string): TaskStore {
   return new TaskStore(stateDbPath(workspaceRoot));
 }
 
-/** Reads the id of the "current" task for this workspace, if one is set. */
+/**
+ * One-time migration: if an older Ariadne version left a `.ariadne/current-task`
+ * flat file behind and the DB doesn't have a current task recorded yet, adopt
+ * its value into the DB and delete the file so state.db becomes the single
+ * source of truth going forward.
+ */
+function migrateLegacyCurrentTaskFile(store: TaskStore, workspaceRoot: string): void {
+  const legacyFile = path.join(workspaceRoot, STATE_DIR, LEGACY_CURRENT_TASK_FILE);
+  if (!fs.existsSync(legacyFile)) return;
+  try {
+    if (store.getCurrentTaskId() === undefined) {
+      const id = fs.readFileSync(legacyFile, 'utf8').trim();
+      if (id.length > 0) store.setCurrentTaskId(id);
+    }
+    fs.unlinkSync(legacyFile);
+  } catch {
+    // Best-effort migration only; never block on it.
+  }
+}
+
+/**
+ * Reads the id of the "current" task for this workspace, if one is set.
+ * Stored in `state.db` (schema_meta table) so it's part of the same
+ * source-of-truth database every surface reads/writes, rather than a
+ * separate file that could drift or race independently of it.
+ */
 export function readCurrentTaskId(workspaceRoot: string): string | undefined {
-  const file = path.join(workspaceRoot, STATE_DIR, CURRENT_TASK_FILE);
-  if (!fs.existsSync(file)) return undefined;
-  const id = fs.readFileSync(file, 'utf8').trim();
-  return id.length > 0 ? id : undefined;
+  const store = openWorkspaceStore(workspaceRoot);
+  try {
+    migrateLegacyCurrentTaskFile(store, workspaceRoot);
+    return store.getCurrentTaskId();
+  } finally {
+    store.close();
+  }
 }
 
 /** Marks `taskId` as the current task for this workspace (used when no explicit task id is given). */
 export function setCurrentTaskId(taskId: string, workspaceRoot: string): void {
-  const file = path.join(workspaceRoot, STATE_DIR, CURRENT_TASK_FILE);
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, taskId, 'utf8');
+  const store = openWorkspaceStore(workspaceRoot);
+  try {
+    store.setCurrentTaskId(taskId);
+  } finally {
+    store.close();
+  }
 }
+

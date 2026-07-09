@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { findWorkspaceRoot, readCurrentTaskId, setCurrentTaskId } from '@ariadne/core';
+import { findWorkspaceRoot } from '@ariadne/core';
 import type { TaskStore } from '@ariadne/core';
 import { getOrOpenStore } from './storeCache.js';
 
@@ -96,11 +96,11 @@ export function openStoreForCurrentWorkspace(): TaskStore | undefined {
 export function getCurrentTaskId(): string | undefined {
   const root = resolveWorkspaceRoot();
   if (!root) return undefined;
-  return readCurrentTaskId(root);
+  return getOrOpenStore(root).getCurrentTaskId();
 }
 
 export function setCurrentTask(taskId: string): void {
   const root = resolveWorkspaceRoot();
   if (!root) return;
-  setCurrentTaskId(taskId, root);
+  getOrOpenStore(root).setCurrentTaskId(taskId);
 }

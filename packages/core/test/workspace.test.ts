@@ -40,4 +40,23 @@ describe('workspace resolution', () => {
     setCurrentTaskId('01ABCXYZ', tmpDir);
     expect(readCurrentTaskId(tmpDir)).toBe('01ABCXYZ');
   });
+
+  it('migrates a legacy current-task flat file into the DB and removes it', () => {
+    // Simulate a workspace left behind by a pre-SQLite-current-task version.
+    fs.mkdirSync(path.join(tmpDir, '.ariadne'), { recursive: true });
+    fs.writeFileSync(path.join(tmpDir, '.ariadne', 'current-task'), '01LEGACYTASK', 'utf8');
+
+    expect(readCurrentTaskId(tmpDir)).toBe('01LEGACYTASK');
+    expect(fs.existsSync(path.join(tmpDir, '.ariadne', 'current-task'))).toBe(false);
+    // Subsequent reads come from the DB now, without needing the file.
+    expect(readCurrentTaskId(tmpDir)).toBe('01LEGACYTASK');
+  });
+
+  it('prefers the DB value over a stale legacy file if both somehow exist', () => {
+    setCurrentTaskId('01DBTASK', tmpDir);
+    fs.writeFileSync(path.join(tmpDir, '.ariadne', 'current-task'), '01STALETASK', 'utf8');
+
+    expect(readCurrentTaskId(tmpDir)).toBe('01DBTASK');
+    expect(fs.existsSync(path.join(tmpDir, '.ariadne', 'current-task'))).toBe(false);
+  });
 });

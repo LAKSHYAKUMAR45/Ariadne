@@ -78,4 +78,15 @@ describe('TaskStore', () => {
     store.resolveOpenQuestion(question.id);
     expect(store.listOpenQuestions(task.id, { resolved: true })[0].id).toBe(question.id);
   });
+
+  it('tracks the current task id in the DB (schema_meta), not a separate file', () => {
+    expect(store.getCurrentTaskId()).toBeUndefined();
+    const task = store.createTask({ title: 'A' });
+    store.setCurrentTaskId(task.id);
+    expect(store.getCurrentTaskId()).toBe(task.id);
+
+    const task2 = store.createTask({ title: 'B' });
+    store.setCurrentTaskId(task2.id);
+    expect(store.getCurrentTaskId()).toBe(task2.id);
+  });
 });
