@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import * as path from 'node:path';
-import { findWorkspaceRoot, readCurrentTaskId } from '@ariadne/core';
+import { findWorkspaceRoot, readCurrentTaskId, redactCommand } from '@ariadne/core';
 import { getOrOpenStore } from './storeCache.js';
 
 /**
@@ -85,13 +85,6 @@ function resolveTaskContext(uri: vscode.Uri): { root: string; taskId: string } |
 
 function shouldIgnorePath(relPath: string): boolean {
   return relPath.split(path.sep).some((segment) => IGNORED_PATH_SEGMENTS.has(segment));
-}
-
-/** Very small heuristic redaction so obviously secret-bearing flags aren't stored verbatim. */
-function redactCommand(cmd: string): string {
-  return cmd
-    .replace(/(--?(?:password|token|secret|api[-_]?key)\S*)([=\s]+)(\S+)/gi, '$1$2***')
-    .slice(0, 500);
 }
 
 function registerFileSaveCapture(context: vscode.ExtensionContext): void {

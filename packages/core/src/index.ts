@@ -29,6 +29,13 @@ export {
 } from './GitWatcher.js';
 export type { GitLogEntry, SyncGitResult } from './GitWatcher.js';
 export {
+  DEFAULT_REDACTION_RULES,
+  MAX_REDACTED_LENGTH,
+  redact,
+  redactCommand,
+} from './Redactor.js';
+export type { RedactionRule } from './Redactor.js';
+export {
   findWorkspaceRoot,
   stateDbPath,
   openWorkspaceStore,
