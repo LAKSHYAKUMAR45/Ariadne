@@ -1,0 +1,60 @@
+name: Release VS Code Extension
+
+# Builds @ariadne/core, then packages the VS Code extension into one .vsix
+# per supported platform (each bundling a real, correctly-ABI'd
+# better-sqlite3 native binary — see packages/vscode-extension/esbuild.js
+# and README.md's "Multi-platform packaging" section) and attaches them to
+# a GitHub Release.
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch: {}
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'pnpm'
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build @ariadne/core
+        run: pnpm --filter @ariadne/core run build
+
+      - name: Test @ariadne/core, cli, and vscode-extension
+        run: |
+          pnpm --filter @ariadne/core run test
+          pnpm --filter @ariadne/core exec tsc --noEmit -p tsconfig.json
+          pnpm --filter ariadne run build
+          pnpm --filter ariadne run test
+          pnpm --filter ariadne exec tsc --noEmit -p tsconfig.json
+          pnpm --filter ariadne-vscode exec tsc --noEmit -p tsconfig.json
+          pnpm --filter ariadne-vscode run test
+
+      # Fetches a real prebuilt better-sqlite3 binary per target platform
+      # (no cross-compilation needed — prebuild-install just downloads
+      # already-compiled binaries) and packages each into its own .vsix.
+      - name: Package all platform targets
+        run: pnpm --filter ariadne-vscode run package:all
+
+      - name: Upload .vsix artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ariadne-vsix
+          path: packages/vscode-extension/dist-vsix/*.vsix
+
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: packages/vscode-extension/dist-vsix/*.vsix
+          generate_release_notes: true

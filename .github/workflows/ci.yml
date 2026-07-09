@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'pnpm'
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # @ariadne/core must be built before packages/cli or
+      # packages/vscode-extension can typecheck/test, since they import its
+      # compiled dist/. `pnpm -r run build` runs in workspace dependency
+      # order, so this handles that automatically.
+      - name: Build all packages
+        run: pnpm run build
+
+      - name: Typecheck all packages
+        run: pnpm -r exec tsc --noEmit -p tsconfig.json
+
+      - name: Test all packages
+        run: pnpm run test
+
+      - name: Verify the extension still bundles and packages
+        run: |
+          pnpm --filter ariadne-vscode exec vsce package --no-dependencies -o /tmp/ci-check.vsix
