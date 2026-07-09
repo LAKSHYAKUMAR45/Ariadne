@@ -32,3 +32,8 @@ All notable changes to the Ariadne VS Code extension will be documented here.
   Code's bundled Electron version) for linux-x64/arm64, darwin-x64/arm64,
   and win32-x64, producing one native, working `.vsix` per platform without
   needing to actually run on that OS.
+- Hardened the esbuild.js bundling pipeline against silent breakage: it now
+  fails loudly if `@ariadne/core`'s `better-sqlite3` dependency moves to an
+  unverified major version, validates each fetched cross-platform native
+  binary's magic bytes and size, and actually loads + exercises the locally
+  bundled native binding as part of every dev build.
