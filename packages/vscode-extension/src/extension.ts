@@ -1,16 +1,44 @@
 import * as vscode from 'vscode';
 import { openStoreForCurrentWorkspace, getCurrentTaskId, setCurrentTask, initWorkspaceResolution, promptSelectWorkspaceFolder, resolveWorkspaceRoot } from './workspace.js';
-import { handleChatCommand, progressMessageFor } from './commands.js';
+import { handleChatCommand, progressMessageFor, formatStatusBarItem } from './commands.js';
 import { closeAllStores, closeStore } from './storeCache.js';
 import { registerPassiveCapture } from './passiveCapture.js';
 import { findWorkspaceRoot } from '@ariadne/core';
 
 let output: vscode.OutputChannel;
+let statusBarItem: vscode.StatusBarItem | undefined;
 
 function logError(context: string, err: unknown): string {
   const message = err instanceof Error ? (err.stack ?? err.message) : String(err);
   output.appendLine(`[${new Date().toISOString()}] ${context}: ${message}`);
   return err instanceof Error ? err.message : String(err);
+}
+
+/**
+ * Refreshes the always-visible status bar item showing whether a task is
+ * currently tracked for this workspace — a lightweight, non-blocking
+ * guardrail against passive capture silently recording nothing (no current
+ * task) or recording into the wrong task without the user noticing.
+ */
+function refreshStatusBar(): void {
+  if (!statusBarItem) return;
+  try {
+    const root = resolveWorkspaceRoot();
+    if (!root) {
+      statusBarItem.hide();
+      return;
+    }
+    const taskId = getCurrentTaskId();
+    const store = openStoreForCurrentWorkspace();
+    const task = taskId && store ? store.getTask(taskId) : undefined;
+    const { text, tooltip } = formatStatusBarItem(task);
+    statusBarItem.text = text;
+    statusBarItem.tooltip = tooltip;
+    statusBarItem.command = task ? 'ariadne.status' : 'ariadne.newTask';
+    statusBarItem.show();
+  } catch (err) {
+    logError('refreshStatusBar', err);
+  }
 }
 
 export function activate(context: vscode.ExtensionContext): void {
@@ -26,6 +54,12 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand('ariadne.selectWorkspaceFolder', () => promptSelectWorkspaceFolder()),
   );
 
+  statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
+  context.subscriptions.push(statusBarItem);
+  refreshStatusBar();
+
+  context.subscriptions.push(vscode.window.onDidChangeActiveTextEditor(() => refreshStatusBar()));
+
   if (vscode.workspace.getConfiguration('ariadne').get<boolean>('passiveCapture.enabled', true)) {
     registerPassiveCapture(context, output);
   }
@@ -36,6 +70,7 @@ export function activate(context: vscode.ExtensionContext): void {
       for (const removed of e.removed) {
         closeStore(findWorkspaceRoot(removed.uri.fsPath));
       }
+      refreshStatusBar();
     }),
   );
 
@@ -59,6 +94,7 @@ export function activate(context: vscode.ExtensionContext): void {
       try {
         const task = store.createTask({ title });
         setCurrentTask(task.id);
+        refreshStatusBar();
         void vscode.window.showInformationMessage(`Ariadne: created task "${task.title}".`);
       } catch (err) {
         const message = logError('ariadne.newTask', err);
@@ -134,6 +170,10 @@ async function handleRequest(
     if (result.newCurrentTaskId) {
       setCurrentTask(result.newCurrentTaskId);
     }
+    // Cheap enough to refresh unconditionally — keeps the status bar's
+    // task/status label accurate after e.g. /task pause|done|archive too,
+    // not just after an explicit task switch.
+    refreshStatusBar();
 
     if (result.sections && result.sections.length > 1) {
       // Stream section-by-section (with a microtask yield between each) so

@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { TaskStore } from '@ariadne/core';
-import { handleChatCommand, formatStatus, formatStatusSections } from '../src/commands.js';
+import { handleChatCommand, formatStatus, formatStatusSections, formatStatusBarItem, branchMismatchWarning } from '../src/commands.js';
 
 describe('chat participant command logic', () => {
   let store: TaskStore;
@@ -350,5 +350,48 @@ describe('chat participant command logic', () => {
     expect(unbudgeted).toContain('todo number 19');
     expect(budgeted.length).toBeLessThan(unbudgeted.length);
     expect(budgeted).toContain('Trimmed to fit token budget');
+  });
+});
+
+describe('formatStatusBarItem', () => {
+  it('shows a "no task" state when there is no current task', () => {
+    const item = formatStatusBarItem(undefined);
+    expect(item.text).toContain('no task');
+    expect(item.tooltip).toContain('no current task');
+  });
+
+  it('shows the task title when there is a current task', () => {
+    const item = formatStatusBarItem({ title: 'Fix login bug', status: 'active' });
+    expect(item.text).toContain('Fix login bug');
+    expect(item.tooltip).toContain('Fix login bug');
+    expect(item.tooltip).toContain('active');
+  });
+
+  it('truncates long task titles in the status bar text', () => {
+    const longTitle = 'A'.repeat(80);
+    const item = formatStatusBarItem({ title: longTitle, status: 'active' });
+    expect(item.text.length).toBeLessThan(longTitle.length);
+    expect(item.text).toContain('...');
+  });
+});
+
+describe('branchMismatchWarning', () => {
+  it('returns undefined when branches match', () => {
+    expect(branchMismatchWarning({ title: 'Task A', branch: 'main' }, 'main')).toBeUndefined();
+  });
+
+  it('returns undefined when no branch has been recorded yet', () => {
+    expect(branchMismatchWarning({ title: 'Task A', branch: null }, 'main')).toBeUndefined();
+  });
+
+  it('returns undefined when the actual branch is unknown', () => {
+    expect(branchMismatchWarning({ title: 'Task A', branch: 'main' }, undefined)).toBeUndefined();
+  });
+
+  it('returns a warning mentioning both branches when they differ', () => {
+    const warning = branchMismatchWarning({ title: 'Task A', branch: 'main' }, 'feature/x');
+    expect(warning).toContain('Task A');
+    expect(warning).toContain('main');
+    expect(warning).toContain('feature/x');
   });
 });

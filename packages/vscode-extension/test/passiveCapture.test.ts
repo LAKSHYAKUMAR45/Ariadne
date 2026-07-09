@@ -14,6 +14,22 @@ let terminalHandler: ((e: unknown) => void) | undefined;
 let diagnosticsChangeHandler: ((e: { uris: { scheme: string; fsPath: string; toString(): string }[] }) => void) | undefined;
 let folders: { uri: { fsPath: string } }[] = [];
 let diagnosticsByUri = new Map<string, { severity: number; message: string; range: { start: { line: number; character: number } } }[]>();
+let infoMessages: string[] = [];
+let warningMessages: string[] = [];
+
+// Fake `vscode.git` API surface, only populated by the tests in the "git
+// commit capture" describe block below; left undefined everywhere else so
+// registerGitCommitCapture's `getExtension('vscode.git')` no-ops as before.
+let gitApi:
+  | {
+      repositories: {
+        rootUri: { fsPath: string };
+        state: { HEAD?: { commit?: string; name?: string }; onDidChange: (fn: () => void) => { dispose(): void } };
+        log: (opts: { maxEntries: number }) => Promise<{ message?: string }[]>;
+      }[];
+      onDidOpenRepository: (fn: (repo: unknown) => void) => { dispose(): void };
+    }
+  | undefined;
 
 vi.mock('vscode', () => {
   return {
@@ -33,6 +49,14 @@ vi.mock('vscode', () => {
         terminalHandler = fn;
         return { dispose: () => {} };
       },
+      showInformationMessage: (...args: unknown[]) => {
+        infoMessages.push(String(args[0]));
+        return Promise.resolve(undefined);
+      },
+      showWarningMessage: (...args: unknown[]) => {
+        warningMessages.push(String(args[0]));
+        return Promise.resolve(undefined);
+      },
     },
     languages: {
       onDidChangeDiagnostics: (fn: typeof diagnosticsChangeHandler) => {
@@ -43,7 +67,10 @@ vi.mock('vscode', () => {
     },
     DiagnosticSeverity: { Error: 0, Warning: 1, Information: 2, Hint: 3 },
     extensions: {
-      getExtension: () => undefined,
+      getExtension: (id: string) => {
+        if (id !== 'vscode.git' || !gitApi) return undefined;
+        return { isActive: true, exports: { getAPI: () => gitApi } };
+      },
     },
   };
 });
@@ -62,6 +89,9 @@ describe('passive capture', () => {
     terminalHandler = undefined;
     diagnosticsChangeHandler = undefined;
     diagnosticsByUri = new Map();
+    infoMessages = [];
+    warningMessages = [];
+    gitApi = undefined;
 
     root = fs.mkdtempSync(path.join(os.tmpdir(), 'ariadne-passive-'));
     fs.mkdirSync(path.join(root, '.git'));
@@ -145,6 +175,25 @@ describe('passive capture', () => {
     try {
       savedDocHandler!({ uri: { scheme: 'file', fsPath: path.join(root2, 'a.ts') } });
       expect(store2.listFiles(store2.listTasks()[0]?.id ?? 'none')).toHaveLength(0);
+    } finally {
+      store2.close();
+      fs.rmSync(root2, { recursive: true, force: true });
+    }
+  });
+
+  it('shows a one-time info notice when a workspace has no current task', () => {
+    const root2 = fs.mkdtempSync(path.join(os.tmpdir(), 'ariadne-passive-notice-'));
+    fs.mkdirSync(path.join(root2, '.git'));
+    folders = [{ uri: { fsPath: root2 } }];
+    const store2 = openWorkspaceStore(root2);
+
+    try {
+      savedDocHandler!({ uri: { scheme: 'file', fsPath: path.join(root2, 'a.ts') } });
+      savedDocHandler!({ uri: { scheme: 'file', fsPath: path.join(root2, 'b.ts') } });
+
+      // Only one notice per workspace root, even across repeated events.
+      expect(infoMessages).toHaveLength(1);
+      expect(infoMessages[0]).toContain('no active task');
     } finally {
       store2.close();
       fs.rmSync(root2, { recursive: true, force: true });
@@ -255,6 +304,66 @@ describe('passive capture', () => {
       const after = store.listCheckpoints(taskId);
       expect(after.length).toBeGreaterThan(before);
       expect(after[0].summary).toContain('idle');
+    });
+  });
+
+  describe('git branch-mismatch guardrail', () => {
+    let onDidChange: (() => void) | undefined;
+    let headState: { commit?: string; name?: string };
+
+    beforeEach(async () => {
+      // Track the task's branch as 'main' up front, mirroring what
+      // registerGitCommitCapture would have recorded from an earlier
+      // checkout, so switching to a different branch below is a genuine
+      // mismatch rather than the task's first-ever branch assignment.
+      store.updateTaskBranch(taskId, 'main');
+      headState = { commit: 'abc123', name: 'main' };
+      gitApi = {
+        repositories: [
+          {
+            rootUri: { fsPath: root },
+            state: {
+              get HEAD() {
+                return headState;
+              },
+              onDidChange: (fn: () => void) => {
+                onDidChange = fn;
+                return { dispose: () => {} };
+              },
+            },
+            log: async () => [{ message: 'a commit' }],
+          },
+        ],
+        onDidOpenRepository: () => ({ dispose: () => {} }),
+      };
+
+      vi.resetModules();
+      savedDocHandler = undefined;
+      terminalHandler = undefined;
+      diagnosticsChangeHandler = undefined;
+      const { registerPassiveCapture } = await import('../src/passiveCapture.js');
+      registerPassiveCapture(context as never, output as never);
+    });
+
+    it('warns when the checked-out branch no longer matches the task\'s tracked branch', async () => {
+      headState = { commit: 'def456', name: 'feature/other' };
+      onDidChange!();
+      // The onDidChange handler is async; flush microtasks.
+      await Promise.resolve();
+      await Promise.resolve();
+
+      expect(warningMessages).toHaveLength(1);
+      expect(warningMessages[0]).toContain('feature/other');
+      expect(store.getTask(taskId)?.branch).toBe('feature/other');
+    });
+
+    it('does not warn when the branch is unchanged', async () => {
+      headState = { commit: 'def456', name: 'main' };
+      onDidChange!();
+      await Promise.resolve();
+      await Promise.resolve();
+
+      expect(warningMessages).toHaveLength(0);
     });
   });
 });

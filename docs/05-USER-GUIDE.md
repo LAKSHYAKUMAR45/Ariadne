@@ -207,6 +207,18 @@ needed:
   Status** work without opening chat at all; **Ariadne: Select Workspace
   Folder** matters if you have a multi-root workspace open.
 
+A **status bar item** always shows the current task's title (or "no task"
+if none is set yet for this workspace); click it to open `/status` or start
+a new task. Two guardrails help catch silent misattribution:
+- If a workspace has no current task, you'll get a one-time notice the
+  first time passive capture would otherwise silently drop an event (a
+  save, terminal command, or diagnostic) — a nudge to run
+  `/task new <title>` rather than losing that context forever.
+- If the checked-out git branch no longer matches the branch the current
+  task was last tracked on, you'll get a warning suggesting `/task use <id>`
+  — useful if you switched branches (or meant to switch tasks) without
+  telling Ariadne.
+
 Passive capture never auto-starts or auto-switches tasks — it only appends
 to a task you've explicitly started via `/task new` or "Ariadne: New Task".
 Toggle it off via the `ariadne.passiveCapture.enabled` setting if you don't

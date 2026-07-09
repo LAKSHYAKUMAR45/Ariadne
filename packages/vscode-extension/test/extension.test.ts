@@ -14,6 +14,7 @@ vi.mock('vscode', () => {
   }
   return {
     ThemeIcon,
+    StatusBarAlignment: { Left: 1, Right: 2 },
     chat: {
       createChatParticipant: (_id: string, handler: unknown) => {
         capturedHandler = handler as typeof capturedHandler;
@@ -25,6 +26,15 @@ vi.mock('vscode', () => {
         appendLine: (line: string) => outputLines.push(line),
         dispose: () => {},
       }),
+      createStatusBarItem: () => ({
+        show: () => {},
+        hide: () => {},
+        dispose: () => {},
+        text: '',
+        tooltip: '',
+        command: undefined,
+      }),
+      onDidChangeActiveTextEditor: () => ({ dispose: () => {} }),
       showWarningMessage: vi.fn(),
       showErrorMessage: vi.fn(),
       showInformationMessage: vi.fn(),
@@ -140,6 +150,12 @@ describe('chat participant error handling', () => {
   it('reports a friendly error and logs details when TaskStore throws', async () => {
     const markdownCalls: string[] = [];
     // Corrupt the state db to force a real TaskStore failure on next open.
+    // Evict the cached connection first — activate()'s status-bar refresh
+    // eagerly opens (and caches) a good connection on startup, so without
+    // evicting it here we'd just keep reusing that cached handle instead of
+    // hitting the now-corrupted file.
+    const { closeStore } = await import('../src/storeCache.js');
+    closeStore(tmpDir);
     const dbPath = path.join(tmpDir, '.ariadne', 'state.db');
     fs.mkdirSync(path.dirname(dbPath), { recursive: true });
     fs.writeFileSync(dbPath, 'not a sqlite file');

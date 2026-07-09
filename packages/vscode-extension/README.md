@@ -18,9 +18,17 @@ task state is identical no matter which one you use.
 - Adds two commands to the Command Palette: **Ariadne: New Task**,
   **Ariadne: Show Task Status**, and **Ariadne: Select Workspace Folder**
   (for multi-root workspaces).
+- Shows a **status bar item** (bottom-right) with the current task's title,
+  or "no task" if none is set for the workspace — click it to jump to
+  `/status` (or start a new task if there isn't one yet).
 - Passively captures saved files, terminal commands, and git commits against
   the current task in the background (toggle via the
   `ariadne.passiveCapture.enabled` setting).
+- Guards against silent misattribution: a one-time notice if you start
+  working in a workspace with no current task (so passive capture doesn't
+  silently drop everything), and a warning if the checked-out git branch no
+  longer matches the branch the current task was last tracked on (in case
+  you switched branches — or tasks — without telling Ariadne).
 
 ## Chat commands
 

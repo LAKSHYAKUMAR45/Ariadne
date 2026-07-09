@@ -37,6 +37,49 @@ function requireTask(store: TaskStore, currentTaskId: string | undefined): strin
   if (!currentTaskId) return undefined;
   return store.getTask(currentTaskId) ? currentTaskId : undefined;
 }
+
+/**
+ * Builds the label/tooltip for the status bar guardrail item that always
+ * shows whether a task is currently tracked for this workspace — so it's
+ * obvious at a glance if passive capture (file saves, terminal commands,
+ * diagnostics) is actually going anywhere, instead of silently doing
+ * nothing when the user forgot to start/switch a task.
+ */
+export function formatStatusBarItem(task: { title: string; status: TaskStatus } | undefined): {
+  text: string;
+  tooltip: string;
+} {
+  if (!task) {
+    return {
+      text: '$(circle-slash) Ariadne: no task',
+      tooltip: 'Ariadne: no current task for this workspace. Passive capture is not recording anything. Click to start one.',
+    };
+  }
+  const label = task.title.length > 40 ? `${task.title.slice(0, 37)}...` : task.title;
+  return {
+    text: `$(compass) Ariadne: ${label}`,
+    tooltip: `Ariadne task (${task.status}): ${task.title}\nClick to view status.`,
+  };
+}
+
+/**
+ * Detects a possible "working on the wrong task" situation: the task's
+ * last-recorded git branch (set by GitWatcher/passive capture whenever a
+ * commit or branch switch was observed) no longer matches the branch
+ * that's actually checked out. Returns a warning message, or undefined if
+ * there's nothing to warn about (no recorded branch yet, or it matches).
+ */
+export function branchMismatchWarning(
+  task: { title: string; branch: string | null },
+  actualBranch: string | undefined,
+): string | undefined {
+  if (!task.branch || !actualBranch || task.branch === actualBranch) return undefined;
+  return (
+    `Ariadne: current task "${task.title}" was last tracked on branch "${task.branch}", ` +
+    `but this repo is now on "${actualBranch}". If you're working on something else, ` +
+    'run `/task use <id>` (or "Ariadne: New Task") to switch to the right task.'
+  );
+}
 /**
  * Resolves an explicit task id that isn't in the current workspace's store
  * by consulting the global cross-workspace registry (the same mechanism

@@ -8,6 +8,7 @@ import {
   maybeCheckpointOnIdle,
 } from '@ariadne/core';
 import { getOrOpenStore, listOpenStores } from './storeCache.js';
+import { branchMismatchWarning } from './commands.js';
 
 /**
  * Passive background capture: watches file saves, terminal command
@@ -80,6 +81,16 @@ function log(context: string, err: unknown): void {
   output?.appendLine(`[${new Date().toISOString()}] passive-capture ${context}: ${message}`);
 }
 
+// Workspace roots we've already nudged about having no current task, so the
+// "no active task" notice fires once per workspace per session instead of
+// spamming on every file save/terminal command/diagnostic while it's true.
+const warnedNoTaskRoots = new Set<string>();
+
+/** Resets the one-time "no active task" notice tracking — exported for tests only. */
+export function resetPassiveCaptureGuardrailState(): void {
+  warnedNoTaskRoots.clear();
+}
+
 function resolveTaskContext(uri: vscode.Uri): { root: string; taskId: string } | undefined {
   const folder = vscode.workspace.getWorkspaceFolder(uri);
   if (!folder) return undefined;
@@ -88,7 +99,19 @@ function resolveTaskContext(uri: vscode.Uri): { root: string; taskId: string } |
   // will use) instead of readCurrentTaskId(root), which would open its own
   // short-lived connection — this runs on a hot path (every file save).
   const taskId = getOrOpenStore(root).getCurrentTaskId();
-  if (!taskId) return undefined;
+  if (!taskId) {
+    // Lightweight, non-blocking guardrail: nudge the user once per
+    // workspace per session that passive capture isn't recording anything
+    // because no task has been started yet, rather than silently dropping
+    // every save/terminal/diagnostic event forever.
+    if (!warnedNoTaskRoots.has(root)) {
+      warnedNoTaskRoots.add(root);
+      void vscode.window.showInformationMessage(
+        'Ariadne: no active task for this workspace, so nothing is being captured. Run "Ariadne: New Task" (or `/task new <title>`) to start one.',
+      );
+    }
+    return undefined;
+  }
   return { root, taskId };
 }
 
@@ -175,7 +198,18 @@ async function registerGitCommitCapture(context: vscode.ExtensionContext): Promi
             const branch = repo.state.HEAD?.name;
             if (ctx && lastKnownBranch.get(repoRoot) !== branch) {
               lastKnownBranch.set(repoRoot, branch);
-              getOrOpenStore(ctx.root).updateTaskBranch(ctx.taskId, branch ?? null);
+              const store = getOrOpenStore(ctx.root);
+              // Guardrail: if the task was previously tracked on a
+              // *different* branch than the one just checked out, that's a
+              // plausible sign the user meant to switch Ariadne tasks too
+              // (not just git branches) — warn instead of silently
+              // re-tagging the task to the new branch.
+              const task = store.getTask(ctx.taskId);
+              if (task) {
+                const warning = branchMismatchWarning(task, branch);
+                if (warning) void vscode.window.showWarningMessage(warning);
+              }
+              store.updateTaskBranch(ctx.taskId, branch ?? null);
             }
 
             const head = repo.state.HEAD?.commit;
