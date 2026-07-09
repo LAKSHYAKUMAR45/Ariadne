@@ -3,14 +3,22 @@ import { Command } from 'commander';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { TaskStore, TodoStatus } from '@ariadne/core';
-import { buildContext, syncTaskGit, exportTaskMarkdown, searchWorkspace } from '@ariadne/core';
+import {
+  buildContext,
+  syncTaskGit,
+  exportTaskMarkdown,
+  searchWorkspace,
+  listTasksAcrossWorkspaces,
+  searchAcrossWorkspaces,
+} from '@ariadne/core';
 import { openWorkspaceStore, findWorkspaceRoot, stateDbPath } from './workspace.js';
 import { readCurrentTaskId, setCurrentTaskId } from './currentTask.js';
+import { withResolvedTask } from './withTask.js';
 
 const program = new Command();
 program.name('ariadne').description('Chats are disposable, tasks are permanent.').version('0.1.0');
 
-/** Resolves which task id to operate on: explicit --task flag wins, else the workspace's current task. */
+/** Resolves which task id to operate on: explicit --task flag wins, else the workspace's current task. Validates against the CURRENT workspace only — see `withResolvedTask` in withTask.ts for the cross-workspace-aware version used by most commands. */
 function resolveTaskId(store: TaskStore, explicitId: string | undefined): string {
   const id = explicitId ?? readCurrentTaskId();
   if (!id) {
@@ -56,7 +64,22 @@ task
   .command('list')
   .description('List tasks')
   .option('-s, --status <status>', 'Filter by status (active|paused|done|archived)')
-  .action((opts: { status?: 'active' | 'paused' | 'done' | 'archived' }) => {
+  .option('-a, --all-workspaces', 'List tasks from every known workspace, not just this one')
+  .action((opts: { status?: 'active' | 'paused' | 'done' | 'archived'; allWorkspaces?: boolean }) => {
+    if (opts.allWorkspaces) {
+      const tasks = listTasksAcrossWorkspaces(opts.status ? { status: opts.status } : undefined);
+      if (tasks.length === 0) {
+        console.log('No tasks found in any known workspace.');
+        return;
+      }
+      const currentRoot = findWorkspaceRoot();
+      const current = readCurrentTaskId();
+      for (const t of tasks) {
+        const marker = t.taskId === current && t.workspaceRoot === currentRoot ? '*' : ' ';
+        console.log(`${marker} [${t.status}] ${t.taskId}  ${t.title}  (${t.workspaceRoot})`);
+      }
+      return;
+    }
     withStore((store) => {
       const tasks = store.listTasks(opts.status ? { status: opts.status } : undefined);
       if (tasks.length === 0) {
@@ -86,8 +109,7 @@ task
   .command('pause [id]')
   .description('Pause the current (or given) task')
   .action((id: string | undefined) => {
-    withStore((store) => {
-      const taskId = resolveTaskId(store, id);
+    withResolvedTask(id, (store, taskId) => {
       store.updateTaskStatus(taskId, 'paused');
       console.log(`Task ${taskId} paused.`);
     });
@@ -97,8 +119,7 @@ task
   .command('done [id]')
   .description('Mark the current (or given) task done')
   .action((id: string | undefined) => {
-    withStore((store) => {
-      const taskId = resolveTaskId(store, id);
+    withResolvedTask(id, (store, taskId) => {
       store.updateTaskStatus(taskId, 'done');
       console.log(`Task ${taskId} marked done.`);
     });
@@ -108,8 +129,7 @@ task
   .command('archive [id]')
   .description('Archive the current (or given) task')
   .action((id: string | undefined) => {
-    withStore((store) => {
-      const taskId = resolveTaskId(store, id);
+    withResolvedTask(id, (store, taskId) => {
       store.updateTaskStatus(taskId, 'archived');
       console.log(`Task ${taskId} archived.`);
     });
@@ -119,8 +139,7 @@ task
   .command('reopen [id]')
   .description('Reopen a paused/done/archived task, marking it active again')
   .action((id: string | undefined) => {
-    withStore((store) => {
-      const taskId = resolveTaskId(store, id);
+    withResolvedTask(id, (store, taskId) => {
       store.updateTaskStatus(taskId, 'active');
       console.log(`Task ${taskId} reactivated.`);
     });
@@ -136,8 +155,7 @@ program
   .option('-t, --task <id>', 'Task id')
   .option('-l, --level <level>', 'micro|session|milestone', 'micro')
   .action((summary: string, opts: { task?: string; level: 'micro' | 'session' | 'milestone' }) => {
-    withStore((store) => {
-      const taskId = resolveTaskId(store, opts.task);
+    withResolvedTask(opts.task, (store, taskId) => {
       const cp = store.createCheckpoint({ taskId, level: opts.level, summary });
       console.log(`Recorded ${cp.level} checkpoint ${cp.id}.`);
     });
@@ -153,8 +171,7 @@ program
   .option('-t, --task <id>', 'Task id')
   .option('-r, --rationale <rationale>', 'Why this decision was made')
   .action((text: string, opts: { task?: string; rationale?: string }) => {
-    withStore((store) => {
-      const taskId = resolveTaskId(store, opts.task);
+    withResolvedTask(opts.task, (store, taskId) => {
       const created = store.recordDecision({ taskId, text, rationale: opts.rationale });
       console.log(`Recorded decision ${created.id}: ${created.text}`);
     });
@@ -171,8 +188,7 @@ errorCmd
   .description('Record an error against the current (or --task) task')
   .option('-t, --task <id>', 'Task id')
   .action((message: string, opts: { task?: string }) => {
-    withStore((store) => {
-      const taskId = resolveTaskId(store, opts.task);
+    withResolvedTask(opts.task, (store, taskId) => {
       const created = store.recordError({ taskId, message });
       console.log(`Recorded error ${created.id}.`);
     });
@@ -184,8 +200,7 @@ errorCmd
   .option('-t, --task <id>', 'Task id')
   .option('-a, --all', 'Include resolved errors (default: unresolved only)')
   .action((opts: { task?: string; all?: boolean }) => {
-    withStore((store) => {
-      const taskId = resolveTaskId(store, opts.task);
+    withResolvedTask(opts.task, (store, taskId) => {
       const errors = store.listErrors(taskId, opts.all ? undefined : { resolved: false });
       if (errors.length === 0) {
         console.log('No errors found.');
@@ -219,8 +234,7 @@ todo
   .description('Add a todo to the current (or --task) task')
   .option('-t, --task <id>', 'Task id')
   .action((text: string, opts: { task?: string }) => {
-    withStore((store) => {
-      const taskId = resolveTaskId(store, opts.task);
+    withResolvedTask(opts.task, (store, taskId) => {
       const created = store.createTodo({ taskId, text });
       console.log(`Added todo ${created.id}: ${created.text}`);
     });
@@ -232,8 +246,7 @@ todo
   .option('-t, --task <id>', 'Task id')
   .option('-s, --status <status>', 'Filter by status (pending|done|blocked)')
   .action((opts: { task?: string; status?: TodoStatus }) => {
-    withStore((store) => {
-      const taskId = resolveTaskId(store, opts.task);
+    withResolvedTask(opts.task, (store, taskId) => {
       const todos = store.listTodos(taskId, opts.status ? { status: opts.status } : undefined);
       if (todos.length === 0) {
         console.log('No todos found.');
@@ -266,8 +279,7 @@ question
   .description('Add an open question to the current (or --task) task')
   .option('-t, --task <id>', 'Task id')
   .action((text: string, opts: { task?: string }) => {
-    withStore((store) => {
-      const taskId = resolveTaskId(store, opts.task);
+    withResolvedTask(opts.task, (store, taskId) => {
       const created = store.recordOpenQuestion({ taskId, text });
       console.log(`Added open question ${created.id}: ${created.text}`);
     });
@@ -279,8 +291,7 @@ question
   .option('-t, --task <id>', 'Task id')
   .option('-a, --all', 'Include resolved questions (default: unresolved only)')
   .action((opts: { task?: string; all?: boolean }) => {
-    withStore((store) => {
-      const taskId = resolveTaskId(store, opts.task);
+    withResolvedTask(opts.task, (store, taskId) => {
       const questions = store.listOpenQuestions(taskId, opts.all ? undefined : { resolved: false });
       if (questions.length === 0) {
         console.log('No open questions found.');
@@ -362,8 +373,7 @@ program
   .option('-t, --task <id>', 'Task id')
   .option('-b, --budget <tokens>', 'Token budget for context ranking (default: 2000)', (v) => parseInt(v, 10))
   .action((opts: { task?: string; budget?: number }) => {
-    withStore((store) => {
-      const taskId = resolveTaskId(store, opts.task);
+    withResolvedTask(opts.task, (store, taskId) => {
       printStatus(store, taskId, opts.budget);
     });
   });
@@ -374,8 +384,7 @@ program
   .option('-t, --task <id>', 'Task id')
   .option('-b, --budget <tokens>', 'Token budget for context ranking (default: 2000)', (v) => parseInt(v, 10))
   .action((opts: { task?: string; budget?: number }) => {
-    withStore((store) => {
-      const taskId = resolveTaskId(store, opts.task);
+    withResolvedTask(opts.task, (store, taskId) => {
       printStatus(store, taskId, opts.budget);
     });
   });
@@ -391,9 +400,24 @@ program
 
 program
   .command('search <query>')
-  .description('Search this workspace for a substring match across task titles, goals, checkpoints, decisions, todos, errors, open questions, files, and commits')
+  .description('Search this workspace (or, with --all-workspaces, every known workspace) for a substring match across task titles, goals, checkpoints, decisions, todos, errors, open questions, files, and commits')
   .option('-l, --limit <n>', 'Max tasks to show (default: 20)', (v) => parseInt(v, 10))
-  .action((query: string, opts: { limit?: number }) => {
+  .option('-a, --all-workspaces', 'Search every known workspace, not just this one')
+  .action((query: string, opts: { limit?: number; allWorkspaces?: boolean }) => {
+    if (opts.allWorkspaces) {
+      const results = searchAcrossWorkspaces(query, opts.limit ? { totalLimit: opts.limit } : undefined);
+      if (results.length === 0) {
+        console.log('No matches found in any known workspace.');
+        return;
+      }
+      for (const r of results) {
+        console.log(`  [${r.taskStatus}] ${r.taskId}  ${r.taskTitle}  (${r.workspaceRoot})`);
+        for (const m of r.matches) {
+          console.log(`    (${m.category}) ${m.text}`);
+        }
+      }
+      return;
+    }
     withStore((store) => {
       const results = searchWorkspace(store, query, opts.limit ? { limit: opts.limit } : undefined);
       if (results.length === 0) {
@@ -416,9 +440,8 @@ program
   .description('Sync the current git branch and any new commits into the current (or --task) task — for CLI-only workflows without VS Code')
   .option('-t, --task <id>', 'Task id')
   .action((opts: { task?: string }) => {
-    withStore((store) => {
-      const taskId = resolveTaskId(store, opts.task);
-      const result = syncTaskGit(store, taskId, findWorkspaceRoot());
+    withResolvedTask(opts.task, (store, taskId, workspaceRoot) => {
+      const result = syncTaskGit(store, taskId, workspaceRoot);
       if (result.branchChanged) {
         console.log(`Branch updated to ${result.newBranch}.`);
       }
@@ -437,11 +460,9 @@ program
   .option('-t, --task <id>', 'Task id')
   .option('-o, --out <path>', 'Output file path (defaults to .ariadne/export/<task-id>.md)')
   .action((opts: { task?: string; out?: string }) => {
-    withStore((store) => {
-      const taskId = resolveTaskId(store, opts.task);
+    withResolvedTask(opts.task, (store, taskId, workspaceRoot) => {
       const markdown = exportTaskMarkdown(store, taskId);
-      const root = findWorkspaceRoot();
-      const outPath = opts.out ?? path.join(root, '.ariadne', 'export', `${taskId}.md`);
+      const outPath = opts.out ?? path.join(workspaceRoot, '.ariadne', 'export', `${taskId}.md`);
       fs.mkdirSync(path.dirname(outPath), { recursive: true });
       fs.writeFileSync(outPath, markdown, 'utf8');
       console.log(`Exported task ${taskId} to ${outPath}`);

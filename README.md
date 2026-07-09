@@ -95,6 +95,32 @@ Common commands: `task new <title>`, `task list`, `task use <id>`,
 `question add <text>` / `question list` / `question resolve <id>`,
 `search <query>`, `status`, `resume`, `git-sync`, `export`, `where`. Run `ariadne --help` for the full list.
 
+Any command that takes `--task <id>` (or `[id]`) works across workspaces:
+if the id isn't a task in your current workspace, Ariadne transparently
+looks it up in the global cross-workspace registry (`~/.ariadne/registry.db`)
+and operates on the workspace that actually owns it — no need to `cd` there
+first. `task list --all-workspaces` and `search <query> --all-workspaces`
+list/search every workspace you've ever used Ariadne in, not just the
+current one. See "Cross-workspace task discovery" below.
+
+### Cross-workspace task discovery
+
+Each workspace's `.ariadne/state.db` is still the source of truth for that
+workspace's tasks — but Ariadne also maintains a small global index at
+`~/.ariadne/registry.db` (which task ids live in which workspace, kept live
+automatically as you work) purely so you can discover and act on tasks
+without needing to remember, or `cd` into, every workspace:
+
+```bash
+ariadne task list --all-workspaces     # every task in every workspace you've used
+ariadne search "flaky test" -a         # search every workspace's checkpoints/decisions/todos/etc
+ariadne status --task <id>             # works even if <id> belongs to a different workspace
+```
+
+This is index-only, not sync — nothing is copied between workspaces, and a
+workspace that's been deleted from disk is just skipped rather than
+breaking the search.
+
 ### Using the MCP server
 
 ```bash

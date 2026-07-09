@@ -41,4 +41,13 @@ describe('ariadne CLI surface', () => {
     const errorCmd = program.commands.find((c) => c.name() === 'error')!;
     expect(errorCmd.commands.map((c) => c.name())).toEqual(expect.arrayContaining(['add', 'list', 'resolve']));
   });
+
+  it('registers --all-workspaces on task list and search for cross-workspace discovery', () => {
+    const taskCmd = program.commands.find((c) => c.name() === 'task')!;
+    const taskListCmd = taskCmd.commands.find((c) => c.name() === 'list')!;
+    expect(taskListCmd.options.some((o) => o.long === '--all-workspaces')).toBe(true);
+
+    const searchCmd = program.commands.find((c) => c.name() === 'search')!;
+    expect(searchCmd.options.some((o) => o.long === '--all-workspaces')).toBe(true);
+  });
 });
