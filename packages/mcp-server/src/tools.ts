@@ -4,6 +4,7 @@ import type {
   ContextPackage,
   Decision,
   OpenQuestion,
+  SearchResult,
   SyncGitResult,
   Task,
   TaskError,
@@ -12,7 +13,7 @@ import type {
   Todo,
   TodoStatus,
 } from '@ariadne/core';
-import { buildContext, syncTaskGit, exportTaskMarkdown } from '@ariadne/core';
+import { buildContext, syncTaskGit, exportTaskMarkdown, searchWorkspace } from '@ariadne/core';
 import { readCurrentTaskId, setCurrentTaskId } from './workspace.js';
 
 /**
@@ -167,14 +168,12 @@ export function questionResolve(store: TaskStore, args: QuestionResolveArgs): vo
 
 export interface SearchArgs {
   query: string;
+  limit?: number;
 }
 
-/** Simple substring search over task titles/goals — a placeholder until `core-context-builder` ships ranked search. */
-export function searchTasks(store: TaskStore, args: SearchArgs): Task[] {
-  const needle = args.query.toLowerCase();
-  return store
-    .listTasks()
-    .filter((t) => t.title.toLowerCase().includes(needle) || (t.goal ?? '').toLowerCase().includes(needle));
+/** Cross-entity workspace search (title/goal, checkpoints, decisions, todos, errors, open questions, files, commits), delegating to @ariadne/core's shared searchWorkspace. */
+export function searchTasks(store: TaskStore, args: SearchArgs): SearchResult[] {
+  return searchWorkspace(store, args.query, args.limit ? { limit: args.limit } : undefined);
 }
 
 export interface GetContextArgs {

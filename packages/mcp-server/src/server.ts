@@ -252,9 +252,12 @@ export function createAriadneMcpServer(options?: { workspaceRoot?: string; store
   server.registerTool(
     'search',
     {
-      title: 'Search tasks',
-      description: 'Searches task titles and goals in this workspace for a substring match.',
-      inputSchema: { query: z.string() },
+      title: 'Search workspace',
+      description:
+        'Cross-entity search over this workspace: task titles/goals, checkpoints, decisions, todos, ' +
+        'errors, open questions, files, and commits. Returns tasks ranked by number of matches, each with ' +
+        'the matching entities.',
+      inputSchema: { query: z.string(), limit: z.number().int().positive().optional() },
     },
     async (args) => {
       try {

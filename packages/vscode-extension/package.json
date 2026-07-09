@@ -41,7 +41,8 @@
           { "name": "task", "description": "Create, list, or switch tasks" },
           { "name": "decision", "description": "Record a decision" },
           { "name": "error", "description": "Record or resolve an error" },
-          { "name": "question", "description": "Add, list, or resolve open questions" }
+          { "name": "question", "description": "Add, list, or resolve open questions" },
+          { "name": "search", "description": "Search this workspace's tasks, checkpoints, decisions, todos, errors, and more" }
         ]
       }
     ],

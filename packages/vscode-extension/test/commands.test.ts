@@ -67,6 +67,23 @@ describe('chat participant command logic', () => {
     expect(store.listErrors(task.id, { resolved: false })).toHaveLength(0);
   });
 
+  it('searches across tasks and their entities via /search', () => {
+    const task = store.createTask({ title: 'Networking work' });
+    store.createTodo({ taskId: task.id, text: 'Pick a transport for IPC' });
+    store.createTask({ title: 'Unrelated task' });
+
+    const result = handleChatCommand(store, { command: 'search', prompt: 'transport', currentTaskId: task.id });
+    expect(result.markdown).toContain('Networking work');
+    expect(result.markdown).toContain('transport');
+    expect(result.markdown).not.toContain('Unrelated task');
+  });
+
+  it('reports no matches for a /search with no hits', () => {
+    store.createTask({ title: 'Anything' });
+    const result = handleChatCommand(store, { command: 'search', prompt: 'nonexistent-needle' });
+    expect(result.markdown).toMatch(/no matches/i);
+  });
+
   it('adds, lists, and resolves an open question via /question', () => {
     const task = store.createTask({ title: 'Task with questions' });
     const added = handleChatCommand(store, {

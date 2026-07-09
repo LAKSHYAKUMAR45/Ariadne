@@ -1,5 +1,5 @@
 import type { TaskStore, CheckpointLevel } from '@ariadne/core';
-import { buildContext } from '@ariadne/core';
+import { buildContext, searchWorkspace } from '@ariadne/core';
 
 /**
  * Pure, vscode-independent command logic for the Ariadne chat participant.
@@ -243,6 +243,17 @@ export function handleChatCommand(store: TaskStore, input: ChatCommandInput): Ch
       return { markdown: 'Usage: `/task new <title>`, `/task list`, or `/task use <id>`.' };
     }
 
+    case 'search': {
+      if (!prompt.trim()) return { markdown: 'Usage: `/search <query>`.' };
+      const results = searchWorkspace(store, prompt.trim());
+      if (results.length === 0) return { markdown: `No matches for "${prompt.trim()}".` };
+      const lines = results.map((r) => {
+        const matchLines = r.matches.map((m) => `  - (${m.category}) ${m.text}`).join('\n');
+        return `- ${r.taskId === taskId ? '**' : ''}[${r.taskStatus}] \`${r.taskId}\` ${r.taskTitle}${r.taskId === taskId ? '**' : ''}\n${matchLines}`;
+      });
+      return { markdown: lines.join('\n') };
+    }
+
     case 'checkpoint': {
       if (!taskId) return { markdown: noCurrentTaskMessage() };
       if (!prompt.trim()) return { markdown: 'Usage: `/checkpoint <summary>`.' };
@@ -344,6 +355,8 @@ export function progressMessageFor(command: string | undefined): string {
       return 'Recording error…';
     case 'question':
       return 'Updating open questions…';
+    case 'search':
+      return 'Searching workspace…';
     case 'resume':
       return 'Resuming task context…';
     case 'status':

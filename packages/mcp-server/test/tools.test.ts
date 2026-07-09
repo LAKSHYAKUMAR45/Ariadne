@@ -91,9 +91,18 @@ describe('mcp-server tools', () => {
     tools.taskNew(store, workspaceRoot, { title: 'Fix login bug', goal: 'Users cannot log in' });
     tools.taskNew(store, workspaceRoot, { title: 'Add dark mode' });
 
-    expect(tools.searchTasks(store, { query: 'LOGIN' }).map((t) => t.title)).toEqual(['Fix login bug']);
-    expect(tools.searchTasks(store, { query: 'dark' }).map((t) => t.title)).toEqual(['Add dark mode']);
+    expect(tools.searchTasks(store, { query: 'LOGIN' }).map((r) => r.taskTitle)).toEqual(['Fix login bug']);
+    expect(tools.searchTasks(store, { query: 'dark' }).map((r) => r.taskTitle)).toEqual(['Add dark mode']);
     expect(tools.searchTasks(store, { query: 'nonexistent' })).toEqual([]);
+  });
+
+  it('search also matches todos, decisions, and errors, not just task title/goal', () => {
+    const task = tools.taskNew(store, workspaceRoot, { title: 'Networking' });
+    tools.todoAdd(store, workspaceRoot, { text: 'Pick a transport for IPC', taskId: task.id });
+
+    const results = tools.searchTasks(store, { query: 'transport' });
+    expect(results).toHaveLength(1);
+    expect(results[0].matches.some((m) => m.category === 'todo')).toBe(true);
   });
 
   it('get_context assembles the full task context as structured data', () => {

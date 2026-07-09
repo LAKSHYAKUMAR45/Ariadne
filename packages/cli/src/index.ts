@@ -3,7 +3,7 @@ import { Command } from 'commander';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { TaskStore, TodoStatus } from '@ariadne/core';
-import { buildContext, syncTaskGit, exportTaskMarkdown } from '@ariadne/core';
+import { buildContext, syncTaskGit, exportTaskMarkdown, searchWorkspace } from '@ariadne/core';
 import { openWorkspaceStore, findWorkspaceRoot } from './workspace.js';
 import { readCurrentTaskId, setCurrentTaskId } from './currentTask.js';
 
@@ -345,21 +345,22 @@ program
 
 program
   .command('search <query>')
-  .description('Search task titles and goals in this workspace for a substring match')
-  .action((query: string) => {
+  .description('Search this workspace for a substring match across task titles, goals, checkpoints, decisions, todos, errors, open questions, files, and commits')
+  .option('-l, --limit <n>', 'Max tasks to show (default: 20)', (v) => parseInt(v, 10))
+  .action((query: string, opts: { limit?: number }) => {
     withStore((store) => {
-      const needle = query.toLowerCase();
-      const matches = store
-        .listTasks()
-        .filter((t) => t.title.toLowerCase().includes(needle) || (t.goal ?? '').toLowerCase().includes(needle));
-      if (matches.length === 0) {
-        console.log('No matching tasks found.');
+      const results = searchWorkspace(store, query, opts.limit ? { limit: opts.limit } : undefined);
+      if (results.length === 0) {
+        console.log('No matches found.');
         return;
       }
       const current = readCurrentTaskId();
-      for (const t of matches) {
-        const marker = t.id === current ? '*' : ' ';
-        console.log(`${marker} [${t.status}] ${t.id}  ${t.title}`);
+      for (const r of results) {
+        const marker = r.taskId === current ? '*' : ' ';
+        console.log(`${marker} [${r.taskStatus}] ${r.taskId}  ${r.taskTitle}`);
+        for (const m of r.matches) {
+          console.log(`    (${m.category}) ${m.text}`);
+        }
       }
     });
   });

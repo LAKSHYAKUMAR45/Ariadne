@@ -37,6 +37,8 @@ export {
 export type { RedactionRule } from './Redactor.js';
 export { exportTaskMarkdown } from './Exporter.js';
 export { ensureGitignored } from './gitignore.js';
+export { searchWorkspace } from './Search.js';
+export type { SearchCategory, SearchMatch, SearchResult, SearchOptions } from './Search.js';
 export {
   findWorkspaceRoot,
   stateDbPath,
