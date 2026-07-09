@@ -1,4 +1,5 @@
 import type { TaskStore, CheckpointLevel } from '@ariadne/core';
+import { buildContext } from '@ariadne/core';
 
 /**
  * Pure, vscode-independent command logic for the Ariadne chat participant.
@@ -34,47 +35,59 @@ function requireTask(store: TaskStore, currentTaskId: string | undefined): strin
   return store.getTask(currentTaskId) ? currentTaskId : undefined;
 }
 
-/** Builds the /status (and /resume) output as an ordered list of sections, so callers can stream them incrementally. */
-export function formatStatusSections(store: TaskStore, taskId: string): string[] {
+/**
+ * Builds the /status (and /resume) output as an ordered list of sections, so
+ * callers can stream them incrementally. Delegates to @ariadne/core's
+ * buildContext — the same ranked, token-budgeted context package the CLI's
+ * `status`/`resume` and the MCP server's `get_context` tool use — so all
+ * three surfaces show identical "what am I working on" context instead of
+ * the chat participant reimplementing its own ad-hoc query/formatting.
+ */
+export function formatStatusSections(store: TaskStore, taskId: string, tokenBudget?: number): string[] {
   const t = store.getTask(taskId);
   if (!t) return [`No task found with id \`${taskId}\`.`];
 
+  const ctx = buildContext(store, taskId, tokenBudget ? { tokenBudget } : undefined);
   const sections: string[] = [];
 
   let header = `### ${t.title}  \`${t.status}\``;
-  if (t.goal) header += `\n**Goal:** ${t.goal}`;
+  if (ctx.goal) header += `\n**Goal:** ${ctx.goal}`;
   sections.push(header);
 
-  const latest = store.latestCheckpoint(taskId);
-  if (latest) {
-    sections.push(`**Latest checkpoint** (${latest.level}, ${latest.createdAt}):\n> ${latest.summary}`);
+  if (ctx.latestSummary) {
+    sections.push(`**Latest checkpoint:**\n> ${ctx.latestSummary}`);
   }
 
-  const openQuestions = store.listOpenQuestions(taskId, { resolved: false });
-  if (openQuestions.length > 0) {
-    sections.push(`**Open questions:**\n${openQuestions.map((q) => `- ${q.text}`).join('\n')}`);
+  if (ctx.openQuestions.length > 0) {
+    sections.push(`**Open questions:**\n${ctx.openQuestions.map((q) => `- ${q}`).join('\n')}`);
   }
 
-  const unresolvedErrors = store.listErrors(taskId, { resolved: false });
-  if (unresolvedErrors.length > 0) {
-    sections.push(`**Unresolved errors:**\n${unresolvedErrors.map((e) => `- ${e.message}`).join('\n')}`);
+  if (ctx.unresolvedErrors.length > 0) {
+    sections.push(`**Unresolved errors:**\n${ctx.unresolvedErrors.map((e) => `- ${e}`).join('\n')}`);
   }
 
-  const pendingTodos = store.listTodos(taskId, { status: 'pending' });
-  if (pendingTodos.length > 0) {
-    sections.push(`**Pending todos:**\n${pendingTodos.map((td) => `- [ ] \`${td.id}\` ${td.text}`).join('\n')}`);
+  if (ctx.decisions.length > 0) {
+    sections.push(`**Decisions:**\n${ctx.decisions.map((d) => `- ${d}`).join('\n')}`);
   }
 
-  const recentFiles = store.listFiles(taskId, 10);
-  if (recentFiles.length > 0) {
-    sections.push(`**Recently touched files:**\n${recentFiles.map((f) => `- (${f.role}) \`${f.path}\``).join('\n')}`);
+  if (ctx.openTodos.length > 0) {
+    sections.push(`**Pending todos:**\n${ctx.openTodos.map((td) => `- [ ] ${td}`).join('\n')}`);
   }
 
-  const recentCommits = store.listCommits(taskId, 5);
-  if (recentCommits.length > 0) {
+  if (ctx.recentFiles.length > 0) {
+    sections.push(`**Recently touched files:**\n${ctx.recentFiles.map((f) => `- (${f.role}) \`${f.path}\``).join('\n')}`);
+  }
+
+  if (ctx.recentCommits.length > 0) {
     sections.push(
-      `**Recent commits:**\n${recentCommits.map((c) => `- \`${c.sha.slice(0, 7)}\` ${c.message ?? ''}`).join('\n')}`,
+      `**Recent commits:**\n${ctx.recentCommits.map((c) => `- \`${c.sha.slice(0, 7)}\` ${c.message ?? ''}`).join('\n')}`,
     );
+  }
+
+  const truncatedEntries = Object.entries(ctx.truncated);
+  if (truncatedEntries.length > 0) {
+    const summary = truncatedEntries.map(([category, count]) => `${count} ${category}`).join(', ');
+    sections.push(`_(Trimmed to fit token budget — omitted: ${summary}.)_`);
   }
 
   return sections;

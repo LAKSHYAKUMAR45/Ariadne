@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { TaskStore } from '@ariadne/core';
-import { handleChatCommand, formatStatus } from '../src/commands.js';
+import { handleChatCommand, formatStatus, formatStatusSections } from '../src/commands.js';
 
 describe('chat participant command logic', () => {
   let store: TaskStore;
@@ -108,8 +108,10 @@ describe('chat participant command logic', () => {
       const task = store.createTask({ title: 'Task with decisions' });
       handleChatCommand(store, { prompt: 'decision: use SQLite for storage', currentTaskId: task.id });
       const status = formatStatus(store, task.id);
-      // Decisions aren't rendered in /status; verify via the store directly instead.
       expect(store.listDecisions(task.id).some((d) => d.text === 'use SQLite for storage')).toBe(true);
+      // formatStatus now delegates to buildContext (shared with CLI/MCP), which
+      // does render current decisions as a ranked context category.
+      expect(status).toContain('use SQLite for storage');
       expect(status).toContain('Task with decisions');
     });
 
@@ -124,5 +126,20 @@ describe('chat participant command logic', () => {
       const result = handleChatCommand(store, { prompt: "how's it going", currentTaskId: task.id });
       expect(result.markdown).toContain('Status phrasing task');
     });
+  });
+
+  it('formatStatusSections delegates to buildContext, honoring a token budget like the CLI/MCP surfaces', () => {
+    const task = store.createTask({ title: 'Budget task', goal: 'Ship the thing' });
+    store.createCheckpoint({ taskId: task.id, level: 'session', summary: 'made progress' });
+    for (let i = 0; i < 20; i++) {
+      store.createTodo({ taskId: task.id, text: `todo number ${i} with some extra padding text to add up tokens` });
+    }
+
+    const unbudgeted = formatStatusSections(store, task.id).join('\n\n');
+    const budgeted = formatStatusSections(store, task.id, 50).join('\n\n');
+
+    expect(unbudgeted).toContain('todo number 19');
+    expect(budgeted.length).toBeLessThan(unbudgeted.length);
+    expect(budgeted).toContain('Trimmed to fit token budget');
   });
 });
