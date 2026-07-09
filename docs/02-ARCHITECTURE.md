@@ -11,28 +11,35 @@ each surface is a thin adapter over `@ariadne/core`.
 ┌───────────────────────────────────────────────────────────────────┐
 │                        @ariadne/core (library)                   │
 │  TaskStore (SQLite) │ ContextBuilder │ CheckpointEngine │ GitWatcher│
-│                       │ PluginRegistry │ Redactor                  │
+│                       │ Redactor │ Exporter                        │
+│                       │ (PluginRegistry — deferred, post-MVP)      │
 └───────────────┬───────────────────────────────┬─────────────────────┘
                 │                               │
      ┌──────────▼───────────┐        ┌──────────▼───────────┐
      │ @ariadne/mcp-server  │        │  @ariadne/cli        │
-     │ stdio/SSE MCP server   │        │  `ariadne` binary     │
-     │ tools: task.*          │        │  start/checkpoint/      │
-     │ resources: context     │        │  resume/status/search   │
+     │ stdio MCP server        │        │  `ariadne` binary     │
+     │ tools: task.*, get_context, │        │  task/checkpoint/todo/  │
+     │ git_sync, export_task       │        │  status/resume/git-sync/│
+     │                          │        │  export                 │
      └──────────┬─────────────┘        └──────────┬───────────┘
                 │                                 │
      ┌──────────▼──────────────────────────────────▼───────────┐
      │              @ariadne/vscode-extension                 │
-     │  - spawns/registers MCP server for Copilot Chat           │
-     │  - registers `@ariadne` chat participant (wraps CLI/MCP)│
-     │  - background listeners → feed core (file/git/terminal)   │
+     │  - registers `@ariadne` chat participant (commands.ts)    │
+     │  - background listeners → write directly to @ariadne/core │
+     │    (file saves, terminal commands, git commits, diagnostics)│
      │  - optional thin tree view (secondary, v1.1+)              │
      └────────────────────────────────────────────────────────────┘
                 │
      Any MCP-capable client (Copilot CLI, Claude Code, Cursor,
-     custom agents) connects to the same MCP server directly —
+     custom agents) connects to `@ariadne/mcp-server` directly —
      no VS Code required for the CLI + MCP path.
 ```
+
+Each of the three surfaces above opens its own connection directly to
+`.ariadne/state.db` via `@ariadne/core`'s `TaskStore` (no daemon, no IPC — see
+§4). They agree on shared state purely because they all read/write the same
+SQLite file using the same shared library.
 
 ## 3. Why MCP Is the Integration Backbone
 - MCP is already the emerging standard for "expose tools/resources to any AI client."
@@ -40,87 +47,145 @@ each surface is a thin adapter over `@ariadne/core`.
   assistant.
 - Copilot Chat, Copilot CLI, and Claude Code can all attach to the same local MCP
   server. One implementation, three+ front doors.
-- The chat participant (`@ariadne` in Copilot Chat) is a **wrapper**, not a
-  reimplementation: it calls the same MCP tools a CLI or external agent would call.
+- The chat participant (`@ariadne` in Copilot Chat) currently reimplements its
+  `/status`/`/resume` output directly against `@ariadne/core` (see
+  `packages/vscode-extension/src/commands.ts`) rather than calling into
+  `@ariadne/mcp-server`, since running an MCP client from inside the extension
+  isn't wired up yet. Tracked as a known gap (see `ext-chat-participant-shared-context`
+  in the roadmap) — the intent is still for it to become a thin wrapper over the
+  exact same `buildContext`/tool logic the CLI and MCP server already share, just
+  without an extra MCP hop for something running in-process.
 
-## 4. Process Model
-- **Core** runs as a **local daemon** (long-lived process) per workspace, owning the
-  SQLite connection (avoids multi-writer contention). Started lazily on first use by
-  either the VS Code extension or the CLI; whichever starts first wins, others attach
-  via a local IPC/unix socket (or named pipe on Windows).
-- **MCP server** is a thin process wrapping the daemon's IPC client — this is what
-  Copilot Chat/CLI actually spawn/connect to per the MCP client contract (typically
-  stdio).
-- If no daemon is running, the CLI/MCP server auto-starts one and exits it after an
-  idle timeout (keeps footprint low when not in use).
+## 4. Process Model (as shipped — no daemon)
+**Locked MVP decision, superseding the daemon/IPC design originally sketched
+here:** there is no long-lived daemon and no IPC transport. Every process — the
+CLI (one process per invocation), the MCP server (one process per client
+session), and the VS Code extension (one process per editor window) — opens
+its own `better-sqlite3` connection straight to `.ariadne/state.db` via
+`@ariadne/core`'s `TaskStore`/`openWorkspaceStore()`.
+
+This works safely today because:
+- SQLite is opened in **WAL mode** (`packages/core/src/db.ts`), which allows
+  multiple readers plus one writer concurrently without corrupting the file.
+- All writes are single statements per `TaskStore` method (no long-held
+  transactions spanning a user interaction), keeping writer contention windows
+  short.
+- `packages/core/test/concurrency.test.ts` exercises two connections
+  interleaving writes against the same file and reopening after a close, as a
+  regression test for this assumption.
+
+**Why no daemon for v1:** the target user is a single developer working in one
+workspace at a time. A background daemon (with its own lifecycle, IPC
+transport choice, crash recovery, and idle-timeout policy — all previously
+open questions here) is real operational complexity that direct-SQLite-access
+avoids entirely for that use case. It's revisited only if a real bottleneck
+shows up (e.g., very high-frequency passive-capture writes racing a large
+`ariadne export`, or eventual multi-workspace/team scenarios) — see
+`04-ROADMAP.md`'s deferred/stretch section.
+
+**Current-task state** (which task is "current" for a workspace, so commands
+without an explicit `--task` know what to act on) also lives in `state.db`
+(the `schema_meta` table), not a side file — see `packages/core/src/workspace.ts`.
+This was previously a separate flat file; moving it into the same DB removed
+one more place surfaces could drift out of sync with each other.
 
 ## 5. Component Responsibilities
 
 | Component | Responsibility |
 |---|---|
-| `TaskStore` | CRUD over SQLite: tasks, checkpoints, files, commits, decisions, todos, errors, commands |
+| `TaskStore` | CRUD over SQLite: tasks, checkpoints, files, commits, decisions, todos, errors, commands, open questions, current-task pointer |
 | `ContextBuilder` | Ranks + assembles context package under a token budget (see PRD/data-model) |
 | `CheckpointEngine` | Rule-based, event-triggered summarization + hierarchical rollup |
-| `GitWatcher` | Watches `.git/HEAD`, commits; links commits ↔ checkpoints; detects branch switches |
-| `Redactor` | Strips likely secrets (env vars, tokens, key patterns) from captured terminal output *before* persistence |
-| `PluginRegistry` | Loads plugins (Jira, Slack, etc.) that contribute context sources or MCP tools |
-| `mcp-server` | Exposes `task.*` tools/resources over MCP to any client |
+| `GitWatcher` | Shells out to `git` to read HEAD/branch/recent commits; used by CLI/MCP server for git capture without an editor. (The VS Code extension uses the built-in `vscode.git` API instead, for better event-driven UX — see §6.) |
+| `Redactor` | Strips likely secrets (known token shapes, password/token/secret/api-key assignments) from captured terminal commands *before* persistence |
+| `Exporter` | Renders a task's full history to Markdown for `ariadne export` / the MCP `export_task` tool |
+| `PluginRegistry` | **Not implemented.** Originally sketched for post-MVP plugins (Jira, Slack, LLM-based summarization backend, etc.) — no code exists yet; listed here only as a future extension point, not a current component. |
+| `mcp-server` | Exposes task/checkpoint/todo/decision/error/context/git/export tools over MCP to any client |
 | `cli` | Human-typable commands; also callable by non-MCP agents via shell |
-| `vscode-extension` | Registers chat participant, background capture listeners, lazy daemon bootstrap, optional tree view |
+| `vscode-extension` | Registers chat participant, background capture listeners, optional tree view |
 
 ## 6. Background Capture (Passive, No Prompts)
 The VS Code extension subscribes to:
 - `workspace.onDidSaveTextDocument` → file touched
-- Git extension API / `.git` FS watch → commits, branch switches
-- `window.onDidWriteTerminalData` / shell integration API → command + exit code capture
-  (through `Redactor` before storage)
-- `languages.onDidChangeDiagnostics` → error/build-failure capture
-- Copilot Chat participant turn completion (if available) → optional AI-turn summary
-  hook for the checkpoint engine
+- `vscode.git` extension API → commits (branch-switch capture via `GitWatcher`
+  is not yet wired into this passive path — tracked separately)
+- Terminal shell integration API (`window.onDidEndTerminalShellExecution`) →
+  command + exit code capture (through `Redactor` before storage)
+- `languages.onDidChangeDiagnostics` → error/build-failure capture, debounced
+  per file, with diagnostics that disappear auto-resolving their recorded error
+- Copilot Chat participant turn completion (if available) → optional AI-turn
+  summary hook for the checkpoint engine — **not implemented yet**
 
-All of this writes to the core daemon via IPC — never blocks the editor, never
-prompts the user.
+All of this writes directly to the same `TaskStore`/SQLite file the extension
+process has open (via a per-workspace-root cache, `storeCache.ts`) — never
+through IPC, since there's no daemon to relay to (see §4). It never blocks the
+editor and never prompts the user.
 
 ## 7. Sequence: Resuming a Task in a New Chat
 
 ```
-Developer            Copilot Chat        @ariadne participant   MCP server   Core
-    │  "@ariadne resume"  │                    │                  │           │
-    ├──────────────────────►│                    │                  │           │
-    │                       ├───────────────────►│                  │           │
-    │                       │                    ├── task.getContext(budget) ──►│
-    │                       │                    │                  ├──────────►│ ContextBuilder
-    │                       │                    │                  │◄──────────┤ ranked package
-    │                       │                    │◄─────────────────┤           │
-    │                       │◄── context msg ────┤                  │           │
-    │◄── injected context ──┤                    │                  │           │
+Developer            Copilot Chat        @ariadne participant       @ariadne/core
+    │  "@ariadne resume"  │                    │                         │
+    ├──────────────────────►│                    │                         │
+    │                       ├───────────────────►│                         │
+    │                       │                    ├── buildContext(taskId) ►│ ContextBuilder
+    │                       │                    │◄────────────────────────┤ ranked package
+    │                       │◄── context msg ────┤                         │
+    │◄── injected context ──┤                    │                         │
 ```
 
-The same sequence works with **Copilot CLI** substituting for "Copilot Chat" — CLI
-calls the MCP server (or shells to `ariadne context`) directly, no VS Code needed.
+Today the chat participant calls `@ariadne/core` in-process (no MCP hop — see
+§3's note). The equivalent flow for **Copilot CLI** or any other MCP-capable
+client instead calls `@ariadne/mcp-server`'s `get_context` tool, which
+delegates to the same `buildContext` under the hood:
+
+```
+Developer        Copilot CLI / other MCP client        @ariadne/mcp-server   @ariadne/core
+    │ "resume task X" │                                      │                    │
+    ├──────────────────►│                                      │                    │
+    │                   ├── tools/call get_context ───────────►│                    │
+    │                   │                                      ├── buildContext ───►│
+    │                   │                                      │◄────────────────────┤
+    │                   │◄── ranked context package ───────────┤                    │
+    │◄── injected context ──┤                                  │                    │
+```
+
+The plain CLI's `ariadne status`/`ariadne resume` commands take the same
+`buildContext` path directly, without any client/server hop at all.
 
 ## 8. Storage & Deployment Model
-- SQLite file: `.ariadne/state.db` (per workspace), **gitignored by default**
-  (locked decision — private by default, since it may capture terminal
-  output/decisions not meant for the repo).
+- SQLite file: `.ariadne/state.db` (per workspace). **Intended to be
+  gitignored by default** (locked decision — private by default, since it may
+  capture terminal output/decisions not meant for the repo); as of this
+  writing this is not yet auto-enforced by any surface (tracked as
+  `core-gitignore-enforcement`) — currently relies on the user gitignoring it
+  themselves.
 - Optional Markdown export: `ariadne export` writes `.ariadne/export/<task>.md`
   — opt-in, safe to commit if a team wants shared task history.
 - No cloud dependency in MVP. Sync/cloud is a stretch-goal plugin (see roadmap).
 
 ## 9. Failure Modes & Resilience
-- Daemon crash → next CLI/MCP call auto-restarts it; SQLite WAL mode ensures no
-  corruption from abrupt termination.
-- Redactor false negatives (secret leak) — mitigated by keeping storage local-only by
-  default and never transmitting raw terminal output as part of context without
-  passing through redaction first.
-- MCP client incompatibility — CLI must remain a fully functional fallback so the
-  product works even where MCP isn't yet supported by a given assistant.
+- Process crash mid-write → SQLite WAL mode ensures the file itself isn't
+  corrupted; at most the in-flight write is lost (no daemon to restart, since
+  there isn't one — see §4).
+- Redactor false negatives (secret leak) — mitigated by keeping storage
+  local-only by default and never transmitting raw terminal output as part of
+  context without passing through redaction first.
+- MCP client incompatibility — CLI must remain a fully functional fallback so
+  the product works even where MCP isn't yet supported by a given assistant.
+  (As of this writing the CLI is missing decision/error/search/task-lifecycle
+  commands that MCP already exposes — tracked as `cli-parity-commands`.)
 
 ## 10. Open Architecture Questions
-- Daemon lifecycle: fixed idle-timeout vs. explicit `ariadne stop`? (lean: idle
-  timeout + explicit stop both available)
-- IPC transport: unix domain socket vs named pipe vs local TCP loopback — needs a
-  cross-platform decision before CLI implementation starts.
-- Should the MCP server be spawned per-client-request (stateless) or be the same
-  long-lived daemon-attached process shared across clients? (leaning: shared, for
-  consistent state across Copilot Chat + CLI in the same workspace)
+- Multi-workspace/multi-repo support: today each workspace root gets its own
+  independent `.ariadne/state.db`; there's no cross-repo task linking. Revisit
+  if/when a real multi-repo use case shows up.
+- If passive-capture write volume or `ariadne export`-style long reads ever
+  contend meaningfully under WAL mode, reconsider a daemon — but this is
+  explicitly **not** a v1 concern given the single-developer, single-workspace
+  target user.
+- Automatic vs. explicit task detection: the PRD floats auto-detection, but
+  shipped behavior is explicit-only (passive capture only ever appends to a
+  task the user already started via `task new`/`task use`; it never creates
+  or switches one on its own). Revisit alongside first-run UX polish.
+
