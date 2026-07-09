@@ -1,13 +1,30 @@
-out
-dist/**/*.map
+# What ships in the .vsix. vsce is invoked with --no-dependencies (see
+# package.json's "package" script) because dependency resolution happens
+# ahead of time via esbuild.js — better-sqlite3's runtime files are copied
+# into dist/node_modules explicitly, so vsce shouldn't try to infer deps
+# itself from a pnpm workspace (which it can't parse correctly).
+
+# Root node_modules holds workspace symlinks (@ariadne/core source,
+# dev tooling like esbuild/typescript/vitest) — never ship these directly.
+# The only node_modules that should end up in the package is the curated
+# one esbuild.js copies into dist/node_modules.
+node_modules/**
+!dist/node_modules/**
+
+# Source, tests, and dev-only config — the extension runs from dist/extension.js.
 src/**
 test/**
 .vscode-test/**
 *.ts
-!dist/**/*.js
+!dist/**/*.d.ts
 tsconfig.json
 esbuild.js
+
+# Misc dev/repo files that don't belong in the package.
 .gitignore
+out/**
+
+# Source maps: kept out of the shipped package for now (extension.js.map is
+# ~60KB and isn't consulted by anything at runtime); regenerate locally with
+# `pnpm build` when debugging a stack trace from dist/extension.js.
 **/*.map
-pnpm-lock.yaml
-.pnpm-store/**
