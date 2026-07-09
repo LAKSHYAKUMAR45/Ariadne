@@ -92,8 +92,101 @@ function splitSubcommand(prompt: string): { sub: string; rest: string } {
   return { sub: trimmed.slice(0, spaceIdx), rest: trimmed.slice(spaceIdx + 1).trim() };
 }
 
+interface InferredIntent {
+  command: string;
+  prompt: string;
+}
+
+/**
+ * Best-effort keyword-based routing for plain `@ariadne` messages that
+ * don't use a slash command. Deliberately simple (no LLM calls, per the
+ * MVP's rule-based-only decision) — a handful of ordered regexes that map
+ * common phrasings onto the existing slash-command handlers. Falls back to
+ * `undefined` (status/resume default) when nothing matches.
+ */
+export function inferIntent(rawPrompt: string): InferredIntent | undefined {
+  const text = rawPrompt.trim();
+  if (!text) return undefined;
+
+  const patterns: { re: RegExp; build: (m: RegExpMatchArray) => InferredIntent }[] = [
+    // "mark todo abc123 done" / "complete todo abc123" / "finish todo abc123"
+    {
+      re: /^(?:mark|complete|finish)\s+todo\s+(\S+)(?:\s+(?:as\s+)?done)?$/i,
+      build: (m) => ({ command: 'todo', prompt: `done ${m[1]}` }),
+    },
+    // "done with abc123" / "finished abc123"
+    {
+      re: /^(?:done with|finished)\s+(\S+)$/i,
+      build: (m) => ({ command: 'todo', prompt: `done ${m[1]}` }),
+    },
+    // "add todo: fix the bug" / "todo: fix the bug" / "remind me to fix the bug" / "remember to fix the bug"
+    {
+      re: /^(?:add\s+(?:a\s+)?todo|todo|remind me to|remember to)\s*[:\-]?\s*(.+)$/i,
+      build: (m) => ({ command: 'todo', prompt: `add ${m[1].trim()}` }),
+    },
+    // "new task: refactor auth" / "start a task refactor auth" / "create task refactor auth"
+    {
+      re: /^(?:new task|start(?:ing)? (?:a )?task|create (?:a )?task)\s*[:\-]?\s*(.+)$/i,
+      build: (m) => ({ command: 'task', prompt: `new ${m[1].trim()}` }),
+    },
+    // "list tasks" / "show tasks" / "what tasks are there"
+    {
+      re: /^(?:list tasks|show tasks|what tasks(?: are there)?)\s*\??$/i,
+      build: () => ({ command: 'task', prompt: 'list' }),
+    },
+    // "use task abc123" / "switch to task abc123" / "switch task to abc123"
+    {
+      re: /^(?:use task|switch to task|switch task to)\s+(\S+)$/i,
+      build: (m) => ({ command: 'task', prompt: `use ${m[1]}` }),
+    },
+    // "decision: use SQLite" / "we decided to use SQLite" / "decided to use SQLite" / "going with SQLite"
+    {
+      re: /^(?:decision|we decided(?: to)?|decided(?: to)?|going with)\s*[:\-]?\s*(.+)$/i,
+      build: (m) => ({ command: 'decision', prompt: m[1].trim() }),
+    },
+    // "error: build fails" / "bug: build fails" / "got an error: build fails" / "failed with: build fails"
+    {
+      re: /^(?:error|bug|got an error|failed with)\s*[:\-]?\s*(.+)$/i,
+      build: (m) => ({ command: 'error', prompt: m[1].trim() }),
+    },
+    // "resolve error abc123" / "fixed error abc123"
+    {
+      re: /^(?:resolve|fixed)\s+error\s+(\S+)$/i,
+      build: (m) => ({ command: 'error', prompt: `resolve ${m[1]}` }),
+    },
+    // "checkpoint: got auth working" / "record checkpoint: got auth working"
+    {
+      re: /^(?:record\s+)?checkpoint\s*[:\-]?\s*(.+)$/i,
+      build: (m) => ({ command: 'checkpoint', prompt: m[1].trim() }),
+    },
+    // "status" / "what's the status" / "how's it going" / "where are we"
+    {
+      re: /^(?:status|what'?s the status|how'?s it going|where are we)\??$/i,
+      build: () => ({ command: 'status', prompt: '' }),
+    },
+    // "resume" / "catch me up" / "what was I doing"
+    {
+      re: /^(?:resume|catch me up|what was i doing)\??$/i,
+      build: () => ({ command: 'resume', prompt: '' }),
+    },
+  ];
+
+  for (const { re, build } of patterns) {
+    const match = text.match(re);
+    if (match) return build(match);
+  }
+  return undefined;
+}
+
 export function handleChatCommand(store: TaskStore, input: ChatCommandInput): ChatCommandResult {
-  const { command, prompt } = input;
+  let { command, prompt } = input;
+  if (!command) {
+    const inferred = inferIntent(prompt);
+    if (inferred) {
+      command = inferred.command;
+      prompt = inferred.prompt;
+    }
+  }
   const taskId = requireTask(store, input.currentTaskId);
 
   switch (command) {

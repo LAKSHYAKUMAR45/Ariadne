@@ -72,4 +72,57 @@ describe('chat participant command logic', () => {
     const result = handleChatCommand(store, { prompt: 'what are we doing again?', currentTaskId: task.id });
     expect(result.markdown).toContain('Plain message task');
   });
+
+  describe('natural language intent routing (no slash command)', () => {
+    it('creates a task from "new task: <title>" phrasing', () => {
+      const result = handleChatCommand(store, { prompt: 'new task: Implement auth' });
+      expect(result.newCurrentTaskId).toBeTruthy();
+      expect(result.markdown).toContain('Implement auth');
+    });
+
+    it('creates a task from "start a task <title>" phrasing', () => {
+      const result = handleChatCommand(store, { prompt: 'start a task refactor the parser' });
+      expect(result.newCurrentTaskId).toBeTruthy();
+      const task = store.getTask(result.newCurrentTaskId!);
+      expect(task?.title).toBe('refactor the parser');
+    });
+
+    it('adds a todo from "remind me to <text>" phrasing', () => {
+      const task = store.createTask({ title: 'Task with todos' });
+      const result = handleChatCommand(store, { prompt: 'remind me to write the changelog', currentTaskId: task.id });
+      expect(result.markdown).toMatch(/write the changelog/);
+      const todos = store.listTodos(task.id);
+      expect(todos.some((t) => t.text === 'write the changelog')).toBe(true);
+    });
+
+    it('marks a todo done from "mark todo <id> done" phrasing', () => {
+      const task = store.createTask({ title: 'Task with todos' });
+      const added = handleChatCommand(store, { command: 'todo', prompt: 'add Ship it', currentTaskId: task.id });
+      const todoId = added.markdown.match(/`([0-9A-Z]+)`/)![1];
+
+      handleChatCommand(store, { prompt: `mark todo ${todoId} done`, currentTaskId: task.id });
+      expect(store.getTodo(todoId)?.status).toBe('done');
+    });
+
+    it('records a decision from "decision: <text>" phrasing', () => {
+      const task = store.createTask({ title: 'Task with decisions' });
+      handleChatCommand(store, { prompt: 'decision: use SQLite for storage', currentTaskId: task.id });
+      const status = formatStatus(store, task.id);
+      // Decisions aren't rendered in /status; verify via the store directly instead.
+      expect(store.listDecisions(task.id).some((d) => d.text === 'use SQLite for storage')).toBe(true);
+      expect(status).toContain('Task with decisions');
+    });
+
+    it('records an error from "error: <text>" phrasing', () => {
+      const task = store.createTask({ title: 'Task with errors' });
+      handleChatCommand(store, { prompt: 'error: build fails on CI', currentTaskId: task.id });
+      expect(formatStatus(store, task.id)).toContain('build fails on CI');
+    });
+
+    it('routes "status"/"how\'s it going" to the status view', () => {
+      const task = store.createTask({ title: 'Status phrasing task' });
+      const result = handleChatCommand(store, { prompt: "how's it going", currentTaskId: task.id });
+      expect(result.markdown).toContain('Status phrasing task');
+    });
+  });
 });
