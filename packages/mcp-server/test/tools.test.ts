@@ -47,6 +47,27 @@ describe('mcp-server tools', () => {
     expect(() => tools.taskUse(store, workspaceRoot, { taskId: 'nope' })).toThrow(/No task found/);
   });
 
+  it('taskSetStatus pauses/completes/archives/reopens the current (or given) task', () => {
+    const task = tools.taskNew(store, workspaceRoot, { title: 'Lifecycle task' });
+
+    tools.taskSetStatus(store, workspaceRoot, { status: 'paused' });
+    expect(store.getTask(task.id)?.status).toBe('paused');
+
+    tools.taskSetStatus(store, workspaceRoot, { status: 'done' });
+    expect(store.getTask(task.id)?.status).toBe('done');
+
+    tools.taskSetStatus(store, workspaceRoot, { status: 'archived' });
+    expect(store.getTask(task.id)?.status).toBe('archived');
+
+    tools.taskSetStatus(store, workspaceRoot, { status: 'active' });
+    expect(store.getTask(task.id)?.status).toBe('active');
+
+    const other = tools.taskNew(store, workspaceRoot, { title: 'Other task' });
+    tools.taskSetStatus(store, workspaceRoot, { taskId: task.id, status: 'done' });
+    expect(store.getTask(task.id)?.status).toBe('done');
+    expect(store.getTask(other.id)?.status).toBe('active');
+  });
+
   it('checkpoint_add, todo_add/list/done, decision_add, error_add/resolve operate on the current task', () => {
     const task = tools.taskNew(store, workspaceRoot, { title: 'A' });
 

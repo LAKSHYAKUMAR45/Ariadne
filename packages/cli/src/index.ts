@@ -82,6 +82,50 @@ task
     });
   });
 
+task
+  .command('pause [id]')
+  .description('Pause the current (or given) task')
+  .action((id: string | undefined) => {
+    withStore((store) => {
+      const taskId = resolveTaskId(store, id);
+      store.updateTaskStatus(taskId, 'paused');
+      console.log(`Task ${taskId} paused.`);
+    });
+  });
+
+task
+  .command('done [id]')
+  .description('Mark the current (or given) task done')
+  .action((id: string | undefined) => {
+    withStore((store) => {
+      const taskId = resolveTaskId(store, id);
+      store.updateTaskStatus(taskId, 'done');
+      console.log(`Task ${taskId} marked done.`);
+    });
+  });
+
+task
+  .command('archive [id]')
+  .description('Archive the current (or given) task')
+  .action((id: string | undefined) => {
+    withStore((store) => {
+      const taskId = resolveTaskId(store, id);
+      store.updateTaskStatus(taskId, 'archived');
+      console.log(`Task ${taskId} archived.`);
+    });
+  });
+
+task
+  .command('reopen [id]')
+  .description('Reopen a paused/done/archived task, marking it active again')
+  .action((id: string | undefined) => {
+    withStore((store) => {
+      const taskId = resolveTaskId(store, id);
+      store.updateTaskStatus(taskId, 'active');
+      console.log(`Task ${taskId} reactivated.`);
+    });
+  });
+
 // ---------------------------------------------------------------------
 // checkpoint
 // ---------------------------------------------------------------------

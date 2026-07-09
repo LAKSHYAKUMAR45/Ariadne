@@ -86,6 +86,29 @@ export function createAriadneMcpServer(options?: { workspaceRoot?: string; store
     },
   );
 
+  for (const [name, status] of [
+    ['task_pause', 'paused'],
+    ['task_done', 'done'],
+    ['task_archive', 'archived'],
+    ['task_reopen', 'active'],
+  ] as const) {
+    server.registerTool(
+      name,
+      {
+        title: `${status === 'active' ? 'Reopen' : status === 'paused' ? 'Pause' : status === 'done' ? 'Complete' : 'Archive'} a task`,
+        description: `Sets the current (or given) task's status to "${status}".`,
+        inputSchema: { taskId: z.string().optional() },
+      },
+      async (args) => {
+        try {
+          return jsonResult(tools.taskSetStatus(store, workspaceRoot, { taskId: args.taskId, status }));
+        } catch (err) {
+          return errorResult(err);
+        }
+      },
+    );
+  }
+
   server.registerTool(
     'checkpoint_add',
     {

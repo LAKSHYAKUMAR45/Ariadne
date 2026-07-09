@@ -22,6 +22,31 @@ describe('chat participant command logic', () => {
     expect(task?.title).toBe('Implement auth');
   });
 
+  it('pauses, completes, archives, and reopens the current task via /task', () => {
+    const task = store.createTask({ title: 'Lifecycle task' });
+
+    handleChatCommand(store, { command: 'task', prompt: 'pause', currentTaskId: task.id });
+    expect(store.getTask(task.id)?.status).toBe('paused');
+
+    handleChatCommand(store, { command: 'task', prompt: 'done', currentTaskId: task.id });
+    expect(store.getTask(task.id)?.status).toBe('done');
+
+    handleChatCommand(store, { command: 'task', prompt: 'archive', currentTaskId: task.id });
+    expect(store.getTask(task.id)?.status).toBe('archived');
+
+    handleChatCommand(store, { command: 'task', prompt: 'reopen', currentTaskId: task.id });
+    expect(store.getTask(task.id)?.status).toBe('active');
+  });
+
+  it('supports /task pause|done|archive|reopen with an explicit task id, independent of the current task', () => {
+    const current = store.createTask({ title: 'Current task' });
+    const other = store.createTask({ title: 'Other task' });
+
+    handleChatCommand(store, { command: 'task', prompt: `done ${other.id}`, currentTaskId: current.id });
+    expect(store.getTask(other.id)?.status).toBe('done');
+    expect(store.getTask(current.id)?.status).toBe('active');
+  });
+
   it('reports no current task for /status when none is set', () => {
     const result = handleChatCommand(store, { command: 'status', prompt: '' });
     expect(result.markdown).toMatch(/no current task/i);
@@ -174,6 +199,22 @@ describe('chat participant command logic', () => {
       const task = store.createTask({ title: 'Status phrasing task' });
       const result = handleChatCommand(store, { prompt: "how's it going", currentTaskId: task.id });
       expect(result.markdown).toContain('Status phrasing task');
+    });
+
+    it('pauses, completes, archives, and reopens the current task from plain-language phrasing', () => {
+      const task = store.createTask({ title: 'Lifecycle phrasing task' });
+
+      handleChatCommand(store, { prompt: 'pause', currentTaskId: task.id });
+      expect(store.getTask(task.id)?.status).toBe('paused');
+
+      handleChatCommand(store, { prompt: 'mark task done', currentTaskId: task.id });
+      expect(store.getTask(task.id)?.status).toBe('done');
+
+      handleChatCommand(store, { prompt: 'archive', currentTaskId: task.id });
+      expect(store.getTask(task.id)?.status).toBe('archived');
+
+      handleChatCommand(store, { prompt: 'reopen', currentTaskId: task.id });
+      expect(store.getTask(task.id)?.status).toBe('active');
     });
   });
 

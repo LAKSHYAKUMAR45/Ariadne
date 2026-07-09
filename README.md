@@ -89,6 +89,7 @@ node packages/cli/dist/index.js status
 ```
 
 Common commands: `task new <title>`, `task list`, `task use <id>`,
+`task pause` / `task done` / `task archive` / `task reopen`,
 `checkpoint <summary>`, `decision <text>`, `error add <message>` / `error list` / `error resolve <id>`,
 `todo add <text>` / `todo list` / `todo done <id>`,
 `question add <text>` / `question list` / `question resolve <id>`,

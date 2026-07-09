@@ -69,6 +69,18 @@ export function taskUse(store: TaskStore, workspaceRoot: string, args: TaskUseAr
   return task;
 }
 
+export interface TaskSetStatusArgs {
+  taskId?: string;
+  status: TaskStatus;
+}
+
+/** Backs task_pause/task_done/task_archive/task_reopen — all are the same "set task status" operation with a fixed status. */
+export function taskSetStatus(store: TaskStore, workspaceRoot: string, args: TaskSetStatusArgs): Task {
+  const taskId = resolveTaskId(store, workspaceRoot, args.taskId);
+  store.updateTaskStatus(taskId, args.status);
+  return store.getTask(taskId)!;
+}
+
 export interface CheckpointAddArgs {
   summary: string;
   level?: CheckpointLevel;

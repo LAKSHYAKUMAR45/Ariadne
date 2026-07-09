@@ -38,7 +38,7 @@
           { "name": "resume", "description": "Reload full context for the current task" },
           { "name": "checkpoint", "description": "Record a checkpoint summary" },
           { "name": "todo", "description": "Add, list, or complete todos" },
-          { "name": "task", "description": "Create, list, or switch tasks" },
+          { "name": "task", "description": "Create, list, switch, pause, complete, archive, or reopen tasks" },
           { "name": "decision", "description": "Record a decision" },
           { "name": "error", "description": "Record or resolve an error" },
           { "name": "question", "description": "Add, list, or resolve open questions" },

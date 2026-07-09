@@ -1,4 +1,4 @@
-import type { TaskStore, CheckpointLevel } from '@ariadne/core';
+import type { TaskStore, CheckpointLevel, TaskStatus } from '@ariadne/core';
 import { buildContext, searchWorkspace } from '@ariadne/core';
 
 /**
@@ -152,6 +152,26 @@ export function inferIntent(rawPrompt: string): InferredIntent | undefined {
       re: /^(?:use task|switch to task|switch task to)\s+(\S+)$/i,
       build: (m) => ({ command: 'task', prompt: `use ${m[1]}` }),
     },
+    // "pause task abc123" / "pause this task" / "pause the task"
+    {
+      re: /^pause(?: task)?(?:\s+(\S+))?$/i,
+      build: (m) => ({ command: 'task', prompt: `pause ${m[1] ?? ''}`.trim() }),
+    },
+    // "mark task abc123 done" / "finish task abc123" / "complete this task" / "close the task"
+    {
+      re: /^(?:mark task|finish task|complete task|close task|mark this task done|finish this task|complete this task|close this task)(?:\s+(?!(?:as\s+)?done\b)(\S+))?(?:\s+(?:as\s+)?done)?$/i,
+      build: (m) => ({ command: 'task', prompt: `done ${m[1] ?? ''}`.trim() }),
+    },
+    // "archive task abc123" / "archive this task"
+    {
+      re: /^archive(?: task| this task)?(?:\s+(\S+))?$/i,
+      build: (m) => ({ command: 'task', prompt: `archive ${m[1] ?? ''}`.trim() }),
+    },
+    // "reopen task abc123" / "reopen this task" / "reopen"
+    {
+      re: /^reopen(?: task| this task)?(?:\s+(\S+))?$/i,
+      build: (m) => ({ command: 'task', prompt: `reopen ${m[1] ?? ''}`.trim() }),
+    },
     // "decision: use SQLite" / "we decided to use SQLite" / "decided to use SQLite" / "going with SQLite"
     {
       re: /^(?:decision|we decided(?: to)?|decided(?: to)?|going with)\s*[:\-]?\s*(.+)$/i,
@@ -240,7 +260,20 @@ export function handleChatCommand(store: TaskStore, input: ChatCommandInput): Ch
         if (!store.getTask(id)) return { markdown: `No task found with id \`${id}\`.` };
         return { markdown: `Current task set to \`${id}\`.`, newCurrentTaskId: id };
       }
-      return { markdown: 'Usage: `/task new <title>`, `/task list`, or `/task use <id>`.' };
+      if (sub === 'pause' || sub === 'done' || sub === 'archive' || sub === 'reopen') {
+        const targetId = rest || taskId;
+        if (!targetId) return { markdown: noCurrentTaskMessage() };
+        if (!store.getTask(targetId)) return { markdown: `No task found with id \`${targetId}\`.` };
+        const status: TaskStatus =
+          sub === 'reopen' ? 'active' : sub === 'pause' ? 'paused' : sub === 'archive' ? 'archived' : 'done';
+        store.updateTaskStatus(targetId, status);
+        return { markdown: `Task \`${targetId}\` ${sub === 'reopen' ? 'reactivated' : `marked ${status}`}.` };
+      }
+      return {
+        markdown:
+          'Usage: `/task new <title>`, `/task list`, `/task use <id>`, ' +
+          '`/task pause [id]`, `/task done [id]`, `/task archive [id]`, or `/task reopen [id]`.',
+      };
     }
 
     case 'search': {
