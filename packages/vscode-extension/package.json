@@ -57,7 +57,17 @@
         "command": "ariadne.selectWorkspaceFolder",
         "title": "Ariadne: Select Workspace Folder"
       }
-    ]
+    ],
+    "configuration": {
+      "title": "Ariadne",
+      "properties": {
+        "ariadne.passiveCapture.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically record saved files, terminal commands, and git commits against the current task in the background. Requires a window reload to take effect after changing."
+        }
+      }
+    }
   },
   "scripts": {
     "build": "node esbuild.js",

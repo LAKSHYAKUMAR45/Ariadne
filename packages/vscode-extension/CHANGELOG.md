@@ -11,8 +11,17 @@ All notable changes to the Ariadne VS Code extension will be documented here.
 - Per-workspace TaskStore connection caching.
 - Friendly error surfacing in chat (with details logged to the "Ariadne"
   output channel) instead of silent failures.
+- Multi-root workspace support: resolves the active editor's folder or a
+  persisted user selection (`Ariadne: Select Workspace Folder`) instead of
+  always assuming the first folder.
+- Streamed, progressive `/status`/`/resume` output plus `stream.progress()`
+  feedback while commands run.
+- Rule-based natural-language intent routing for plain `@ariadne` messages
+  (no slash command required for common phrasings).
+- Passive capture: saved files, terminal commands (via VS Code's shell
+  integration API), and git commits are automatically recorded against the
+  current task in the background. Toggle via
+  `ariadne.passiveCapture.enabled`.
 
 ### Known limitations
-- Single workspace-folder support only (no multi-root).
-- No automatic/passive capture of files, terminal commands, or git commits.
 - Native SQLite binding packaged for linux-x64 only so far.

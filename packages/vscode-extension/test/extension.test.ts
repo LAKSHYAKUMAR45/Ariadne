@@ -37,6 +37,12 @@ vi.mock('vscode', () => {
         return workspaceFolders;
       },
       onDidChangeWorkspaceFolders: () => ({ dispose: () => {} }),
+      onDidSaveTextDocument: () => ({ dispose: () => {} }),
+      getWorkspaceFolder: () => undefined,
+      getConfiguration: () => ({ get: (_key: string, def?: unknown) => def }),
+    },
+    extensions: {
+      getExtension: () => undefined,
     },
   };
 });

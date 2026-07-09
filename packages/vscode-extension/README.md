@@ -15,12 +15,20 @@ task state is identical no matter which one you use.
 - Adds an **`@ariadne` chat participant** to Copilot Chat, so you can recall
   or update the current task's state directly from the chat you're already
   using.
-- Adds two commands to the Command Palette: **Ariadne: New Task** and
-  **Ariadne: Show Task Status**.
+- Adds two commands to the Command Palette: **Ariadne: New Task**,
+  **Ariadne: Show Task Status**, and **Ariadne: Select Workspace Folder**
+  (for multi-root workspaces).
+- Passively captures saved files, terminal commands, and git commits against
+  the current task in the background (toggle via the
+  `ariadne.passiveCapture.enabled` setting).
 
 ## Chat commands
 
-Type `@ariadne` in Copilot Chat, optionally followed by one of:
+Type `@ariadne` in Copilot Chat, optionally followed by one of the slash
+commands below — or just describe what you want in plain language (e.g.
+"remind me to write the changelog", "decision: use SQLite for storage",
+"mark todo abc123 done"); Ariadne uses simple rule-based phrase matching
+(no LLM calls) to route common phrasings to the same handlers.
 
 | Command | What it does |
 |---|---|
@@ -39,10 +47,10 @@ Type `@ariadne` in Copilot Chat, optionally followed by one of:
 
 ## Known limitations (early/pre-release)
 
-- Only the first workspace folder is used in multi-root workspaces.
-- No automatic capture yet — files/commands/commits must be recorded
-  explicitly via slash commands; passive capture (watching saves, terminal
-  commands, and git commits automatically) is planned but not implemented.
+- Passive capture only ever appends to an *explicitly started* task (via
+  `/task new` or "Ariadne: New Task") — it never creates or auto-switches
+  tasks. Terminal command capture requires VS Code's shell integration API
+  (stable since 1.93) and a shell that supports it.
 - The packaged native SQLite binding currently targets linux-x64 only;
   multi-platform `.vsix` builds are in progress.
 

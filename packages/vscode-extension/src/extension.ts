@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import { openStoreForCurrentWorkspace, getCurrentTaskId, setCurrentTask, initWorkspaceResolution, promptSelectWorkspaceFolder } from './workspace.js';
 import { handleChatCommand, progressMessageFor } from './commands.js';
 import { closeAllStores, closeStore } from './storeCache.js';
+import { registerPassiveCapture } from './passiveCapture.js';
 import { findWorkspaceRoot } from '@ariadne/core';
 
 let output: vscode.OutputChannel;
@@ -24,6 +25,10 @@ export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(
     vscode.commands.registerCommand('ariadne.selectWorkspaceFolder', () => promptSelectWorkspaceFolder()),
   );
+
+  if (vscode.workspace.getConfiguration('ariadne').get<boolean>('passiveCapture.enabled', true)) {
+    registerPassiveCapture(context, output);
+  }
 
   // Close (and evict) the cached store for any folder removed from the workspace.
   context.subscriptions.push(
