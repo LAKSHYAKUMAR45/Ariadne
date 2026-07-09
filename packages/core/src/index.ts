@@ -36,6 +36,7 @@ export {
 } from './Redactor.js';
 export type { RedactionRule } from './Redactor.js';
 export { exportTaskMarkdown } from './Exporter.js';
+export { ensureGitignored } from './gitignore.js';
 export {
   findWorkspaceRoot,
   stateDbPath,

@@ -1,6 +1,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { TaskStore } from './TaskStore.js';
+import { ensureGitignored } from './gitignore.js';
 
 const STATE_DIR = '.ariadne';
 const STATE_FILE = 'state.db';
@@ -32,10 +33,17 @@ export function stateDbPath(workspaceRoot: string): string {
   return path.join(workspaceRoot, STATE_DIR, STATE_FILE);
 }
 
-/** Opens (creating on first use) the TaskStore for the given workspace root. */
+/**
+ * Opens (creating on first use) the TaskStore for the given workspace root.
+ * Also ensures `.ariadne/` is gitignored (best-effort, see gitignore.ts) —
+ * every surface opens its store through this one function, so this is the
+ * single place that enforces the "gitignored by default" decision.
+ */
 export function openWorkspaceStore(workspaceRoot: string): TaskStore {
+  ensureGitignored(workspaceRoot);
   return new TaskStore(stateDbPath(workspaceRoot));
 }
+
 
 /**
  * One-time migration: if an older Ariadne version left a `.ariadne/current-task`
