@@ -42,7 +42,7 @@ jobs:
       - name: Build publishable packages
         run: |
           pnpm --filter @ariadne/core run build
-          pnpm --filter ariadne run build
+          pnpm --filter @ariadne/cli run build
           pnpm --filter @ariadne/mcp-server run build
 
       - name: Create/update Version Packages PR or publish

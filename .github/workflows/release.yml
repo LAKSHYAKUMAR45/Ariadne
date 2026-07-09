@@ -34,9 +34,9 @@ jobs:
         run: |
           pnpm --filter @ariadne/core run test
           pnpm --filter @ariadne/core exec tsc --noEmit -p tsconfig.json
-          pnpm --filter ariadne run build
-          pnpm --filter ariadne run test
-          pnpm --filter ariadne exec tsc --noEmit -p tsconfig.json
+          pnpm --filter @ariadne/cli run build
+          pnpm --filter @ariadne/cli run test
+          pnpm --filter @ariadne/cli exec tsc --noEmit -p tsconfig.json
           pnpm --filter @ariadne/mcp-server run build
           pnpm --filter @ariadne/mcp-server run test
           pnpm --filter @ariadne/mcp-server exec tsc --noEmit -p tsconfig.json

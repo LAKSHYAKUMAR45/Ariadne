@@ -1,5 +1,5 @@
 {
-  "name": "ariadne",
+  "name": "@ariadne/cli",
   "version": "0.1.0",
   "description": "CLI for Ariadne — chats are disposable, tasks are permanent.",
   "license": "MIT",

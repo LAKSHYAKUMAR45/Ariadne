@@ -85,7 +85,7 @@ pnpm test    # runs the full test suite across all packages
 ### Using the CLI
 
 ```bash
-pnpm --filter ariadne build
+pnpm --filter @ariadne/cli build
 node packages/cli/dist/index.js task new "Fix login bug"
 node packages/cli/dist/index.js status
 ```
