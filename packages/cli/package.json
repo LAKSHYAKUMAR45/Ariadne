@@ -2,6 +2,12 @@
   "name": "ariadne",
   "version": "0.1.0",
   "description": "CLI for Ariadne — chats are disposable, tasks are permanent.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/LAKSHYAKUMAR45/Ariadne.git",
+    "directory": "packages/cli"
+  },
   "type": "commonjs",
   "bin": {
     "ariadne": "dist/index.js"

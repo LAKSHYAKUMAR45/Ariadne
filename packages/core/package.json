@@ -2,6 +2,12 @@
   "name": "@ariadne/core",
   "version": "0.1.0",
   "description": "Shared core: SQLite schema, TaskStore, context builder for Ariadne.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/LAKSHYAKUMAR45/Ariadne.git",
+    "directory": "packages/core"
+  },
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "type": "commonjs",

@@ -4,6 +4,17 @@
   "description": "Chats are disposable, tasks are permanent. Persists task state (goals, decisions, files, todos, errors, commands) across any AI assistant.",
   "version": "0.1.0",
   "publisher": "ariadne-dev",
+  "license": "MIT",
+  "icon": "resources/icon.png",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/LAKSHYAKUMAR45/Ariadne.git",
+    "directory": "packages/vscode-extension"
+  },
+  "bugs": {
+    "url": "https://github.com/LAKSHYAKUMAR45/Ariadne/issues"
+  },
+  "homepage": "https://github.com/LAKSHYAKUMAR45/Ariadne#readme",
   "private": true,
   "engines": {
     "vscode": "^1.93.0"

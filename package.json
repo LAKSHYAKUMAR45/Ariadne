@@ -1,8 +1,18 @@
 {
-  "name": "ariadne",
+  "name": "ariadne-monorepo",
   "private": true,
   "version": "0.1.0",
   "description": "Chats are disposable, tasks are permanent.",
+  "license": "MIT",
+  "author": "Lakshya Kumar",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/LAKSHYAKUMAR45/Ariadne.git"
+  },
+  "bugs": {
+    "url": "https://github.com/LAKSHYAKUMAR45/Ariadne/issues"
+  },
+  "homepage": "https://github.com/LAKSHYAKUMAR45/Ariadne#readme",
   "scripts": {
     "build": "pnpm -r run build",
     "test": "pnpm -r run test",
