@@ -103,38 +103,32 @@ interface Candidate {
 const TIER_ORDER: Record<Tier, number> = { high: 0, medium: 1, low: 2 };
 
 /**
- * Builds a ranked, budgeted context package for `taskId`.
- *
- * Priority tiers (per docs/03-DATA-MODEL.md section 5), filled greedily
- * under `tokenBudget`:
- * 1. Never-trim: active task goal, latest checkpoint summary.
- * 2. High: open questions, unresolved errors, current (non-superseded) decisions.
- * 3. Medium: recently touched files, pending todos, commits since the last checkpoint.
- * 4. Low: resolved todos, superseded/historical decisions, full command log.
- *
- * Within a tier, items are ordered most-recent-first. This is intentionally
- * simple and deterministic (no LLM call, no external tokenizer) to match the
- * MVP's rule-based-only decision.
+ * Gathers every ranking candidate (open questions, errors, decisions,
+ * files, todos, commits, commands) plus the never-trim goal/latest-summary
+ * fields for `taskId`, without yet sorting or budget-filling them. Shared
+ * by `buildContext` (rule-based tier + recency sort) and
+ * `buildContextWithEmbeddingRanking` (similarity-to-query sort) so both
+ * ranking strategies see identical candidate data — only the *ordering*
+ * differs between them.
  */
-export function buildContext(store: TaskStore, taskId: string, options: BuildContextOptions = {}): ContextPackage {
+function gatherContextData(
+  store: TaskStore,
+  taskId: string,
+): {
+  goal: string | null;
+  branch: string | null;
+  latestSummary: string | null;
+  candidates: Candidate[];
+} {
   const task = store.getTask(taskId);
   if (!task) {
     throw new Error(`No task found with id "${taskId}".`);
   }
 
-  const tokenBudget = options.tokenBudget ?? DEFAULT_TOKEN_BUDGET;
-  let remaining = tokenBudget;
-  const truncated: Record<string, number> = {};
-
-  // --- Never-trim tier: goal + latest checkpoint summary always included. ---
   const goal = task.goal ?? null;
-  remaining -= estimateTokens(goal ?? '');
-
   const latestCheckpoint = store.latestCheckpoint(taskId);
   const latestSummary = latestCheckpoint?.summary ?? null;
-  remaining -= estimateTokens(latestSummary ?? '');
 
-  // --- Gather candidates for the ranked (high/medium/low) tiers. ---
   const candidates: Candidate[] = [];
 
   const openQuestions = store.listOpenQuestions(taskId, { resolved: false });
@@ -194,15 +188,17 @@ export function buildContext(store: TaskStore, taskId: string, options: BuildCon
     candidates.push({ tier: 'low', category: 'commands', createdAt: c.createdAt, cost: estimateTokens(text), text, data: c });
   }
 
-  // --- Sort: tier priority first, then most-recent-first within a tier. ---
-  candidates.sort((a, b) => {
-    const tierDiff = TIER_ORDER[a.tier] - TIER_ORDER[b.tier];
-    if (tierDiff !== 0) return tierDiff;
-    return a.createdAt < b.createdAt ? 1 : a.createdAt > b.createdAt ? -1 : 0;
-  });
+  return { goal, branch: task.branch ?? null, latestSummary, candidates };
+}
 
-  // --- Greedily fill under the remaining budget; anything that doesn't fit is counted as truncated. ---
+/** Greedily fills `candidates` (already sorted in the desired priority order) under `tokenBudget`, returning what was included per category and what got cut. */
+function fillBudget(
+  candidates: Candidate[],
+  tokenBudget: number,
+): { included: Record<string, Candidate[]>; truncated: Record<string, number> } {
+  let remaining = tokenBudget;
   const included: Record<string, Candidate[]> = {};
+  const truncated: Record<string, number> = {};
   for (const candidate of candidates) {
     if (candidate.cost <= remaining) {
       remaining -= candidate.cost;
@@ -211,12 +207,24 @@ export function buildContext(store: TaskStore, taskId: string, options: BuildCon
       truncated[candidate.category] = (truncated[candidate.category] ?? 0) + 1;
     }
   }
+  return { included, truncated };
+}
 
+/** Assembles the final `ContextPackage` from already-ranked-and-budgeted `included` candidates. Shared by both ranking strategies. */
+function toContextPackage(
+  taskId: string,
+  goal: string | null,
+  branch: string | null,
+  workspaceRoot: string | null,
+  latestSummary: string | null,
+  included: Record<string, Candidate[]>,
+  truncated: Record<string, number>,
+): ContextPackage {
   return {
     taskId,
     goal,
-    branch: task.branch ?? null,
-    workspaceRoot: options.workspaceRoot ?? null,
+    branch,
+    workspaceRoot,
     latestSummary,
     openQuestions: (included.openQuestions ?? []).map((c) => c.text),
     openTodos: (included.pendingTodos ?? []).map((c) => c.text),
@@ -234,4 +242,158 @@ export function buildContext(store: TaskStore, taskId: string, options: BuildCon
     decisions: (included.decisions ?? []).map((c) => c.text),
     truncated,
   };
+}
+
+/**
+ * Builds a ranked, budgeted context package for `taskId`.
+ *
+ * Priority tiers (per docs/03-DATA-MODEL.md section 5), filled greedily
+ * under `tokenBudget`:
+ * 1. Never-trim: active task goal, latest checkpoint summary.
+ * 2. High: open questions, unresolved errors, current (non-superseded) decisions.
+ * 3. Medium: recently touched files, pending todos, commits since the last checkpoint.
+ * 4. Low: resolved todos, superseded/historical decisions, full command log.
+ *
+ * Within a tier, items are ordered most-recent-first. This is intentionally
+ * simple and deterministic (no LLM call, no external tokenizer) to match the
+ * MVP's rule-based-only decision.
+ */
+export function buildContext(store: TaskStore, taskId: string, options: BuildContextOptions = {}): ContextPackage {
+  const { goal, branch, latestSummary, candidates } = gatherContextData(store, taskId);
+
+  const tokenBudget = options.tokenBudget ?? DEFAULT_TOKEN_BUDGET;
+  const neverTrimCost = estimateTokens(goal ?? '') + estimateTokens(latestSummary ?? '');
+  const remainingBudget = tokenBudget - neverTrimCost;
+
+  // --- Sort: tier priority first, then most-recent-first within a tier. ---
+  candidates.sort((a, b) => {
+    const tierDiff = TIER_ORDER[a.tier] - TIER_ORDER[b.tier];
+    if (tierDiff !== 0) return tierDiff;
+    return a.createdAt < b.createdAt ? 1 : a.createdAt > b.createdAt ? -1 : 0;
+  });
+
+  const { included, truncated } = fillBudget(candidates, remainingBudget);
+  return toContextPackage(taskId, goal, branch, options.workspaceRoot ?? null, latestSummary, included, truncated);
+}
+
+// ---------------------------------------------------------------------------
+// Embedding-based context ranking (additive, opt-in).
+//
+// `buildContext` above ranks candidates deterministically by tier + recency,
+// with zero external dependencies. That's the right default, but it has no
+// notion of *relevance to what the agent is actually asking about right
+// now*. This section adds an optional, purely additive ranking mode that
+// re-orders the same candidate pool by embedding-similarity to a caller-
+// supplied query string, instead of tier/recency. It never changes
+// `buildContext`'s behavior — existing callers and tests are untouched.
+// ---------------------------------------------------------------------------
+
+/**
+ * Minimal embedding-provider contract. Implementations may call out to a
+ * local model, a hosted API, or anything else — `ContextBuilder` only needs
+ * batched text -> vector conversion. Keeping the interface this small (one
+ * method, no config) makes it trivial to implement with any embedding
+ * backend (OpenAI, local ONNX model, etc.) without coupling core to a
+ * specific provider or requiring network access by default.
+ */
+export interface EmbeddingProvider {
+  embed(texts: string[]): Promise<number[][]>;
+}
+
+/**
+ * Cosine similarity between two equal-length numeric vectors, in [-1, 1].
+ * Returns 0 for zero-length or zero-magnitude vectors (rather than NaN) so
+ * a degenerate embedding never crashes ranking or forces every consumer to
+ * special-case it.
+ */
+export function cosineSimilarity(a: number[], b: number[]): number {
+  const len = Math.min(a.length, b.length);
+  let dot = 0;
+  let magA = 0;
+  let magB = 0;
+  for (let i = 0; i < len; i++) {
+    dot += a[i] * b[i];
+    magA += a[i] * a[i];
+    magB += b[i] * b[i];
+  }
+  if (magA === 0 || magB === 0) return 0;
+  return dot / (Math.sqrt(magA) * Math.sqrt(magB));
+}
+
+export interface BuildContextWithEmbeddingRankingOptions extends BuildContextOptions {
+  /**
+   * Number of highest-similarity candidates to always keep regardless of
+   * tier, before falling back to tier order for anything left over. Lets
+   * "on-topic but low tier" items (e.g. a resolved todo that exactly
+   * matches the query) outrank "off-topic but high tier" items, which is
+   * the entire point of embedding ranking. Defaults to including every
+   * candidate in similarity order.
+   */
+  topK?: number;
+}
+
+/**
+ * Like `buildContext`, but ranks candidates by cosine similarity between
+ * `query`'s embedding and each candidate's embedding, instead of by
+ * tier + recency. Falls back to the same greedy token-budget fill as
+ * `buildContext`, just with a different candidate order.
+ *
+ * The never-trim tier (goal + latest checkpoint summary) is unaffected —
+ * it's always included first, exactly as in `buildContext`.
+ *
+ * This is intentionally a separate async function rather than a new
+ * `buildContext` option: embedding calls are async and potentially slow or
+ * networked, so callers that want the fast, synchronous, zero-dependency
+ * default keep using `buildContext` unchanged.
+ */
+export async function buildContextWithEmbeddingRanking(
+  store: TaskStore,
+  taskId: string,
+  query: string,
+  embed: EmbeddingProvider,
+  options: BuildContextWithEmbeddingRankingOptions = {},
+): Promise<ContextPackage> {
+  const { goal, branch, latestSummary, candidates } = gatherContextData(store, taskId);
+
+  const tokenBudget = options.tokenBudget ?? DEFAULT_TOKEN_BUDGET;
+  const neverTrimCost = estimateTokens(goal ?? '') + estimateTokens(latestSummary ?? '');
+  const remainingBudget = tokenBudget - neverTrimCost;
+
+  if (candidates.length === 0) {
+    return toContextPackage(taskId, goal, branch, options.workspaceRoot ?? null, latestSummary, {}, {});
+  }
+
+  // Embed the query and every candidate's text in one batched call so a
+  // real network-backed provider only pays one round trip per buildContext
+  // call, not one per candidate.
+  const vectors = await embed.embed([query, ...candidates.map((c) => c.text)]);
+  const queryVector = vectors[0];
+  const candidateVectors = vectors.slice(1);
+
+  const ranked = candidates
+    .map((candidate, i) => ({ candidate, similarity: cosineSimilarity(queryVector, candidateVectors[i]) }))
+    .sort((a, b) => b.similarity - a.similarity);
+
+  const topK = options.topK ?? ranked.length;
+  const orderedCandidates: Candidate[] = [];
+  for (let i = 0; i < ranked.length; i++) {
+    if (i < topK) {
+      orderedCandidates.push(ranked[i].candidate);
+    }
+  }
+  // Anything beyond topK still gets a chance to fill leftover budget, in
+  // tier order, so a generous topK doesn't silently drop otherwise-includable
+  // context — it only controls *priority*, not exclusion.
+  if (topK < ranked.length) {
+    const remainder = ranked.slice(topK).map((r) => r.candidate);
+    remainder.sort((a, b) => {
+      const tierDiff = TIER_ORDER[a.tier] - TIER_ORDER[b.tier];
+      if (tierDiff !== 0) return tierDiff;
+      return a.createdAt < b.createdAt ? 1 : a.createdAt > b.createdAt ? -1 : 0;
+    });
+    orderedCandidates.push(...remainder);
+  }
+
+  const { included, truncated } = fillBudget(orderedCandidates, remainingBudget);
+  return toContextPackage(taskId, goal, branch, options.workspaceRoot ?? null, latestSummary, included, truncated);
 }

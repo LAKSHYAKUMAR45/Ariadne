@@ -8,8 +8,17 @@ export {
   DEFAULT_TOKEN_BUDGET,
   estimateTokens,
   buildContext,
+  buildContextWithEmbeddingRanking,
+  cosineSimilarity,
 } from './ContextBuilder.js';
-export type { ContextPackage, ContextFileRef, ContextCommitRef, BuildContextOptions } from './ContextBuilder.js';
+export type {
+  ContextPackage,
+  ContextFileRef,
+  ContextCommitRef,
+  BuildContextOptions,
+  EmbeddingProvider,
+  BuildContextWithEmbeddingRankingOptions,
+} from './ContextBuilder.js';
 export {
   DEFAULT_FILE_TRIGGER_THRESHOLD,
   DEFAULT_IDLE_TRIGGER_MINUTES,

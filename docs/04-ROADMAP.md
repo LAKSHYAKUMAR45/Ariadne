@@ -74,8 +74,23 @@
   is data-model-only for now, deliberately validated before building UI on
   top of it.
 - Smarter (embedding-based) context ranking beyond the rule-based v0.1 scorer
-  (token counting is shipped as a `chars / 4` heuristic in `ContextBuilder.ts`,
-  not embedding-based ranking).
+  — **now shipped at the interface level:**
+  `packages/core/src/ContextBuilder.ts` adds an `EmbeddingProvider` interface
+  (`embed(texts): Promise<number[][]>`), a `cosineSimilarity` utility, and a
+  new `buildContextWithEmbeddingRanking(store, taskId, query, embed,
+  options)` function that gathers the exact same candidate pool as
+  `buildContext` but re-ranks it by similarity-to-query instead of
+  tier/recency (with an optional `topK` to prioritize the most relevant
+  items first, falling back to tier order for the remainder so nothing is
+  silently dropped when budget allows). `buildContext` itself is completely
+  unmodified — its candidate-gathering was extracted into a shared internal
+  helper reused by both ranking strategies, with zero behavior change to
+  the original rule-based path (all pre-existing tests pass unchanged).
+  **Not yet done:** no real embedding-model integration exists (only the
+  interface + tests with a fake bag-of-words provider), and no CLI/MCP
+  server/VS Code extension call site opts into embedding ranking yet — they
+  all still call the original synchronous `buildContext`. The `chars / 4`
+  token-count heuristic is unchanged.
 
 ## 4. Technical Roadmap (Phased) — Phases 0–4 complete, Phase 5 interfaces shipped
 1. ✅ **Phase 0 — Core skeleton:** SQLite schema + TaskStore CRUD + unit tests.
@@ -219,3 +234,15 @@ what's next*, not building the core loop:
 5. **Broaden integration-test coverage** on the lighter-tested surfaces (CLI,
    MCP server, VS Code extension) now that the core loop is stable, rather
    than continuing to add core-only tests.
+6. **Wire `buildContextWithEmbeddingRanking` into a real surface with a real
+   embedding backend.** The interface, cosine-similarity ranking, and tests
+   are shipped (`packages/core/src/ContextBuilder.ts`), but there's no
+   concrete `EmbeddingProvider` implementation yet (e.g. a local ONNX
+   model or a hosted embeddings API) and no CLI/MCP/extension call site
+   opts into it. A natural first target: an optional `--query` flag on
+   `ariadne context`/the MCP `get_context` tool that, when a provider is
+   configured, ranks by relevance-to-query instead of tier/recency.
+7. **`cloud-sync-team-graph`** remains explicitly out of scope for
+   autonomous implementation — it needs product/infra decisions (hosting,
+   auth, conflict resolution across a shared task graph) before any code
+   should be written.
