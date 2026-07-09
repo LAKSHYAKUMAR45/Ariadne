@@ -1,0 +1,21 @@
+{
+  "name": "ariadne",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Chats are disposable, tasks are permanent.",
+  "scripts": {
+    "build": "pnpm -r run build",
+    "test": "pnpm -r run test",
+    "lint": "pnpm -r run lint"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "packageManager": "pnpm@10.34.4",
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "better-sqlite3",
+      "esbuild"
+    ]
+  }
+}

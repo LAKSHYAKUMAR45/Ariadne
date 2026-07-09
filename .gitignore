@@ -1,0 +1,8 @@
+node_modules/
+dist/
+out/
+*.log
+.ariadne/
+.DS_Store
+*.tsbuildinfo
+coverage/

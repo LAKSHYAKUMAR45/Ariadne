@@ -1,0 +1,23 @@
+{
+  "name": "@ariadne/core",
+  "version": "0.1.0",
+  "description": "Shared core: SQLite schema, TaskStore, context builder for Ariadne.",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "type": "commonjs",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "lint": "echo \"(no lint configured yet)\""
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.3.0",
+    "ulid": "^2.3.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.11",
+    "@types/node": "^20.14.0",
+    "typescript": "^5.5.4",
+    "vitest": "^2.1.1"
+  }
+}
