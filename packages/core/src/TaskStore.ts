@@ -332,6 +332,11 @@ export class TaskStore {
     return this.listCheckpoints(taskId, 1)[0];
   }
 
+  /** Re-parents a checkpoint under a rolled-up ancestor (used by CheckpointEngine's rollup). */
+  setCheckpointParent(id: string, parentCheckpointId: string): void {
+    this.db.prepare(`UPDATE checkpoints SET parent_checkpoint_id = ? WHERE id = ?`).run(parentCheckpointId, id);
+  }
+
   // ---------------------------------------------------------------------
   // Files
   // ---------------------------------------------------------------------
