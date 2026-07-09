@@ -136,6 +136,19 @@ Issues and PRs welcome. CI runs build/typecheck/test on every push and PR
 and publish multi-platform `.vsix` artifacts (see
 `.github/workflows/release.yml`).
 
+If your PR changes the behavior of `@ariadne/core`, `ariadne` (CLI), or
+`@ariadne/mcp-server` (the VS Code extension is released separately as a
+`.vsix`, not to npm), add a changeset describing it:
+
+```bash
+pnpm changeset
+```
+
+This records what changed and what kind of version bump it warrants
+(patch/minor/major). `.github/workflows/packages-release.yml` turns pending
+changesets into a "Version Packages" PR, and publishes to npm once that PR is
+merged.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).

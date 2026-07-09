@@ -59,9 +59,15 @@
 - CI: per-package lint/typecheck/test on PR (Turborepo caching to keep it fast);
   build + package VS Code extension (`vsce package`) and publish CLI to npm on
   tagged release.
-- Versioning/release: Changesets, independent semver per package, since CLI/MCP
-  server may need to move faster than the VS Code extension (marketplace review
-  lag).
+- Versioning/release: [Changesets](https://github.com/changesets/changesets),
+  independent semver per package, since CLI/MCP server may need to move faster
+  than the VS Code extension (marketplace review lag). Shipped: `.changeset/config.json`,
+  root `pnpm changeset` / `pnpm version-packages` / `pnpm release` scripts, and
+  `.github/workflows/packages-release.yml` (opens/updates a "Version Packages"
+  PR on master, publishes to npm once merged — the VS Code extension is
+  excluded since it ships as a `.vsix` via `release.yml` instead). Publishing
+  is a no-op until an `NPM_TOKEN` secret and the packages' first real release
+  are in place.
 - Testing: unit tests for core (ContextBuilder ranking, CheckpointEngine rollup,
   Redactor patterns) are the highest-value tests — prioritize these over
   extension-level integration tests early on.

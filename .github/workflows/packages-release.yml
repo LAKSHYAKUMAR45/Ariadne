@@ -1,0 +1,55 @@
+name: Release npm packages
+
+# Changesets-driven versioning/publishing for the npm-publishable packages
+# (@ariadne/core, ariadne (CLI), @ariadne/mcp-server). The VS Code extension
+# is intentionally excluded (see .changeset/config.json's `ignore` list and
+# its package.json's `private: true`) — it's released separately as a .vsix
+# via release.yml, not to npm.
+#
+# Flow: every push to master, this either opens/updates a "Version Packages"
+# PR (if there are pending changesets) or, once that PR is merged (so no
+# changesets remain but versions were just bumped), publishes the new
+# versions to npm. Requires an NPM_TOKEN repo secret with publish rights;
+# until packages are ready for their first real npm release, this workflow
+# runs but the publish step is a no-op (nothing to publish).
+on:
+  push:
+    branches: [master]
+
+concurrency: ${{ github.workflow }}-${{ github.ref }}
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'pnpm'
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build publishable packages
+        run: |
+          pnpm --filter @ariadne/core run build
+          pnpm --filter ariadne run build
+          pnpm --filter @ariadne/mcp-server run build
+
+      - name: Create/update Version Packages PR or publish
+        uses: changesets/action@v1
+        with:
+          publish: pnpm changeset publish
+          version: pnpm changeset version
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
