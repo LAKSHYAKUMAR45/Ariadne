@@ -12,6 +12,7 @@ describe('ariadne CLI surface', () => {
         'error',
         'todo',
         'question',
+        'exec',
         'status',
         'resume',
         'where',

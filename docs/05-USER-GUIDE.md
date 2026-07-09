@@ -136,6 +136,8 @@ ariadne search <query> [--limit <n>] [-a]      # substring search, -a = every wo
 ariadne git-sync [--task <id>]                 # record current branch + new commits
 ariadne export [--task <id>] [--out <path>]    # render task to Markdown
 ariadne where                                  # print resolved workspace root + db path
+
+ariadne exec -- <command> [args...]            # run a command, auto-recording it and any failure
 ```
 
 Run `ariadne --help` or `ariadne <command> --help` for the authoritative list
@@ -146,6 +148,22 @@ see [§8 Cross-workspace tasks](#8-working-across-multiple-workspaces). The
 `edit`/`delete`/`reopen` commands above are curation operations for fixing
 typos or discarding stale entries — none of them are auto-generated, so use
 them freely without worrying about breaking passive capture.
+
+**`ariadne exec`** is a lightweight passive-capture option for CLI-only
+workflows (Claude Code, Gemini CLI, Codex, or any assistant that isn't the
+VS Code extension) — the VS Code extension captures file saves, terminal
+commands, and git commits automatically in the background; outside VS Code
+there's no daemon doing that, so `ariadne exec -- <command>` is the
+CLI-native equivalent for at least terminal commands: it runs the command
+exactly as if you'd typed it (live stdout/stderr, same exit code, works in
+scripts/CI), and against the current task it automatically records the
+command (redacted the same way passive capture redacts obvious secrets)
+plus, if it fails, an unresolved error summarizing the failure — so a
+failing `ariadne exec -- npm test` shows up under `/status`'s unresolved
+errors without an extra manual `ariadne error add`. `--` is the recommended
+separator so flags meant for the wrapped command aren't parsed by `ariadne`
+itself. File-save and git-commit capture, and the "no current task" /
+branch-mismatch notices, remain VS Code-only for now.
 
 ## 6. Using an MCP client (Claude Code, Gemini CLI, Codex, custom agents, etc.)
 

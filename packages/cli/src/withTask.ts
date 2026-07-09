@@ -3,6 +3,10 @@ import { resolveTaskAnyWorkspace } from '@ariadne/core';
 import { findWorkspaceRoot, openWorkspaceStore } from './workspace.js';
 import { readCurrentTaskId } from './currentTask.js';
 
+function isPromiseLike<T>(value: T): value is Extract<T, PromiseLike<unknown>> {
+  return typeof value === 'object' && value !== null && 'then' in value && typeof value.then === 'function';
+}
+
 /**
  * Resolves which task to operate on and opens whichever store actually owns
  * it, runs `fn`, then closes that store. Explicit `id` wins; otherwise
@@ -35,9 +39,15 @@ export function withResolvedTask<T>(
     console.error(`(Task ${id} belongs to a different workspace — ${resolved.workspaceRoot} — operating on it there.)`);
   }
   try {
-    return fn(resolved.store, id, resolved.workspaceRoot);
-  } finally {
+    const result = fn(resolved.store, id, resolved.workspaceRoot);
+    if (isPromiseLike(result)) {
+      return Promise.resolve(result).finally(() => resolved.store.close()) as T;
+    }
     resolved.store.close();
+    return result;
+  } catch (err) {
+    resolved.store.close();
+    throw err;
   }
 }
 
@@ -55,9 +65,15 @@ export function withScopedStore<T>(taskIdHint: string | undefined, fn: (store: T
     const workspaceRoot = findWorkspaceRoot();
     const store = openWorkspaceStore(workspaceRoot);
     try {
-      return fn(store);
-    } finally {
+      const result = fn(store);
+      if (isPromiseLike(result)) {
+        return Promise.resolve(result).finally(() => store.close()) as T;
+      }
       store.close();
+      return result;
+    } catch (err) {
+      store.close();
+      throw err;
     }
   }
   return withResolvedTask(taskIdHint, (store) => fn(store));

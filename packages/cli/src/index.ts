@@ -15,6 +15,7 @@ import {
 import { openWorkspaceStore, findWorkspaceRoot, stateDbPath } from './workspace.js';
 import { readCurrentTaskId, setCurrentTaskId } from './currentTask.js';
 import { withResolvedTask, withScopedStore } from './withTask.js';
+import { runTaskExec } from './exec.js';
 
 const program = new Command();
 program.name('ariadne').description('Chats are disposable, tasks are permanent.').version('0.1.0');
@@ -569,6 +570,17 @@ function printStatus(store: TaskStore, taskId: string, tokenBudget?: number): vo
 }
 
 program
+  .command('exec <command> [args...]')
+  .description('Run a command in the current task context, recording the command and any failure automatically')
+  .allowUnknownOption(true)
+  .action(async (command: string, args: string[] = []) => {
+    await withResolvedTask(undefined, async (store, taskId) => {
+      const exitCode = await runTaskExec(store, taskId, command, args);
+      if (exitCode !== 0) process.exitCode = exitCode;
+    });
+  });
+
+program
   .command('status')
   .description('Show a ranked, token-budgeted summary of the current (or --task) task')
   .option('-t, --task <id>', 'Task id')
@@ -673,5 +685,5 @@ program
 export { program };
 
 if (require.main === module) {
-  program.parse(process.argv);
+  void program.parseAsync(process.argv);
 }
