@@ -194,7 +194,7 @@ set it per-project, or per-MCP-config, if your client supports that.)
 Once connected, the assistant can call `task_new`, `task_list`, `task_use`,
 `task_pause`/`done`/`archive`/`reopen`, `task_edit`, `checkpoint_add`,
 `todo_add`/`list`/`done`/`reopen`/`block`/`edit`/`delete`, `decision_add`/
-`list`/`edit`/`delete`, `error_add`/`resolve`/`reopen`/`edit`/`delete`,
+`list`/`edit`/`delete`, `error_add`/`list`/`resolve`/`reopen`/`edit`/`delete`,
 `question_add`/`list`/`resolve`/`reopen`/`edit`/`delete`, `search`,
 `get_context`, `git_sync`, and `export_task` — see
 [`packages/mcp-server/README.md`](../packages/mcp-server/README.md) for the
@@ -214,6 +214,9 @@ common phrasings:
 ```
 @ariadne /task new Fix the login bug
 @ariadne /status
+@ariadne /status --budget 500
+@ariadne /git-sync
+@ariadne /export
 @ariadne remind me to write a changelog entry
 @ariadne decision: use SQLite for storage
 @ariadne what was I doing?
@@ -221,6 +224,12 @@ common phrasings:
 
 Full command reference:
 [`packages/vscode-extension/README.md`](../packages/vscode-extension/README.md).
+`/git-sync` records the current git branch and any new commits into the
+current (or an explicit) task — the same thing the CLI's `git-sync` and
+MCP's `git_sync` do, for whenever passive capture's automatic git watcher
+hasn't run yet. `/export` renders the task to Markdown, writes it to
+`.ariadne/export/<task-id>.md` by default (or `--out <path>` for a custom
+location), and also shows it inline in the chat response.
 
 Two things happen automatically in the background, no chat interaction
 needed:

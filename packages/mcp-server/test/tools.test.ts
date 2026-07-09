@@ -226,6 +226,19 @@ describe('mcp-server tools', () => {
     expect(store.getError(error.id)).toBeUndefined();
   });
 
+  it('error_list defaults to unresolved-only, and returns everything with all:true', () => {
+    tools.taskNew(store, workspaceRoot, { title: 'Task' });
+    const unresolved = tools.errorAdd(store, workspaceRoot, { message: 'Still broken' });
+    const resolved = tools.errorAdd(store, workspaceRoot, { message: 'Already fixed' });
+    tools.errorResolve(store, workspaceRoot, { errorId: resolved.id });
+
+    const defaultList = tools.errorList(store, workspaceRoot, {});
+    expect(defaultList.map((e) => e.id)).toEqual([unresolved.id]);
+
+    const allList = tools.errorList(store, workspaceRoot, { all: true });
+    expect(allList.map((e) => e.id).sort()).toEqual([resolved.id, unresolved.id].sort());
+  });
+
   it('question curation: reopen, edit, delete', () => {
     tools.taskNew(store, workspaceRoot, { title: 'Task' });
     const question = tools.questionAdd(store, workspaceRoot, { text: 'Should we use X?' });

@@ -316,6 +316,18 @@ export function errorAdd(store: TaskStore, workspaceRoot: string, args: ErrorAdd
   return withTaskStore(store, workspaceRoot, args.taskId, (s, taskId) => s.recordError({ taskId, message: args.message }));
 }
 
+export interface ErrorListArgs {
+  taskId?: string;
+  /** Show resolved errors too (default: unresolved only, matching CLI's `error list` default). */
+  all?: boolean;
+}
+
+export function errorList(store: TaskStore, workspaceRoot: string, args: ErrorListArgs): TaskError[] {
+  return withTaskStore(store, workspaceRoot, args.taskId, (s, taskId) =>
+    s.listErrors(taskId, args.all ? undefined : { resolved: false }),
+  );
+}
+
 export interface ErrorResolveArgs {
   errorId: string;
   resolution?: string;

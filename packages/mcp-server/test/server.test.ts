@@ -37,6 +37,7 @@ describe('createAriadneMcpServer', () => {
           'decision_edit',
           'decision_delete',
           'error_add',
+          'error_list',
           'error_resolve',
           'error_reopen',
           'error_edit',

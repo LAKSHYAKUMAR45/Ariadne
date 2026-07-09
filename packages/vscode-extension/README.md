@@ -40,8 +40,8 @@ commands below — or just describe what you want in plain language (e.g.
 
 | Command | What it does |
 |---|---|
-| `/status [id]` (default) | Show a task's goal, latest checkpoint, open questions, unresolved errors, blocked todos, pending todos, recent files, recent commits, and recent commands. Defaults to the current task; an explicit id works even if it belongs to a different workspace. |
-| `/resume [id]` | Alias of `/status`. |
+| `/status [id] [--budget <tokens>]` (default) | Show a task's goal, latest checkpoint, open questions, unresolved errors, blocked todos, pending todos, recent files, recent commits, and recent commands. Defaults to the current task; an explicit id works even if it belongs to a different workspace. `--budget` trims the output to fit a token budget, like the CLI/MCP surfaces. |
+| `/resume [id] [--budget <tokens>]` | Alias of `/status`. |
 | `/checkpoint <summary>` | Record a checkpoint summary for the current task. |
 | `/todo add <text>` / `/todo list` / `/todo done <id>` / `/todo reopen <id>` / `/todo block <id>` / `/todo edit <id> --text <t>` / `/todo delete <id>` (all `[--task <taskId>]`) | Manage todos, including curation (edit/delete) and reopening/blocking. `--task` tells id-based subcommands which task/workspace the todo belongs to, if not the current one. |
 | `/task new <title>` / `/task list [--all-workspaces]` / `/task use <id>` | Create, list, or switch the current task. `--all-workspaces` lists tasks from every workspace Ariadne has ever seen (tagged with each task's workspace root). |
@@ -50,6 +50,8 @@ commands below — or just describe what you want in plain language (e.g.
 | `/error <message>` / `/error resolve <id>` / `/error reopen <id>` / `/error edit <id> --message <m>` / `/error delete <id>` (all `[--task <taskId>]`) | Record, resolve, reopen, edit, or delete an error. `--task` tells id-based subcommands which task/workspace the error belongs to, if not the current one. |
 | `/question add <text>` / `/question list` / `/question resolve <id>` / `/question reopen <id>` / `/question edit <id> --text <t>` / `/question delete <id>` (id-based ones `[--task <taskId>]`) | Record, list, resolve, reopen, edit, or delete an open question blocking the task. `--task` works the same way. |
 | `/search <query> [--all-workspaces]` | Cross-entity search over task titles/goals, checkpoints, decisions, todos, errors, open questions, files, and commits. `--all-workspaces` searches every known workspace, tagging each result with its workspace root. |
+| `/git-sync [id]` | Sync the current git branch and any new commits (since the last sync) into a task. Defaults to the current task; an explicit id works even for a task in a different workspace (using that workspace's repo root). Same underlying logic as the CLI's `git-sync` and MCP's `git_sync`. |
+| `/export [id] [--out <path>]` | Render a task to Markdown, write it to `.ariadne/export/<task-id>.md` (or `--out <path>` for a custom location, relative to the workspace root unless absolute), and show it inline in the chat response. |
 
 Any command above that resolves a task by id (not just the current task) —
 `/status|/resume <id>`, `/task pause|done|archive|reopen <id>` —

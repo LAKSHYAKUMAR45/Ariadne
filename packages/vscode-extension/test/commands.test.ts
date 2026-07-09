@@ -1,4 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import * as os from 'node:os';
+import { execFileSync } from 'node:child_process';
 import { TaskStore } from '@ariadne/core';
 import { handleChatCommand, formatStatus, formatStatusSections, formatStatusBarItem, branchMismatchWarning } from '../src/commands.js';
 
@@ -350,6 +354,111 @@ describe('chat participant command logic', () => {
     expect(unbudgeted).toContain('todo number 19');
     expect(budgeted.length).toBeLessThan(unbudgeted.length);
     expect(budgeted).toContain('Trimmed to fit token budget');
+  });
+
+  it('/status --budget <n> trims output the same way formatStatusSections(..., budget) does', () => {
+    const task = store.createTask({ title: 'Budget task', goal: 'Ship the thing' });
+    for (let i = 0; i < 20; i++) {
+      store.createTodo({ taskId: task.id, text: `todo number ${i} with some extra padding text to add up tokens` });
+    }
+
+    const unbudgeted = handleChatCommand(store, { command: 'status', prompt: '', currentTaskId: task.id });
+    const budgeted = handleChatCommand(store, { command: 'status', prompt: '--budget 50', currentTaskId: task.id });
+
+    expect(unbudgeted.markdown).toContain('todo number 19');
+    expect(budgeted.markdown.length).toBeLessThan(unbudgeted.markdown.length);
+    expect(budgeted.markdown).toContain('Trimmed to fit token budget');
+  });
+});
+
+describe('/git-sync and /export chat commands', () => {
+  let root: string;
+  let store: TaskStore;
+
+  function git(args: string[], cwd: string): string {
+    return execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
+  }
+
+  beforeEach(() => {
+    root = fs.mkdtempSync(path.join(os.tmpdir(), 'ariadne-gitsync-chat-'));
+    git(['init', '-q', '-b', 'main'], root);
+    git(['config', 'user.email', 'test@example.com'], root);
+    git(['config', 'user.name', 'Test'], root);
+    store = new TaskStore(':memory:');
+  });
+
+  afterEach(() => {
+    store.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  it('/git-sync records the current branch and new commits into the current task', () => {
+    const task = store.createTask({ title: 'Sync task' });
+    fs.writeFileSync(path.join(root, 'a.txt'), 'a\n');
+    git(['add', 'a.txt'], root);
+    git(['commit', '-q', '-m', 'add a'], root);
+
+    const result = handleChatCommand(store, {
+      command: 'git-sync',
+      prompt: '',
+      currentTaskId: task.id,
+      workspaceRoot: root,
+    });
+
+    expect(result.markdown).toContain('Branch updated to `main`');
+    expect(result.markdown).toContain('Recorded 1 commit(s)');
+    expect(store.listCommits(task.id)).toHaveLength(1);
+  });
+
+  it('/git-sync reports no new commits when nothing changed since the last sync', () => {
+    const task = store.createTask({ title: 'Sync task' });
+    handleChatCommand(store, { command: 'git-sync', prompt: '', currentTaskId: task.id, workspaceRoot: root });
+
+    const result = handleChatCommand(store, {
+      command: 'git-sync',
+      prompt: '',
+      currentTaskId: task.id,
+      workspaceRoot: root,
+    });
+    expect(result.markdown).toContain('No new commits.');
+  });
+
+  it('/export writes the task Markdown to .ariadne/export/<task-id>.md by default and returns it inline', () => {
+    const task = store.createTask({ title: 'Export task', goal: 'Ship docs' });
+    store.createCheckpoint({ taskId: task.id, level: 'micro', summary: 'wrote a checkpoint' });
+
+    const result = handleChatCommand(store, {
+      command: 'export',
+      prompt: '',
+      currentTaskId: task.id,
+      workspaceRoot: root,
+    });
+
+    const outPath = path.join(root, '.ariadne', 'export', `${task.id}.md`);
+    expect(fs.existsSync(outPath)).toBe(true);
+    expect(fs.readFileSync(outPath, 'utf8')).toContain('Export task');
+    expect(result.markdown).toContain(`Exported task \`${task.id}\``);
+    expect(result.markdown).toContain('wrote a checkpoint');
+  });
+
+  it('/export --out <path> writes to a custom relative path', () => {
+    const task = store.createTask({ title: 'Custom export task' });
+
+    const result = handleChatCommand(store, {
+      command: 'export',
+      prompt: '--out share/notes.md',
+      currentTaskId: task.id,
+      workspaceRoot: root,
+    });
+
+    const outPath = path.join(root, 'share', 'notes.md');
+    expect(fs.existsSync(outPath)).toBe(true);
+    expect(result.markdown).toContain(outPath);
+  });
+
+  it('/export returns an error when there is no current task and no explicit id', () => {
+    const result = handleChatCommand(store, { command: 'export', prompt: '', workspaceRoot: root });
+    expect(result.markdown).toContain('No current task');
   });
 });
 

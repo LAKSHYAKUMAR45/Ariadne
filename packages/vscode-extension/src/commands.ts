@@ -1,6 +1,8 @@
 import type { TaskStore, CheckpointLevel, TaskStatus } from '@ariadne/core';
-import { buildContext, searchWorkspace, findTaskWorkspace, openRegistry, listTasksAcrossWorkspaces, searchAcrossWorkspaces, setTaskStatusWithRollup } from '@ariadne/core';
+import { buildContext, searchWorkspace, findTaskWorkspace, openRegistry, listTasksAcrossWorkspaces, searchAcrossWorkspaces, setTaskStatusWithRollup, syncTaskGit, exportTaskMarkdown } from '@ariadne/core';
 import { getOrOpenStore } from './storeCache.js';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 
 /**
  * Pure, vscode-independent command logic for the Ariadne chat participant.
@@ -132,6 +134,48 @@ function extractAllWorkspacesFlag(prompt: string): { allWorkspaces: boolean; res
     return { allWorkspaces: true, rest: prompt.replace(re, ' ').trim() };
   }
   return { allWorkspaces: false, rest: prompt };
+}
+
+/** Strips a trailing `--budget <n>` flag off a prompt (used by `/status`/`/resume` to cap the token budget, mirroring the CLI's `--budget`). Ignores a malformed/non-numeric value rather than throwing. */
+function extractBudgetFlag(prompt: string): { budget: number | undefined; rest: string } {
+  const re = /\s*--budget[= ]\s*(\d+)\s*/i;
+  const match = prompt.match(re);
+  if (!match) return { budget: undefined, rest: prompt };
+  return { budget: parseInt(match[1], 10), rest: prompt.replace(re, ' ').trim() };
+}
+
+/**
+ * Strips a trailing `--task <id>` hint off a prompt (used by sub-entity
+ * commands like `/todo done <id> --task <taskId>` to say which task/
+ * workspace a raw todo/error/question id belongs to — the cross-workspace
+ * registry only indexes task ids, not sub-entity ids, so a bare todo/error/
+ * question id from another workspace can't be resolved without this hint).
+ */
+/**
+ * Resolves the task/store/workspaceRoot a command should operate on: an
+ * explicit task id (falling back to the cross-workspace registry if it
+ * isn't local), or the workspace's current task if no id was given. Used by
+ * commands like `/git-sync` and `/export` that need the task's *repo root*
+ * (not just its store) to do their work.
+ */
+function resolveTargetOrCurrent(
+  store: TaskStore,
+  workspaceRoot: string | undefined,
+  currentTaskId: string | undefined,
+  explicitId: string | undefined,
+): { store: TaskStore; taskId: string; workspaceRoot: string } | { error: string } {
+  if (explicitId) {
+    if (store.getTask(explicitId)) {
+      if (!workspaceRoot) return { error: 'This workspace has no known root.' };
+      return { store, taskId: explicitId, workspaceRoot };
+    }
+    const resolved = resolveCrossWorkspaceTask(workspaceRoot, explicitId);
+    if (!resolved) return { error: `No task found with id \`${explicitId}\` in this or any known workspace.` };
+    return { store: resolved.store, taskId: explicitId, workspaceRoot: resolved.workspaceRoot };
+  }
+  if (!currentTaskId) return { error: noCurrentTaskMessage() };
+  if (!workspaceRoot) return { error: 'This workspace has no known root.' };
+  return { store, taskId: currentTaskId, workspaceRoot };
 }
 
 /**
@@ -668,21 +712,54 @@ export function handleChatCommand(store: TaskStore, input: ChatCommandInput): Ch
       // Plain NL messages never reach here with a non-empty prompt —
       // inferIntent() always clears the prompt for its status/resume
       // patterns — so this only fires for the explicit slash-command form.
-      const explicitId = prompt.trim() || undefined;
+      const { budget, rest: promptWithoutBudget } = extractBudgetFlag(prompt);
+      const explicitId = promptWithoutBudget.trim() || undefined;
       if (explicitId) {
         if (store.getTask(explicitId)) {
-          const sections = formatStatusSections(store, explicitId);
+          const sections = formatStatusSections(store, explicitId, budget);
           return { markdown: sections.join('\n\n'), sections };
         }
         const resolved = resolveCrossWorkspaceTask(input.workspaceRoot, explicitId);
         if (!resolved) return { markdown: `No task found with id \`${explicitId}\`.` };
-        const sections = formatStatusSections(resolved.store, explicitId);
+        const sections = formatStatusSections(resolved.store, explicitId, budget);
         sections.push(`_(from workspace \`${resolved.workspaceRoot}\`)_`);
         return { markdown: sections.join('\n\n'), sections };
       }
       if (!taskId) return { markdown: noCurrentTaskMessage() };
-      const sections = formatStatusSections(store, taskId);
+      const sections = formatStatusSections(store, taskId, budget);
       return { markdown: sections.join('\n\n'), sections };
+    }
+
+    case 'git-sync': {
+      const explicitId = prompt.trim() || undefined;
+      const target = resolveTargetOrCurrent(store, input.workspaceRoot, taskId, explicitId);
+      if ('error' in target) return { markdown: target.error };
+      const result = syncTaskGit(target.store, target.taskId, target.workspaceRoot);
+      const lines: string[] = [];
+      lines.push(result.branchChanged ? `Branch updated to \`${result.newBranch}\`.` : 'Branch unchanged.');
+      if (result.recordedCommits.length > 0) {
+        lines.push(`Recorded ${result.recordedCommits.length} commit(s):`);
+        for (const c of result.recordedCommits) lines.push(`  - \`${c.sha.slice(0, 7)}\` ${c.message}`);
+      } else {
+        lines.push('No new commits.');
+      }
+      return { markdown: lines.join('\n') };
+    }
+
+    case 'export': {
+      const { value: outFlag, rest: afterOut } = extractFlagValue(prompt, 'out');
+      const explicitId = afterOut.trim() || undefined;
+      const target = resolveTargetOrCurrent(store, input.workspaceRoot, taskId, explicitId);
+      if ('error' in target) return { markdown: target.error };
+      const markdown = exportTaskMarkdown(target.store, target.taskId);
+      const outPath = outFlag
+        ? path.isAbsolute(outFlag)
+          ? outFlag
+          : path.join(target.workspaceRoot, outFlag)
+        : path.join(target.workspaceRoot, '.ariadne', 'export', `${target.taskId}.md`);
+      fs.mkdirSync(path.dirname(outPath), { recursive: true });
+      fs.writeFileSync(outPath, markdown, 'utf8');
+      return { markdown: `Exported task \`${target.taskId}\` to \`${outPath}\`.\n\n---\n\n${markdown}` };
     }
 
     default: {
@@ -714,6 +791,10 @@ export function progressMessageFor(command: string | undefined): string {
       return 'Updating open questions…';
     case 'search':
       return 'Searching workspace…';
+    case 'git-sync':
+      return 'Syncing git branch and commits…';
+    case 'export':
+      return 'Exporting task to Markdown…';
     case 'resume':
       return 'Resuming task context…';
     case 'status':

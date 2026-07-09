@@ -343,6 +343,22 @@ export function createAriadneMcpServer(options?: { workspaceRoot?: string; store
   );
 
   server.registerTool(
+    'error_list',
+    {
+      title: 'List errors',
+      description: 'Lists errors for the current (or given) task — unresolved only by default, or every error with all:true. Works even if taskId belongs to a different workspace (falls back to the cross-workspace registry).',
+      inputSchema: { taskId: z.string().optional(), all: z.boolean().optional() },
+    },
+    async (args) => {
+      try {
+        return jsonResult(tools.errorList(store, workspaceRoot, args));
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
+
+  server.registerTool(
     'error_resolve',
     {
       title: 'Resolve an error',
