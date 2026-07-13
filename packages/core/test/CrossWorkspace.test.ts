@@ -97,6 +97,10 @@ describe('CrossWorkspace (orchestration over Registry + real per-workspace store
   });
 
   it('searchAcrossWorkspaces defaults to recent workspaces only, but can explicitly scan everything', () => {
+    // Creates 35 real on-disk SQLite workspaces under vi.useFakeTimers();
+    // vitest 3's fake timers also stub performance.now() by default, which
+    // slows down/perturbs this test's own internal timeout tracking, so it
+    // needs a longer-than-default timeout (not a functional issue).
     vi.useFakeTimers();
     try {
       const workspaceCount = 35;
@@ -136,7 +140,7 @@ describe('CrossWorkspace (orchestration over Registry + real per-workspace store
     } finally {
       vi.useRealTimers();
     }
-  });
+  }, 20000);
 
   it('resolveTaskAnyWorkspace finds a task in the current workspace without touching the registry fallback', () => {
     const rootA = makeWorkspace('ws-a');

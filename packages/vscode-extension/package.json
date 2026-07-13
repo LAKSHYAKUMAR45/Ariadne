@@ -147,8 +147,8 @@
     "@types/vscode": "^1.93.0",
     "@types/node": "^20.14.0",
     "@vscode/vsce": "^3.1.1",
-    "esbuild": "^0.21.5",
+    "esbuild": "^0.25.0",
     "typescript": "^5.5.4",
-    "vitest": "^2.1.1"
+    "vitest": "^3.2.6"
   }
 }
