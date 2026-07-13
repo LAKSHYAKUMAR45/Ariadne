@@ -90,11 +90,24 @@ native binding can't be inlined by esbuild).
 ### Multi-platform packaging
 
 `better-sqlite3`'s native binding is platform/ABI-specific, so a single
-`.vsix` can only run on the platform it was built on. Real, per-platform
-`.vsix` files are produced without needing that OS, by downloading
-`better-sqlite3`'s official prebuilt binaries (via `prebuild-install`,
-targeting VS Code's bundled Electron ABI — see `VSCODE_ELECTRON_VERSION` in
-`esbuild.js`) instead of relying on whatever's locally compiled:
+`.vsix` can only run on the platform (OS/arch) it was built for — and, on
+top of that, each platform-targeted `.vsix` must also work whether VS Code
+loads the extension host on **Electron's** bundled Node/V8 (a plain desktop
+install) or on **plain Node.js** (Remote-SSH/Tunnels/Codespaces/WSL, where
+the extension host runs on VS Code Server's own Node, entirely independent
+of Electron's ABI). Those two commonly have different `NODE_MODULE_VERSION`
+ABIs even at the same nominal VS Code version, so a binary built for one
+fails to load under the other with an opaque "Module did not self-register"
+error.
+
+Real, per-platform `.vsix` files are produced without needing that OS, by
+downloading `better-sqlite3`'s official prebuilt binaries (via
+`prebuild-install`). For each target platform/arch, the build fetches
+**every ABI variant** the package should support — VS Code's bundled
+Electron (`VSCODE_ELECTRON_VERSION` in `esbuild.js`) *and* a curated list of
+plain Node.js versions (`BUNDLED_NODE_VERSIONS`, covering the Node majors
+VS Code Server has shipped) — and stores each as
+`better_sqlite3.abi<N>.node`, keyed by its actual detected ABI:
 
 ```bash
 pnpm --filter ariadne-vscode run package:linux-x64
@@ -105,15 +118,27 @@ pnpm --filter ariadne-vscode run package:win32-x64
 pnpm --filter ariadne-vscode run package:all   # all five, into dist-vsix/
 ```
 
-Each script fetches the correct native binary for that target before
-running `vsce package --target <platform>-<arch>`, so `dist-vsix/` ends up
-with one correctly-targeted `.vsix` per platform, ready to publish with
-`vsce publish --target <platform>-<arch> --packagePath dist-vsix/*.vsix` (or
-upload individually via the Marketplace UI/`vsce publish -i <file>`).
+At runtime, `dist/native-bootstrap.js` — a small plain-CJS file that
+`package.json`'s `"main"` points at, deliberately *not* bundled by esbuild
+so it runs before the bundle's top-level `require('better-sqlite3')` —
+inspects the actual running process's `process.versions.modules` and
+copies the matching `better_sqlite3.abi<N>.node` into place as the plain
+`better_sqlite3.node` filename the `bindings` package looks for. This means
+the **same `.vsix`** works correctly whether installed on a desktop VS Code
+or loaded remotely by VS Code Server, with no user-visible difference.
+
+Each script fetches every ABI variant for that target before running
+`vsce package --target <platform>-<arch>`, so `dist-vsix/` ends up with one
+correctly-targeted, dual-runtime-compatible `.vsix` per platform, ready to
+publish with `vsce publish --target <platform>-<arch> --packagePath
+dist-vsix/*.vsix` (or upload individually via the Marketplace UI/`vsce
+publish -i <file>`).
 
 If `engines.vscode`'s floor is ever raised, bump `VSCODE_ELECTRON_VERSION`
 in `esbuild.js` to match the new floor's bundled Electron version (check
 `electron` in https://github.com/microsoft/vscode/blob/<tag>/package.json).
+Extend `BUNDLED_NODE_VERSIONS` if a VS Code Server release ships a Node
+major with a new ABI not already covered.
 
 ## License
 

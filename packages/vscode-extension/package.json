@@ -33,7 +33,7 @@
     "productivity"
   ],
   "activationEvents": [],
-  "main": "./dist/extension.js",
+  "main": "./dist/native-bootstrap.js",
   "contributes": {
     "chatParticipants": [
       {
