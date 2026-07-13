@@ -8,6 +8,25 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    # packages/sync-server's test suite talks to a real Postgres instance
+    # (no mocking — see packages/sync-server/README.md) via TEST_DATABASE_URL,
+    # which defaults to postgres://postgres:ariadne@localhost:55432/ariadne_sync_test.
+    # This service container matches that default exactly so CI needs no
+    # extra env vars, mirroring the `docker run ariadne-sync-test-pg` setup
+    # documented for local development.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: ariadne
+          POSTGRES_DB: ariadne_sync_test
+        ports:
+          - 55432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     steps:
       - uses: actions/checkout@v4
 
