@@ -79,6 +79,23 @@ describe('TaskStore', () => {
     expect(store.listOpenQuestions(task.id, { resolved: true })[0].id).toBe(question.id);
   });
 
+  it('recordCommit is a no-op (not a throw) when the sha is already recorded against a different task', () => {
+    const taskA = store.createTask({ title: 'A' });
+    const taskB = store.createTask({ title: 'B' });
+
+    const commit = store.recordCommit({ taskId: taskA.id, sha: 'shared-sha', message: 'shared commit' });
+    expect(store.commitExists('shared-sha')).toBe(true);
+    expect(store.commitExists('never-recorded-sha')).toBe(false);
+
+    // Re-recording the same sha under a different task must not throw, and
+    // must not move/duplicate it -- it stays owned by taskA.
+    expect(() => store.recordCommit({ taskId: taskB.id, sha: 'shared-sha', message: 'shared commit' })).not.toThrow();
+    const again = store.recordCommit({ taskId: taskB.id, sha: 'shared-sha', message: 'shared commit' });
+    expect(again).toEqual(commit);
+    expect(store.listCommits(taskA.id).map((c) => c.sha)).toEqual(['shared-sha']);
+    expect(store.listCommits(taskB.id)).toEqual([]);
+  });
+
   it('tracks the current task id in the DB (schema_meta), not a separate file', () => {
     expect(store.getCurrentTaskId()).toBeUndefined();
     const task = store.createTask({ title: 'A' });

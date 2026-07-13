@@ -620,11 +620,19 @@ export class TaskStore {
   // Commits
   // ---------------------------------------------------------------------
 
+  /**
+   * Records a commit against a task. `sha` is globally unique (a commit
+   * belongs to exactly one task), so if it's already recorded — against
+   * this task or (via a shared git history) a different one — this is a
+   * no-op that returns the existing row rather than throwing. This keeps
+   * `syncTaskGit`'s "safe to call repeatedly" contract true even when the
+   * same commit is reachable from more than one task's workspace/branch.
+   */
   recordCommit(input: NewCommit): Commit {
     const ts = nowIso();
-    this.db
+    const result = this.db
       .prepare(
-        `INSERT INTO commits (sha, task_id, checkpoint_id, message, created_at)
+        `INSERT OR IGNORE INTO commits (sha, task_id, checkpoint_id, message, created_at)
          VALUES (@sha, @taskId, @checkpointId, @message, @createdAt)`,
       )
       .run({
@@ -634,9 +642,17 @@ export class TaskStore {
         message: input.message ?? null,
         createdAt: ts,
       });
-    this.touchTask(input.taskId);
+    if (result.changes > 0) {
+      this.touchTask(input.taskId);
+    }
     const row = this.db.prepare(`SELECT * FROM commits WHERE sha = ?`).get(input.sha) as CommitRow;
     return rowToCommit(row);
+  }
+
+  /** Whether a commit sha is already recorded, against any task. */
+  commitExists(sha: string): boolean {
+    const row = this.db.prepare(`SELECT 1 FROM commits WHERE sha = ?`).get(sha);
+    return Boolean(row);
   }
 
   listCommits(taskId: string, limit?: number): Commit[] {

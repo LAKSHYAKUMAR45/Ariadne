@@ -100,4 +100,23 @@ describe('GitWatcher', () => {
   it('throws for an unknown task', () => {
     expect(() => syncTaskGit(store, 'nope', repoRoot)).toThrow(/No task found/);
   });
+
+  it('does not crash when a commit is already recorded against a different task (shared git history)', () => {
+    const taskA = store.createTask({ title: 'A' });
+    const taskB = store.createTask({ title: 'B' });
+    const sha1 = commit(repoRoot, 'a.txt', 'First commit');
+
+    // taskA syncs first and owns this commit.
+    const first = syncTaskGit(store, taskA.id, repoRoot);
+    expect(first.recordedCommits.map((c) => c.sha)).toEqual([sha1]);
+    expect(store.listCommits(taskA.id).map((c) => c.sha)).toEqual([sha1]);
+
+    // taskB shares the same repo history and syncs too -- must not throw,
+    // and the commit stays attributed to taskA only (not duplicated).
+    expect(() => syncTaskGit(store, taskB.id, repoRoot)).not.toThrow();
+    const second = syncTaskGit(store, taskB.id, repoRoot);
+    expect(second.recordedCommits).toEqual([]);
+    expect(store.listCommits(taskB.id)).toEqual([]);
+    expect(store.listCommits(taskA.id).map((c) => c.sha)).toEqual([sha1]);
+  });
 });

@@ -85,7 +85,12 @@ export function syncTaskGit(
 
   const alreadyRecorded = new Set(store.listCommits(taskId).map((c) => c.sha));
   const recent = listRecentCommits(repoRoot, options.commitLimit ?? 50);
-  const toRecord = recent.filter((c) => !alreadyRecorded.has(c.sha));
+  // A commit's sha is globally unique across all tasks (it belongs to
+  // whichever task recorded it first), so skip ones already attributed
+  // elsewhere too, not just ones already recorded against this task.
+  const toRecord = recent.filter(
+    (c) => !alreadyRecorded.has(c.sha) && !store.commitExists(c.sha),
+  );
 
   // `git log` returns newest-first; record oldest-first so created_at ordering matches commit order.
   const recordedCommits: GitLogEntry[] = [];
