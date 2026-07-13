@@ -133,14 +133,27 @@ pnpm test    # runs the full test suite across all packages
 
 ### One-command install (recommended)
 
-Once `pnpm install` has run, these build + install each surface with no
-further flags or manual steps:
+These work on a completely fresh machine — no manual `pnpm install` needed
+first, and no assumptions about what's already on the box:
 
 ```bash
 pnpm run install:cli      # builds the CLI, npm links it -> `ariadne` on PATH
 pnpm run install:mcp      # builds the MCP server, npm links it, prints the client config snippet
 pnpm run install:vscode   # builds + packages the extension for your OS/arch, installs it via `code`
 pnpm run install:all      # runs all three of the above in sequence
+```
+
+Each of these first runs `scripts/preflight.mjs` (checks Node 20+, npm,
+git, and pnpm — auto-enabling pnpm via corepack if it's missing — and
+warns, non-fatally, if a C/C++ build toolchain isn't present, which is
+only needed as a fallback if `better-sqlite3` has no prebuilt binary for
+your exact platform/Node version) and then runs `pnpm install` itself, so
+they're safe to run as the very first command on a brand-new clone/server.
+
+You can also run the preflight check on its own:
+
+```bash
+pnpm run preflight   # verifies Node/npm/git/pnpm/build-toolchain, no build/install side effects
 ```
 
 `install:vscode` auto-detects your platform/arch, produces the dual
@@ -150,6 +163,31 @@ and installs it with the `code` (or `code-insiders`) CLI if present —
 otherwise it prints the manual install command. Re-run any of these any
 time you pull new changes; they're idempotent. Scripts live in
 [`scripts/`](scripts/) if you want to see or tweak the exact steps.
+
+### Verifying the install (smoke test)
+
+Once installed, sanity-check that the CLI, MCP server, and VS Code
+extension are actually working end to end — not just that unit tests pass:
+
+```bash
+pnpm run verify:install
+```
+
+This creates a scratch task with `ariadne`, spawns `ariadne-mcp-server`
+and performs a real MCP `initialize` handshake over stdio, and checks the
+extension is present in `code --list-extensions`. It's a smoke test of the
+*installed* binaries, complementary to the package-level unit test suites
+below.
+
+### Running the test suite
+
+```bash
+pnpm test                                   # every package's unit tests
+pnpm --filter @ariadne-dev/core test        # just the storage layer
+pnpm --filter @ariadne-dev/cli test         # just the CLI
+pnpm --filter @ariadne-dev/mcp-server test  # just the MCP server
+pnpm --filter ariadne-vscode test           # just the VS Code extension
+```
 
 ### Using the CLI
 

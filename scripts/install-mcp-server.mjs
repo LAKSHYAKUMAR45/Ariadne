@@ -6,8 +6,10 @@
 // Builds @ariadne-dev/core and @ariadne-dev/mcp-server, `npm link`s it so the
 // `ariadne-mcp-server` binary is available globally, then prints the config
 // snippet to paste into any MCP-capable client (Copilot, Claude, etc.).
-import { log, ok, run, tryCapture, warn, repoRoot } from './_lib.mjs';
+import { log, ok, run, tryCapture, warn, ensureReady, repoRoot } from './_lib.mjs';
 import path from 'node:path';
+
+ensureReady();
 
 log('Building @ariadne-dev/core and @ariadne-dev/mcp-server');
 run('pnpm --filter @ariadne-dev/core --filter @ariadne-dev/mcp-server run build');

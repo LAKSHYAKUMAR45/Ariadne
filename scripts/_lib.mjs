@@ -36,3 +36,18 @@ export function tryCapture(cmd, cwd = repoRoot) {
     return null;
   }
 }
+
+/**
+ * Runs scripts/preflight.mjs (checks Node/npm/git/pnpm) and `pnpm install`
+ * (so a fresh clone/fresh server works with no manual setup) before an
+ * install-*.mjs script does anything else. Exits the process if either step
+ * fails — preflight.mjs and `pnpm install` both print actionable errors.
+ */
+export function ensureReady() {
+  log('Preflight: checking required tools (Node, npm, git, pnpm)');
+  run(`node ${path.join(repoRoot, 'scripts/preflight.mjs')}`);
+
+  log('Ensuring workspace dependencies are installed (pnpm install)');
+  run('pnpm install');
+}
+

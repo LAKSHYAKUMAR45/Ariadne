@@ -21,6 +21,8 @@
     "install:mcp": "node scripts/install-mcp-server.mjs",
     "install:vscode": "node scripts/install-vscode-extension.mjs",
     "install:all": "node scripts/install-all.mjs",
+    "preflight": "node scripts/preflight.mjs",
+    "verify:install": "node scripts/smoke-test.mjs",
     "changeset": "changeset",
     "version-packages": "changeset version",
     "release": "pnpm build && changeset publish"

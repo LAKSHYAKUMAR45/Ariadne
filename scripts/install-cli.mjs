@@ -5,8 +5,10 @@
 //
 // Builds @ariadne-dev/core and @ariadne-dev/cli, then `npm link`s the CLI
 // package so the `ariadne` command is available globally.
-import { log, ok, run, tryCapture, repoRoot } from './_lib.mjs';
+import { log, ok, run, tryCapture, ensureReady, repoRoot } from './_lib.mjs';
 import path from 'node:path';
+
+ensureReady();
 
 log('Building @ariadne-dev/core and @ariadne-dev/cli');
 run('pnpm --filter @ariadne-dev/core --filter @ariadne-dev/cli run build');

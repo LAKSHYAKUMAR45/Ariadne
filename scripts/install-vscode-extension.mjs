@@ -9,7 +9,7 @@
 import os from 'node:os';
 import path from 'node:path';
 import fs from 'node:fs';
-import { log, ok, warn, fail, run, tryCapture, repoRoot } from './_lib.mjs';
+import { log, ok, warn, fail, run, tryCapture, ensureReady, repoRoot } from './_lib.mjs';
 
 const SUPPORTED_TARGETS = ['linux-x64', 'linux-arm64', 'darwin-x64', 'darwin-arm64', 'win32-x64'];
 
@@ -34,6 +34,9 @@ function findCodeBin() {
 }
 
 const extDir = path.join(repoRoot, 'packages/vscode-extension');
+
+ensureReady();
+
 const target = detectTarget();
 
 log(`Building @ariadne-dev/core and the extension bundle`);
