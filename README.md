@@ -131,6 +131,26 @@ pnpm build   # builds all packages, in dependency order
 pnpm test    # runs the full test suite across all packages
 ```
 
+### One-command install (recommended)
+
+Once `pnpm install` has run, these build + install each surface with no
+further flags or manual steps:
+
+```bash
+pnpm run install:cli      # builds the CLI, npm links it -> `ariadne` on PATH
+pnpm run install:mcp      # builds the MCP server, npm links it, prints the client config snippet
+pnpm run install:vscode   # builds + packages the extension for your OS/arch, installs it via `code`
+pnpm run install:all      # runs all three of the above in sequence
+```
+
+`install:vscode` auto-detects your platform/arch, produces the dual
+desktop+server ABI `.vsix` (see "multi-platform packaging" in
+[`packages/vscode-extension/README.md`](packages/vscode-extension/README.md)),
+and installs it with the `code` (or `code-insiders`) CLI if present —
+otherwise it prints the manual install command. Re-run any of these any
+time you pull new changes; they're idempotent. Scripts live in
+[`scripts/`](scripts/) if you want to see or tweak the exact steps.
+
 ### Using the CLI
 
 ```bash

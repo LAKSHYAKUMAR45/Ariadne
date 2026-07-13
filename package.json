@@ -17,6 +17,10 @@
     "build": "pnpm -r run build",
     "test": "pnpm -r run test",
     "lint": "pnpm -r run lint",
+    "install:cli": "node scripts/install-cli.mjs",
+    "install:mcp": "node scripts/install-mcp-server.mjs",
+    "install:vscode": "node scripts/install-vscode-extension.mjs",
+    "install:all": "node scripts/install-all.mjs",
     "changeset": "changeset",
     "version-packages": "changeset version",
     "release": "pnpm build && changeset publish"
