@@ -345,11 +345,10 @@ What to know:
   `ariadne sync pull --import-new` to instead create a local task for each
   of those (already linked via `remote_id`, using the server's own
   timestamps), including pulling in their existing checkpoints.
-  **Caveat:** pull only asks the server for tasks changed since your last
-  pull — if you already pulled (and skipped) a task once, a later
-  `--import-new` run won't re-import it unless it changes again remotely.
-  Run `--import-new` from the start (or use `list-remote` first to see
-  what exists) rather than adding it as an afterthought.
+  `--import-new` does a full browse of every remote task (not just ones
+  changed since your last pull), so it always finds and imports anything
+  you've never linked here, even if a plain `pull` already saw and skipped
+  it earlier.
 - **`list-remote`** is browse-only: it lists *every* task on the server
   (owner + workspace label + status), including ones from workspaces
   you've never linked, without creating or changing anything locally. Use

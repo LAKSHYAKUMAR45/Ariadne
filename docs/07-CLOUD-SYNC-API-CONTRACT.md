@@ -216,11 +216,14 @@ except `/auth/register` and `/auth/login` require `Authorization: Bearer
 - Note this is the feed `ariadne sync pull` uses — by default it only
   updates tasks the calling workspace has already linked via `remote_id`
   (see design doc §4.6.4); tasks from other workspaces still appear here
-  but are skipped client-side unless `--import-new` is passed, in which
-  case the client creates a new local task for each one instead (via
-  `TaskStore.insertPulledTask`, using this response's own
-  `createdAt`/`updatedAt`). Use §4.4 to browse everything without importing
-  anything.
+  but are skipped client-side unless `--import-new` is passed. When
+  `--import-new` is used, the client does **not** rely on this `since`-
+  filtered feed to find unlinked tasks — instead it separately calls
+  `GET /tasks/all` (§4.4, no `since` filtering) and imports any task not
+  yet linked locally (via `TaskStore.insertPulledTask`, using that
+  response's `createdAt`/`updatedAt`). This decouples import-new from the
+  incremental cursor above, so a task already "seen" (and skipped) by an
+  earlier plain `pull` is still found and imported later, however old.
 
 **`GET /api/v1/sync/tasks/all`** — browse-only listing of every task on the
 server, regardless of whether the caller's workspace has ever linked it.

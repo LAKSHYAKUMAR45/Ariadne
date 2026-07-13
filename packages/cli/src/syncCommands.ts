@@ -113,37 +113,26 @@ export async function runSyncPush(store: TaskStore, workspaceRoot: string, taskI
  * the server since the last pull and applies them to any local task
  * already linked via `remoteId`. By default, tasks never pushed from this
  * workspace are skipped (pull only updates rows this workspace already
- * knows about); pass `--import-new` to instead create a new local task for
- * each one (immediately linked via `remoteId`, using the server's own
- * timestamps) — see `TaskStore.insertPulledTask`. Then pulls new
- * checkpoints for every task this workspace has synced, including any
- * just imported.
+ * knows about); pass `--import-new` to also create a new local task for
+ * every remote task this workspace has never linked, however old (see
+ * `TaskStore.insertPulledTask`). That import pass deliberately does NOT
+ * reuse the incremental `since` cursor below — that cursor only guarantees
+ * "tasks changed since X", so a task skipped once would otherwise never
+ * resurface for import unless it changed again remotely. Instead it does a
+ * full browse via GET /tasks/all (the same endpoint `sync list-remote`
+ * uses) and imports anything still unlinked. Then pulls new checkpoints
+ * for every task this workspace has synced, including any just imported.
  */
 export async function runSyncPull(store: TaskStore, taskId?: string, options: { importNew?: boolean } = {}): Promise<void> {
   const config = requireSyncConfig();
 
   const { tasks, serverTime } = await syncClient.pullTasks(config.serverUrl, config.token, config.lastTasksPullAt);
   let updated = 0;
-  let imported = 0;
   const unknownLabels = new Set<string>();
   for (const remoteTask of tasks) {
     const local = store.getTaskByRemoteId(remoteTask.remoteId);
     if (!local) {
-      if (options.importNew) {
-        store.insertPulledTask({
-          remoteId: remoteTask.remoteId,
-          title: remoteTask.title,
-          goal: remoteTask.goal,
-          status: remoteTask.status as TaskStatus,
-          branch: remoteTask.branch,
-          createdAt: remoteTask.createdAt,
-          updatedAt: remoteTask.updatedAt,
-          syncedAt: serverTime,
-        });
-        imported++;
-      } else {
-        unknownLabels.add(remoteTask.workspaceLabel ?? 'unknown workspace');
-      }
+      unknownLabels.add(remoteTask.workspaceLabel ?? 'unknown workspace');
       continue;
     }
     if (taskId && local.id !== taskId) continue;
@@ -158,9 +147,30 @@ export async function runSyncPull(store: TaskStore, taskId?: string, options: { 
     updated++;
   }
   writeSyncConfig({ ...config, lastTasksPullAt: serverTime });
+
+  let imported = 0;
+  if (options.importNew) {
+    const { tasks: allRemoteTasks } = await syncClient.listAllRemoteTasks(config.serverUrl, config.token);
+    const importedAt = new Date().toISOString();
+    for (const remoteTask of allRemoteTasks) {
+      if (store.getTaskByRemoteId(remoteTask.remoteId)) continue; // already linked (possibly just above, in this same run)
+      store.insertPulledTask({
+        remoteId: remoteTask.remoteId,
+        title: remoteTask.title,
+        goal: remoteTask.goal,
+        status: remoteTask.status as TaskStatus,
+        branch: remoteTask.branch,
+        createdAt: remoteTask.createdAt,
+        updatedAt: remoteTask.updatedAt,
+        syncedAt: importedAt,
+      });
+      imported++;
+    }
+  }
+
   const importedNote = imported > 0 ? ` (${imported} new task(s) imported)` : '';
   const skippedNote =
-    unknownLabels.size > 0
+    !options.importNew && unknownLabels.size > 0
       ? ` (tasks from other workspaces skipped: ${[...unknownLabels].join(', ')})`
       : '';
   console.log(`Pulled ${updated} task update(s)${importedNote}${skippedNote}.`);

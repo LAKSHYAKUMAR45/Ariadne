@@ -186,7 +186,13 @@ describe('ariadne sync commands', () => {
   it('pull --import-new creates local tasks for remote tasks never linked here instead of skipping them', async () => {
     writeSyncConfig();
 
-    vi.mocked(syncClient.pullTasks).mockResolvedValue({
+    // pullTasks (the incremental feed) returns nothing new — this simulates
+    // the realistic case the since-cursor bug fix targets: a task that was
+    // already "seen" (and previously skipped) by an earlier incremental
+    // pull, so it would no longer appear here. --import-new must still find
+    // it via the separate browse-all endpoint below, not this feed.
+    vi.mocked(syncClient.pullTasks).mockResolvedValue({ tasks: [], serverTime: '2026-02-01T00:00:05.000Z' });
+    vi.mocked(syncClient.listAllRemoteTasks).mockResolvedValue({
       tasks: [
         {
           remoteId: 'remote-task-new',
@@ -194,11 +200,12 @@ describe('ariadne sync commands', () => {
           goal: 'shipped from another machine',
           status: 'active',
           branch: 'feature/y',
+          workspaceLabel: 'desktop2:org/atom',
+          owner: 'teammate',
           createdAt: '2026-01-01T00:00:00.000Z',
           updatedAt: '2026-02-01T00:00:00.000Z',
         },
       ],
-      serverTime: '2026-02-01T00:00:05.000Z',
     });
     vi.mocked(syncClient.pullCheckpoints).mockResolvedValue({
       checkpoints: [{ remoteId: 'remote-ckpt-imported', level: 'micro', summary: 'a checkpoint from the teammate', createdAt: '2026-02-01T00:00:00.000Z' }],
@@ -207,13 +214,14 @@ describe('ariadne sync commands', () => {
 
     await program.parseAsync(['node', 'ariadne', 'sync', 'pull', '--import-new']);
 
+    expect(syncClient.listAllRemoteTasks).toHaveBeenCalledWith('http://fake-sync-server.test', 'fake-token');
     const storeAfter = openWorkspaceStore(root);
     const imported = storeAfter.getTaskByRemoteId('remote-task-new');
     expect(imported).toBeTruthy();
     expect(imported!.title).toBe("Teammate's task");
     expect(imported!.goal).toBe('shipped from another machine');
     expect(imported!.branch).toBe('feature/y');
-    expect(imported!.syncedAt).toBe('2026-02-01T00:00:05.000Z');
+    expect(imported!.syncedAt).toBeTruthy();
     // Checkpoints for the newly-imported task should also get pulled in the same run.
     const checkpoints = storeAfter.listCheckpoints(imported!.id);
     expect(checkpoints).toHaveLength(1);
