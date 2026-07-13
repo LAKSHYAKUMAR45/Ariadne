@@ -247,13 +247,15 @@ machine unless you run these commands.
 ariadne sync register <username> <password> --server https://your-sync-server
 ariadne sync push          # push local task/checkpoint changes
 ariadne sync pull          # pull changes made by teammates / other machines
+ariadne sync list-remote   # browse every task on the server, including ones never linked here
 ```
 
 `sync push`/`sync pull` take an optional `--task <id>` to scope to a single
-task. Phase 1 syncs `tasks` and `checkpoints` only (todos/decisions/open
-questions/commands/files stay local for now); access is flat (any account
-on the server can read/write any synced task) and conflicts are resolved
-remote-wins.
+task. `sync pull --import-new` also creates local tasks for remote ones this
+workspace has never linked, instead of skipping them. Phase 1 syncs `tasks`
+and `checkpoints` only (todos/decisions/open questions/commands/files stay
+local for now); access is flat (any account on the server can read/write
+any synced task) and conflicts are resolved remote-wins.
 
 ### Using the MCP server
 

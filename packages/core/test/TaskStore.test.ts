@@ -274,6 +274,32 @@ describe('TaskStore', () => {
       expect(store.listTasksNeedingPush().map((t) => t.id)).not.toContain(task.id);
     });
 
+    it('insertPulledTask creates a new local task from a remote task, already linked and using the server timestamps', () => {
+      const task = store.insertPulledTask({
+        remoteId: 'remote-imported-1',
+        title: "Teammate's task",
+        goal: 'goal from server',
+        status: 'active',
+        branch: 'feature/x',
+        createdAt: '2026-06-01T00:00:00.000Z',
+        updatedAt: '2026-06-02T00:00:00.000Z',
+        syncedAt: '2026-06-02T00:00:05.000Z',
+      });
+
+      expect(task.title).toBe("Teammate's task");
+      expect(task.goal).toBe('goal from server');
+      expect(task.status).toBe('active');
+      expect(task.branch).toBe('feature/x');
+      expect(task.remoteId).toBe('remote-imported-1');
+      expect(task.createdAt).toBe('2026-06-01T00:00:00.000Z');
+      expect(task.updatedAt).toBe('2026-06-02T00:00:00.000Z');
+      expect(task.syncedAt).toBe('2026-06-02T00:00:05.000Z');
+
+      // Newly imported task is already fully synced — shouldn't need pushing.
+      expect(store.listTasksNeedingPush().map((t) => t.id)).not.toContain(task.id);
+      expect(store.getTaskByRemoteId('remote-imported-1')?.id).toBe(task.id);
+    });
+
     it('insertPulledCheckpoint creates a locally-unknown checkpoint already marked synced, and getCheckpointByRemoteId finds it', () => {
       const task = store.createTask({ title: 'A' });
 

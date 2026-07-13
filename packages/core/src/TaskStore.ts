@@ -396,6 +396,47 @@ export class TaskStore {
     this.syncToRegistry(localId);
   }
 
+  /**
+   * Creates a brand-new local task from one pulled from the sync server
+   * that this workspace has never linked before — used by `ariadne sync
+   * pull --import-new` (see docs/07-CLOUD-SYNC-API-CONTRACT.md §4.2).
+   * Unlike `createTask`, this uses the server's own `createdAt`/`updatedAt`
+   * (not "now") and sets `remote_id`/`synced_at` immediately, so the new
+   * row is already linked and won't be re-pushed as if it were freshly
+   * created locally.
+   */
+  insertPulledTask(input: {
+    remoteId: string;
+    title: string;
+    goal: string | null;
+    status: TaskStatus;
+    branch: string | null;
+    createdAt: string;
+    updatedAt: string;
+    syncedAt: string;
+  }): Task {
+    const id = ulid();
+    this.db
+      .prepare(
+        `INSERT INTO tasks (id, title, goal, status, branch, remote_id, created_at, updated_at, synced_at)
+         VALUES (@id, @title, @goal, @status, @branch, @remoteId, @createdAt, @updatedAt, @syncedAt)`,
+      )
+      .run({
+        id,
+        title: input.title,
+        goal: input.goal,
+        status: input.status,
+        branch: input.branch,
+        remoteId: input.remoteId,
+        createdAt: input.createdAt,
+        updatedAt: input.updatedAt,
+        syncedAt: input.syncedAt,
+      });
+    const task = this.getTask(id)!;
+    this.syncToRegistry(id);
+    return task;
+  }
+
   // ---------------------------------------------------------------------
   // Checkpoints
   // ---------------------------------------------------------------------

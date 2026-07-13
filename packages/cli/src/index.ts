@@ -21,7 +21,7 @@ import { openWorkspaceStore, findWorkspaceRoot, stateDbPath } from './workspace.
 import { readCurrentTaskId, setCurrentTaskId } from './currentTask.js';
 import { withResolvedTask, withScopedStore } from './withTask.js';
 import { runTaskExec } from './exec.js';
-import { runSyncRegister, runSyncLogin, runSyncLogout, runSyncPush, runSyncPull } from './syncCommands.js';
+import { runSyncRegister, runSyncLogin, runSyncLogout, runSyncPush, runSyncPull, runSyncListRemote } from './syncCommands.js';
 
 const program = new Command();
 program.name('ariadne').description('Chats are disposable, tasks are permanent.').version('0.1.0');
@@ -829,9 +829,10 @@ sync
   .description('Push local task/checkpoint changes to the sync server')
   .option('-t, --task <id>', 'Only push this task (and its checkpoints)')
   .action(async (opts: { task?: string }) => {
+    const root = findWorkspaceRoot();
     await withStore(async (store) => {
       try {
-        await runSyncPush(store, opts.task);
+        await runSyncPush(store, root, opts.task);
       } catch (err) {
         console.error(err instanceof Error ? err.message : String(err));
         process.exit(1);
@@ -843,15 +844,28 @@ sync
   .command('pull')
   .description('Pull task/checkpoint changes from the sync server into already-linked local tasks')
   .option('-t, --task <id>', 'Only pull this task (and its checkpoints)')
-  .action(async (opts: { task?: string }) => {
+  .option('--import-new', 'Also create local tasks for remote tasks this workspace has never linked, instead of skipping them')
+  .action(async (opts: { task?: string; importNew?: boolean }) => {
     await withStore(async (store) => {
       try {
-        await runSyncPull(store, opts.task);
+        await runSyncPull(store, opts.task, { importNew: opts.importNew });
       } catch (err) {
         console.error(err instanceof Error ? err.message : String(err));
         process.exit(1);
       }
     });
+  });
+
+sync
+  .command('list-remote')
+  .description('List every task on the sync server, including ones this workspace has never linked (browse-only, does not import anything locally)')
+  .action(async () => {
+    try {
+      await runSyncListRemote();
+    } catch (err) {
+      console.error(err instanceof Error ? err.message : String(err));
+      process.exit(1);
+    }
   });
 
 export { program };

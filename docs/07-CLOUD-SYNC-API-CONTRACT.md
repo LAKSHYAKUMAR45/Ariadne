@@ -45,6 +45,7 @@ CREATE TABLE tasks (
   goal           TEXT,
   status         TEXT NOT NULL DEFAULT 'active', -- active|paused|done|archived
   branch         TEXT,
+  workspace_label TEXT,               -- e.g. "laptop1:org/atom" — which machine/repo last pushed this (see §2.1)
   created_at     TIMESTAMPTZ NOT NULL,
   updated_at     TIMESTAMPTZ NOT NULL             -- bumped on every field change; drives pull's "changed since" query
 );
@@ -81,6 +82,27 @@ Notes:
   of client data without needing to understand workspace-local ULIDs as
   primary keys — the server mints its own UUIDs, which the client then
   stores back into its local `remote_id` column (§4 below).
+
+### 2.1 Workspace attribution (`workspace_label`)
+
+`owner_user_id` only identifies *who* pushed a task, not *which
+repo/workspace/machine* it came from — two tasks pushed by the same user
+from two different repos are otherwise indistinguishable server-side. Every
+push (`POST /api/v1/sync/tasks`) therefore includes a client-computed
+`workspaceLabel` string, stored verbatim in `tasks.workspace_label` and
+returned by both pull endpoints (§4.2, §4.4):
+
+- Computed as `${hostname}:${repoShorthand}` (e.g. `laptop1:org/atom`),
+  where `repoShorthand` is derived from `git remote get-url origin` when
+  available (`org/repo`, stripped of protocol/`.git`), falling back to the
+  workspace folder's basename if it isn't a git repo or has no `origin`
+  remote. See `packages/cli/src/workspaceLabel.ts`.
+- Recomputed fresh on every push (not cached) — cheap, and stays accurate
+  even if a workspace is renamed or its remote changes.
+- Overwritten (not merged) on re-push, so it always reflects the most
+  recent workspace to push that task, not just its origin.
+- Optional/nullable — omitting it (or pushing from an older client) simply
+  leaves it `null`; nothing else depends on it being present.
 
 ## 3. Client-side schema addition (packages/core)
 
@@ -144,6 +166,7 @@ except `/auth/register` and `/auth/login` require `Authorization: Bearer
       "goal": "...",
       "status": "active",
       "branch": "main",
+      "workspaceLabel": "laptop1:org/atom",  // optional — see §2.1
       "createdAt": "2026-07-01T12:00:00Z",
       "updatedAt": "2026-07-13T10:00:00Z"
     }
@@ -178,6 +201,7 @@ except `/auth/register` and `/auth/login` require `Authorization: Bearer
       "goal": "...",
       "status": "active",
       "branch": "main",
+      "workspaceLabel": "laptop1:org/atom",
       "createdAt": "2026-07-01T12:00:00Z",
       "updatedAt": "2026-07-13T10:00:05Z"
     }
@@ -189,6 +213,38 @@ except `/auth/register` and `/auth/login` require `Authorization: Bearer
   omitted — used for a first-time pull). `serverTime` is what the client
   should store as its next `since` value, not the max `updatedAt` in the
   page, to avoid missing rows written between the query and the response.
+- Note this is the feed `ariadne sync pull` uses — by default it only
+  updates tasks the calling workspace has already linked via `remote_id`
+  (see design doc §4.6.4); tasks from other workspaces still appear here
+  but are skipped client-side unless `--import-new` is passed, in which
+  case the client creates a new local task for each one instead (via
+  `TaskStore.insertPulledTask`, using this response's own
+  `createdAt`/`updatedAt`). Use §4.4 to browse everything without importing
+  anything.
+
+**`GET /api/v1/sync/tasks/all`** — browse-only listing of every task on the
+server, regardless of whether the caller's workspace has ever linked it.
+Backs `ariadne sync list-remote`. No `since` filtering (always returns the
+full set, newest-updated first) — this is a small-scale browsing endpoint,
+not the incremental sync feed.
+```json
+// Response 200
+{
+  "tasks": [
+    {
+      "remoteId": "9a3f...",
+      "title": "Fix login bug",
+      "goal": "...",
+      "status": "active",
+      "branch": "main",
+      "workspaceLabel": "laptop1:org/atom",
+      "owner": "alice",
+      "createdAt": "2026-07-01T12:00:00Z",
+      "updatedAt": "2026-07-13T10:00:05Z"
+    }
+  ]
+}
+```
 
 ### 4.3 Sync — checkpoints
 

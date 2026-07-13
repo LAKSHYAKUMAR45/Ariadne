@@ -255,6 +255,101 @@ describe('sync-server: auth + sync routes', () => {
         });
       expect(bobUpdate.status).toBe(200);
     });
+
+    it('stores and returns workspaceLabel, and updates it on re-push from a different workspace', async () => {
+      const token = await registerAndLogin();
+      const push = await request(app)
+        .post('/api/v1/sync/tasks')
+        .set('Authorization', `Bearer ${token}`)
+        .send({
+          tasks: [
+            {
+              localId: 'local-ws',
+              remoteId: null,
+              title: 'Task from atom repo',
+              status: 'active',
+              workspaceLabel: 'laptop1:org/atom',
+              createdAt: '2026-07-01T12:00:00Z',
+              updatedAt: '2026-07-01T12:00:00Z',
+            },
+          ],
+        });
+      const remoteId = push.body.results[0].remoteId;
+
+      const pull = await request(app).get('/api/v1/sync/tasks').set('Authorization', `Bearer ${token}`);
+      const pulled = pull.body.tasks.find((t: { remoteId: string }) => t.remoteId === remoteId);
+      expect(pulled.workspaceLabel).toBe('laptop1:org/atom');
+
+      // Re-push (e.g. someone pulls it into a different workspace and pushes again) updates the label.
+      await request(app)
+        .post('/api/v1/sync/tasks')
+        .set('Authorization', `Bearer ${token}`)
+        .send({
+          tasks: [
+            {
+              localId: 'local-ws',
+              remoteId,
+              title: 'Task from atom repo',
+              status: 'active',
+              workspaceLabel: 'desktop2:org/atom',
+              createdAt: '2026-07-01T12:00:00Z',
+              updatedAt: '2026-07-02T00:00:00Z',
+            },
+          ],
+        });
+      const pullAgain = await request(app).get('/api/v1/sync/tasks').set('Authorization', `Bearer ${token}`);
+      const pulledAgain = pullAgain.body.tasks.find((t: { remoteId: string }) => t.remoteId === remoteId);
+      expect(pulledAgain.workspaceLabel).toBe('desktop2:org/atom');
+    });
+
+    it('GET /tasks/all lists every task on the server (including from other users) with owner + workspaceLabel', async () => {
+      const aliceToken = await registerAndLogin('alice3', 'pw123456');
+      await request(app)
+        .post('/api/v1/sync/tasks')
+        .set('Authorization', `Bearer ${aliceToken}`)
+        .send({
+          tasks: [
+            {
+              localId: 'alice-task',
+              remoteId: null,
+              title: "Alice's task",
+              status: 'active',
+              workspaceLabel: 'alice-laptop:repo-a',
+              createdAt: '2026-07-01T12:00:00Z',
+              updatedAt: '2026-07-01T12:00:00Z',
+            },
+          ],
+        });
+
+      const bobToken = await registerAndLogin('bob3', 'pw123456');
+      await request(app)
+        .post('/api/v1/sync/tasks')
+        .set('Authorization', `Bearer ${bobToken}`)
+        .send({
+          tasks: [
+            {
+              localId: 'bob-task',
+              remoteId: null,
+              title: "Bob's task",
+              status: 'active',
+              workspaceLabel: 'bob-desktop:repo-b',
+              createdAt: '2026-07-01T12:00:00Z',
+              updatedAt: '2026-07-01T12:00:00Z',
+            },
+          ],
+        });
+
+      // Bob should see Alice's task too (flat access model) with her username and workspace label.
+      const all = await request(app).get('/api/v1/sync/tasks/all').set('Authorization', `Bearer ${bobToken}`);
+      expect(all.status).toBe(200);
+      expect(all.body.tasks).toHaveLength(2);
+      const aliceEntry = all.body.tasks.find((t: { title: string }) => t.title === "Alice's task");
+      expect(aliceEntry.owner).toBe('alice3');
+      expect(aliceEntry.workspaceLabel).toBe('alice-laptop:repo-a');
+      const bobEntry = all.body.tasks.find((t: { title: string }) => t.title === "Bob's task");
+      expect(bobEntry.owner).toBe('bob3');
+      expect(bobEntry.workspaceLabel).toBe('bob-desktop:repo-b');
+    });
   });
 
   describe('checkpoints sync', () => {

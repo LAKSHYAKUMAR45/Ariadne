@@ -1,6 +1,7 @@
 import type { TaskStore, TaskStatus } from '@ariadne-dev/core';
 import { readSyncConfig, writeSyncConfig, requireSyncConfig } from './syncConfig.js';
 import * as syncClient from './syncClient.js';
+import { getWorkspaceLabel } from './workspaceLabel.js';
 
 /** `ariadne sync register <username> <password>` — creates an account, then logs in immediately for convenience. */
 export async function runSyncRegister(username: string, password: string, serverUrl: string): Promise<void> {
@@ -36,8 +37,9 @@ export function runSyncLogout(): void {
  * already exist (`remoteTaskId` must resolve) before accepting checkpoints
  * for it.
  */
-export async function runSyncPush(store: TaskStore, taskId?: string): Promise<void> {
+export async function runSyncPush(store: TaskStore, workspaceRoot: string, taskId?: string): Promise<void> {
   const config = requireSyncConfig();
+  const workspaceLabel = getWorkspaceLabel(workspaceRoot);
   const tasksToPush = taskId
     ? store.listTasksNeedingPush().filter((t) => t.id === taskId)
     : store.listTasksNeedingPush();
@@ -58,6 +60,7 @@ export async function runSyncPush(store: TaskStore, taskId?: string): Promise<vo
         goal: t.goal,
         status: t.status,
         branch: t.branch,
+        workspaceLabel,
         createdAt: t.createdAt,
         updatedAt: t.updatedAt,
       })),
@@ -106,23 +109,41 @@ export async function runSyncPush(store: TaskStore, taskId?: string): Promise<vo
 }
 
 /**
- * `ariadne sync pull [--task <id>]` — pulls tasks changed on the server
- * since the last pull and applies them to any local task already linked
- * via `remoteId` (tasks never pushed from this workspace are skipped —
- * pull only updates rows this workspace already knows about, it does not
- * create brand-new local tasks for ones from other workspaces). Then pulls
- * new checkpoints for every task this workspace has synced.
+ * `ariadne sync pull [--task <id>] [--import-new]` — pulls tasks changed on
+ * the server since the last pull and applies them to any local task
+ * already linked via `remoteId`. By default, tasks never pushed from this
+ * workspace are skipped (pull only updates rows this workspace already
+ * knows about); pass `--import-new` to instead create a new local task for
+ * each one (immediately linked via `remoteId`, using the server's own
+ * timestamps) — see `TaskStore.insertPulledTask`. Then pulls new
+ * checkpoints for every task this workspace has synced, including any
+ * just imported.
  */
-export async function runSyncPull(store: TaskStore, taskId?: string): Promise<void> {
+export async function runSyncPull(store: TaskStore, taskId?: string, options: { importNew?: boolean } = {}): Promise<void> {
   const config = requireSyncConfig();
 
   const { tasks, serverTime } = await syncClient.pullTasks(config.serverUrl, config.token, config.lastTasksPullAt);
   let updated = 0;
-  let unknown = 0;
+  let imported = 0;
+  const unknownLabels = new Set<string>();
   for (const remoteTask of tasks) {
     const local = store.getTaskByRemoteId(remoteTask.remoteId);
     if (!local) {
-      unknown++;
+      if (options.importNew) {
+        store.insertPulledTask({
+          remoteId: remoteTask.remoteId,
+          title: remoteTask.title,
+          goal: remoteTask.goal,
+          status: remoteTask.status as TaskStatus,
+          branch: remoteTask.branch,
+          createdAt: remoteTask.createdAt,
+          updatedAt: remoteTask.updatedAt,
+          syncedAt: serverTime,
+        });
+        imported++;
+      } else {
+        unknownLabels.add(remoteTask.workspaceLabel ?? 'unknown workspace');
+      }
       continue;
     }
     if (taskId && local.id !== taskId) continue;
@@ -137,7 +158,12 @@ export async function runSyncPull(store: TaskStore, taskId?: string): Promise<vo
     updated++;
   }
   writeSyncConfig({ ...config, lastTasksPullAt: serverTime });
-  console.log(`Pulled ${updated} task update(s)${unknown > 0 ? ` (${unknown} belong to workspaces not linked here, skipped)` : ''}.`);
+  const importedNote = imported > 0 ? ` (${imported} new task(s) imported)` : '';
+  const skippedNote =
+    unknownLabels.size > 0
+      ? ` (tasks from other workspaces skipped: ${[...unknownLabels].join(', ')})`
+      : '';
+  console.log(`Pulled ${updated} task update(s)${importedNote}${skippedNote}.`);
 
   const checkpointsPullAt = { ...(config.checkpointsPullAt ?? {}) };
   let checkpointsInserted = 0;
@@ -171,4 +197,25 @@ export async function runSyncPull(store: TaskStore, taskId?: string): Promise<vo
   if (checkpointsInserted > 0) {
     console.log(`Pulled ${checkpointsInserted} new checkpoint(s).`);
   }
+}
+
+/**
+ * `ariadne sync list-remote` — browse-only listing of every task on the
+ * server (including ones this workspace has never linked/pulled), showing
+ * who pushed it and from which workspace/repo. Complements `sync pull`
+ * (which only updates already-linked tasks): this is how you answer "what
+ * has my team pushed?" without importing anything locally.
+ */
+export async function runSyncListRemote(): Promise<void> {
+  const config = requireSyncConfig();
+  const { tasks } = await syncClient.listAllRemoteTasks(config.serverUrl, config.token);
+  if (tasks.length === 0) {
+    console.log('No tasks on the server yet.');
+    return;
+  }
+  for (const t of tasks) {
+    const workspace = t.workspaceLabel ?? 'unknown workspace';
+    console.log(`[${t.status}] ${t.remoteId}  ${t.title}  (owner: ${t.owner}, workspace: ${workspace})`);
+  }
+  console.log(`${tasks.length} task(s) total on the server.`);
 }

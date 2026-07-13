@@ -37,6 +37,7 @@ async function request<T>(url: string, init: RequestInit): Promise<T> {
 export interface RemoteTask {
   remoteId: string;
   title: string;
+  workspaceLabel?: string | null;
   goal: string | null;
   status: 'active' | 'paused' | 'done' | 'archived';
   branch: string | null;
@@ -58,6 +59,7 @@ export interface PushTaskInput {
   goal: string | null;
   status: string;
   branch: string | null;
+  workspaceLabel: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -100,6 +102,22 @@ export function pushTasks(serverUrl: string, token: string, tasks: PushTaskInput
 export function pullTasks(serverUrl: string, token: string, since?: string) {
   const query = since ? `?since=${encodeURIComponent(since)}` : '';
   return request<{ tasks: RemoteTask[]; serverTime: string }>(`${serverUrl}/api/v1/sync/tasks${query}`, {
+    method: 'GET',
+    headers: authHeaders(token),
+  });
+}
+
+export interface RemoteTaskWithOwner extends RemoteTask {
+  owner: string;
+}
+
+/**
+ * Browse-only listing of every task on the server (not just ones this
+ * workspace has linked) — backs `ariadne sync list-remote`. See
+ * GET /api/v1/sync/tasks/all in docs/07-CLOUD-SYNC-API-CONTRACT.md.
+ */
+export function listAllRemoteTasks(serverUrl: string, token: string) {
+  return request<{ tasks: RemoteTaskWithOwner[] }>(`${serverUrl}/api/v1/sync/tasks/all`, {
     method: 'GET',
     headers: authHeaders(token),
   });

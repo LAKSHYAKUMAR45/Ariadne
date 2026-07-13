@@ -18,6 +18,7 @@ vi.mock('../src/syncClient.js', () => ({
   pullTasks: vi.fn(),
   pushCheckpoints: vi.fn(),
   pullCheckpoints: vi.fn(),
+  listAllRemoteTasks: vi.fn(),
 }));
 
 describe('ariadne sync commands', () => {
@@ -112,7 +113,9 @@ describe('ariadne sync commands', () => {
     expect(syncClient.pushTasks).toHaveBeenCalledWith(
       'http://fake-sync-server.test',
       'fake-token',
-      expect.arrayContaining([expect.objectContaining({ localId: task.id, remoteId: null, title: 'A task to sync' })]),
+      expect.arrayContaining([
+        expect.objectContaining({ localId: task.id, remoteId: null, title: 'A task to sync', workspaceLabel: expect.any(String) }),
+      ]),
     );
 
     const storeAfter = openWorkspaceStore(root);
@@ -172,12 +175,52 @@ describe('ariadne sync commands', () => {
     expect(updated.syncedAt).toBe('2026-02-01T00:00:05.000Z');
     storeAfter.close();
 
-    expect(loggedLines().some((l) => l.includes('Pulled 1 task update') && l.includes('1 belong to workspaces not linked here'))).toBe(
-      true,
-    );
+    expect(
+      loggedLines().some((l) => l.includes('Pulled 1 task update') && l.includes('tasks from other workspaces skipped')),
+    ).toBe(true);
 
     const config = JSON.parse(fs.readFileSync(process.env.ARIADNE_SYNC_CONFIG_PATH!, 'utf8'));
     expect(config.lastTasksPullAt).toBe('2026-02-01T00:00:05.000Z');
+  });
+
+  it('pull --import-new creates local tasks for remote tasks never linked here instead of skipping them', async () => {
+    writeSyncConfig();
+
+    vi.mocked(syncClient.pullTasks).mockResolvedValue({
+      tasks: [
+        {
+          remoteId: 'remote-task-new',
+          title: "Teammate's task",
+          goal: 'shipped from another machine',
+          status: 'active',
+          branch: 'feature/y',
+          createdAt: '2026-01-01T00:00:00.000Z',
+          updatedAt: '2026-02-01T00:00:00.000Z',
+        },
+      ],
+      serverTime: '2026-02-01T00:00:05.000Z',
+    });
+    vi.mocked(syncClient.pullCheckpoints).mockResolvedValue({
+      checkpoints: [{ remoteId: 'remote-ckpt-imported', level: 'micro', summary: 'a checkpoint from the teammate', createdAt: '2026-02-01T00:00:00.000Z' }],
+      serverTime: '2026-02-01T00:00:06.000Z',
+    });
+
+    await program.parseAsync(['node', 'ariadne', 'sync', 'pull', '--import-new']);
+
+    const storeAfter = openWorkspaceStore(root);
+    const imported = storeAfter.getTaskByRemoteId('remote-task-new');
+    expect(imported).toBeTruthy();
+    expect(imported!.title).toBe("Teammate's task");
+    expect(imported!.goal).toBe('shipped from another machine');
+    expect(imported!.branch).toBe('feature/y');
+    expect(imported!.syncedAt).toBe('2026-02-01T00:00:05.000Z');
+    // Checkpoints for the newly-imported task should also get pulled in the same run.
+    const checkpoints = storeAfter.listCheckpoints(imported!.id);
+    expect(checkpoints).toHaveLength(1);
+    expect(checkpoints[0].remoteId).toBe('remote-ckpt-imported');
+    storeAfter.close();
+
+    expect(loggedLines().some((l) => l.includes('1 new task(s) imported'))).toBe(true);
   });
 
   it('pull inserts new remote checkpoints for tasks already linked locally', async () => {
@@ -215,5 +258,45 @@ describe('ariadne sync commands', () => {
     const config = JSON.parse(fs.readFileSync(process.env.ARIADNE_SYNC_CONFIG_PATH!, 'utf8'));
     expect(config.token).toBe('');
     expect(config.serverUrl).toBe('http://fake-sync-server.test');
+  });
+
+  it('list-remote prints every server task including ones never linked locally, with owner + workspace', async () => {
+    writeSyncConfig();
+    vi.mocked(syncClient.listAllRemoteTasks).mockResolvedValue({
+      tasks: [
+        {
+          remoteId: 'remote-task-1',
+          title: 'Linked here',
+          goal: null,
+          status: 'active',
+          branch: null,
+          workspaceLabel: 'laptop1:ariadne',
+          owner: 'alice',
+          createdAt: '2025-01-01T00:00:00.000Z',
+          updatedAt: '2026-02-01T00:00:00.000Z',
+        },
+        {
+          remoteId: 'remote-task-unknown',
+          title: 'Never touched this workspace',
+          goal: null,
+          status: 'active',
+          branch: null,
+          workspaceLabel: 'desktop2:atom',
+          owner: 'bob',
+          createdAt: '2025-01-01T00:00:00.000Z',
+          updatedAt: '2026-02-01T00:00:00.000Z',
+        },
+      ],
+    });
+
+    await program.parseAsync(['node', 'ariadne', 'sync', 'list-remote']);
+
+    expect(syncClient.listAllRemoteTasks).toHaveBeenCalledWith('http://fake-sync-server.test', 'fake-token');
+    const lines = loggedLines();
+    expect(lines.some((l) => l.includes('Linked here') && l.includes('alice') && l.includes('laptop1:ariadne'))).toBe(true);
+    expect(lines.some((l) => l.includes('Never touched this workspace') && l.includes('bob') && l.includes('desktop2:atom'))).toBe(
+      true,
+    );
+    expect(lines.some((l) => l.includes('2 task(s) total'))).toBe(true);
   });
 });

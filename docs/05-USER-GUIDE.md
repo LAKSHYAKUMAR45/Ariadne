@@ -164,7 +164,8 @@ ariadne sync register <username> <password> --server <url>  # create an account 
 ariadne sync login <username> <password> --server <url>     # log in, storing a token in ~/.ariadne/sync-config.json
 ariadne sync logout                            # forget the locally-stored token (server account is untouched)
 ariadne sync push [--task <id>]                # push new/changed tasks + checkpoints to the sync server
-ariadne sync pull [--task <id>]                # pull tasks/checkpoints changed by teammates/other machines
+ariadne sync pull [--task <id>] [--import-new]  # pull tasks/checkpoints changed by teammates/other machines
+ariadne sync list-remote                       # browse every task on the server, including ones never linked here
 ```
 
 Run `ariadne --help` or `ariadne <command> --help` for the authoritative list
@@ -322,6 +323,7 @@ ariadne sync register <username> <password> --server https://your-sync-server   
 ariadne sync login <username> <password> --server https://your-sync-server     # subsequent machines/logins
 ariadne sync push                       # push local task/checkpoint changes
 ariadne sync pull                       # pull changes made by teammates / other machines
+ariadne sync list-remote                # browse every task on the server, including ones never linked here
 ariadne sync logout                     # forget the locally-stored token
 ```
 
@@ -331,12 +333,28 @@ What to know:
 - **`push`** sends every task that's new or changed since it was last
   synced (or just `--task <id>`), then pushes any not-yet-synced
   checkpoints for those tasks. The server assigns each a permanent id,
-  stored locally as that task's/checkpoint's `remote_id`.
+  stored locally as that task's/checkpoint's `remote_id`. Each push also
+  sends a `workspaceLabel` (e.g. `laptop1:org/atom` — hostname + git
+  remote/folder name), so the server (and teammates) can tell which
+  machine/repo a task came from, not just which user account pushed it.
 - **`pull`** applies remote changes to tasks *already linked* to this
   workspace (i.e., ones pushed from here before) and downloads any new
-  checkpoints for them. It does not fabricate brand-new local tasks for
-  ones pushed from a workspace you've never linked here — you'll see a
-  count of "skipped" remote tasks in that case.
+  checkpoints for them. By default it does not fabricate brand-new local
+  tasks for ones pushed from a workspace you've never linked here — you'll
+  see a list of "skipped" remote workspace labels in that case. Pass
+  `ariadne sync pull --import-new` to instead create a local task for each
+  of those (already linked via `remote_id`, using the server's own
+  timestamps), including pulling in their existing checkpoints.
+  **Caveat:** pull only asks the server for tasks changed since your last
+  pull — if you already pulled (and skipped) a task once, a later
+  `--import-new` run won't re-import it unless it changes again remotely.
+  Run `--import-new` from the start (or use `list-remote` first to see
+  what exists) rather than adding it as an afterthought.
+- **`list-remote`** is browse-only: it lists *every* task on the server
+  (owner + workspace label + status), including ones from workspaces
+  you've never linked, without creating or changing anything locally. Use
+  this to see what's out there *before* deciding whether to `pull
+  --import-new` it.
 - **Access is flat:** any account on the server can read/write any synced
   task — there's no per-task ACL. Treat the server as a shared, trusted
   team space, not a permissions boundary.

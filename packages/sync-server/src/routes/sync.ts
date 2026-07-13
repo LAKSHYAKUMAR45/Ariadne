@@ -11,6 +11,7 @@ const pushTaskSchema = z.object({
   goal: z.string().nullable().optional(),
   status: z.enum(['active', 'paused', 'done', 'archived']),
   branch: z.string().nullable().optional(),
+  workspaceLabel: z.string().max(256).nullable().optional(),
   createdAt: z.string(),
   updatedAt: z.string(),
 });
@@ -24,6 +25,7 @@ interface TaskRow {
   goal: string | null;
   status: string;
   branch: string | null;
+  workspace_label: string | null;
   created_at: Date;
   updated_at: Date;
 }
@@ -51,10 +53,12 @@ export function createSyncRouter(pool: Pool): Router {
       let row: TaskRow;
       if (task.remoteId) {
         // Remote-wins upsert for Phase 1 (see docs/07-CLOUD-SYNC-API-CONTRACT.md §4.2).
+        // workspace_label is overwritten too, so it always reflects the most
+        // recent workspace/machine to push this task (not just its origin).
         const { rows } = await pool.query<TaskRow>(
-          `UPDATE tasks SET title = $1, goal = $2, status = $3, branch = $4, updated_at = now()
-           WHERE id = $5 RETURNING id, local_id, title, goal, status, branch, created_at, updated_at`,
-          [task.title, task.goal ?? null, task.status, task.branch ?? null, task.remoteId]
+          `UPDATE tasks SET title = $1, goal = $2, status = $3, branch = $4, workspace_label = $5, updated_at = now()
+           WHERE id = $6 RETURNING id, local_id, title, goal, status, branch, workspace_label, created_at, updated_at`,
+          [task.title, task.goal ?? null, task.status, task.branch ?? null, task.workspaceLabel ?? null, task.remoteId]
         );
         if (rows.length === 0) {
           const err = new ApiError(404, 'task_not_found', `No task with remoteId ${task.remoteId}`);
@@ -64,10 +68,10 @@ export function createSyncRouter(pool: Pool): Router {
         row = rows[0];
       } else {
         const { rows } = await pool.query<TaskRow>(
-          `INSERT INTO tasks (local_id, owner_user_id, title, goal, status, branch, created_at, updated_at)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $7)
-           RETURNING id, local_id, title, goal, status, branch, created_at, updated_at`,
-          [task.localId, req.userId, task.title, task.goal ?? null, task.status, task.branch ?? null, task.createdAt]
+          `INSERT INTO tasks (local_id, owner_user_id, title, goal, status, branch, workspace_label, created_at, updated_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8)
+           RETURNING id, local_id, title, goal, status, branch, workspace_label, created_at, updated_at`,
+          [task.localId, req.userId, task.title, task.goal ?? null, task.status, task.branch ?? null, task.workspaceLabel ?? null, task.createdAt]
         );
         row = rows[0];
       }
@@ -81,12 +85,12 @@ export function createSyncRouter(pool: Pool): Router {
     const serverTime = new Date();
     const { rows } = since
       ? await pool.query<TaskRow>(
-          `SELECT id, local_id, title, goal, status, branch, created_at, updated_at FROM tasks
+          `SELECT id, local_id, title, goal, status, branch, workspace_label, created_at, updated_at FROM tasks
            WHERE updated_at > $1 ORDER BY updated_at ASC`,
           [since]
         )
       : await pool.query<TaskRow>(
-          `SELECT id, local_id, title, goal, status, branch, created_at, updated_at FROM tasks ORDER BY updated_at ASC`
+          `SELECT id, local_id, title, goal, status, branch, workspace_label, created_at, updated_at FROM tasks ORDER BY updated_at ASC`
         );
 
     res.status(200).json({
@@ -96,10 +100,43 @@ export function createSyncRouter(pool: Pool): Router {
         goal: r.goal,
         status: r.status,
         branch: r.branch,
+        workspaceLabel: r.workspace_label,
         createdAt: r.created_at.toISOString(),
         updatedAt: r.updated_at.toISOString(),
       })),
       serverTime: serverTime.toISOString(),
+    });
+  });
+
+  interface TaskWithOwnerRow extends TaskRow {
+    username: string;
+  }
+
+  /**
+   * Browse-only listing of every task on the server, including ones this
+   * workspace has never linked (unlike GET /tasks, which is meant to feed
+   * `sync pull`'s "update rows I already know about" flow). Joins in the
+   * owning username so `ariadne sync list-remote` can show "who" alongside
+   * "which workspace" without a client-side lookup.
+   */
+  router.get('/tasks/all', async (_req, res) => {
+    const { rows } = await pool.query<TaskWithOwnerRow>(
+      `SELECT t.id, t.local_id, t.title, t.goal, t.status, t.branch, t.workspace_label, t.created_at, t.updated_at, u.username
+       FROM tasks t JOIN users u ON u.id = t.owner_user_id
+       ORDER BY t.updated_at DESC`
+    );
+    res.status(200).json({
+      tasks: rows.map((r) => ({
+        remoteId: r.id,
+        title: r.title,
+        goal: r.goal,
+        status: r.status,
+        branch: r.branch,
+        workspaceLabel: r.workspace_label,
+        owner: r.username,
+        createdAt: r.created_at.toISOString(),
+        updatedAt: r.updated_at.toISOString(),
+      })),
     });
   });
 
