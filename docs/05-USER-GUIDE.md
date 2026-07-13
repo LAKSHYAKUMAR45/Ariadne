@@ -14,9 +14,10 @@ package's own README.*
 [6. MCP client](#6-using-an-mcp-client-claude-code-gemini-cli-codex-custom-agents-etc) ·
 [7. VS Code + Copilot Chat](#7-using-the-vs-code-extension-copilot-chat) ·
 [8. Cross-workspace](#8-working-across-multiple-workspaces) ·
-[9. Data & privacy](#9-data-privacy) ·
-[10. Troubleshooting](#10-troubleshooting) ·
-[11. Project status](#11-project-status)
+[9. Cloud sync](#9-cloud-sync-optional-self-hosted) ·
+[10. Data & privacy](#10-data-privacy) ·
+[11. Troubleshooting](#11-troubleshooting) ·
+[12. Project status](#12-project-status)
 
 ## 1. What Ariadne actually does for you
 
@@ -158,6 +159,12 @@ ariadne workspace prune                        # remove registry entries for del
 ariadne workspace forget <root>                # remove one workspace from the registry explicitly
 ariadne backup [--out <dir>]                   # snapshot state.db + registry.db
 ariadne restore <path> [--registry]            # restore a snapshot
+
+ariadne sync register <username> <password> --server <url>  # create an account on a sync server, then log in
+ariadne sync login <username> <password> --server <url>     # log in, storing a token in ~/.ariadne/sync-config.json
+ariadne sync logout                            # forget the locally-stored token (server account is untouched)
+ariadne sync push [--task <id>]                # push new/changed tasks + checkpoints to the sync server
+ariadne sync pull [--task <id>]                # pull tasks/checkpoints changed by teammates/other machines
 ```
 
 Run `ariadne --help` or `ariadne <command> --help` for the authoritative list
@@ -300,11 +307,61 @@ disappear from cross-workspace results — nothing else is affected.
 (`task use`) is always scoped to the workspace you're in — switching your
 current task in workspace A never affects workspace B.
 
-## 9. Data & privacy
+## 9. Cloud sync (optional, self-hosted)
+
+Cross-workspace discovery (§8) only works *on one machine*. If you need
+tasks/checkpoints to follow you across machines, or to be shared with
+teammates, Ariadne optionally supports syncing to a self-hosted
+`@ariadne-dev/sync-server` instance (Express + Postgres, built and run by
+you or your team — there's no Ariadne-hosted cloud). This is entirely
+opt-in: nothing leaves your machine unless you explicitly run `ariadne
+sync` commands.
+
+```bash
+ariadne sync register <username> <password> --server https://your-sync-server   # first time only
+ariadne sync login <username> <password> --server https://your-sync-server     # subsequent machines/logins
+ariadne sync push                       # push local task/checkpoint changes
+ariadne sync pull                       # pull changes made by teammates / other machines
+ariadne sync logout                     # forget the locally-stored token
+```
+
+What to know:
+- **Scope (Phase 1):** only `tasks` and `checkpoints` sync today — todos,
+  decisions, open questions, commands, and files stay local-only for now.
+- **`push`** sends every task that's new or changed since it was last
+  synced (or just `--task <id>`), then pushes any not-yet-synced
+  checkpoints for those tasks. The server assigns each a permanent id,
+  stored locally as that task's/checkpoint's `remote_id`.
+- **`pull`** applies remote changes to tasks *already linked* to this
+  workspace (i.e., ones pushed from here before) and downloads any new
+  checkpoints for them. It does not fabricate brand-new local tasks for
+  ones pushed from a workspace you've never linked here — you'll see a
+  count of "skipped" remote tasks in that case.
+- **Access is flat:** any account on the server can read/write any synced
+  task — there's no per-task ACL. Treat the server as a shared, trusted
+  team space, not a permissions boundary.
+- **Conflict resolution is "remote wins"** in Phase 1 — the simplest
+  possible rule. Real last-write-wins-by-field is a later-phase
+  improvement.
+- **No delete propagation:** archiving/deleting a task locally never
+  deletes it from the server, and there's no delete endpoint at all yet.
+- Credentials/token are stored locally at `~/.ariadne/sync-config.json`.
+
+See [`docs/06-CLOUD-SYNC-DESIGN.md`](06-CLOUD-SYNC-DESIGN.md) for the
+product decisions behind this, [`docs/07-CLOUD-SYNC-API-CONTRACT.md`](07-CLOUD-SYNC-API-CONTRACT.md)
+for the schema/API contract, and
+[`packages/sync-server/README.md`](../packages/sync-server/README.md) for
+running your own server.
+
+## 10. Data & privacy
 
 - Everything lives locally at `<workspace-root>/.ariadne/state.db`
   (per-workspace) and `~/.ariadne/registry.db` (a cross-workspace index).
-  Nothing is sent over the network by Ariadne itself.
+  Nothing is sent over the network by Ariadne itself, **unless** you
+  explicitly opt in to cloud sync (§9) by running `ariadne sync
+  register`/`login`/`push`/`pull` — those are the only commands that ever
+  talk to a network address, and only to the self-hosted server you point
+  them at.
 - `.ariadne/` is gitignored by default — task state doesn't get committed or
   pushed unless you explicitly export it.
 - `ariadne export` (or the `export_task` MCP tool, or asking the chat
@@ -339,7 +396,7 @@ backs up whatever db is currently at the target path first (as
 `<path>.pre-restore-<timestamp>.bak`), so a bad restore is itself
 recoverable.
 
-## 10. Troubleshooting
+## 11. Troubleshooting
 
 | Symptom | Likely cause / fix |
 |---|---|
@@ -348,11 +405,15 @@ recoverable.
 | A task from another workspace isn't found via `--task <id>` | The other workspace must have been opened by *some* Ariadne surface at least once since the registry was introduced, so it gets registered. Open it once (any command) to backfill it. |
 | MCP client can't see any tools | Verify the `command`/`args`/`cwd` in your MCP client config point at a built `packages/mcp-server/dist/index.js` and a real project directory. |
 | Multi-root VS Code workspace acts on the "wrong" folder | Run **Ariadne: Select Workspace Folder** to pin which folder Ariadne should track. |
-| Want a clean slate | Delete `.ariadne/` in the workspace (removes that workspace's tasks) and/or `~/.ariadne/registry.db` (removes the cross-workspace index only — doesn't touch any workspace's own data). |
+| `Not logged in to a sync server` on `ariadne sync push`/`pull` | Run `ariadne sync login <username> <password> --server <url>` first (or `sync register` if you don't have an account yet). |
+| `ariadne sync push` says a checkpoint wasn't pushed | Checkpoints can't be pushed until their parent task has a `remote_id` — push happens task-first, automatically, within the same `sync push` call; if the task push itself failed (check the error), fix that first. |
+| Want a clean slate | Delete `.ariadne/` in the workspace (removes that workspace's tasks) and/or `~/.ariadne/registry.db` (removes the cross-workspace index only — doesn't touch any workspace's own data). Cloud-synced data on the server, if any, is untouched either way (delete is local-only, per §9). |
 
-## 11. Project status
+## 12. Project status
 
-Early / pre-release, built for a single individual developer working
-across one or more workspaces on one machine (not a team/multi-user
-product today). See the main [README](../README.md) and
+Early / pre-release. The core CLI/MCP/VS Code trio is built for a single
+developer working across one or more workspaces on one machine; cloud sync
+(§9) is an optional, opt-in add-on (Phase 1: tasks + checkpoints only) for
+teams that want to share state across machines/people via a self-hosted
+server. See the main [README](../README.md) and
 [`docs/04-ROADMAP.md`](04-ROADMAP.md) for what's shipped vs. deferred.
