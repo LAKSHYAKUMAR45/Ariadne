@@ -88,6 +88,38 @@ describe('mcp-server tools', () => {
     expect(store.listErrors(task.id, { resolved: false })).toHaveLength(0);
   });
 
+  it('command_log records a successful command without adding an error', () => {
+    const task = tools.taskNew(store, workspaceRoot, { title: 'A' });
+
+    const cmd = tools.commandLog(store, workspaceRoot, { command: 'npm test', exitCode: 0 });
+    expect(cmd.taskId).toBe(task.id);
+    expect(cmd.cmdRedacted).toBe('npm test');
+    expect(cmd.exitCode).toBe(0);
+    expect(store.listErrors(task.id, { resolved: false })).toHaveLength(0);
+  });
+
+  it('command_log records a failing command and also records a matching unresolved error', () => {
+    const task = tools.taskNew(store, workspaceRoot, { title: 'A' });
+
+    const cmd = tools.commandLog(store, workspaceRoot, { command: 'npm run build', exitCode: 1 });
+    expect(cmd.exitCode).toBe(1);
+
+    const errors = store.listErrors(task.id, { resolved: false });
+    expect(errors).toHaveLength(1);
+    expect(errors[0].message).toContain('npm run build');
+    expect(errors[0].message).toContain('exit 1');
+  });
+
+  it('command_log redacts secrets in the command the same way the CLI does', () => {
+    tools.taskNew(store, workspaceRoot, { title: 'A' });
+
+    const cmd = tools.commandLog(store, workspaceRoot, {
+      command: 'curl -H "Authorization: Bearer sk-abcdefghijklmnop1234567890" https://example.com',
+      exitCode: 0,
+    });
+    expect(cmd.cmdRedacted).not.toContain('sk-abcdefghijklmnop1234567890');
+  });
+
   it('question_add/list/resolve operate on the current task', () => {
     const task = tools.taskNew(store, workspaceRoot, { title: 'A' });
 

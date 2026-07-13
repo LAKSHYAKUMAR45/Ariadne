@@ -343,6 +343,25 @@ export function createAriadneMcpServer(options?: { workspaceRoot?: string; store
   );
 
   server.registerTool(
+    'command_log',
+    {
+      title: 'Log a command run by this MCP client',
+      description:
+        'Records a command this MCP client already ran (via its own execution tool) against the current (or given) task, along with its exit code — this tool does not run the command itself. ' +
+        "Unlike the CLI's `ariadne exec` (which spawns and records in one step) or the VS Code extension's passive background capture of terminal commands, an MCP client's own shell/tool-call activity is otherwise invisible to Ariadne; call this after running a command so it shows up in status/resume/get_context and search the same way. " +
+        'A non-zero exitCode also automatically records a matching unresolved error. Works even if taskId belongs to a different workspace (falls back to the cross-workspace registry).',
+      inputSchema: { command: z.string(), exitCode: z.number().int(), taskId: z.string().optional() },
+    },
+    async (args) => {
+      try {
+        return jsonResult(tools.commandLog(store, workspaceRoot, args));
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
+
+  server.registerTool(
     'error_list',
     {
       title: 'List errors',

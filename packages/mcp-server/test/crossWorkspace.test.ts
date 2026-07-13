@@ -127,6 +127,21 @@ describe('mcp-server cross-workspace tools', () => {
     verifyB.close();
   });
 
+  it('command_log with a taskId hint records a command (and its failure error) in a different workspace', () => {
+    const storeB = openWorkspaceStore(rootB);
+    const task = tools.taskNew(storeB, rootB, { title: 'Task in B' });
+    storeB.close();
+
+    const storeA = openWorkspaceStore(rootA);
+    tools.commandLog(storeA, rootA, { command: 'npm run build', exitCode: 1, taskId: task.id });
+    storeA.close();
+
+    const verifyB = openWorkspaceStore(rootB);
+    expect(verifyB.listCommands(task.id, 10).some((c) => c.cmdRedacted === 'npm run build')).toBe(true);
+    expect(verifyB.listErrors(task.id, { resolved: false }).some((e) => e.message.includes('npm run build'))).toBe(true);
+    verifyB.close();
+  });
+
   it('question_resolve with a taskId hint resolves a question in a different workspace', () => {
     const storeB = openWorkspaceStore(rootB);
     const task = tools.taskNew(storeB, rootB, { title: 'Task in B' });

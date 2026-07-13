@@ -1,6 +1,7 @@
 import type {
   Checkpoint,
   CheckpointLevel,
+  Command,
   ContextPackage,
   Decision,
   OpenQuestion,
@@ -22,6 +23,7 @@ import {
   listTasksAcrossWorkspaces,
   searchAcrossWorkspaces,
   setTaskStatusWithRollup,
+  redactCommand,
 } from '@ariadne-dev/core';
 import type { CrossWorkspaceTask, CrossWorkspaceSearchResult } from '@ariadne-dev/core';
 import { readCurrentTaskId, setCurrentTaskId } from './workspace.js';
@@ -314,6 +316,38 @@ export interface ErrorAddArgs {
 
 export function errorAdd(store: TaskStore, workspaceRoot: string, args: ErrorAddArgs): TaskError {
   return withTaskStore(store, workspaceRoot, args.taskId, (s, taskId) => s.recordError({ taskId, message: args.message }));
+}
+
+export interface CommandLogArgs {
+  /** The full command line, exactly as run (e.g. "npm test"). Redacted the same way the CLI's `ariadne exec` and VS Code's passive capture are before storage. */
+  command: string;
+  /** Exit code the command actually finished with (0 = success). */
+  exitCode: number;
+  taskId?: string;
+}
+
+/**
+ * Records a command an MCP client (an AI agent, typically) already ran via
+ * its own execution tool — this doesn't spawn anything itself. It exists so
+ * MCP clients have a way to get command activity into a task's history at
+ * all: unlike the CLI (`ariadne exec`, which spawns and records in one
+ * step) or the VS Code extension (passive background capture of terminal
+ * commands), an MCP client's own shell/bash tool calls are otherwise
+ * invisible to Ariadne — there was previously no MCP-surface equivalent.
+ * On a non-zero exit code, also records a matching unresolved error, exactly
+ * mirroring `packages/cli/src/exec.ts`'s recordFailedCommand behavior, so
+ * status/resume/get_context surface agent-run failures the same way a CLI
+ * `ariadne exec` failure would.
+ */
+export function commandLog(store: TaskStore, workspaceRoot: string, args: CommandLogArgs): Command {
+  const cmdRedacted = redactCommand(args.command);
+  return withTaskStore(store, workspaceRoot, args.taskId, (s, taskId) => {
+    const recorded = s.recordCommand({ taskId, cmdRedacted, exitCode: args.exitCode });
+    if (args.exitCode !== 0) {
+      s.recordError({ taskId, message: `Command failed (exit ${args.exitCode}): ${cmdRedacted}` });
+    }
+    return recorded;
+  });
 }
 
 export interface ErrorListArgs {

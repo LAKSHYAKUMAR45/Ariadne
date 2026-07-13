@@ -35,6 +35,7 @@ directory), and reads/writes `<workspace-root>/.ariadne/state.db`.
 | `todo_add` / `todo_list` / `todo_done` / `todo_reopen` / `todo_block` / `todo_edit` / `todo_delete` | Manage todos, including curation (edit/delete) and reopening/blocking. All id-based ones accept an optional `taskId` if the todo belongs to a different workspace than the current one (needed because the cross-workspace registry indexes tasks, not sub-entity ids). |
 | `decision_add` / `decision_list` / `decision_edit` / `decision_delete` | Record, list, edit, or delete a decision (with optional rationale). |
 | `error_add` / `error_list` / `error_resolve` / `error_reopen` / `error_edit` / `error_delete` | Record, list, resolve, reopen, edit, or delete an error. `error_list` defaults to unresolved-only; pass `all: true` for everything. Id-based ones accept an optional `taskId` the same way `todo_done` does. |
+| `command_log` | Records a command an AI agent already ran (and its exit code) against the current (or given) task — the MCP equivalent of the CLI's `ariadne exec` (which spawns the command itself) and VS Code's passive terminal capture. Redacts secrets the same way. On a non-zero exit code, also records a matching unresolved error so failures surface in `get_context`/`status`/`resume`. Closes the gap where commands run directly by an MCP-connected AI agent (rather than through `ariadne exec` or a watched terminal) were otherwise invisible to Ariadne. |
 | `question_add` / `question_list` / `question_resolve` / `question_reopen` / `question_edit` / `question_delete` | Record, list, resolve, reopen, edit, or delete an open question blocking the task. Id-based ones accept an optional `taskId` the same way `todo_done` does. |
 | `search` | Cross-entity search over task titles/goals, checkpoints, decisions, todos, errors, open questions, files, and commits — returns tasks ranked by match count, each with its matching entities. Pass `allWorkspaces: true` to search every known workspace, with each result tagged by its `workspaceRoot`. |
 | `get_context` | Returns the current (or given) task's full context — workspace root, tracked git branch, goal, latest checkpoint, open questions, unresolved errors, blocked todos, pending todos, recent files, commits, commands, and decisions — as structured JSON, ranked and trimmed to fit an optional `tokenBudget` (default 2000). Equivalent to the CLI's `status`/`resume`. |
@@ -48,7 +49,7 @@ same one `ariadne task use` sets) when no explicit `taskId` is given.
 
 Every tool that accepts a `taskId` (`task_pause`/`done`/`archive`/`reopen`,
 `checkpoint_add`, `todo_add`/`list`, `decision_add`, `error_add`,
-`question_add`/`list`, `get_context`, `git_sync`, `export_task`) will
+`command_log`, `question_add`/`list`, `get_context`, `git_sync`, `export_task`) will
 transparently operate on that task even if it doesn't belong to this
 server's workspace: it falls back to the global cross-workspace registry
 (`~/.ariadne/registry.db`, maintained automatically as any surface uses

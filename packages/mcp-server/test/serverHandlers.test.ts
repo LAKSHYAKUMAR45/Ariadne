@@ -117,4 +117,42 @@ describe('createAriadneMcpServer tool handlers (success + error envelopes)', () 
       cleanup(workspaceRoot, store);
     }
   });
+
+  it('command_log records a successful command and returns it JSON-encoded', async () => {
+    const { workspaceRoot, store, tools } = setup();
+    try {
+      await tools.task_new.handler({ title: 'Command log handler task' });
+      const result = await tools.command_log.handler({ command: 'npm test', exitCode: 0 });
+      expect(result.isError).toBeUndefined();
+      const command = JSON.parse(result.content[0].text);
+      expect(command.cmdRedacted).toBe('npm test');
+      expect(command.exitCode).toBe(0);
+    } finally {
+      cleanup(workspaceRoot, store);
+    }
+  });
+
+  it('command_log with a non-zero exitCode also surfaces as an unresolved error via get_context', async () => {
+    const { workspaceRoot, store, tools } = setup();
+    try {
+      await tools.task_new.handler({ title: 'Command log failure task' });
+      await tools.command_log.handler({ command: 'npm run build', exitCode: 2 });
+      const ctxResult = await tools.get_context.handler({});
+      const ctx = JSON.parse(ctxResult.content[0].text);
+      expect(ctx.unresolvedErrors.some((message: string) => message.includes('npm run build'))).toBe(true);
+    } finally {
+      cleanup(workspaceRoot, store);
+    }
+  });
+
+  it('command_log returns an error envelope when no task is current and no taskId is given', async () => {
+    const { workspaceRoot, store, tools } = setup();
+    try {
+      const result = await tools.command_log.handler({ command: 'echo hi', exitCode: 0 });
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toMatch(/No task specified/);
+    } finally {
+      cleanup(workspaceRoot, store);
+    }
+  });
 });

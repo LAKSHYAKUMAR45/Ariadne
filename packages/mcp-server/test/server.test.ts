@@ -42,6 +42,7 @@ describe('createAriadneMcpServer', () => {
           'error_reopen',
           'error_edit',
           'error_delete',
+          'command_log',
           'question_add',
           'question_list',
           'question_resolve',
