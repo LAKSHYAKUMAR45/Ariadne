@@ -17,6 +17,10 @@ export interface Task {
   branch: string | null;
   createdAt: string;
   updatedAt: string;
+  /** Cloud-sync-server task id this task is linked to, if ever pushed. Null until first push. See docs/07-CLOUD-SYNC-API-CONTRACT.md. */
+  remoteId: string | null;
+  /** Timestamp of the last successful push/pull sync for this task. Null if never synced. */
+  syncedAt: string | null;
 }
 
 export interface NewTask {
@@ -34,6 +38,10 @@ export interface Checkpoint {
   level: CheckpointLevel;
   summary: string;
   createdAt: string;
+  /** Cloud-sync-server checkpoint id this checkpoint is linked to, if ever pushed. Null until first push. */
+  remoteId: string | null;
+  /** Timestamp of the last successful push sync for this checkpoint. Null if never synced. */
+  syncedAt: string | null;
 }
 
 export interface NewCheckpoint {

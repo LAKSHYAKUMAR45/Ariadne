@@ -1,7 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import Database from 'better-sqlite3';
 import { SCHEMA_SQL } from '../src/schema.js';
-import { runMigrations, type Migration } from '../src/migrations.js';
+import { runMigrations, MIGRATIONS, type Migration } from '../src/migrations.js';
+import { openDatabase } from '../src/db.js';
 
 function freshDb(): Database.Database {
   const db = new Database(':memory:');
@@ -86,5 +87,39 @@ describe('runMigrations', () => {
       value: string;
     };
     expect(version.value).toBe('1');
+  });
+});
+
+describe('MIGRATIONS (real app migrations)', () => {
+  it('v2 adds remote_id/synced_at columns to tasks and checkpoints, nullable and defaulting to null', () => {
+    const db = openDatabase(':memory:');
+
+    // openDatabase already runs MIGRATIONS, so schema_version should reflect the latest.
+    const version = db.prepare(`SELECT value FROM schema_meta WHERE key = 'schema_version'`).get() as {
+      value: string;
+    };
+    expect(Number(version.value)).toBe(MIGRATIONS[MIGRATIONS.length - 1].version);
+
+    db.prepare(
+      `INSERT INTO tasks (id, title, status, created_at, updated_at) VALUES ('t1', 'Task', 'active', '2020-01-01', '2020-01-01')`,
+    ).run();
+    const task = db.prepare(`SELECT remote_id, synced_at FROM tasks WHERE id = 't1'`).get() as {
+      remote_id: string | null;
+      synced_at: string | null;
+    };
+    expect(task.remote_id).toBeNull();
+    expect(task.synced_at).toBeNull();
+
+    db.prepare(
+      `INSERT INTO checkpoints (id, task_id, level, summary, created_at) VALUES ('c1', 't1', 'micro', 'did a thing', '2020-01-01')`,
+    ).run();
+    const checkpoint = db.prepare(`SELECT remote_id, synced_at FROM checkpoints WHERE id = 'c1'`).get() as {
+      remote_id: string | null;
+      synced_at: string | null;
+    };
+    expect(checkpoint.remote_id).toBeNull();
+    expect(checkpoint.synced_at).toBeNull();
+
+    db.close();
   });
 });

@@ -39,6 +39,8 @@ interface TaskRow {
   branch: string | null;
   created_at: string;
   updated_at: string;
+  remote_id: string | null;
+  synced_at: string | null;
 }
 
 function rowToTask(row: TaskRow): Task {
@@ -51,6 +53,8 @@ function rowToTask(row: TaskRow): Task {
     branch: row.branch,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+    remoteId: row.remote_id,
+    syncedAt: row.synced_at,
   };
 }
 
@@ -61,6 +65,8 @@ interface CheckpointRow {
   level: Checkpoint['level'];
   summary: string;
   created_at: string;
+  remote_id: string | null;
+  synced_at: string | null;
 }
 
 function rowToCheckpoint(row: CheckpointRow): Checkpoint {
@@ -71,6 +77,8 @@ function rowToCheckpoint(row: CheckpointRow): Checkpoint {
     level: row.level,
     summary: row.summary,
     createdAt: row.created_at,
+    remoteId: row.remote_id,
+    syncedAt: row.synced_at,
   };
 }
 
@@ -336,6 +344,59 @@ export class TaskStore {
   }
 
   // ---------------------------------------------------------------------
+  // Cloud sync (see docs/07-CLOUD-SYNC-API-CONTRACT.md)
+  // ---------------------------------------------------------------------
+
+  /**
+   * Tasks that either have never been pushed (`remoteId` null) or have
+   * been modified locally since their last sync (`updatedAt > syncedAt`).
+   * Used by `ariadne sync push` to decide what to send.
+   */
+  listTasksNeedingPush(): Task[] {
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM tasks WHERE remote_id IS NULL OR synced_at IS NULL OR updated_at > synced_at
+         ORDER BY updated_at ASC`,
+      )
+      .all() as TaskRow[];
+    return rows.map(rowToTask);
+  }
+
+  /** Records the result of a successful push/pull for a task: its server-assigned id and the sync timestamp. */
+  setTaskRemoteSync(id: string, remoteId: string, syncedAt: string): void {
+    this.db
+      .prepare(`UPDATE tasks SET remote_id = ?, synced_at = ? WHERE id = ?`)
+      .run(remoteId, syncedAt, id);
+  }
+
+  /** Looks up a task by its cloud-sync-server id (used when pulling to find the matching local row, if any). */
+  getTaskByRemoteId(remoteId: string): Task | undefined {
+    const row = this.db.prepare(`SELECT * FROM tasks WHERE remote_id = ?`).get(remoteId) as
+      | TaskRow
+      | undefined;
+    return row ? rowToTask(row) : undefined;
+  }
+
+  /**
+   * Applies a task update pulled from the sync server to an existing local
+   * row already linked via `remoteId`. Sets `updatedAt`/`syncedAt` to the
+   * values the server reported (rather than "now"), so the row doesn't
+   * immediately reappear in `listTasksNeedingPush` as if it had been
+   * modified locally.
+   */
+  applyPulledTask(
+    localId: string,
+    update: { title: string; goal: string | null; status: TaskStatus; branch: string | null; updatedAt: string; syncedAt: string },
+  ): void {
+    this.db
+      .prepare(
+        `UPDATE tasks SET title = ?, goal = ?, status = ?, branch = ?, updated_at = ?, synced_at = ? WHERE id = ?`,
+      )
+      .run(update.title, update.goal, update.status, update.branch, update.updatedAt, update.syncedAt, localId);
+    this.syncToRegistry(localId);
+  }
+
+  // ---------------------------------------------------------------------
   // Checkpoints
   // ---------------------------------------------------------------------
 
@@ -385,6 +446,70 @@ export class TaskStore {
   /** Re-parents a checkpoint under a rolled-up ancestor (used by CheckpointEngine's rollup). */
   setCheckpointParent(id: string, parentCheckpointId: string): void {
     this.db.prepare(`UPDATE checkpoints SET parent_checkpoint_id = ? WHERE id = ?`).run(parentCheckpointId, id);
+  }
+
+  /**
+   * Checkpoints never pushed yet (`remoteId` null). Checkpoints are
+   * append-only/immutable locally (see schema.ts), so unlike tasks there's
+   * no "modified since last sync" case to detect — once pushed, a
+   * checkpoint never needs re-pushing.
+   */
+  listCheckpointsNeedingPush(taskId?: string): Checkpoint[] {
+    const rows = taskId
+      ? (this.db
+          .prepare(`SELECT * FROM checkpoints WHERE remote_id IS NULL AND task_id = ? ORDER BY created_at ASC`)
+          .all(taskId) as CheckpointRow[])
+      : (this.db
+          .prepare(`SELECT * FROM checkpoints WHERE remote_id IS NULL ORDER BY created_at ASC`)
+          .all() as CheckpointRow[]);
+    return rows.map(rowToCheckpoint);
+  }
+
+  /** Records the result of a successful push for a checkpoint: its server-assigned id and the sync timestamp. */
+  setCheckpointRemoteSync(id: string, remoteId: string, syncedAt: string): void {
+    this.db
+      .prepare(`UPDATE checkpoints SET remote_id = ?, synced_at = ? WHERE id = ?`)
+      .run(remoteId, syncedAt, id);
+  }
+
+  /** Looks up a checkpoint by its cloud-sync-server id (used when pulling to avoid inserting a duplicate for one already synced). */
+  getCheckpointByRemoteId(remoteId: string): Checkpoint | undefined {
+    const row = this.db.prepare(`SELECT * FROM checkpoints WHERE remote_id = ?`).get(remoteId) as
+      | CheckpointRow
+      | undefined;
+    return row ? rowToCheckpoint(row) : undefined;
+  }
+
+  /**
+   * Inserts a checkpoint pulled from the sync server that doesn't exist
+   * locally yet, preserving the server's `createdAt` and marking it synced
+   * immediately. Does not touch the parent task's `updatedAt` — this is
+   * inbound data arriving via pull, not a local mutation.
+   */
+  insertPulledCheckpoint(input: {
+    taskId: string;
+    remoteId: string;
+    level: Checkpoint['level'];
+    summary: string;
+    createdAt: string;
+    syncedAt: string;
+  }): Checkpoint {
+    const id = ulid();
+    this.db
+      .prepare(
+        `INSERT INTO checkpoints (id, task_id, level, summary, created_at, remote_id, synced_at)
+         VALUES (@id, @taskId, @level, @summary, @createdAt, @remoteId, @syncedAt)`,
+      )
+      .run({
+        id,
+        taskId: input.taskId,
+        level: input.level,
+        summary: input.summary,
+        createdAt: input.createdAt,
+        remoteId: input.remoteId,
+        syncedAt: input.syncedAt,
+      });
+    return this.getCheckpoint(id)!;
   }
 
   // ---------------------------------------------------------------------

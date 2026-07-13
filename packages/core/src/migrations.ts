@@ -28,12 +28,27 @@ export interface Migration {
 
 /**
  * Ordered list of migrations beyond the baseline v1 schema (which
- * `SCHEMA_SQL` already applies idempotently on every open). Empty for now —
- * v1 is the only schema version that has shipped — but the runner below is
- * exercised by tests using synthetic migrations, so it's proven to work
- * before it's ever needed for a real schema change.
+ * `SCHEMA_SQL` already applies idempotently on every open). The runner is
+ * also exercised by tests using synthetic migrations independent of this
+ * list, so it was proven to work before it was ever needed for a real
+ * schema change.
  */
-export const MIGRATIONS: Migration[] = [];
+export const MIGRATIONS: Migration[] = [
+  {
+    version: 2,
+    description: 'Add remote_id/synced_at columns to tasks and checkpoints for cloud sync support',
+    up: (db) => {
+      db.exec(`
+        ALTER TABLE tasks ADD COLUMN remote_id TEXT;
+        ALTER TABLE tasks ADD COLUMN synced_at TEXT;
+        ALTER TABLE checkpoints ADD COLUMN remote_id TEXT;
+        ALTER TABLE checkpoints ADD COLUMN synced_at TEXT;
+        CREATE INDEX IF NOT EXISTS idx_tasks_remote_id ON tasks(remote_id);
+        CREATE INDEX IF NOT EXISTS idx_checkpoints_remote_id ON checkpoints(remote_id);
+      `);
+    },
+  },
+];
 
 function getSchemaVersion(db: Database.Database): number {
   const row = db.prepare(`SELECT value FROM schema_meta WHERE key = 'schema_version'`).get() as

@@ -21,6 +21,7 @@ import { openWorkspaceStore, findWorkspaceRoot, stateDbPath } from './workspace.
 import { readCurrentTaskId, setCurrentTaskId } from './currentTask.js';
 import { withResolvedTask, withScopedStore } from './withTask.js';
 import { runTaskExec } from './exec.js';
+import { runSyncRegister, runSyncLogin, runSyncLogout, runSyncPush, runSyncPull } from './syncCommands.js';
 
 const program = new Command();
 program.name('ariadne').description('Chats are disposable, tasks are permanent.').version('0.1.0');
@@ -43,9 +44,15 @@ function resolveTaskId(store: TaskStore, explicitId: string | undefined): string
 function withStore<T>(fn: (store: TaskStore) => T): T {
   const store = openWorkspaceStore();
   try {
-    return fn(store);
-  } finally {
+    const result = fn(store);
+    if (result instanceof Promise) {
+      return result.finally(() => store.close()) as T;
+    }
     store.close();
+    return result;
+  } catch (err) {
+    store.close();
+    throw err;
   }
 }
 
@@ -778,7 +785,77 @@ program
     console.log(`Restored ${resolvedSnapshot} to ${target}`);
   });
 
+// ---------------------------------------------------------------------
+// sync (cloud sync server — see docs/06-CLOUD-SYNC-DESIGN.md, docs/07-CLOUD-SYNC-API-CONTRACT.md)
+// ---------------------------------------------------------------------
+
+const sync = program.command('sync').description('Sync tasks/checkpoints with a self-hosted Ariadne sync server');
+
+sync
+  .command('register <username> <password>')
+  .description('Create an account on a sync server and log in')
+  .requiredOption('-s, --server <url>', 'Sync server base URL, e.g. https://ariadne-sync.internal')
+  .action(async (username: string, password: string, opts: { server: string }) => {
+    try {
+      await runSyncRegister(username, password, opts.server.replace(/\/+$/, ''));
+    } catch (err) {
+      console.error(err instanceof Error ? err.message : String(err));
+      process.exit(1);
+    }
+  });
+
+sync
+  .command('login <username> <password>')
+  .description('Log in to a sync server and store the token in ~/.ariadne/sync-config.json')
+  .requiredOption('-s, --server <url>', 'Sync server base URL, e.g. https://ariadne-sync.internal')
+  .action(async (username: string, password: string, opts: { server: string }) => {
+    try {
+      await runSyncLogin(username, password, opts.server.replace(/\/+$/, ''));
+    } catch (err) {
+      console.error(err instanceof Error ? err.message : String(err));
+      process.exit(1);
+    }
+  });
+
+sync
+  .command('logout')
+  .description('Forget the locally-stored sync server token')
+  .action(() => {
+    runSyncLogout();
+  });
+
+sync
+  .command('push')
+  .description('Push local task/checkpoint changes to the sync server')
+  .option('-t, --task <id>', 'Only push this task (and its checkpoints)')
+  .action(async (opts: { task?: string }) => {
+    await withStore(async (store) => {
+      try {
+        await runSyncPush(store, opts.task);
+      } catch (err) {
+        console.error(err instanceof Error ? err.message : String(err));
+        process.exit(1);
+      }
+    });
+  });
+
+sync
+  .command('pull')
+  .description('Pull task/checkpoint changes from the sync server into already-linked local tasks')
+  .option('-t, --task <id>', 'Only pull this task (and its checkpoints)')
+  .action(async (opts: { task?: string }) => {
+    await withStore(async (store) => {
+      try {
+        await runSyncPull(store, opts.task);
+      } catch (err) {
+        console.error(err instanceof Error ? err.message : String(err));
+        process.exit(1);
+      }
+    });
+  });
+
 export { program };
+
 
 if (require.main === module) {
   void program.parseAsync(process.argv);

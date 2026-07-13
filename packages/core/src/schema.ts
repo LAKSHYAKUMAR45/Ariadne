@@ -110,4 +110,4 @@ CREATE TABLE IF NOT EXISTS schema_meta (
 INSERT OR IGNORE INTO schema_meta (key, value) VALUES ('schema_version', '1');
 `;
 
-export const SCHEMA_VERSION = 1;
+export const SCHEMA_VERSION = 2;

@@ -1,0 +1,41 @@
+{
+  "name": "@ariadne-dev/sync-server",
+  "version": "0.1.0",
+  "description": "Self-hosted cloud sync server for Ariadne — internal-use task/checkpoint sync across machines/users. See docs/06-CLOUD-SYNC-DESIGN.md and docs/07-CLOUD-SYNC-API-CONTRACT.md.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/LAKSHYAKUMAR45/Ariadne.git",
+    "directory": "packages/sync-server"
+  },
+  "type": "commonjs",
+  "main": "dist/index.js",
+  "bin": {
+    "ariadne-sync-server": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js",
+    "migrate": "node dist/migrate.js",
+    "test": "vitest run",
+    "lint": "echo \"(no lint configured yet)\""
+  },
+  "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "express": "^4.21.2",
+    "jsonwebtoken": "^9.0.2",
+    "pg": "^8.13.1",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/bcryptjs": "^2.4.6",
+    "@types/express": "^4.17.21",
+    "@types/jsonwebtoken": "^9.0.7",
+    "@types/node": "^20.14.0",
+    "@types/pg": "^8.11.10",
+    "@types/supertest": "^6.0.2",
+    "supertest": "^7.0.0",
+    "typescript": "^5.5.4",
+    "vitest": "^2.1.1"
+  }
+}

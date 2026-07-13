@@ -192,4 +192,105 @@ describe('TaskStore', () => {
     store.resolveOpenQuestion(question.id);
     expect(store.getTask(task.id)!.updatedAt > afterErrorResolve).toBe(true);
   });
+
+  describe('cloud sync helpers', () => {
+    it('a freshly created task/checkpoint has null remoteId/syncedAt and shows up as needing push', () => {
+      const task = store.createTask({ title: 'A' });
+      expect(task.remoteId).toBeNull();
+      expect(task.syncedAt).toBeNull();
+      expect(store.listTasksNeedingPush().map((t) => t.id)).toContain(task.id);
+
+      const checkpoint = store.createCheckpoint({ taskId: task.id, level: 'micro', summary: 'did a thing' });
+      expect(checkpoint.remoteId).toBeNull();
+      expect(checkpoint.syncedAt).toBeNull();
+      expect(store.listCheckpointsNeedingPush(task.id).map((c) => c.id)).toContain(checkpoint.id);
+    });
+
+    it('setTaskRemoteSync records the remote id/timestamp and removes the task from the needing-push list until it changes again', async () => {
+      const task = store.createTask({ title: 'A' });
+      store.setTaskRemoteSync(task.id, 'remote-123', new Date().toISOString());
+
+      const synced = store.getTask(task.id)!;
+      expect(synced.remoteId).toBe('remote-123');
+      expect(synced.syncedAt).toBeTruthy();
+      expect(store.listTasksNeedingPush().map((t) => t.id)).not.toContain(task.id);
+
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      store.updateTaskTitle(task.id, 'A (renamed)');
+      expect(store.listTasksNeedingPush().map((t) => t.id)).toContain(task.id);
+    });
+
+    it('getTaskByRemoteId finds a task by its cloud-sync-server id', () => {
+      const task = store.createTask({ title: 'A' });
+      store.setTaskRemoteSync(task.id, 'remote-abc', new Date().toISOString());
+      expect(store.getTaskByRemoteId('remote-abc')?.id).toBe(task.id);
+      expect(store.getTaskByRemoteId('nonexistent')).toBeUndefined();
+    });
+
+    it('setCheckpointRemoteSync records the remote id/timestamp and removes the checkpoint from the needing-push list', () => {
+      const task = store.createTask({ title: 'A' });
+      const checkpoint = store.createCheckpoint({ taskId: task.id, level: 'micro', summary: 'did a thing' });
+
+      store.setCheckpointRemoteSync(checkpoint.id, 'remote-ckpt-1', new Date().toISOString());
+
+      const synced = store.getCheckpoint(checkpoint.id)!;
+      expect(synced.remoteId).toBe('remote-ckpt-1');
+      expect(synced.syncedAt).toBeTruthy();
+      expect(store.listCheckpointsNeedingPush(task.id)).toEqual([]);
+    });
+
+    it('listCheckpointsNeedingPush without a taskId scans across all tasks', () => {
+      const taskA = store.createTask({ title: 'A' });
+      const taskB = store.createTask({ title: 'B' });
+      store.createCheckpoint({ taskId: taskA.id, level: 'micro', summary: 'a' });
+      const ckptB = store.createCheckpoint({ taskId: taskB.id, level: 'micro', summary: 'b' });
+      store.setCheckpointRemoteSync(ckptB.id, 'remote-b', new Date().toISOString());
+
+      const needingPush = store.listCheckpointsNeedingPush();
+      expect(needingPush.map((c) => c.taskId)).toEqual([taskA.id]);
+    });
+
+    it('applyPulledTask overwrites local fields and updatedAt/syncedAt from a pulled remote task', () => {
+      const task = store.createTask({ title: 'Old title', goal: 'old goal' });
+      store.setTaskRemoteSync(task.id, 'remote-1', new Date().toISOString());
+
+      store.applyPulledTask(task.id, {
+        title: 'New title from server',
+        goal: 'new goal',
+        status: 'done',
+        branch: 'main',
+        updatedAt: '2026-08-01T00:00:00.000Z',
+        syncedAt: '2026-08-01T00:00:01.000Z',
+      });
+
+      const updated = store.getTask(task.id)!;
+      expect(updated.title).toBe('New title from server');
+      expect(updated.goal).toBe('new goal');
+      expect(updated.status).toBe('done');
+      expect(updated.branch).toBe('main');
+      expect(updated.updatedAt).toBe('2026-08-01T00:00:00.000Z');
+      expect(updated.syncedAt).toBe('2026-08-01T00:00:01.000Z');
+      // Applying a pull shouldn't make the task look like it needs pushing again.
+      expect(store.listTasksNeedingPush().map((t) => t.id)).not.toContain(task.id);
+    });
+
+    it('insertPulledCheckpoint creates a locally-unknown checkpoint already marked synced, and getCheckpointByRemoteId finds it', () => {
+      const task = store.createTask({ title: 'A' });
+
+      const inserted = store.insertPulledCheckpoint({
+        taskId: task.id,
+        remoteId: 'remote-ckpt-9',
+        level: 'milestone',
+        summary: 'From another machine',
+        createdAt: '2026-08-01T00:00:00.000Z',
+        syncedAt: '2026-08-01T00:00:01.000Z',
+      });
+
+      expect(inserted.remoteId).toBe('remote-ckpt-9');
+      expect(inserted.createdAt).toBe('2026-08-01T00:00:00.000Z');
+      expect(store.getCheckpointByRemoteId('remote-ckpt-9')?.id).toBe(inserted.id);
+      expect(store.listCheckpointsNeedingPush(task.id)).toEqual([]);
+    });
+  });
 });
+

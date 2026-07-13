@@ -117,6 +117,7 @@ This is a pnpm workspace monorepo:
 | [`packages/cli`](packages/cli) | `ariadne` — a command-line interface for managing tasks, todos, checkpoints, and status. |
 | [`packages/mcp-server`](packages/mcp-server) | `@ariadne-dev/mcp-server` — an MCP server exposing task state as tools to any MCP-capable AI client (Claude Code, Gemini CLI, Codex, Copilot, etc.), no VS Code required. |
 | [`packages/vscode-extension`](packages/vscode-extension) | `ariadne-vscode` — a VS Code extension that adds an `@ariadne` Copilot Chat participant, commands, and passive background capture (saved files, terminal commands, git commits). |
+| [`packages/sync-server`](packages/sync-server) | `@ariadne-dev/sync-server` — an optional, self-hosted cloud sync server (Express + Postgres) for syncing tasks/checkpoints across machines/teammates. |
 
 ## Getting started
 
@@ -202,7 +203,8 @@ Common commands: `task new <title>`, `task list`, `task use <id>`,
 `checkpoint <summary>`, `decision <text>`, `error add <message>` / `error list` / `error resolve <id>`,
 `todo add <text>` / `todo list` / `todo done <id>`,
 `question add <text>` / `question list` / `question resolve <id>`,
-`search <query>`, `status`, `resume`, `git-sync`, `export`, `where`. Run `ariadne --help` for the full list.
+`search <query>`, `status`, `resume`, `git-sync`, `export`, `where`,
+`sync login` / `sync push` / `sync pull` (see "Cloud sync" below). Run `ariadne --help` for the full list.
 
 Any command that takes `--task <id>` (or `[id]`) works across workspaces:
 if the id isn't a task in your current workspace, Ariadne transparently
@@ -229,6 +231,29 @@ ariadne status --task <id>             # works even if <id> belongs to a differe
 This is index-only, not sync — nothing is copied between workspaces, and a
 workspace that's been deleted from disk is just skipped rather than
 breaking the search.
+
+### Cloud sync (optional, self-hosted)
+
+For teams that want tasks/checkpoints to follow them across machines (or be
+shared with teammates), Ariadne can optionally sync to a self-hosted
+`@ariadne-dev/sync-server` instance — see
+[`docs/06-CLOUD-SYNC-DESIGN.md`](docs/06-CLOUD-SYNC-DESIGN.md) for the
+product decisions and [`docs/07-CLOUD-SYNC-API-CONTRACT.md`](docs/07-CLOUD-SYNC-API-CONTRACT.md)
+/ [`packages/sync-server/README.md`](packages/sync-server/README.md) for
+running the server itself. This is entirely opt-in — nothing leaves your
+machine unless you run these commands.
+
+```bash
+ariadne sync register <username> <password> --server https://your-sync-server
+ariadne sync push          # push local task/checkpoint changes
+ariadne sync pull          # pull changes made by teammates / other machines
+```
+
+`sync push`/`sync pull` take an optional `--task <id>` to scope to a single
+task. Phase 1 syncs `tasks` and `checkpoints` only (todos/decisions/open
+questions/commands/files stay local for now); access is flat (any account
+on the server can read/write any synced task) and conflicts are resolved
+remote-wins.
 
 ### Using the MCP server
 
