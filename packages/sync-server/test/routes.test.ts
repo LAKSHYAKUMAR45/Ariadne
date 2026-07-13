@@ -23,7 +23,7 @@ describe('sync-server: auth + sync routes', () => {
 
   beforeEach(async () => {
     // Isolate each test: wipe all sync-relevant tables (CASCADE handles FKs).
-    await pool.query('TRUNCATE TABLE checkpoints, tasks, users CASCADE');
+    await pool.query('TRUNCATE TABLE todos, decisions, errors, open_questions, commands, checkpoints, tasks, users CASCADE');
   });
 
   async function registerAndLogin(username = 'alice', password = 'hunter2') {
@@ -350,6 +350,48 @@ describe('sync-server: auth + sync routes', () => {
       expect(bobEntry.owner).toBe('bob3');
       expect(bobEntry.workspaceLabel).toBe('bob-desktop:repo-b');
     });
+
+    it('GET /tasks/all paginates via limit/offset, reporting hasMore/nextOffset', async () => {
+      const token = await registerAndLogin('pager', 'pw123456');
+      const pushBody = {
+        tasks: Array.from({ length: 5 }, (_, i) => ({
+          localId: `pager-task-${i}`,
+          remoteId: null,
+          title: `Pager task ${i}`,
+          status: 'active' as const,
+          createdAt: `2026-07-01T12:0${i}:00Z`,
+          updatedAt: `2026-07-01T12:0${i}:00Z`,
+        })),
+      };
+      await request(app).post('/api/v1/sync/tasks').set('Authorization', `Bearer ${token}`).send(pushBody);
+
+      const page1 = await request(app)
+        .get('/api/v1/sync/tasks/all')
+        .query({ limit: 2 })
+        .set('Authorization', `Bearer ${token}`);
+      expect(page1.body.tasks).toHaveLength(2);
+      expect(page1.body.hasMore).toBe(true);
+      expect(page1.body.nextOffset).toBe(2);
+
+      const page2 = await request(app)
+        .get('/api/v1/sync/tasks/all')
+        .query({ limit: 2, offset: page1.body.nextOffset })
+        .set('Authorization', `Bearer ${token}`);
+      expect(page2.body.tasks).toHaveLength(2);
+      expect(page2.body.hasMore).toBe(true);
+
+      const page3 = await request(app)
+        .get('/api/v1/sync/tasks/all')
+        .query({ limit: 2, offset: page2.body.nextOffset })
+        .set('Authorization', `Bearer ${token}`);
+      expect(page3.body.tasks).toHaveLength(1);
+      expect(page3.body.hasMore).toBe(false);
+      expect(page3.body.nextOffset).toBeNull();
+
+      // No overlap/gaps across the three pages.
+      const allTitles = [...page1.body.tasks, ...page2.body.tasks, ...page3.body.tasks].map((t: { title: string }) => t.title);
+      expect(new Set(allTitles).size).toBe(5);
+    });
   });
 
   describe('checkpoints sync', () => {
@@ -442,11 +484,259 @@ describe('sync-server: auth + sync routes', () => {
       expect(pull.body.checkpoints[0].summary).toBe('New checkpoint');
     });
 
-    it('requires a taskRemoteId query parameter on pull', async () => {
+    it('stores and returns workspaceLabel + owner attribution for checkpoints', async () => {
+      const token = await registerAndLogin();
+      const taskRemoteId = await pushTask(app, token);
+
+      await request(app)
+        .post('/api/v1/sync/checkpoints')
+        .set('Authorization', `Bearer ${token}`)
+        .send({
+          checkpoints: [
+            {
+              localId: 'ckpt-attributed',
+              remoteTaskId: taskRemoteId,
+              level: 'session',
+              summary: 'Attributed checkpoint',
+              workspaceLabel: 'laptop1:org/atom',
+              createdAt: '2026-07-01T14:00:00Z',
+            },
+          ],
+        });
+
+      const pull = await request(app)
+        .get('/api/v1/sync/checkpoints')
+        .query({ taskRemoteId })
+        .set('Authorization', `Bearer ${token}`);
+      const attributed = pull.body.checkpoints.find((c: { summary: string }) => c.summary === 'Attributed checkpoint');
+      expect(attributed.workspaceLabel).toBe('laptop1:org/atom');
+    });
+
+  it('requires a taskRemoteId query parameter on pull', async () => {
       const token = await registerAndLogin();
       const res = await request(app).get('/api/v1/sync/checkpoints').set('Authorization', `Bearer ${token}`);
       expect(res.status).toBe(400);
       expect(res.body.error.code).toBe('invalid_request');
+    });
+  });
+
+  describe('todos sync', () => {
+    async function pushTask(app: Express, token: string): Promise<string> {
+      const res = await request(app)
+        .post('/api/v1/sync/tasks')
+        .set('Authorization', `Bearer ${token}`)
+        .send({
+          tasks: [
+            {
+              localId: 'task-for-todos',
+              remoteId: null,
+              title: 'Task with todos',
+              status: 'active',
+              createdAt: '2026-07-01T12:00:00Z',
+              updatedAt: '2026-07-01T12:00:00Z',
+            },
+          ],
+        });
+      return res.body.results[0].remoteId;
+    }
+
+    it('pushes a new todo (remoteId null) and assigns a remote id', async () => {
+      const token = await registerAndLogin();
+      const taskRemoteId = await pushTask(app, token);
+
+      const res = await request(app)
+        .post('/api/v1/sync/todos')
+        .set('Authorization', `Bearer ${token}`)
+        .send({
+          todos: [
+            { localId: 'todo-1', remoteId: null, remoteTaskId: taskRemoteId, text: 'Write tests', status: 'pending', createdAt: '2026-07-01T13:00:00Z', updatedAt: '2026-07-01T13:00:00Z' },
+          ],
+        });
+      expect(res.status).toBe(200);
+      expect(res.body.results[0].localId).toBe('todo-1');
+      expect(res.body.results[0].remoteId).toMatch(/^[0-9a-f-]{36}$/);
+    });
+
+    it('re-pushing with a remoteId updates the existing todo (e.g. status change)', async () => {
+      const token = await registerAndLogin();
+      const taskRemoteId = await pushTask(app, token);
+
+      const first = await request(app)
+        .post('/api/v1/sync/todos')
+        .set('Authorization', `Bearer ${token}`)
+        .send({
+          todos: [
+            { localId: 'todo-1', remoteId: null, remoteTaskId: taskRemoteId, text: 'Write tests', status: 'pending', createdAt: '2026-07-01T13:00:00Z', updatedAt: '2026-07-01T13:00:00Z' },
+          ],
+        });
+      const remoteId = first.body.results[0].remoteId;
+
+      const second = await request(app)
+        .post('/api/v1/sync/todos')
+        .set('Authorization', `Bearer ${token}`)
+        .send({
+          todos: [
+            { localId: 'todo-1', remoteId, remoteTaskId: taskRemoteId, text: 'Write tests', status: 'done', createdAt: '2026-07-01T13:00:00Z', updatedAt: '2026-07-01T14:00:00Z' },
+          ],
+        });
+      expect(second.status).toBe(200);
+      expect(second.body.results[0].remoteId).toBe(remoteId);
+
+      const pull = await request(app).get('/api/v1/sync/todos').query({ taskRemoteId }).set('Authorization', `Bearer ${token}`);
+      expect(pull.body.todos[0].status).toBe('done');
+    });
+
+    it('returns 404 when pushing an update for a todo remoteId that does not exist', async () => {
+      const token = await registerAndLogin();
+      const taskRemoteId = await pushTask(app, token);
+      const res = await request(app)
+        .post('/api/v1/sync/todos')
+        .set('Authorization', `Bearer ${token}`)
+        .send({
+          todos: [
+            { localId: 'todo-x', remoteId: '00000000-0000-0000-0000-000000000000', remoteTaskId: taskRemoteId, text: 'x', status: 'pending', createdAt: '2026-07-01T13:00:00Z', updatedAt: '2026-07-01T13:00:00Z' },
+          ],
+        });
+      expect(res.status).toBe(404);
+      expect(res.body.error.code).toBe('todo_not_found');
+    });
+
+    it('returns 404 when pushing a new todo for a task that does not exist', async () => {
+      const token = await registerAndLogin();
+      const res = await request(app)
+        .post('/api/v1/sync/todos')
+        .set('Authorization', `Bearer ${token}`)
+        .send({
+          todos: [
+            { localId: 'todo-x', remoteId: null, remoteTaskId: '00000000-0000-0000-0000-000000000000', text: 'x', status: 'pending', createdAt: '2026-07-01T13:00:00Z', updatedAt: '2026-07-01T13:00:00Z' },
+          ],
+        });
+      expect(res.status).toBe(404);
+      expect(res.body.error.code).toBe('task_not_found');
+    });
+
+    it('pulls todos scoped to a task, filtered by `since`', async () => {
+      const token = await registerAndLogin();
+      const taskRemoteId = await pushTask(app, token);
+
+      await request(app)
+        .post('/api/v1/sync/todos')
+        .set('Authorization', `Bearer ${token}`)
+        .send({
+          todos: [
+            { localId: 'todo-old', remoteId: null, remoteTaskId: taskRemoteId, text: 'Old todo', status: 'pending', createdAt: '2020-01-01T00:00:00Z', updatedAt: '2020-01-01T00:00:00Z' },
+          ],
+        });
+
+      const midpoint = new Date().toISOString();
+      const afterMidpoint = new Date(Date.now() + 60_000).toISOString();
+
+      await request(app)
+        .post('/api/v1/sync/todos')
+        .set('Authorization', `Bearer ${token}`)
+        .send({
+          todos: [
+            { localId: 'todo-new', remoteId: null, remoteTaskId: taskRemoteId, text: 'New todo', status: 'pending', createdAt: afterMidpoint, updatedAt: afterMidpoint },
+          ],
+        });
+
+      const pull = await request(app)
+        .get('/api/v1/sync/todos')
+        .query({ taskRemoteId, since: midpoint })
+        .set('Authorization', `Bearer ${token}`);
+      expect(pull.body.todos).toHaveLength(1);
+      expect(pull.body.todos[0].text).toBe('New todo');
+    });
+  });
+
+  describe('decisions/errors/open-questions/commands sync (create-once)', () => {
+    async function pushTask(app: Express, token: string): Promise<string> {
+      const res = await request(app)
+        .post('/api/v1/sync/tasks')
+        .set('Authorization', `Bearer ${token}`)
+        .send({
+          tasks: [
+            {
+              localId: 'task-for-subentities',
+              remoteId: null,
+              title: 'Task with sub-entities',
+              status: 'active',
+              createdAt: '2026-07-01T12:00:00Z',
+              updatedAt: '2026-07-01T12:00:00Z',
+            },
+          ],
+        });
+      return res.body.results[0].remoteId;
+    }
+
+    it('pushes and pulls a decision', async () => {
+      const token = await registerAndLogin();
+      const taskRemoteId = await pushTask(app, token);
+
+      const push = await request(app)
+        .post('/api/v1/sync/decisions')
+        .set('Authorization', `Bearer ${token}`)
+        .send({ decisions: [{ localId: 'dec-1', remoteTaskId: taskRemoteId, text: 'Use SQLite', rationale: 'Simplicity', createdAt: '2026-07-01T13:00:00Z' }] });
+      expect(push.status).toBe(200);
+      expect(push.body.results[0].remoteId).toMatch(/^[0-9a-f-]{36}$/);
+
+      const pull = await request(app).get('/api/v1/sync/decisions').query({ taskRemoteId }).set('Authorization', `Bearer ${token}`);
+      expect(pull.body.decisions[0].text).toBe('Use SQLite');
+      expect(pull.body.decisions[0].rationale).toBe('Simplicity');
+    });
+
+    it('pushes and pulls an error', async () => {
+      const token = await registerAndLogin();
+      const taskRemoteId = await pushTask(app, token);
+
+      const push = await request(app)
+        .post('/api/v1/sync/errors')
+        .set('Authorization', `Bearer ${token}`)
+        .send({ errors: [{ localId: 'err-1', remoteTaskId: taskRemoteId, message: 'TypeError', resolved: false, createdAt: '2026-07-01T13:00:00Z' }] });
+      expect(push.status).toBe(200);
+
+      const pull = await request(app).get('/api/v1/sync/errors').query({ taskRemoteId }).set('Authorization', `Bearer ${token}`);
+      expect(pull.body.errors[0].message).toBe('TypeError');
+      expect(pull.body.errors[0].resolved).toBe(false);
+    });
+
+    it('pushes and pulls an open question', async () => {
+      const token = await registerAndLogin();
+      const taskRemoteId = await pushTask(app, token);
+
+      const push = await request(app)
+        .post('/api/v1/sync/open-questions')
+        .set('Authorization', `Bearer ${token}`)
+        .send({ openQuestions: [{ localId: 'q-1', remoteTaskId: taskRemoteId, text: 'Which DB?', resolved: false, createdAt: '2026-07-01T13:00:00Z' }] });
+      expect(push.status).toBe(200);
+
+      const pull = await request(app).get('/api/v1/sync/open-questions').query({ taskRemoteId }).set('Authorization', `Bearer ${token}`);
+      expect(pull.body.openQuestions[0].text).toBe('Which DB?');
+    });
+
+    it('pushes and pulls a command', async () => {
+      const token = await registerAndLogin();
+      const taskRemoteId = await pushTask(app, token);
+
+      const push = await request(app)
+        .post('/api/v1/sync/commands')
+        .set('Authorization', `Bearer ${token}`)
+        .send({ commands: [{ localId: 'cmd-1', remoteTaskId: taskRemoteId, cmdRedacted: 'npm test', exitCode: 0, createdAt: '2026-07-01T13:00:00Z' }] });
+      expect(push.status).toBe(200);
+
+      const pull = await request(app).get('/api/v1/sync/commands').query({ taskRemoteId }).set('Authorization', `Bearer ${token}`);
+      expect(pull.body.commands[0].cmdRedacted).toBe('npm test');
+      expect(pull.body.commands[0].exitCode).toBe(0);
+    });
+
+    it('returns 404 when pushing any sub-entity for a task that does not exist', async () => {
+      const token = await registerAndLogin();
+      const res = await request(app)
+        .post('/api/v1/sync/decisions')
+        .set('Authorization', `Bearer ${token}`)
+        .send({ decisions: [{ localId: 'dec-x', remoteTaskId: '00000000-0000-0000-0000-000000000000', text: 'Orphaned', createdAt: '2026-07-01T13:00:00Z' }] });
+      expect(res.status).toBe(404);
+      expect(res.body.error.code).toBe('task_not_found');
     });
   });
 });

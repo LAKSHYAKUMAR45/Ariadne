@@ -74,6 +74,18 @@
         "command": "ariadne.refreshTreeView",
         "title": "Ariadne: Refresh Task Tree",
         "icon": "$(refresh)"
+      },
+      {
+        "command": "ariadne.syncPush",
+        "title": "Ariadne: Sync Push"
+      },
+      {
+        "command": "ariadne.syncPull",
+        "title": "Ariadne: Sync Pull"
+      },
+      {
+        "command": "ariadne.syncListRemote",
+        "title": "Ariadne: Sync List Remote"
       }
     ],
     "viewsContainers": {

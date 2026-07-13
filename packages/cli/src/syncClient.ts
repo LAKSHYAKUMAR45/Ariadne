@@ -49,6 +49,7 @@ export interface RemoteCheckpoint {
   remoteId: string;
   level: 'micro' | 'session' | 'milestone';
   summary: string;
+  workspaceLabel?: string | null;
   createdAt: string;
 }
 
@@ -69,6 +70,7 @@ export interface PushCheckpointInput {
   remoteTaskId: string;
   level: string;
   summary: string;
+  workspaceLabel: string | null;
   createdAt: string;
 }
 
@@ -99,12 +101,24 @@ export function pushTasks(serverUrl: string, token: string, tasks: PushTaskInput
   );
 }
 
-export function pullTasks(serverUrl: string, token: string, since?: string) {
-  const query = since ? `?since=${encodeURIComponent(since)}` : '';
-  return request<{ tasks: RemoteTask[]; serverTime: string }>(`${serverUrl}/api/v1/sync/tasks${query}`, {
-    method: 'GET',
-    headers: authHeaders(token),
-  });
+export interface PullTasksOptions {
+  since?: string;
+  limit?: number;
+  offset?: number;
+}
+
+/** One page of `GET /tasks`. `hasMore`/`nextOffset` support paging through large result sets (see docs/07-CLOUD-SYNC-API-CONTRACT.md §4.5). */
+export function pullTasks(serverUrl: string, token: string, sinceOrOptions?: string | PullTasksOptions) {
+  const opts: PullTasksOptions = typeof sinceOrOptions === 'string' ? { since: sinceOrOptions } : (sinceOrOptions ?? {});
+  const params = new URLSearchParams();
+  if (opts.since) params.set('since', opts.since);
+  if (opts.limit) params.set('limit', String(opts.limit));
+  if (opts.offset) params.set('offset', String(opts.offset));
+  const query = params.toString() ? `?${params.toString()}` : '';
+  return request<{ tasks: RemoteTask[]; serverTime: string; hasMore: boolean; nextOffset: number | null }>(
+    `${serverUrl}/api/v1/sync/tasks${query}`,
+    { method: 'GET', headers: authHeaders(token) },
+  );
 }
 
 export interface RemoteTaskWithOwner extends RemoteTask {
@@ -113,14 +127,19 @@ export interface RemoteTaskWithOwner extends RemoteTask {
 
 /**
  * Browse-only listing of every task on the server (not just ones this
- * workspace has linked) — backs `ariadne sync list-remote`. See
- * GET /api/v1/sync/tasks/all in docs/07-CLOUD-SYNC-API-CONTRACT.md.
+ * workspace has linked) — backs `ariadne sync list-remote`. Paginated via
+ * `limit`/`offset` (defaults: limit 200, max 500); see GET
+ * /api/v1/sync/tasks/all in docs/07-CLOUD-SYNC-API-CONTRACT.md §4.5.
  */
-export function listAllRemoteTasks(serverUrl: string, token: string) {
-  return request<{ tasks: RemoteTaskWithOwner[] }>(`${serverUrl}/api/v1/sync/tasks/all`, {
-    method: 'GET',
-    headers: authHeaders(token),
-  });
+export function listAllRemoteTasks(serverUrl: string, token: string, options: { limit?: number; offset?: number } = {}) {
+  const params = new URLSearchParams();
+  if (options.limit) params.set('limit', String(options.limit));
+  if (options.offset) params.set('offset', String(options.offset));
+  const query = params.toString() ? `?${params.toString()}` : '';
+  return request<{ tasks: RemoteTaskWithOwner[]; hasMore: boolean; nextOffset: number | null }>(
+    `${serverUrl}/api/v1/sync/tasks/all${query}`,
+    { method: 'GET', headers: authHeaders(token) },
+  );
 }
 
 export function pushCheckpoints(serverUrl: string, token: string, checkpoints: PushCheckpointInput[]) {
@@ -136,6 +155,193 @@ export function pullCheckpoints(serverUrl: string, token: string, taskRemoteId: 
   if (since) params.set('since', since);
   return request<{ checkpoints: RemoteCheckpoint[]; serverTime: string }>(
     `${serverUrl}/api/v1/sync/checkpoints?${params.toString()}`,
+    { method: 'GET', headers: authHeaders(token) },
+  );
+}
+
+// ---------------------------------------------------------------------
+// Todos — the one sub-entity type with full bidirectional sync (an
+// update-by-remoteId path), mirroring tasks above.
+// ---------------------------------------------------------------------
+
+export interface RemoteTodo {
+  remoteId: string;
+  text: string;
+  status: 'pending' | 'done' | 'blocked';
+  workspaceLabel?: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface PushTodoInput {
+  localId: string;
+  remoteId: string | null;
+  remoteTaskId: string;
+  text: string;
+  status: string;
+  workspaceLabel: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export function pushTodos(serverUrl: string, token: string, todos: PushTodoInput[]) {
+  return request<{ results: { localId: string; remoteId: string; updatedAt: string }[] }>(
+    `${serverUrl}/api/v1/sync/todos`,
+    { method: 'POST', headers: authHeaders(token), body: JSON.stringify({ todos }) },
+  );
+}
+
+export function pullTodos(serverUrl: string, token: string, taskRemoteId: string, since?: string) {
+  const params = new URLSearchParams({ taskRemoteId });
+  if (since) params.set('since', since);
+  return request<{ todos: RemoteTodo[]; serverTime: string }>(
+    `${serverUrl}/api/v1/sync/todos?${params.toString()}`,
+    { method: 'GET', headers: authHeaders(token) },
+  );
+}
+
+// ---------------------------------------------------------------------
+// Decisions, errors, open questions, commands — create-once sync,
+// mirroring checkpoints above (push is insert-only, pull is a
+// since-cursor scan). See docs/07-CLOUD-SYNC-API-CONTRACT.md §4.6.
+// ---------------------------------------------------------------------
+
+export interface RemoteDecision {
+  remoteId: string;
+  text: string;
+  rationale: string | null;
+  workspaceLabel?: string | null;
+  createdAt: string;
+}
+
+export interface PushDecisionInput {
+  localId: string;
+  remoteTaskId: string;
+  text: string;
+  rationale: string | null;
+  workspaceLabel: string | null;
+  createdAt: string;
+}
+
+export function pushDecisions(serverUrl: string, token: string, decisions: PushDecisionInput[]) {
+  return request<{ results: { localId: string; remoteId: string }[] }>(`${serverUrl}/api/v1/sync/decisions`, {
+    method: 'POST',
+    headers: authHeaders(token),
+    body: JSON.stringify({ decisions }),
+  });
+}
+
+export function pullDecisions(serverUrl: string, token: string, taskRemoteId: string, since?: string) {
+  const params = new URLSearchParams({ taskRemoteId });
+  if (since) params.set('since', since);
+  return request<{ decisions: RemoteDecision[]; serverTime: string }>(
+    `${serverUrl}/api/v1/sync/decisions?${params.toString()}`,
+    { method: 'GET', headers: authHeaders(token) },
+  );
+}
+
+export interface RemoteTaskError {
+  remoteId: string;
+  message: string;
+  resolved: boolean;
+  resolution: string | null;
+  workspaceLabel?: string | null;
+  createdAt: string;
+}
+
+export interface PushErrorInput {
+  localId: string;
+  remoteTaskId: string;
+  message: string;
+  resolved: boolean;
+  resolution: string | null;
+  workspaceLabel: string | null;
+  createdAt: string;
+}
+
+export function pushErrors(serverUrl: string, token: string, errors: PushErrorInput[]) {
+  return request<{ results: { localId: string; remoteId: string }[] }>(`${serverUrl}/api/v1/sync/errors`, {
+    method: 'POST',
+    headers: authHeaders(token),
+    body: JSON.stringify({ errors }),
+  });
+}
+
+export function pullErrors(serverUrl: string, token: string, taskRemoteId: string, since?: string) {
+  const params = new URLSearchParams({ taskRemoteId });
+  if (since) params.set('since', since);
+  return request<{ errors: RemoteTaskError[]; serverTime: string }>(
+    `${serverUrl}/api/v1/sync/errors?${params.toString()}`,
+    { method: 'GET', headers: authHeaders(token) },
+  );
+}
+
+export interface RemoteOpenQuestion {
+  remoteId: string;
+  text: string;
+  resolved: boolean;
+  workspaceLabel?: string | null;
+  createdAt: string;
+}
+
+export interface PushOpenQuestionInput {
+  localId: string;
+  remoteTaskId: string;
+  text: string;
+  resolved: boolean;
+  workspaceLabel: string | null;
+  createdAt: string;
+}
+
+export function pushOpenQuestions(serverUrl: string, token: string, openQuestions: PushOpenQuestionInput[]) {
+  return request<{ results: { localId: string; remoteId: string }[] }>(`${serverUrl}/api/v1/sync/open-questions`, {
+    method: 'POST',
+    headers: authHeaders(token),
+    body: JSON.stringify({ openQuestions }),
+  });
+}
+
+export function pullOpenQuestions(serverUrl: string, token: string, taskRemoteId: string, since?: string) {
+  const params = new URLSearchParams({ taskRemoteId });
+  if (since) params.set('since', since);
+  return request<{ openQuestions: RemoteOpenQuestion[]; serverTime: string }>(
+    `${serverUrl}/api/v1/sync/open-questions?${params.toString()}`,
+    { method: 'GET', headers: authHeaders(token) },
+  );
+}
+
+export interface RemoteCommand {
+  remoteId: string;
+  cmdRedacted: string;
+  exitCode: number | null;
+  summary: string | null;
+  workspaceLabel?: string | null;
+  createdAt: string;
+}
+
+export interface PushCommandInput {
+  localId: string;
+  remoteTaskId: string;
+  cmdRedacted: string;
+  exitCode: number | null;
+  summary: string | null;
+  workspaceLabel: string | null;
+  createdAt: string;
+}
+
+export function pushCommands(serverUrl: string, token: string, commands: PushCommandInput[]) {
+  return request<{ results: { localId: string; remoteId: string }[] }>(`${serverUrl}/api/v1/sync/commands`, {
+    method: 'POST',
+    headers: authHeaders(token),
+    body: JSON.stringify({ commands }),
+  });
+}
+
+export function pullCommands(serverUrl: string, token: string, taskRemoteId: string, since?: string) {
+  const params = new URLSearchParams({ taskRemoteId });
+  if (since) params.set('since', since);
+  return request<{ commands: RemoteCommand[]; serverTime: string }>(
+    `${serverUrl}/api/v1/sync/commands?${params.toString()}`,
     { method: 'GET', headers: authHeaders(token) },
   );
 }

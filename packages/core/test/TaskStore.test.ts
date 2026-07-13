@@ -227,6 +227,20 @@ describe('TaskStore', () => {
       expect(store.getTaskByRemoteId('nonexistent')).toBeUndefined();
     });
 
+    it('unlinkTaskFromRemote clears remoteId/syncedAt so the task is treated as unsynced again', () => {
+      const task = store.createTask({ title: 'A' });
+      store.setTaskRemoteSync(task.id, 'remote-xyz', new Date().toISOString());
+      expect(store.getTask(task.id)!.remoteId).toBe('remote-xyz');
+
+      store.unlinkTaskFromRemote(task.id);
+
+      const unlinked = store.getTask(task.id)!;
+      expect(unlinked.remoteId).toBeNull();
+      expect(unlinked.syncedAt).toBeNull();
+      expect(store.getTaskByRemoteId('remote-xyz')).toBeUndefined();
+      expect(store.listTasksNeedingPush().map((t) => t.id)).toContain(task.id);
+    });
+
     it('setCheckpointRemoteSync records the remote id/timestamp and removes the checkpoint from the needing-push list', () => {
       const task = store.createTask({ title: 'A' });
       const checkpoint = store.createCheckpoint({ taskId: task.id, level: 'micro', summary: 'did a thing' });
@@ -316,6 +330,126 @@ describe('TaskStore', () => {
       expect(inserted.createdAt).toBe('2026-08-01T00:00:00.000Z');
       expect(store.getCheckpointByRemoteId('remote-ckpt-9')?.id).toBe(inserted.id);
       expect(store.listCheckpointsNeedingPush(task.id)).toEqual([]);
+    });
+  });
+
+  describe('sub-entity sync (todos, decisions, commands, errors, open questions)', () => {
+    it('todos support full bidirectional sync: push detection, remote-sync marking, and re-detection after a local edit', async () => {
+      const task = store.createTask({ title: 'A' });
+      const todo = store.createTodo({ taskId: task.id, text: 'Write tests' });
+
+      expect(store.listTodosNeedingPush(task.id).map((t) => t.id)).toContain(todo.id);
+
+      store.setTodoRemoteSync(todo.id, 'remote-todo-1', new Date().toISOString());
+      expect(store.listTodosNeedingPush(task.id).map((t) => t.id)).not.toContain(todo.id);
+      expect(store.getTodoByRemoteId('remote-todo-1')?.id).toBe(todo.id);
+
+      // Editing after the initial push should mark it as needing push again, unlike create-once entities.
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      store.updateTodoStatus(todo.id, 'done');
+      expect(store.listTodosNeedingPush(task.id).map((t) => t.id)).toContain(todo.id);
+    });
+
+    it('applyPulledTodo updates an already-linked local todo from a remote change without touching the parent task via touchTask', () => {
+      const task = store.createTask({ title: 'A' });
+      const todo = store.createTodo({ taskId: task.id, text: 'Write tests' });
+      store.setTodoRemoteSync(todo.id, 'remote-todo-2', new Date().toISOString());
+
+      store.applyPulledTodo(todo.id, {
+        text: 'Write tests (updated)',
+        status: 'done',
+        updatedAt: '2026-09-01T00:00:00.000Z',
+        syncedAt: '2026-09-01T00:00:01.000Z',
+      });
+
+      const updated = store.getTodo(todo.id)!;
+      expect(updated.text).toBe('Write tests (updated)');
+      expect(updated.status).toBe('done');
+      expect(updated.syncedAt).toBe('2026-09-01T00:00:01.000Z');
+      expect(store.listTodosNeedingPush(task.id).map((t) => t.id)).not.toContain(todo.id);
+    });
+
+    it('insertPulledTodo creates a locally-unknown todo already marked synced', () => {
+      const task = store.createTask({ title: 'A' });
+      const inserted = store.insertPulledTodo({
+        taskId: task.id,
+        remoteId: 'remote-todo-9',
+        text: 'From another machine',
+        status: 'pending',
+        createdAt: '2026-09-02T00:00:00.000Z',
+        updatedAt: '2026-09-02T00:00:00.000Z',
+        syncedAt: '2026-09-02T00:00:01.000Z',
+      });
+
+      expect(inserted.remoteId).toBe('remote-todo-9');
+      expect(store.getTodoByRemoteId('remote-todo-9')?.id).toBe(inserted.id);
+      expect(store.listTodosNeedingPush(task.id)).toEqual([]);
+    });
+
+    it('decisions, commands, errors and open questions support create-once sync: push detection, remote-sync marking, and pulled-insert', () => {
+      const task = store.createTask({ title: 'A' });
+
+      const decision = store.recordDecision({ taskId: task.id, text: 'Use SQLite' });
+      expect(store.listDecisionsNeedingPush(task.id).map((d) => d.id)).toContain(decision.id);
+      store.setDecisionRemoteSync(decision.id, 'remote-dec-1', new Date().toISOString());
+      expect(store.listDecisionsNeedingPush(task.id)).toEqual([]);
+      expect(store.getDecisionByRemoteId('remote-dec-1')?.id).toBe(decision.id);
+      const pulledDecision = store.insertPulledDecision({
+        taskId: task.id,
+        remoteId: 'remote-dec-9',
+        text: 'From another machine',
+        rationale: null,
+        createdAt: '2026-09-03T00:00:00.000Z',
+        syncedAt: '2026-09-03T00:00:01.000Z',
+      });
+      expect(store.getDecisionByRemoteId('remote-dec-9')?.id).toBe(pulledDecision.id);
+
+      const command = store.recordCommand({ taskId: task.id, cmdRedacted: 'npm test' });
+      expect(store.listCommandsNeedingPush(task.id).map((c) => c.id)).toContain(command.id);
+      store.setCommandRemoteSync(command.id, 'remote-cmd-1', new Date().toISOString());
+      expect(store.listCommandsNeedingPush(task.id)).toEqual([]);
+      expect(store.getCommandByRemoteId('remote-cmd-1')?.id).toBe(command.id);
+      const pulledCommand = store.insertPulledCommand({
+        taskId: task.id,
+        remoteId: 'remote-cmd-9',
+        cmdRedacted: 'npm run build',
+        exitCode: 0,
+        summary: null,
+        createdAt: '2026-09-03T00:00:00.000Z',
+        syncedAt: '2026-09-03T00:00:01.000Z',
+      });
+      expect(store.getCommandByRemoteId('remote-cmd-9')?.id).toBe(pulledCommand.id);
+
+      const error = store.recordError({ taskId: task.id, message: 'TypeError: x is undefined' });
+      expect(store.listErrorsNeedingPush(task.id).map((e) => e.id)).toContain(error.id);
+      store.setErrorRemoteSync(error.id, 'remote-err-1', new Date().toISOString());
+      expect(store.listErrorsNeedingPush(task.id)).toEqual([]);
+      expect(store.getErrorByRemoteId('remote-err-1')?.id).toBe(error.id);
+      const pulledError = store.insertPulledError({
+        taskId: task.id,
+        remoteId: 'remote-err-9',
+        message: 'From another machine',
+        resolved: false,
+        resolution: null,
+        createdAt: '2026-09-03T00:00:00.000Z',
+        syncedAt: '2026-09-03T00:00:01.000Z',
+      });
+      expect(store.getErrorByRemoteId('remote-err-9')?.id).toBe(pulledError.id);
+
+      const question = store.recordOpenQuestion({ taskId: task.id, text: 'Which DB engine?' });
+      expect(store.listOpenQuestionsNeedingPush(task.id).map((q) => q.id)).toContain(question.id);
+      store.setOpenQuestionRemoteSync(question.id, 'remote-q-1', new Date().toISOString());
+      expect(store.listOpenQuestionsNeedingPush(task.id)).toEqual([]);
+      expect(store.getOpenQuestionByRemoteId('remote-q-1')?.id).toBe(question.id);
+      const pulledQuestion = store.insertPulledOpenQuestion({
+        taskId: task.id,
+        remoteId: 'remote-q-9',
+        text: 'From another machine',
+        resolved: false,
+        createdAt: '2026-09-03T00:00:00.000Z',
+        syncedAt: '2026-09-03T00:00:01.000Z',
+      });
+      expect(store.getOpenQuestionByRemoteId('remote-q-9')?.id).toBe(pulledQuestion.id);
     });
   });
 });

@@ -1,26 +1,34 @@
-# Ariadne — Cloud Sync Server Schema & API Contract (Phase 0)
+# Ariadne — Cloud Sync Server Schema & API Contract
 
-**Status: Phase 0 output — schema + API contract finalized, implementation
-starting.** This is the concrete follow-on to `docs/06-CLOUD-SYNC-DESIGN.md`
-v0.2 (all product/infra decisions locked there). This doc defines the actual
-Postgres schema and HTTP API for `packages/sync-server`, scoped to **Phase 1**
-of that design's phasing: read/write sync for `tasks` and `checkpoints` only
-(todos/decisions/open_questions/commands/files follow once the round trip is
-proven, per §5.2 of the design doc).
+**Status: Phase 0/1 schema + API finalized and implemented; Phase 2
+(sub-entity sync) also implemented — see §4.6.** This is the concrete
+follow-on to `docs/06-CLOUD-SYNC-DESIGN.md` v0.2 (all product/infra
+decisions locked there). This doc defines the actual Postgres schema and
+HTTP API for `packages/sync-server`.
 
-## 1. Scope of this phase
+## 1. Scope
 
-In scope (Phase 1):
+Implemented:
 - User accounts (username/password).
 - `tasks` and `checkpoints` sync — push (upload local changes) and pull
   (download remote changes), additive-only (no deletes, per design doc §6).
+- `todos`, `decisions`, `errors`, `open_questions`, `commands` sync (§4.6).
+  Todos get full bidirectional sync; the other four are create-once
+  (mirroring checkpoints) — see §4.6 for the exact limitation.
+- Visible conflict detection + a `--on-conflict <remote-wins|local-wins>`
+  flag on `ariadne sync pull` for the two bidirectional entity types
+  (tasks, todos) — see §6's pull section for the exact behavior.
 
-Out of scope for this phase (tracked as follow-up todos):
-- `todos`, `decisions`, `open_questions`, `commands`, `files` sync (Phase 2).
-- Conflict-resolution UI beyond a simple "remote wins" default (Phase 2 adds
-  real last-write-wins-by-field with a reported conflict, per design doc §4.4).
-- Any client-side CLI/MCP/VS Code wiring beyond a minimal `ariadne sync
-  push`/`ariadne sync pull` (tracked separately; this doc is server-only).
+Out of scope (tracked as follow-up work):
+- `files`/`commits` sync — deliberately excluded. These are git/workspace-
+  local derived artifacts (already partly covered by `git_sync`), not
+  first-class curated text content like todos/decisions/errors/questions.
+- Full per-field interactive conflict resolution / CRDT-style merge (the
+  design doc's §4.4 "eventual" full vision) — what's implemented instead
+  is whole-row conflict detection with a visible warning and a
+  remote-wins/local-wins flag, which is deliberately simpler.
+- Delete/archive propagation to the server (reaffirmed as an intentional
+  scope decision — see §2's notes on additive-only sync).
 
 ## 2. Postgres schema
 
@@ -58,6 +66,8 @@ CREATE TABLE checkpoints (
   task_id    UUID NOT NULL REFERENCES tasks(id),
   level      TEXT NOT NULL, -- micro|session|milestone
   summary    TEXT NOT NULL,
+  owner_user_id   UUID REFERENCES users(id), -- who pushed THIS checkpoint (may differ from the task's owner — see §2.1)
+  workspace_label TEXT,                      -- which machine/repo pushed THIS checkpoint (see §2.1)
   created_at TIMESTAMPTZ NOT NULL
 );
 CREATE INDEX idx_checkpoints_task_created ON checkpoints(task_id, created_at);
@@ -73,8 +83,16 @@ INSERT INTO schema_meta (key, value) VALUES ('schema_version', '1');
 
 Notes:
 - **No delete semantics anywhere** — per design doc §4.6/§6, the server is
-  additive-only in v1. There is no `DELETE` endpoint and no `deleted_at`
-  column; local archival/deletion never propagates.
+  additive-only. There is no `DELETE` endpoint and no `deleted_at` column;
+  local archival/deletion never propagates. **Reaffirmed** after
+  implementing todos/decisions/errors/open questions/commands sync (§4.6):
+  archiving a *task* already syncs fine (`status: 'archived'` is just a
+  normal field on the existing upsert), but hard-deleting a sub-entity
+  locally (e.g. `ariadne decision delete <id>`) is **not** propagated to
+  the server — the remote row is left as-is. Adding delete/tombstone
+  propagation was considered and explicitly deferred to keep sync
+  additive-only/conflict-free; if this becomes a real need later, revisit
+  as its own design doc rather than bolting deletes on ad hoc.
 - **No team/ACL table** — per design doc §6's flat-access decision, any row
   is readable/writable by any authenticated user. `owner_user_id` on `tasks`
   is bookkeeping (who created it), not an access-control gate.
@@ -103,6 +121,14 @@ returned by both pull endpoints (§4.2, §4.4):
   recent workspace to push that task, not just its origin.
 - Optional/nullable — omitting it (or pushing from an older client) simply
   leaves it `null`; nothing else depends on it being present.
+- **Checkpoints get the same treatment** (migration `0003`, `checkpoints.
+  owner_user_id`/`workspace_label`), but per-checkpoint rather than
+  overwritten on the parent task: each checkpoint push records the
+  authenticated user and computed `workspaceLabel` *at push time* and never
+  changes it afterward, since (unlike a task) a checkpoint is never
+  re-pushed/edited once created. This lets a checkpoint pushed by a
+  teammate who pulled (but didn't originate) a task be told apart from ones
+  pushed by the task's original owner/workspace.
 
 ## 3. Client-side schema addition (packages/core)
 
@@ -181,16 +207,23 @@ except `/auth/register` and `/auth/login` require `Authorization: Bearer
 ```
 - If `remoteId` is `null`, the server inserts a new row and returns a fresh
   UUID — the client persists this into its local `remote_id` column.
-- If `remoteId` is set, the server upserts by `id = remoteId`. Phase 1 uses
-  **remote-wins on conflict** (the simplest possible rule, explicitly
-  weaker than the design doc's eventual last-write-wins-by-field — that's
-  Phase 2 scope). The response's `updatedAt` reflects what the server now
-  has; the client sets its local `synced_at` to that value.
+- If `remoteId` is set, the server upserts by `id = remoteId` — this part
+  of conflict resolution (which row's data wins in Postgres) is still a
+  simple whole-row overwrite. The response's `updatedAt` reflects what the
+  server now has; the client sets its local `synced_at` to that value.
+  The client-side CLI layer now adds a visible-conflict check *before* this
+  call: if a local task/todo has unpushed changes (`updated_at >
+  synced_at`) that differ from what pull just fetched, `ariadne sync pull`
+  logs `⚠ Conflict on <entity> <id>: field "<name>" differs (local=...,
+  remote=...)` and then resolves it per `--on-conflict` (`remote-wins` by
+  default, or `local-wins` to re-push the local value on the next push).
+  This satisfies the design doc's "visible warning, pick a side via flag"
+  requirement without building full per-field/CRDT merge.
 - `403 Forbidden` is never returned for a task another user owns — per the
   flat-access model, ownership doesn't gate writes; `owner_user_id` is set
   once at creation time only.
 
-**`GET /api/v1/sync/tasks?since=<ISO-8601 timestamp>`** — pull
+**`GET /api/v1/sync/tasks?since=<ISO-8601 timestamp>&limit=<n>&offset=<n>`** — pull
 ```json
 // Response 200
 {
@@ -206,30 +239,41 @@ except `/auth/register` and `/auth/login` require `Authorization: Bearer
       "updatedAt": "2026-07-13T10:00:05Z"
     }
   ],
-  "serverTime": "2026-07-13T10:05:00Z"
+  "serverTime": "2026-07-13T10:05:00Z",
+  "hasMore": false,
+  "nextOffset": null
 }
 ```
 - Returns every task with `updated_at > since` (or all tasks if `since` is
   omitted — used for a first-time pull). `serverTime` is what the client
   should store as its next `since` value, not the max `updatedAt` in the
   page, to avoid missing rows written between the query and the response.
+  When a pull spans multiple pages (see below), the client stores the
+  **last** page's `serverTime`, not the first's.
+- **Pagination (§4.5)**: `limit` defaults to 200, clamped to a max of 500;
+  `offset` defaults to 0. `hasMore`/`nextOffset` let the caller page
+  through results larger than one `limit`. `ariadne sync pull` loops
+  internally until `hasMore` is `false`, transparently to the user — no
+  new CLI flags were needed for this.
 - Note this is the feed `ariadne sync pull` uses — by default it only
   updates tasks the calling workspace has already linked via `remote_id`
   (see design doc §4.6.4); tasks from other workspaces still appear here
   but are skipped client-side unless `--import-new` is passed. When
   `--import-new` is used, the client does **not** rely on this `since`-
   filtered feed to find unlinked tasks — instead it separately calls
-  `GET /tasks/all` (§4.4, no `since` filtering) and imports any task not
+  `GET /tasks/all` (§4.2, no `since` filtering) and imports any task not
   yet linked locally (via `TaskStore.insertPulledTask`, using that
   response's `createdAt`/`updatedAt`). This decouples import-new from the
   incremental cursor above, so a task already "seen" (and skipped) by an
   earlier plain `pull` is still found and imported later, however old.
 
-**`GET /api/v1/sync/tasks/all`** — browse-only listing of every task on the
-server, regardless of whether the caller's workspace has ever linked it.
-Backs `ariadne sync list-remote`. No `since` filtering (always returns the
-full set, newest-updated first) — this is a small-scale browsing endpoint,
-not the incremental sync feed.
+**`GET /api/v1/sync/tasks/all?limit=<n>&offset=<n>`** — browse-only listing
+of every task on the server, regardless of whether the caller's workspace
+has ever linked it. Backs `ariadne sync list-remote`. No `since` filtering
+(always returns tasks ordered newest-updated first) — paginated the same
+way as `GET /tasks` (§4.5): `limit`/`offset` query params, `hasMore`/
+`nextOffset` in the response. Both `ariadne sync list-remote` and
+`--import-new` page through this endpoint internally until exhausted.
 ```json
 // Response 200
 {
@@ -245,7 +289,9 @@ not the incremental sync feed.
       "createdAt": "2026-07-01T12:00:00Z",
       "updatedAt": "2026-07-13T10:00:05Z"
     }
-  ]
+  ],
+  "hasMore": false,
+  "nextOffset": null
 }
 ```
 
@@ -262,6 +308,7 @@ immutable once written, matching the local schema's append-only design)
       "remoteTaskId": "9a3f...",  // the task's remote id — must already exist
       "level": "milestone",
       "summary": "...",
+      "workspaceLabel": "laptop1:org/atom",  // optional — see §2.1; recorded from the pushing account/workspace, independent of the task's
       "createdAt": "2026-07-13T10:00:00Z"
     }
   ]
@@ -278,11 +325,107 @@ immutable once written, matching the local schema's append-only design)
 // Response 200
 {
   "checkpoints": [
-    { "remoteId": "7b21...", "level": "milestone", "summary": "...", "createdAt": "2026-07-13T10:00:00Z" }
+    { "remoteId": "7b21...", "level": "milestone", "summary": "...", "workspaceLabel": "laptop1:org/atom", "createdAt": "2026-07-13T10:00:00Z" }
   ],
   "serverTime": "2026-07-13T10:05:00Z"
 }
 ```
+
+### 4.4 Pagination
+
+`GET /api/v1/sync/tasks` and `GET /api/v1/sync/tasks/all` both accept
+`limit`/`offset` query params:
+- `limit` — default 200, clamped server-side to a max of 500.
+- `offset` — default 0.
+
+Both responses include `hasMore: boolean` and `nextOffset: number | null`
+(`null` once exhausted). The server fetches `limit + 1` rows internally to
+detect `hasMore` cheaply, without a separate `COUNT(*)` query, then trims
+the extra row before returning.
+
+This is purely an internal scalability safeguard for teams/servers with
+many tasks — it does not add any new CLI flags. `ariadne sync pull` and
+`ariadne sync list-remote` (including the `--import-new` browse pass) loop
+through pages automatically until `hasMore` is `false`, accumulating the
+full result before acting on it, so behavior is unchanged from the user's
+perspective regardless of how many tasks exist on the server.
+
+### 4.6 Sync — todos, decisions, errors, open questions, commands
+
+Extends sync coverage beyond tasks/checkpoints to the rest of a task's
+curated content, mirroring the tables in `packages/core/src/schema.ts`.
+`files`/`commits` are deliberately **not** included (see §1) — this section
+covers only `todos`, `decisions`, `errors`, `open_questions`, `commands`.
+
+**Todos** get full bidirectional sync (like tasks): push is an upsert keyed
+on `remoteId` (`null` → insert, present → update), and a local edit made
+after the first push (e.g. marking one done) is correctly re-detected and
+re-pushed on the next `sync push`, since `todos.updated_at` is bumped on
+every mutation and compared against `synced_at`.
+
+**Decisions, errors, open questions, commands** get **create-once** sync,
+identical in spirit to checkpoints (§4.3): push is insert-only (no
+`remoteId` in the push payload — there's nothing to upsert), and pull is a
+`since`-cursor scan by `created_at`. **This is a known, deliberate
+limitation**: none of these four have an `updated_at` column, so a local
+edit made *after* the initial push — editing a decision's rationale,
+resolving an error, resolving an open question, editing a command's summary
+— is **not** automatically detected or re-pushed in this phase. The first
+push of each row is what reaches the server; later local edits stay local
+until a future phase adds per-row update tracking for these four types.
+
+**`POST /api/v1/sync/todos`** — push (upsert by `remoteId`)
+```json
+// Request
+{
+  "todos": [
+    {
+      "localId": "01J...",
+      "remoteId": null,                 // null on first push; the server's id on subsequent updates
+      "remoteTaskId": "9a3f...",         // must already exist
+      "text": "Write tests",
+      "status": "pending",               // pending | done | blocked
+      "workspaceLabel": "laptop1:org/atom",
+      "createdAt": "2026-07-13T10:00:00Z",
+      "updatedAt": "2026-07-13T10:00:00Z"
+    }
+  ]
+}
+// Response 200
+{ "results": [ { "localId": "01J...", "remoteId": "7b21...", "updatedAt": "2026-07-13T10:00:00Z" } ] }
+```
+- `404 Not Found` (`task_not_found`) if `remoteTaskId` doesn't exist (on a first push).
+- `404 Not Found` (`todo_not_found`) if `remoteId` doesn't exist (on an update push).
+
+**`GET /api/v1/sync/todos?taskRemoteId=<id>&since=<ISO-8601>`** — pull, filtered by `updated_at > since`
+```json
+// Response 200
+{
+  "todos": [
+    { "remoteId": "7b21...", "text": "Write tests", "status": "done", "workspaceLabel": "laptop1:org/atom", "createdAt": "...", "updatedAt": "..." }
+  ],
+  "serverTime": "2026-07-13T10:05:00Z"
+}
+```
+
+**`POST /api/v1/sync/decisions`** / **`GET /api/v1/sync/decisions?taskRemoteId=<id>&since=<ISO-8601>`**
+— same create-only push / since-cursor pull shape as checkpoints, with
+fields `text`, `rationale` (nullable).
+
+**`POST /api/v1/sync/errors`** / **`GET /api/v1/sync/errors?taskRemoteId=<id>&since=<ISO-8601>`**
+— fields `message`, `resolved` (boolean), `resolution` (nullable). Note:
+`resolved`/`resolution` reflect the state *at first push* only, per the
+create-once limitation above.
+
+**`POST /api/v1/sync/open-questions`** / **`GET /api/v1/sync/open-questions?taskRemoteId=<id>&since=<ISO-8601>`**
+— fields `text`, `resolved` (boolean). Response body key is `openQuestions`.
+
+**`POST /api/v1/sync/commands`** / **`GET /api/v1/sync/commands?taskRemoteId=<id>&since=<ISO-8601>`**
+— fields `cmdRedacted`, `exitCode` (nullable int), `summary` (nullable).
+
+All five push endpoints follow checkpoints' attribution model (§2.1):
+`owner_user_id` is the pushing account, `workspace_label` is the pushing
+workspace, independent of the parent task's own attribution.
 
 ## 5. Error format
 
@@ -311,14 +454,12 @@ human-readable.
   instance — see `packages/sync-server/README.md` once written for how to
   point tests at one locally / in CI.
 
-## 7. Next steps after this doc
+## 7. Status
 
-1. Scaffold `packages/sync-server` (Express + `pg`), migrations runner,
-   config loading (`DATABASE_URL`, `SYNC_SERVER_JWT_SECRET`, `PORT`).
-2. Implement `/auth/register` and `/auth/login`.
-3. Implement `/sync/tasks` push + pull.
-4. Implement `/sync/checkpoints` push + pull.
-5. Add the `remote_id`/`synced_at` columns to `packages/core` (§3) — needed
-   before any client (CLI `ariadne sync push`/`pull`) can be built.
-6. Add a test suite for all of the above.
-7. Only then: wire a client (`ariadne sync push`/`pull` CLI commands).
+Phase 1 (tasks/checkpoints), Phase 2 (todos/decisions/errors/open
+questions/commands sync, §4.6), and visible conflict detection with
+`--on-conflict` (§6) are all implemented and tested end-to-end
+(sync-server routes, CLI push/pull, MCP server + VS Code extension surfaces
+that shell out to the CLI). Remaining known gap, tracked as a deliberate
+scope decision rather than an oversight: delete/archive propagation (§2)
+— sync stays additive-only by design.

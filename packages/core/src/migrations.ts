@@ -48,6 +48,29 @@ export const MIGRATIONS: Migration[] = [
       `);
     },
   },
+  {
+    version: 3,
+    description: 'Add remote_id/synced_at columns to todos/decisions/errors/open_questions/commands for cloud sync support',
+    up: (db) => {
+      db.exec(`
+        ALTER TABLE todos ADD COLUMN remote_id TEXT;
+        ALTER TABLE todos ADD COLUMN synced_at TEXT;
+        ALTER TABLE decisions ADD COLUMN remote_id TEXT;
+        ALTER TABLE decisions ADD COLUMN synced_at TEXT;
+        ALTER TABLE errors ADD COLUMN remote_id TEXT;
+        ALTER TABLE errors ADD COLUMN synced_at TEXT;
+        ALTER TABLE open_questions ADD COLUMN remote_id TEXT;
+        ALTER TABLE open_questions ADD COLUMN synced_at TEXT;
+        ALTER TABLE commands ADD COLUMN remote_id TEXT;
+        ALTER TABLE commands ADD COLUMN synced_at TEXT;
+        CREATE INDEX IF NOT EXISTS idx_todos_remote_id ON todos(remote_id);
+        CREATE INDEX IF NOT EXISTS idx_decisions_remote_id ON decisions(remote_id);
+        CREATE INDEX IF NOT EXISTS idx_errors_remote_id ON errors(remote_id);
+        CREATE INDEX IF NOT EXISTS idx_open_questions_remote_id ON open_questions(remote_id);
+        CREATE INDEX IF NOT EXISTS idx_commands_remote_id ON commands(remote_id);
+      `);
+    },
+  },
 ];
 
 function getSchemaVersion(db: Database.Database): number {

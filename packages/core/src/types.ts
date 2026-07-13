@@ -81,6 +81,8 @@ export interface Decision {
   rationale: string | null;
   supersedesId: string | null;
   createdAt: string;
+  remoteId: string | null;
+  syncedAt: string | null;
 }
 
 export interface NewDecision {
@@ -99,6 +101,8 @@ export interface Todo {
   sourceCheckpointId: string | null;
   createdAt: string;
   updatedAt: string;
+  remoteId: string | null;
+  syncedAt: string | null;
 }
 
 export interface NewTodo {
@@ -115,6 +119,8 @@ export interface Command {
   exitCode: number | null;
   summary: string | null;
   createdAt: string;
+  remoteId: string | null;
+  syncedAt: string | null;
 }
 
 export interface NewCommand {
@@ -131,6 +137,8 @@ export interface TaskError {
   resolved: boolean;
   resolution: string | null;
   createdAt: string;
+  remoteId: string | null;
+  syncedAt: string | null;
 }
 
 export interface NewTaskError {
@@ -146,6 +154,8 @@ export interface OpenQuestion {
   text: string;
   resolved: boolean;
   createdAt: string;
+  remoteId: string | null;
+  syncedAt: string | null;
 }
 
 export interface NewOpenQuestion {

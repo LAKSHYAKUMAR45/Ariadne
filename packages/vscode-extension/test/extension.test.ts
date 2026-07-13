@@ -2,11 +2,16 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
+import { execFileSync } from 'node:child_process';
+
+vi.mock('node:child_process', () => ({ execFileSync: vi.fn() }));
 
 // Minimal fake of the `vscode` module surface this extension touches, so we
 // can exercise extension.ts's error-handling paths without a real extension
 // host. Must be declared before importing extension.ts/workspace.ts.
 let workspaceFolders: { uri: { fsPath: string } }[] | undefined;
+let registeredCommands: Record<string, (...args: unknown[]) => unknown>;
+let quickPickChoice: unknown;
 
 vi.mock('vscode', () => {
   class ThemeIcon {
@@ -46,6 +51,7 @@ vi.mock('vscode', () => {
     window: {
       createOutputChannel: () => ({
         appendLine: (line: string) => outputLines.push(line),
+        show: () => {},
         dispose: () => {},
       }),
       createStatusBarItem: () => ({
@@ -61,9 +67,13 @@ vi.mock('vscode', () => {
       showWarningMessage: vi.fn(),
       showErrorMessage: vi.fn(),
       showInformationMessage: vi.fn(),
+      showQuickPick: vi.fn(() => Promise.resolve(quickPickChoice)),
     },
     commands: {
-      registerCommand: (_id: string, _fn: unknown) => ({ dispose: () => {} }),
+      registerCommand: (id: string, fn: (...args: unknown[]) => unknown) => {
+        registeredCommands[id] = fn;
+        return { dispose: () => {} };
+      },
     },
     workspace: {
       get workspaceFolders() {
@@ -100,6 +110,8 @@ describe('chat participant error handling', () => {
 
   beforeEach(async () => {
     outputLines = [];
+    registeredCommands = {};
+    vi.mocked(execFileSync).mockReset();
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ariadne-ext-test-'));
     fs.mkdirSync(path.join(tmpDir, '.git'));
     workspaceFolders = [{ uri: { fsPath: tmpDir } }];
@@ -193,5 +205,36 @@ describe('chat participant error handling', () => {
     expect(result && 'errorDetails' in result ? result.errorDetails?.message : undefined).toBeTruthy();
     expect(markdownCalls.join('\n')).toMatch(/couldn't open its task database|went wrong/i);
     expect(outputLines.length).toBeGreaterThan(0);
+  });
+
+  it('ariadne.syncPush shells out to `ariadne sync push` and logs its output', async () => {
+    vi.mocked(execFileSync).mockReturnValue('Pushed 1 task.\n');
+    await registeredCommands['ariadne.syncPush']();
+    expect(execFileSync).toHaveBeenCalledWith('ariadne', ['sync', 'push'], expect.objectContaining({ cwd: tmpDir }));
+    expect(outputLines.some((l) => l.includes('Pushed 1 task'))).toBe(true);
+  });
+
+  it('ariadne.syncPull respects the quick-pick choice, including "import new"', async () => {
+    vi.mocked(execFileSync).mockReturnValue('Pulled 2 tasks.\n');
+    quickPickChoice = { label: 'Pull (import new)', importNew: true };
+    await registeredCommands['ariadne.syncPull']();
+    expect(execFileSync).toHaveBeenCalledWith('ariadne', ['sync', 'pull', '--import-new'], expect.objectContaining({ cwd: tmpDir }));
+  });
+
+  it('ariadne.syncPull does nothing if the quick pick is dismissed', async () => {
+    quickPickChoice = undefined;
+    await registeredCommands['ariadne.syncPull']();
+    expect(execFileSync).not.toHaveBeenCalled();
+  });
+
+  it('ariadne.syncListRemote surfaces a CLI failure as an error toast', async () => {
+    const vscode = await import('vscode');
+    vi.mocked(execFileSync).mockImplementation(() => {
+      const err = new Error('Command failed') as Error & { stderr?: string };
+      err.stderr = 'Not logged in.';
+      throw err;
+    });
+    await registeredCommands['ariadne.syncListRemote']();
+    expect(vi.mocked(vscode.window.showErrorMessage)).toHaveBeenCalledWith(expect.stringContaining('Not logged in'));
   });
 });

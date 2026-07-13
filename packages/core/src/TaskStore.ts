@@ -124,6 +124,8 @@ interface DecisionRow {
   rationale: string | null;
   supersedes_id: string | null;
   created_at: string;
+  remote_id: string | null;
+  synced_at: string | null;
 }
 
 function rowToDecision(row: DecisionRow): Decision {
@@ -135,6 +137,8 @@ function rowToDecision(row: DecisionRow): Decision {
     rationale: row.rationale,
     supersedesId: row.supersedes_id,
     createdAt: row.created_at,
+    remoteId: row.remote_id,
+    syncedAt: row.synced_at,
   };
 }
 
@@ -146,6 +150,8 @@ interface TodoRow {
   source_checkpoint_id: string | null;
   created_at: string;
   updated_at: string;
+  remote_id: string | null;
+  synced_at: string | null;
 }
 
 function rowToTodo(row: TodoRow): Todo {
@@ -157,6 +163,8 @@ function rowToTodo(row: TodoRow): Todo {
     sourceCheckpointId: row.source_checkpoint_id,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+    remoteId: row.remote_id,
+    syncedAt: row.synced_at,
   };
 }
 
@@ -167,6 +175,8 @@ interface CommandRow {
   exit_code: number | null;
   summary: string | null;
   created_at: string;
+  remote_id: string | null;
+  synced_at: string | null;
 }
 
 function rowToCommand(row: CommandRow): Command {
@@ -177,6 +187,8 @@ function rowToCommand(row: CommandRow): Command {
     exitCode: row.exit_code,
     summary: row.summary,
     createdAt: row.created_at,
+    remoteId: row.remote_id,
+    syncedAt: row.synced_at,
   };
 }
 
@@ -187,6 +199,8 @@ interface ErrorRow {
   resolved: number;
   resolution: string | null;
   created_at: string;
+  remote_id: string | null;
+  synced_at: string | null;
 }
 
 function rowToError(row: ErrorRow): TaskError {
@@ -197,6 +211,8 @@ function rowToError(row: ErrorRow): TaskError {
     resolved: Boolean(row.resolved),
     resolution: row.resolution,
     createdAt: row.created_at,
+    remoteId: row.remote_id,
+    syncedAt: row.synced_at,
   };
 }
 
@@ -206,6 +222,8 @@ interface OpenQuestionRow {
   text: string;
   resolved: number;
   created_at: string;
+  remote_id: string | null;
+  synced_at: string | null;
 }
 
 function rowToOpenQuestion(row: OpenQuestionRow): OpenQuestion {
@@ -215,6 +233,8 @@ function rowToOpenQuestion(row: OpenQuestionRow): OpenQuestion {
     text: row.text,
     resolved: Boolean(row.resolved),
     createdAt: row.created_at,
+    remoteId: row.remote_id,
+    syncedAt: row.synced_at,
   };
 }
 
@@ -367,6 +387,19 @@ export class TaskStore {
     this.db
       .prepare(`UPDATE tasks SET remote_id = ?, synced_at = ? WHERE id = ?`)
       .run(remoteId, syncedAt, id);
+  }
+
+  /**
+   * Clears a task's link to the sync server (`remote_id`/`synced_at` both
+   * reset to null) without touching the server or the task's own content.
+   * Used by `ariadne sync unlink` when a task was linked in error, or a
+   * user wants a clean local copy that no longer participates in sync. A
+   * later `sync push` will treat it as brand-new and create a fresh remote
+   * row (the old server-side row, if any, is left as-is — this is purely a
+   * local un-linking, not a delete).
+   */
+  unlinkTaskFromRemote(id: string): void {
+    this.db.prepare(`UPDATE tasks SET remote_id = NULL, synced_at = NULL WHERE id = ?`).run(id);
   }
 
   /** Looks up a task by its cloud-sync-server id (used when pulling to find the matching local row, if any). */
@@ -675,6 +708,41 @@ export class TaskStore {
     this.touchTask(existing.taskId);
   }
 
+  /**
+   * Decisions never pushed yet (`remoteId` null). Like checkpoints,
+   * decisions are treated as create-once for sync purposes: an edit made
+   * locally after the initial push (via `updateDecision`) is not
+   * automatically detected/re-pushed in this phase, since decisions have
+   * no `updated_at` column to compare against `synced_at`.
+   */
+  listDecisionsNeedingPush(taskId?: string): Decision[] {
+    const rows = taskId
+      ? (this.db.prepare(`SELECT * FROM decisions WHERE remote_id IS NULL AND task_id = ? ORDER BY created_at ASC`).all(taskId) as DecisionRow[])
+      : (this.db.prepare(`SELECT * FROM decisions WHERE remote_id IS NULL ORDER BY created_at ASC`).all() as DecisionRow[]);
+    return rows.map(rowToDecision);
+  }
+
+  setDecisionRemoteSync(id: string, remoteId: string, syncedAt: string): void {
+    this.db.prepare(`UPDATE decisions SET remote_id = ?, synced_at = ? WHERE id = ?`).run(remoteId, syncedAt, id);
+  }
+
+  getDecisionByRemoteId(remoteId: string): Decision | undefined {
+    const row = this.db.prepare(`SELECT * FROM decisions WHERE remote_id = ?`).get(remoteId) as DecisionRow | undefined;
+    return row ? rowToDecision(row) : undefined;
+  }
+
+  /** Inserts a decision pulled from the sync server that doesn't exist locally yet. Does not touch the parent task's `updatedAt` — inbound data, not a local mutation. */
+  insertPulledDecision(input: { taskId: string; remoteId: string; text: string; rationale: string | null; createdAt: string; syncedAt: string }): Decision {
+    const id = ulid();
+    this.db
+      .prepare(
+        `INSERT INTO decisions (id, task_id, text, rationale, created_at, remote_id, synced_at)
+         VALUES (@id, @taskId, @text, @rationale, @createdAt, @remoteId, @syncedAt)`,
+      )
+      .run({ id, taskId: input.taskId, text: input.text, rationale: input.rationale, createdAt: input.createdAt, remoteId: input.remoteId, syncedAt: input.syncedAt });
+    return this.getDecision(id)!;
+  }
+
   // ---------------------------------------------------------------------
   // Todos
   // ---------------------------------------------------------------------
@@ -744,6 +812,43 @@ export class TaskStore {
     return rows.map(rowToTodo);
   }
 
+  /** Todos never pushed, or pushed but changed locally since (`updated_at > synced_at`) — mirrors `listTasksNeedingPush`, since todos (unlike decisions/errors/commands/open_questions) track `updated_at`. */
+  listTodosNeedingPush(taskId?: string): Todo[] {
+    const sql = `SELECT * FROM todos WHERE (remote_id IS NULL OR synced_at IS NULL OR updated_at > synced_at)${
+      taskId ? ' AND task_id = ?' : ''
+    } ORDER BY created_at ASC`;
+    const rows = (taskId ? this.db.prepare(sql).all(taskId) : this.db.prepare(sql).all()) as TodoRow[];
+    return rows.map(rowToTodo);
+  }
+
+  setTodoRemoteSync(id: string, remoteId: string, syncedAt: string): void {
+    this.db.prepare(`UPDATE todos SET remote_id = ?, synced_at = ? WHERE id = ?`).run(remoteId, syncedAt, id);
+  }
+
+  getTodoByRemoteId(remoteId: string): Todo | undefined {
+    const row = this.db.prepare(`SELECT * FROM todos WHERE remote_id = ?`).get(remoteId) as TodoRow | undefined;
+    return row ? rowToTodo(row) : undefined;
+  }
+
+  /** Applies a remote update to an already-linked local todo (e.g. a teammate marked it done). Does not touch the parent task's `updatedAt` — inbound data, not a local mutation. */
+  applyPulledTodo(id: string, updates: { text: string; status: TodoStatus; updatedAt: string; syncedAt: string }): void {
+    this.db
+      .prepare(`UPDATE todos SET text = ?, status = ?, updated_at = ?, synced_at = ? WHERE id = ?`)
+      .run(updates.text, updates.status, updates.updatedAt, updates.syncedAt, id);
+  }
+
+  /** Inserts a todo pulled from the sync server that doesn't exist locally yet, preserving the server's timestamps and marking it synced immediately. */
+  insertPulledTodo(input: { taskId: string; remoteId: string; text: string; status: TodoStatus; createdAt: string; updatedAt: string; syncedAt: string }): Todo {
+    const id = ulid();
+    this.db
+      .prepare(
+        `INSERT INTO todos (id, task_id, text, status, created_at, updated_at, remote_id, synced_at)
+         VALUES (@id, @taskId, @text, @status, @createdAt, @updatedAt, @remoteId, @syncedAt)`,
+      )
+      .run({ id, taskId: input.taskId, text: input.text, status: input.status, createdAt: input.createdAt, updatedAt: input.updatedAt, remoteId: input.remoteId, syncedAt: input.syncedAt });
+    return this.getTodo(id)!;
+  }
+
   // ---------------------------------------------------------------------
   // Commands
   // ---------------------------------------------------------------------
@@ -777,6 +882,36 @@ export class TaskStore {
       limit ? this.db.prepare(sql).all(taskId, limit) : this.db.prepare(sql).all(taskId)
     ) as CommandRow[];
     return rows.map(rowToCommand);
+  }
+
+  /** Commands never pushed yet (`remoteId` null). Like checkpoints, commands are append-only/immutable locally — create-once for sync purposes. */
+  listCommandsNeedingPush(taskId?: string): Command[] {
+    const rows = taskId
+      ? (this.db.prepare(`SELECT * FROM commands WHERE remote_id IS NULL AND task_id = ? ORDER BY created_at ASC`).all(taskId) as CommandRow[])
+      : (this.db.prepare(`SELECT * FROM commands WHERE remote_id IS NULL ORDER BY created_at ASC`).all() as CommandRow[]);
+    return rows.map(rowToCommand);
+  }
+
+  setCommandRemoteSync(id: string, remoteId: string, syncedAt: string): void {
+    this.db.prepare(`UPDATE commands SET remote_id = ?, synced_at = ? WHERE id = ?`).run(remoteId, syncedAt, id);
+  }
+
+  getCommandByRemoteId(remoteId: string): Command | undefined {
+    const row = this.db.prepare(`SELECT * FROM commands WHERE remote_id = ?`).get(remoteId) as CommandRow | undefined;
+    return row ? rowToCommand(row) : undefined;
+  }
+
+  /** Inserts a command pulled from the sync server that doesn't exist locally yet. Does not touch the parent task's `updatedAt` — inbound data, not a local mutation. */
+  insertPulledCommand(input: { taskId: string; remoteId: string; cmdRedacted: string; exitCode: number | null; summary: string | null; createdAt: string; syncedAt: string }): Command {
+    const id = ulid();
+    this.db
+      .prepare(
+        `INSERT INTO commands (id, task_id, cmd_redacted, exit_code, summary, created_at, remote_id, synced_at)
+         VALUES (@id, @taskId, @cmdRedacted, @exitCode, @summary, @createdAt, @remoteId, @syncedAt)`,
+      )
+      .run({ id, taskId: input.taskId, cmdRedacted: input.cmdRedacted, exitCode: input.exitCode, summary: input.summary, createdAt: input.createdAt, remoteId: input.remoteId, syncedAt: input.syncedAt });
+    const row = this.db.prepare(`SELECT * FROM commands WHERE id = ?`).get(id) as CommandRow;
+    return rowToCommand(row);
   }
 
   // ---------------------------------------------------------------------
@@ -853,6 +988,35 @@ export class TaskStore {
     return rows.map(rowToError);
   }
 
+  /** Errors never pushed yet (`remoteId` null). Like checkpoints, errors are create-once for sync purposes: resolving one locally after the initial push is not automatically re-pushed in this phase (no `updated_at` to compare against `synced_at`). */
+  listErrorsNeedingPush(taskId?: string): TaskError[] {
+    const rows = taskId
+      ? (this.db.prepare(`SELECT * FROM errors WHERE remote_id IS NULL AND task_id = ? ORDER BY created_at ASC`).all(taskId) as ErrorRow[])
+      : (this.db.prepare(`SELECT * FROM errors WHERE remote_id IS NULL ORDER BY created_at ASC`).all() as ErrorRow[]);
+    return rows.map(rowToError);
+  }
+
+  setErrorRemoteSync(id: string, remoteId: string, syncedAt: string): void {
+    this.db.prepare(`UPDATE errors SET remote_id = ?, synced_at = ? WHERE id = ?`).run(remoteId, syncedAt, id);
+  }
+
+  getErrorByRemoteId(remoteId: string): TaskError | undefined {
+    const row = this.db.prepare(`SELECT * FROM errors WHERE remote_id = ?`).get(remoteId) as ErrorRow | undefined;
+    return row ? rowToError(row) : undefined;
+  }
+
+  /** Inserts an error pulled from the sync server that doesn't exist locally yet. Does not touch the parent task's `updatedAt` — inbound data, not a local mutation. */
+  insertPulledError(input: { taskId: string; remoteId: string; message: string; resolved: boolean; resolution: string | null; createdAt: string; syncedAt: string }): TaskError {
+    const id = ulid();
+    this.db
+      .prepare(
+        `INSERT INTO errors (id, task_id, message, resolved, resolution, created_at, remote_id, synced_at)
+         VALUES (@id, @taskId, @message, @resolved, @resolution, @createdAt, @remoteId, @syncedAt)`,
+      )
+      .run({ id, taskId: input.taskId, message: input.message, resolved: input.resolved ? 1 : 0, resolution: input.resolution, createdAt: input.createdAt, remoteId: input.remoteId, syncedAt: input.syncedAt });
+    return this.getError(id)!;
+  }
+
   // ---------------------------------------------------------------------
   // Open questions
   // ---------------------------------------------------------------------
@@ -926,6 +1090,35 @@ export class TaskStore {
           .prepare(`SELECT * FROM open_questions WHERE task_id = ? ORDER BY created_at DESC`)
           .all(taskId) as OpenQuestionRow[]);
     return rows.map(rowToOpenQuestion);
+  }
+
+  /** Open questions never pushed yet (`remoteId` null). Create-once for sync purposes, same as errors/decisions/commands. */
+  listOpenQuestionsNeedingPush(taskId?: string): OpenQuestion[] {
+    const rows = taskId
+      ? (this.db.prepare(`SELECT * FROM open_questions WHERE remote_id IS NULL AND task_id = ? ORDER BY created_at ASC`).all(taskId) as OpenQuestionRow[])
+      : (this.db.prepare(`SELECT * FROM open_questions WHERE remote_id IS NULL ORDER BY created_at ASC`).all() as OpenQuestionRow[]);
+    return rows.map(rowToOpenQuestion);
+  }
+
+  setOpenQuestionRemoteSync(id: string, remoteId: string, syncedAt: string): void {
+    this.db.prepare(`UPDATE open_questions SET remote_id = ?, synced_at = ? WHERE id = ?`).run(remoteId, syncedAt, id);
+  }
+
+  getOpenQuestionByRemoteId(remoteId: string): OpenQuestion | undefined {
+    const row = this.db.prepare(`SELECT * FROM open_questions WHERE remote_id = ?`).get(remoteId) as OpenQuestionRow | undefined;
+    return row ? rowToOpenQuestion(row) : undefined;
+  }
+
+  /** Inserts an open question pulled from the sync server that doesn't exist locally yet. Does not touch the parent task's `updatedAt` — inbound data, not a local mutation. */
+  insertPulledOpenQuestion(input: { taskId: string; remoteId: string; text: string; resolved: boolean; createdAt: string; syncedAt: string }): OpenQuestion {
+    const id = ulid();
+    this.db
+      .prepare(
+        `INSERT INTO open_questions (id, task_id, text, resolved, created_at, remote_id, synced_at)
+         VALUES (@id, @taskId, @text, @resolved, @createdAt, @remoteId, @syncedAt)`,
+      )
+      .run({ id, taskId: input.taskId, text: input.text, resolved: input.resolved ? 1 : 0, createdAt: input.createdAt, remoteId: input.remoteId, syncedAt: input.syncedAt });
+    return this.getOpenQuestion(id)!;
   }
 
   // ---------------------------------------------------------------------

@@ -5,6 +5,7 @@ import { closeAllStores, closeStore } from './storeCache.js';
 import { registerPassiveCapture } from './passiveCapture.js';
 import { AriadneTreeDataProvider } from './treeView.js';
 import { findWorkspaceRoot } from '@ariadne-dev/core';
+import { syncPush, syncPull, syncListRemote } from './syncCommands.js';
 
 let output: vscode.OutputChannel;
 let statusBarItem: vscode.StatusBarItem | undefined;
@@ -144,6 +145,70 @@ export function activate(context: vscode.ExtensionContext): void {
         void vscode.window.showErrorMessage(`Ariadne: failed to show status — ${message}`);
       }
     }),
+  );
+
+  registerSyncCommands(context);
+}
+
+/**
+ * Registers command-palette entries for cloud sync (`ariadne sync push/pull/
+ * list-remote`), shelling out to the `ariadne` CLI (see syncCommands.ts) —
+ * login/register/logout are deliberately left CLI-only since they handle
+ * credentials. Output is streamed to the "Ariadne" output channel (which is
+ * revealed) since sync output can be multi-line (e.g. a `list-remote`
+ * listing many tasks), and errors surface via a toast + the same channel.
+ */
+function registerSyncCommands(context: vscode.ExtensionContext): void {
+  function requireCwd(): string | undefined {
+    const root = resolveWorkspaceRoot();
+    if (!root) {
+      void vscode.window.showWarningMessage('Ariadne: open a folder/workspace first.');
+      return undefined;
+    }
+    return root;
+  }
+
+  async function run(label: string, action: (cwd: string) => string): Promise<void> {
+    const cwd = requireCwd();
+    if (!cwd) return;
+    try {
+      const out = action(cwd);
+      output.appendLine(`[${new Date().toISOString()}] ${label}\n${out}`);
+      output.show(true);
+      void vscode.window.showInformationMessage(`Ariadne: ${label} succeeded — see the "Ariadne" output channel for details.`);
+      refreshStatusBar();
+      refreshTreeView();
+    } catch (err) {
+      const message = logError(label, err);
+      output.show(true);
+      void vscode.window.showErrorMessage(`Ariadne: ${label} failed — ${message}`);
+    }
+  }
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('ariadne.syncPush', () => run('sync push', (cwd) => syncPush({ cwd }))),
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('ariadne.syncPull', async () => {
+      const choice = await vscode.window.showQuickPick(
+        [
+          { label: 'Pull', description: 'Update already-linked local tasks only', importNew: false },
+          {
+            label: 'Pull (import new)',
+            description: 'Also create local tasks for remote tasks this workspace has never linked',
+            importNew: true,
+          },
+        ],
+        { placeHolder: 'Ariadne: sync pull' },
+      );
+      if (!choice) return;
+      await run(choice.importNew ? 'sync pull --import-new' : 'sync pull', (cwd) => syncPull({ cwd, importNew: choice.importNew }));
+    }),
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('ariadne.syncListRemote', () => run('sync list-remote', (cwd) => syncListRemote({ cwd }))),
   );
 }
 

@@ -160,12 +160,15 @@ ariadne workspace forget <root>                # remove one workspace from the r
 ariadne backup [--out <dir>]                   # snapshot state.db + registry.db
 ariadne restore <path> [--registry]            # restore a snapshot
 
-ariadne sync register <username> <password> --server <url>  # create an account on a sync server, then log in
-ariadne sync login <username> <password> --server <url>     # log in, storing a token in ~/.ariadne/sync-config.json
-ariadne sync logout                            # forget the locally-stored token (server account is untouched)
-ariadne sync push [--task <id>]                # push new/changed tasks + checkpoints to the sync server
-ariadne sync pull [--task <id>] [--import-new]  # pull tasks/checkpoints changed by teammates/other machines
-ariadne sync list-remote                       # browse every task on the server, including ones never linked here
+ariadne sync register <username> <password> --server <url> [--profile <name>]  # create an account on a sync server, then log in
+ariadne sync login <username> <password> --server <url> [--profile <name>]     # log in, storing a token in ~/.ariadne/sync-config.json
+ariadne sync logout [--profile <name>]         # forget the locally-stored token (server account is untouched)
+ariadne sync push [--task <id>] [--profile <name>]                # push new/changed tasks, checkpoints, todos, decisions, errors, open questions, commands
+ariadne sync pull [--task <id>] [--import-new] [--on-conflict <remote-wins|local-wins>] [--profile <name>]  # pull the same, changed by teammates/other machines
+ariadne sync list-remote [--profile <name>]    # browse every task on the server, including ones never linked here
+ariadne sync unlink <taskId>                   # clear a task's link to the sync server, locally only
+ariadne sync profile list                      # list every configured sync profile, flagging which is current
+ariadne sync profile use <name>                # switch which sync profile is current
 ```
 
 Run `ariadne --help` or `ariadne <command> --help` for the authoritative list
@@ -218,9 +221,13 @@ Once connected, the assistant can call `task_new`, `task_list`, `task_use`,
 `todo_add`/`list`/`done`/`reopen`/`block`/`edit`/`delete`, `decision_add`/
 `list`/`edit`/`delete`, `error_add`/`list`/`resolve`/`reopen`/`edit`/`delete`,
 `question_add`/`list`/`resolve`/`reopen`/`edit`/`delete`, `search`,
-`get_context`, `git_sync`, and `export_task` — see
+`get_context`, `git_sync`, `export_task`, and cloud sync tools `sync_push`,
+`sync_pull`, `sync_list_remote`, `sync_profile_list` — see
 [`packages/mcp-server/README.md`](../packages/mcp-server/README.md) for the
-full reference and exact input shapes. In practice, you'd typically start a
+full reference and exact input shapes. The sync tools shell out to the
+`ariadne` CLI (which must be installed and on `PATH`, and already logged in
+via `ariadne sync login` — the MCP server never handles credentials itself).
+In practice, you'd typically start a
 conversation with something like *"check my current Ariadne task before we
 start"* — the assistant calls `get_context` and picks up right where a
 previous session left off, even if that previous session was in a
@@ -260,7 +267,14 @@ needed:
   whatever task is current, as long as you've started one.
 - **Command Palette** — **Ariadne: New Task** and **Ariadne: Show Task
   Status** work without opening chat at all; **Ariadne: Select Workspace
-  Folder** matters if you have a multi-root workspace open.
+  Folder** matters if you have a multi-root workspace open. Cloud sync is
+  also available from the palette without opening a terminal: **Ariadne:
+  Sync Push**, **Ariadne: Sync Pull** (prompts whether to also import
+  tasks this workspace has never linked), and **Ariadne: Sync List
+  Remote** — all shell out to the `ariadne` CLI (must be installed, on
+  `PATH`, and already logged in via `ariadne sync login`) and stream
+  output to the "Ariadne" output channel. Login/register/logout stay
+  CLI-only since they handle credentials.
 
 A **status bar item** always shows the current task's title (or "no task"
 if none is set yet for this workspace); click it to open `/status` or start
@@ -324,19 +338,33 @@ ariadne sync login <username> <password> --server https://your-sync-server     #
 ariadne sync push                       # push local task/checkpoint changes
 ariadne sync pull                       # pull changes made by teammates / other machines
 ariadne sync list-remote                # browse every task on the server, including ones never linked here
+ariadne sync unlink <taskId>            # clear a task's link to the sync server, locally only
 ariadne sync logout                     # forget the locally-stored token
 ```
 
 What to know:
-- **Scope (Phase 1):** only `tasks` and `checkpoints` sync today — todos,
-  decisions, open questions, commands, and files stay local-only for now.
+- **Scope:** `tasks`, `checkpoints`, `todos`, `decisions`, `errors`, `open
+  questions`, and `commands` all sync. `files`/`commits` stay local-only —
+  they're git/workspace-derived, not curated text content.
 - **`push`** sends every task that's new or changed since it was last
   synced (or just `--task <id>`), then pushes any not-yet-synced
-  checkpoints for those tasks. The server assigns each a permanent id,
-  stored locally as that task's/checkpoint's `remote_id`. Each push also
-  sends a `workspaceLabel` (e.g. `laptop1:org/atom` — hostname + git
-  remote/folder name), so the server (and teammates) can tell which
-  machine/repo a task came from, not just which user account pushed it.
+  checkpoints/todos/decisions/errors/open questions/commands for those
+  tasks. The server assigns each a permanent id, stored locally as that
+  row's `remote_id`. Each push also sends a `workspaceLabel` (e.g.
+  `laptop1:org/atom` — hostname + git remote/folder name), so the server
+  (and teammates) can tell which machine/repo something came from, not
+  just which user account pushed it — every sub-entity records its own
+  `owner`/`workspaceLabel` independent of its parent task's, since a
+  teammate can add content to a task they didn't originate.
+- **Todos sync bidirectionally**, just like tasks: editing a todo's text or
+  marking it done/blocked *after* it was first pushed is detected and
+  re-pushed on the next `sync push`.
+- **Decisions, errors, open questions, and commands sync create-once**
+  (like checkpoints): the first push of each is what reaches the server.
+  **Known limitation:** editing a decision's rationale, resolving an error
+  or open question, or editing a command's summary *after* its first push
+  does **not** automatically propagate to the server in this phase — only
+  the state at first push is captured remotely.
 - **`pull`** applies remote changes to tasks *already linked* to this
   workspace (i.e., ones pushed from here before) and downloads any new
   checkpoints for them. By default it does not fabricate brand-new local
@@ -344,7 +372,8 @@ What to know:
   see a list of "skipped" remote workspace labels in that case. Pass
   `ariadne sync pull --import-new` to instead create a local task for each
   of those (already linked via `remote_id`, using the server's own
-  timestamps), including pulling in their existing checkpoints.
+  timestamps), including pulling in their existing checkpoints and other
+  sub-entities.
   `--import-new` does a full browse of every remote task (not just ones
   changed since your last pull), so it always finds and imports anything
   you've never linked here, even if a plain `pull` already saw and skipped
@@ -354,14 +383,42 @@ What to know:
   you've never linked, without creating or changing anything locally. Use
   this to see what's out there *before* deciding whether to `pull
   --import-new` it.
+- **`unlink <taskId>`** clears that task's `remote_id`/`synced_at` locally
+  only — it never contacts the server, so the server-side row (if any) is
+  left exactly as it was. Use it to undo an accidental `--import-new`, or
+  to detach a task from sync entirely; a later `push` will treat the task
+  as brand-new and create a fresh remote row.
 - **Access is flat:** any account on the server can read/write any synced
   task — there's no per-task ACL. Treat the server as a shared, trusted
   team space, not a permissions boundary.
-- **Conflict resolution is "remote wins"** in Phase 1 — the simplest
-  possible rule. Real last-write-wins-by-field is a later-phase
-  improvement.
-- **No delete propagation:** archiving/deleting a task locally never
-  deletes it from the server, and there's no delete endpoint at all yet.
+- **Conflict handling is visible, with a flag to control it:** if a task
+  or todo was edited both locally and on the server since the last sync,
+  `sync pull` detects the differing field(s), prints a warning
+  (`⚠ Conflict on task/todo <id>: field "<name>" differs...`), and then
+  resolves it — `remote-wins` by default (the server's value is kept
+  locally), or `local-wins` if you pass `--on-conflict local-wins` (your
+  local value is kept and will be re-pushed on the next `sync push`).
+  This only applies to tasks and todos, the two entity types with
+  bidirectional sync; see the create-once note above for the rest.
+- **No delete propagation (by design):** archiving a task *does* sync
+  normally (`status` is just a synced field), but hard-deleting anything
+  locally — a task, or a decision/error/open question via the curation
+  delete commands — never removes it from the server; there's no delete
+  endpoint at all. This was a deliberate choice to keep sync additive-only
+  and conflict-free, not a gap to be filled later without its own design
+  pass.
+- **Multiple profiles:** one machine can stay logged into more than one
+  sync server/team via named profiles (e.g. a "work" server and a
+  "personal" one). `sync login`/`sync register` take an optional
+  `--profile <name>` (default: `"default"`) and make that profile
+  *current*; every other `sync` command accepts `--profile <name>` to
+  target a specific profile for just that one call without changing which
+  profile is current. `ariadne sync profile list` shows what's configured
+  (marking the current one with `*`), and `ariadne sync profile use <name>`
+  switches the current profile persistently. Configs from before profiles
+  existed (a bare `serverUrl`/`token`/`username` at the top level of
+  `sync-config.json`) are read transparently as an implicit `"default"`
+  profile — no manual migration needed.
 - Credentials/token are stored locally at `~/.ariadne/sync-config.json`.
 
 See [`docs/06-CLOUD-SYNC-DESIGN.md`](06-CLOUD-SYNC-DESIGN.md) for the
@@ -430,7 +487,8 @@ recoverable.
 
 Early / pre-release. The core CLI/MCP/VS Code trio is built for a single
 developer working across one or more workspaces on one machine; cloud sync
-(§9) is an optional, opt-in add-on (Phase 1: tasks + checkpoints only) for
-teams that want to share state across machines/people via a self-hosted
-server. See the main [README](../README.md) and
+(§9) is an optional, opt-in add-on (tasks, checkpoints, todos, decisions,
+errors, open questions, and commands all sync) for teams that want to
+share state across machines/people via a self-hosted server. See the main
+[README](../README.md) and
 [`docs/04-ROADMAP.md`](04-ROADMAP.md) for what's shipped vs. deferred.

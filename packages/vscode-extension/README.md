@@ -18,6 +18,11 @@ task state is identical no matter which one you use.
 - Adds two commands to the Command Palette: **Ariadne: New Task**,
   **Ariadne: Show Task Status**, and **Ariadne: Select Workspace Folder**
   (for multi-root workspaces).
+- Also adds cloud sync commands to the Command Palette — **Ariadne: Sync
+  Push**, **Ariadne: Sync Pull** (offers an "import new" option), and
+  **Ariadne: Sync List Remote** — which shell out to the `ariadne` CLI
+  (must be installed and already logged in via `ariadne sync login`) and
+  stream output to the "Ariadne" output channel.
 - Shows a **status bar item** (bottom-right) with the current task's title,
   or "no task" if none is set for the workspace — click it to jump to
   `/status` (or start a new task if there isn't one yet).

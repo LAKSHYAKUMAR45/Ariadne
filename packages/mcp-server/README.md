@@ -41,6 +41,7 @@ directory), and reads/writes `<workspace-root>/.ariadne/state.db`.
 | `get_context` | Returns the current (or given) task's full context — workspace root, tracked git branch, goal, latest checkpoint, open questions, unresolved errors, blocked todos, pending todos, recent files, commits, commands, and decisions — as structured JSON, ranked and trimmed to fit an optional `tokenBudget` (default 2000). Equivalent to the CLI's `status`/`resume`. |
 | `git_sync` | Syncs the current git branch and any new commits into the current (or given) task by shelling out to `git` directly — works without any editor's git integration open. Equivalent to the CLI's `git-sync`. |
 | `export_task` | Renders the current (or given) task's full history as a Markdown document (text in the response) — for sharing or pasting into a PR description. Equivalent to the CLI's `export` (which additionally writes the file to `.ariadne/export/<task-id>.md`). |
+| `sync_push` / `sync_pull` / `sync_list_remote` / `sync_profile_list` | Shell out to the installed `ariadne` CLI's `sync push`/`sync pull`/`sync list-remote`/`sync profile list` commands (must already be logged in via `ariadne sync login` — these tools never handle credentials). `sync_pull` accepts `importNew: true` for `--import-new`. All accept an optional `profile` to target a non-default sync profile. Returns the CLI's raw stdout as `output`. |
 
 All tools that need a task default to the workspace's "current task" (the
 same one `ariadne task use` sets) when no explicit `taskId` is given.

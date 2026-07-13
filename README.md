@@ -248,6 +248,7 @@ ariadne sync register <username> <password> --server https://your-sync-server
 ariadne sync push          # push local task/checkpoint changes
 ariadne sync pull          # pull changes made by teammates / other machines
 ariadne sync list-remote   # browse every task on the server, including ones never linked here
+ariadne sync unlink <id>   # clear a task's link to the sync server, locally only
 ```
 
 `sync push`/`sync pull` take an optional `--task <id>` to scope to a single

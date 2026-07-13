@@ -3,6 +3,7 @@ import { z } from 'zod';
 import type { TaskStore } from '@ariadne-dev/core';
 import { findWorkspaceRoot, openWorkspaceStore } from './workspace.js';
 import * as tools from './tools.js';
+import * as syncTools from './syncTools.js';
 
 /** Wraps a tool result value as the `{ content: [...] }` shape the MCP SDK expects. */
 function jsonResult(value: unknown): { content: Array<{ type: 'text'; text: string }> } {
@@ -643,6 +644,80 @@ export function createAriadneMcpServer(options?: { workspaceRoot?: string; store
       return {
         contents: [{ uri: uri.href, mimeType: 'application/json', text: JSON.stringify(context, null, 2) }],
       };
+    },
+  );
+
+  server.registerTool(
+    'sync_push',
+    {
+      title: 'Push local task/checkpoint changes to the sync server',
+      description:
+        "Shells out to `ariadne sync push`, sending this workspace's locally-changed tasks/checkpoints to the configured self-hosted sync server. Requires the `ariadne` CLI to already be logged in (see `ariadne sync login`) — this tool does not handle credentials.",
+      inputSchema: { taskId: z.string().optional(), profile: z.string().optional() },
+    },
+    async (args) => {
+      try {
+        return jsonResult({ output: syncTools.syncPush({ cwd: workspaceRoot, taskId: args.taskId, profile: args.profile }) });
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    'sync_pull',
+    {
+      title: 'Pull task/checkpoint changes from the sync server',
+      description:
+        'Shells out to `ariadne sync pull`, applying remote changes to already-linked local tasks. Pass importNew:true to also create local tasks for remote tasks this workspace has never linked (equivalent to `--import-new`). Pass onConflict:"local-wins" to keep the local version of anything changed both locally and remotely since the last sync (default "remote-wins").',
+      inputSchema: {
+        taskId: z.string().optional(),
+        importNew: z.boolean().optional(),
+        onConflict: z.enum(['remote-wins', 'local-wins']).optional(),
+        profile: z.string().optional(),
+      },
+    },
+    async (args) => {
+      try {
+        return jsonResult({
+          output: syncTools.syncPull({ cwd: workspaceRoot, taskId: args.taskId, importNew: args.importNew, onConflict: args.onConflict, profile: args.profile }),
+        });
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    'sync_list_remote',
+    {
+      title: 'Browse every task on the sync server',
+      description:
+        'Shells out to `ariadne sync list-remote` — a read-only browse of every task on the server (including ones this workspace has never linked), showing owner and workspace label. Does not import or change any local state.',
+      inputSchema: { profile: z.string().optional() },
+    },
+    async (args) => {
+      try {
+        return jsonResult({ output: syncTools.syncListRemote({ cwd: workspaceRoot, profile: args.profile }) });
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    'sync_profile_list',
+    {
+      title: 'List configured sync profiles',
+      description: 'Shells out to `ariadne sync profile list` — read-only listing of every configured sync server profile, flagging which one is current.',
+      inputSchema: {},
+    },
+    async () => {
+      try {
+        return jsonResult({ output: syncTools.syncProfileList({ cwd: workspaceRoot }) });
+      } catch (err) {
+        return errorResult(err);
+      }
     },
   );
 

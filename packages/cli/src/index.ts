@@ -21,7 +21,7 @@ import { openWorkspaceStore, findWorkspaceRoot, stateDbPath } from './workspace.
 import { readCurrentTaskId, setCurrentTaskId } from './currentTask.js';
 import { withResolvedTask, withScopedStore } from './withTask.js';
 import { runTaskExec } from './exec.js';
-import { runSyncRegister, runSyncLogin, runSyncLogout, runSyncPush, runSyncPull, runSyncListRemote } from './syncCommands.js';
+import { runSyncRegister, runSyncLogin, runSyncLogout, runSyncPush, runSyncPull, runSyncListRemote, runSyncUnlink, runSyncProfileList, runSyncProfileUse } from './syncCommands.js';
 
 const program = new Command();
 program.name('ariadne').description('Chats are disposable, tasks are permanent.').version('0.1.0');
@@ -795,9 +795,10 @@ sync
   .command('register <username> <password>')
   .description('Create an account on a sync server and log in')
   .requiredOption('-s, --server <url>', 'Sync server base URL, e.g. https://ariadne-sync.internal')
-  .action(async (username: string, password: string, opts: { server: string }) => {
+  .option('-p, --profile <name>', 'Name to store this login under (default: "default"); lets one machine stay logged into multiple sync servers/teams')
+  .action(async (username: string, password: string, opts: { server: string; profile?: string }) => {
     try {
-      await runSyncRegister(username, password, opts.server.replace(/\/+$/, ''));
+      await runSyncRegister(username, password, opts.server.replace(/\/+$/, ''), opts.profile);
     } catch (err) {
       console.error(err instanceof Error ? err.message : String(err));
       process.exit(1);
@@ -808,9 +809,10 @@ sync
   .command('login <username> <password>')
   .description('Log in to a sync server and store the token in ~/.ariadne/sync-config.json')
   .requiredOption('-s, --server <url>', 'Sync server base URL, e.g. https://ariadne-sync.internal')
-  .action(async (username: string, password: string, opts: { server: string }) => {
+  .option('-p, --profile <name>', 'Name to store this login under (default: "default"); lets one machine stay logged into multiple sync servers/teams')
+  .action(async (username: string, password: string, opts: { server: string; profile?: string }) => {
     try {
-      await runSyncLogin(username, password, opts.server.replace(/\/+$/, ''));
+      await runSyncLogin(username, password, opts.server.replace(/\/+$/, ''), opts.profile);
     } catch (err) {
       console.error(err instanceof Error ? err.message : String(err));
       process.exit(1);
@@ -820,19 +822,21 @@ sync
 sync
   .command('logout')
   .description('Forget the locally-stored sync server token')
-  .action(() => {
-    runSyncLogout();
+  .option('-p, --profile <name>', 'Profile to log out of (default: the current profile)')
+  .action((opts: { profile?: string }) => {
+    runSyncLogout(opts.profile);
   });
 
 sync
   .command('push')
   .description('Push local task/checkpoint changes to the sync server')
   .option('-t, --task <id>', 'Only push this task (and its checkpoints)')
-  .action(async (opts: { task?: string }) => {
+  .option('-p, --profile <name>', 'Sync profile to push to (default: the current profile)')
+  .action(async (opts: { task?: string; profile?: string }) => {
     const root = findWorkspaceRoot();
     await withStore(async (store) => {
       try {
-        await runSyncPush(store, root, opts.task);
+        await runSyncPush(store, root, opts.task, opts.profile);
       } catch (err) {
         console.error(err instanceof Error ? err.message : String(err));
         process.exit(1);
@@ -845,10 +849,23 @@ sync
   .description('Pull task/checkpoint changes from the sync server into already-linked local tasks')
   .option('-t, --task <id>', 'Only pull this task (and its checkpoints)')
   .option('--import-new', 'Also create local tasks for remote tasks this workspace has never linked, instead of skipping them')
-  .action(async (opts: { task?: string; importNew?: boolean }) => {
+  .option('-p, --profile <name>', 'Sync profile to pull from (default: the current profile)')
+  .option(
+    '--on-conflict <strategy>',
+    'How to resolve a task/todo changed both locally and remotely since the last sync: "remote-wins" (default) or "local-wins"',
+    'remote-wins',
+  )
+  .action(async (opts: { task?: string; importNew?: boolean; profile?: string; onConflict?: string }) => {
     await withStore(async (store) => {
       try {
-        await runSyncPull(store, opts.task, { importNew: opts.importNew });
+        if (opts.onConflict && opts.onConflict !== 'remote-wins' && opts.onConflict !== 'local-wins') {
+          throw new Error(`Invalid --on-conflict value "${opts.onConflict}" — must be "remote-wins" or "local-wins".`);
+        }
+        await runSyncPull(store, opts.task, {
+          importNew: opts.importNew,
+          profileName: opts.profile,
+          onConflict: opts.onConflict as 'remote-wins' | 'local-wins' | undefined,
+        });
       } catch (err) {
         console.error(err instanceof Error ? err.message : String(err));
         process.exit(1);
@@ -859,13 +876,49 @@ sync
 sync
   .command('list-remote')
   .description('List every task on the sync server, including ones this workspace has never linked (browse-only, does not import anything locally)')
-  .action(async () => {
+  .option('-p, --profile <name>', 'Sync profile to browse (default: the current profile)')
+  .action(async (opts: { profile?: string }) => {
     try {
-      await runSyncListRemote();
+      await runSyncListRemote(opts.profile);
     } catch (err) {
       console.error(err instanceof Error ? err.message : String(err));
       process.exit(1);
     }
+  });
+
+const profile = sync.command('profile').description('Manage sync server profiles (multiple named serverUrl/token/username configs)');
+
+profile
+  .command('list')
+  .description('List every configured sync profile, flagging which one is current')
+  .action(() => {
+    runSyncProfileList();
+  });
+
+profile
+  .command('use <name>')
+  .description('Switch which sync profile is current (used by commands that omit --profile)')
+  .action((name: string) => {
+    try {
+      runSyncProfileUse(name);
+    } catch (err) {
+      console.error(err instanceof Error ? err.message : String(err));
+      process.exit(1);
+    }
+  });
+
+sync
+  .command('unlink <taskId>')
+  .description('Clear a local task\'s link to the sync server (local-only; the server-side task, if any, is left untouched)')
+  .action((taskId: string) => {
+    withResolvedTask(taskId, (store, resolvedId) => {
+      try {
+        runSyncUnlink(store, resolvedId);
+      } catch (err) {
+        console.error(err instanceof Error ? err.message : String(err));
+        process.exit(1);
+      }
+    });
   });
 
 export { program };
