@@ -60,14 +60,16 @@
   Slack, Obsidian export, local LLM backends) — the `PluginRegistry`
   interface exists (§4 Phase 5) but none of these have been built, and no
   call site wires the registry in yet.
-- Cloud sync / team-shared task graph. **Design-only pass done:** see
-  `docs/06-CLOUD-SYNC-DESIGN.md` for goals, non-goals, a proposed shape
+- Cloud sync / team-shared task graph. **Design decisions locked (v0.2):**
+  see `docs/06-CLOUD-SYNC-DESIGN.md` for goals, non-goals, a proposed shape
   (opt-in per-task sync, push/pull like git rather than realtime, last-
   write-wins conflict handling, reusing `CrossRepoLinks.ts`'s group concept),
-  a phasing plan, and the open product/infra questions (hosting, auth,
-  pricing, retention, team scope) that must be answered before any code is
-  written. No implementation exists — intentionally deferred pending those
-  decisions.
+  a phasing plan, and the now-resolved product/infra decisions: self-hosted
+  server, username/password auth, free/internal use, indefinite server-side
+  retention with local-only deletion, flat team access, and existing
+  `Redactor.ts` redaction (no extra wire-level pass). No implementation
+  exists yet — Phase 0 (server schema + API contract doc) is the next step
+  whenever prioritized.
 - True cross-repo tasks (one task entity spanning multiple repos as a single
   linked unit) — **the data model now exists**:
   `packages/core/src/CrossRepoLinks.ts` adds `task_link_groups`/`task_links`
@@ -249,8 +251,10 @@ what's next*, not building the core loop:
    opts into it. A natural first target: an optional `--query` flag on
    `ariadne context`/the MCP `get_context` tool that, when a provider is
    configured, ranks by relevance-to-query instead of tier/recency.
-7. **`cloud-sync-team-graph`** has a design-only pass done
-   (`docs/06-CLOUD-SYNC-DESIGN.md`) but remains out of scope for autonomous
-   implementation — it needs explicit product/infra decisions (hosting,
-   auth, pricing, data retention, team scope) answered before any code
-   should be written.
+7. **`cloud-sync-team-graph`** has a design pass done with all product/infra
+   decisions locked (`docs/06-CLOUD-SYNC-DESIGN.md` v0.2): self-hosted server,
+   username/password auth, free/internal use, server-side data retained
+   indefinitely (deletion is local-only), flat team access (no ACLs), and no
+   extra wire-redaction beyond the existing `Redactor.ts` pass. Phase 0
+   (server-side schema + API contract, as its own doc) is unblocked and is
+   the next concrete step whenever this is prioritized for implementation.
