@@ -625,6 +625,30 @@ export function createAriadneMcpServer(options?: { workspaceRoot?: string; store
     },
   );
 
+  server.registerTool(
+    'graphify_run',
+    {
+      title: 'Run graphify (code knowledge graph)',
+      description:
+        'Passthrough wrapper for the `graphify` CLI (https://github.com/Graphify-Labs/graphify, PyPI package ' +
+        '`graphifyy`) — a separate, locally-installed tool that maps this codebase into a knowledge graph and ' +
+        'lets you query it. Pass any graphify subcommand/flags in `args`, e.g. ["update", "."] to (re)build the ' +
+        'graph from code (no LLM needed), ["query", "how does auth work"] to ask a question, ["explain", "Foo"] ' +
+        'to explain a node, ["path", "A", "B"] for the shortest path between two nodes, or ["affected", "X"] for ' +
+        'what depends on X. Requires the `graphify` binary on PATH (uv tool install graphifyy). Returns its ' +
+        'stdout/stderr/exit code, and (best-effort) logs the invocation as a checkpoint against the current ' +
+        '(or given) task.',
+      inputSchema: { args: z.array(z.string()), taskId: z.string().optional() },
+    },
+    async (args) => {
+      try {
+        return jsonResult(await tools.graphifyRun(store, workspaceRoot, args));
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
+
   // Resources: a read-only, URI-addressable alternative to the `get_context` tool.
   // Some MCP hosts auto-attach subscribed/discoverable resources to a conversation
   // without an explicit tool call, so exposing context this way (in addition to the

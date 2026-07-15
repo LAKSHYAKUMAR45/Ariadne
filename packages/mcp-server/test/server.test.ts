@@ -53,6 +53,7 @@ describe('createAriadneMcpServer', () => {
           'get_context',
           'git_sync',
           'export_task',
+          'graphify_run',
           'sync_push',
           'sync_pull',
           'sync_list_remote',

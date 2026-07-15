@@ -147,6 +147,46 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
   );
 
+  context.subscriptions.push(
+    vscode.commands.registerCommand('ariadne.graphify', async () => {
+      const args = await vscode.window.showInputBox({
+        prompt: 'graphify subcommand and args (e.g. "update ." or \'query "how does auth work"\')',
+        placeHolder: 'update .',
+      });
+      if (args === undefined || args.trim().length === 0) return;
+
+      let store;
+      try {
+        store = openStoreForCurrentWorkspace();
+      } catch (err) {
+        const message = logError('ariadne.graphify (open store)', err);
+        void vscode.window.showErrorMessage(`Ariadne: failed to open task database — ${message}`);
+        return;
+      }
+      if (!store) {
+        void vscode.window.showWarningMessage('Ariadne: open a folder/workspace first.');
+        return;
+      }
+      try {
+        const taskId = getCurrentTaskId();
+        const result = handleChatCommand(store, {
+          command: 'graphify',
+          prompt: args,
+          currentTaskId: taskId,
+          workspaceRoot: resolveWorkspaceRoot(),
+        });
+        output.appendLine(`[${new Date().toISOString()}] graphify ${args}\n${result.markdown}`);
+        output.show(true);
+        refreshStatusBar();
+        refreshTreeView();
+      } catch (err) {
+        const message = logError('ariadne.graphify', err);
+        output.show(true);
+        void vscode.window.showErrorMessage(`Ariadne: graphify failed — ${message}`);
+      }
+    }),
+  );
+
   registerSyncCommands(context);
 }
 

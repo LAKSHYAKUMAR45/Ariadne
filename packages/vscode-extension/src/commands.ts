@@ -1,5 +1,5 @@
 import type { TaskStore, CheckpointLevel, TaskStatus } from '@ariadne-dev/core';
-import { buildContext, searchWorkspace, findTaskWorkspace, openRegistry, listTasksAcrossWorkspaces, searchAcrossWorkspaces, setTaskStatusWithRollup, syncTaskGit, exportTaskMarkdown } from '@ariadne-dev/core';
+import { buildContext, searchWorkspace, findTaskWorkspace, openRegistry, listTasksAcrossWorkspaces, searchAcrossWorkspaces, setTaskStatusWithRollup, syncTaskGit, exportTaskMarkdown, isGraphifyInstalled, runGraphifySync, summarizeGraphifyRun, GRAPHIFY_INSTALL_HINT } from '@ariadne-dev/core';
 import { getOrOpenStore } from './storeCache.js';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
@@ -205,6 +205,22 @@ function extractFlagValue(prompt: string, flag: string): { value: string | undef
   const value = match[1].trim();
   const rest = (prompt.slice(0, match.index!) + prompt.slice(match.index! + match[0].length)).trim();
   return { value, rest };
+}
+
+/**
+ * Splits a `/graphify <subcommand> [args...]` prompt into argv-style tokens,
+ * honoring double/single-quoted segments so multi-word arguments (e.g.
+ * `/graphify query "how does auth work"` or `/graphify path "A" "B"`) come
+ * through as single tokens instead of being split on every space.
+ */
+function splitGraphifyArgs(prompt: string): string[] {
+  const re = /"([^"]*)"|'([^']*)'|(\S+)/g;
+  const tokens: string[] = [];
+  let match: RegExpExecArray | null;
+  while ((match = re.exec(prompt)) !== null) {
+    tokens.push(match[1] ?? match[2] ?? match[3]);
+  }
+  return tokens;
 }
 
 /**
@@ -752,6 +768,28 @@ export function handleChatCommand(store: TaskStore, input: ChatCommandInput): Ch
       return { markdown: lines.join('\n') };
     }
 
+    case 'graphify': {
+      const args = splitGraphifyArgs(prompt);
+      if (args.length === 0) {
+        return {
+          markdown:
+            'Usage: `/graphify <subcommand> [args...]` — passthrough to the graphify CLI ' +
+            '(https://github.com/Graphify-Labs/graphify), e.g. `/graphify update .` to build the code graph ' +
+            '(no LLM needed) or `/graphify query "how does auth work"` to ask a question.',
+        };
+      }
+      if (!isGraphifyInstalled()) {
+        return { markdown: GRAPHIFY_INSTALL_HINT };
+      }
+      const result = runGraphifySync(args, { cwd: input.workspaceRoot });
+      if (taskId) {
+        store.createCheckpoint({ taskId, level: 'micro', summary: summarizeGraphifyRun(args, result) });
+      }
+      const output = (result.stdout || result.stderr || '(no output)').trim();
+      const status = result.exitCode === 0 ? '' : `\n\n⚠️ graphify exited with code ${result.exitCode}.`;
+      return { markdown: `\`\`\`\n${output}\n\`\`\`${status}` };
+    }
+
     case 'export': {
       const { value: outFlag, rest: afterOut } = extractFlagValue(prompt, 'out');
       const explicitId = afterOut.trim() || undefined;
@@ -801,6 +839,8 @@ export function progressMessageFor(command: string | undefined): string {
       return 'Syncing git branch and commits…';
     case 'export':
       return 'Exporting task to Markdown…';
+    case 'graphify':
+      return 'Running graphify…';
     case 'resume':
       return 'Resuming task context…';
     case 'status':

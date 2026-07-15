@@ -24,7 +24,12 @@ import {
   searchAcrossWorkspaces,
   setTaskStatusWithRollup,
   redactCommand,
+  isGraphifyInstalled,
+  runGraphify,
+  summarizeGraphifyRun,
+  GRAPHIFY_INSTALL_HINT,
 } from '@ariadne-dev/core';
+import type { GraphifyResult } from '@ariadne-dev/core';
 import type { CrossWorkspaceTask, CrossWorkspaceSearchResult } from '@ariadne-dev/core';
 import { readCurrentTaskId, setCurrentTaskId } from './workspace.js';
 
@@ -562,4 +567,42 @@ export interface ExportTaskArgs {
  */
 export function exportTask(store: TaskStore, workspaceRoot: string, args: ExportTaskArgs): { taskId: string; markdown: string } {
   return withTaskStore(store, workspaceRoot, args.taskId, (s, taskId) => ({ taskId, markdown: exportTaskMarkdown(s, taskId) }));
+}
+
+export interface GraphifyRunArgs {
+  /** Raw args to forward to the `graphify` CLI as-is, e.g. ["query", "how does auth work"] or ["update", "."]. */
+  args: string[];
+  taskId?: string;
+}
+
+/**
+ * Passthrough wrapper for the `graphify` CLI
+ * (https://github.com/Graphify-Labs/graphify, PyPI package `graphifyy`) — a
+ * separate, locally-installed tool that maps a codebase (and docs/PDFs/
+ * images/video) into a local knowledge graph and exposes commands like
+ * `update`, `query`, `explain`, `path`, and `affected` to query it. Ariadne
+ * doesn't reimplement any of that logic; it shells out to the real binary,
+ * captures its output as text (so an MCP client gets it back directly
+ * instead of a terminal), and — best-effort, never blocking the call —
+ * logs the invocation as a checkpoint against the current (or given) task,
+ * the same way `command_log` records shell commands run outside Ariadne.
+ */
+export async function graphifyRun(store: TaskStore, workspaceRoot: string, args: GraphifyRunArgs): Promise<GraphifyResult> {
+  if (!isGraphifyInstalled()) {
+    throw new Error(GRAPHIFY_INSTALL_HINT);
+  }
+  const result = await runGraphify(args.args, { cwd: workspaceRoot, mode: 'capture' });
+  try {
+    const taskId = args.taskId ?? readCurrentTaskId(workspaceRoot);
+    if (taskId) {
+      withTaskStore(store, workspaceRoot, taskId, (s, id) => {
+        if (s.getTask(id)) {
+          s.createCheckpoint({ taskId: id, level: 'micro', summary: summarizeGraphifyRun(args.args, result) });
+        }
+      });
+    }
+  } catch {
+    // Best-effort checkpoint logging only — never fail the tool call over it.
+  }
+  return result;
 }
