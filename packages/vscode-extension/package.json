@@ -53,7 +53,8 @@
           { "name": "question", "description": "Add, list, or resolve open questions" },
           { "name": "search", "description": "Search this workspace's tasks, checkpoints, decisions, todos, errors, and more (add --all-workspaces to search every workspace)" },
           { "name": "git-sync", "description": "Sync the current git branch and any new commits into the current (or specified) task" },
-          { "name": "export", "description": "Render a task to Markdown (defaults to .ariadne/export/<task-id>.md; add --out <path> to change)" }
+          { "name": "export", "description": "Render a task to Markdown (defaults to .ariadne/export/<task-id>.md; add --out <path> to change)" },
+          { "name": "graphify", "description": "Passthrough to the graphify CLI (code knowledge graph) — e.g. \"update .\" to build the graph or \"query <question>\" to ask it something. Requires graphify on PATH (uv tool install graphifyy)" }
         ]
       }
     ],
@@ -86,6 +87,10 @@
       {
         "command": "ariadne.syncListRemote",
         "title": "Ariadne: Sync List Remote"
+      },
+      {
+        "command": "ariadne.graphify",
+        "title": "Ariadne: Run Graphify (code knowledge graph)"
       }
     ],
     "viewsContainers": {

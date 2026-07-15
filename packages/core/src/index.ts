@@ -102,6 +102,14 @@ export {
   deleteTaskLinkGroup,
 } from './CrossRepoLinks.js';
 export type { TaskLinkGroup, TaskLinkMember } from './CrossRepoLinks.js';
+export {
+  GRAPHIFY_INSTALL_HINT,
+  isGraphifyInstalled,
+  runGraphify,
+  runGraphifySync,
+  summarizeGraphifyRun,
+} from './Graphify.js';
+export type { GraphifyResult, RunGraphifyOptions, GraphifySpawnFn } from './Graphify.js';
 export { PluginRegistry } from './PluginRegistry.js';
 export type {
   AriadnePlugin,

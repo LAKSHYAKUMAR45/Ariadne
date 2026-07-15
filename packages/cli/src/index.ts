@@ -16,6 +16,10 @@ import {
   listWorkspaces,
   forgetWorkspace,
   pruneMissingWorkspaces,
+  isGraphifyInstalled,
+  runGraphify,
+  summarizeGraphifyRun,
+  GRAPHIFY_INSTALL_HINT,
 } from '@ariadne-dev/core';
 import { openWorkspaceStore, findWorkspaceRoot, stateDbPath } from './workspace.js';
 import { readCurrentTaskId, setCurrentTaskId } from './currentTask.js';
@@ -592,6 +596,42 @@ program
       const exitCode = await runTaskExec(store, taskId, command, args);
       if (exitCode !== 0) process.exitCode = exitCode;
     });
+  });
+
+program
+  .command('graphify [args...]')
+  .description(
+    'Passthrough wrapper for the graphify CLI (https://github.com/Graphify-Labs/graphify) — maps this ' +
+      'codebase into a local knowledge graph and lets you query it, e.g. "ariadne graphify update ." or ' +
+      '"ariadne graphify query \'how does auth work\'". Requires the graphify binary on PATH ' +
+      '(uv tool install graphifyy). Any graphify subcommand/flag is forwarded as-is. If a task is current, ' +
+      'the invocation is logged as a checkpoint (best-effort; never blocks the command).',
+  )
+  .allowUnknownOption(true)
+  .action(async (args: string[] = []) => {
+    if (!isGraphifyInstalled()) {
+      console.error(GRAPHIFY_INSTALL_HINT);
+      process.exitCode = 1;
+      return;
+    }
+    const result = await runGraphify(args, { cwd: findWorkspaceRoot(), mode: 'inherit' });
+    try {
+      const workspaceRoot = findWorkspaceRoot();
+      const taskId = readCurrentTaskId(workspaceRoot);
+      if (taskId) {
+        const store = openWorkspaceStore(workspaceRoot);
+        try {
+          if (store.getTask(taskId)) {
+            store.createCheckpoint({ taskId, level: 'micro', summary: summarizeGraphifyRun(args, result) });
+          }
+        } finally {
+          store.close();
+        }
+      }
+    } catch {
+      // Best-effort checkpoint logging only — never fail the command over it.
+    }
+    if (result.exitCode !== 0) process.exitCode = result.exitCode;
   });
 
 program

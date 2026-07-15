@@ -67,6 +67,17 @@ and let any assistant read and write to it.
 - **Registry maintenance & backup** — `workspace list`/`prune`/`forget` to
   manage the cross-workspace index, and `backup`/`restore` to snapshot and
   recover a workspace's state database.
+- **Graphify integration** — `ariadne graphify <args...>` (CLI),
+  `/graphify <args...>` (VS Code chat participant / palette), and the
+  `graphify_run` MCP tool are thin passthrough wrappers around the
+  [graphify](https://github.com/Graphify-Labs/graphify) CLI (PyPI package
+  `graphifyy`), a separate, locally-installed tool that maps a codebase
+  into a queryable knowledge graph. Ariadne doesn't reimplement any of
+  graphify's graph-building/querying logic — it just shells out to the
+  real binary (e.g. `ariadne graphify update .` or
+  `ariadne graphify query "how does auth work"`) and, best-effort, logs
+  the invocation as a checkpoint against the current task. Requires
+  `graphify` on `PATH` (`uv tool install graphifyy`).
 - **Three interchangeable surfaces, one shared core** — CLI, MCP server,
   and VS Code chat participant all read/write the exact same
   `@ariadne-dev/core` data, so nothing is surface-specific or out of sync.
