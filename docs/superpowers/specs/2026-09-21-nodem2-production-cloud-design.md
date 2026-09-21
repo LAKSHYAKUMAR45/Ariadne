@@ -3,7 +3,8 @@
 **Date:** 2026-09-21  
 **Status:** Approved design  
 **Scope:** Reproducible nodem2 deployment, local scheduled PostgreSQL
-backups, and explicit single-team authorization for Ariadne cloud sync.
+backups, explicit single-team authorization, encrypted task file history,
+and a single-admin operations dashboard for Ariadne cloud sync.
 
 ## 1. Goals
 
@@ -17,13 +18,19 @@ backups, and explicit single-team authorization for Ariadne cloud sync.
    behavior during migration.
 5. Keep the sync API and PostgreSQL inaccessible from the network except
    through the existing SSH tunnel.
+6. Provide one admin with a secure operations dashboard for health, users,
+   tasks, backups, services, logs, and deployments.
+7. Reconstruct how a task was completed using commands, commits, checkpoints,
+   decisions, encrypted file snapshots, and diffs.
 
 ## 2. Non-goals
 
 - Multi-team tenancy in the first release.
 - Per-task invitations or owner-only task visibility.
 - Off-node/object-storage backups.
-- Synchronizing files or commits.
+- Arbitrary repository browsing or uploading every repository file.
+- Editing repository files through the dashboard.
+- Recording every file save or keystroke.
 - Replacing username/password authentication or JWTs.
 - Exposing the sync server directly through HTTP, HTTPS, or a public reverse
   proxy.
@@ -45,10 +52,15 @@ deploy/nodem2/
     verify-backup.sh
     restore.sh
   systemd/
+    ariadne-operator.service
     ariadne-backup.service
     ariadne-backup.timer
     ariadne-backup-verify.service
     ariadne-backup-verify.timer
+
+packages/
+  dashboard/
+  operator/
 ```
 
 The root package scripts will expose stable entry points:
@@ -74,6 +86,7 @@ embed credentials.
   - Health check using `pg_isready`.
 - `sync-server`
   - Built from the tracked multi-stage Dockerfile.
+  - Serves the dashboard's built static assets under `/admin`.
   - Depends on healthy Postgres.
   - Runs pending migrations during application startup.
   - Bound to `127.0.0.1:4300`.
@@ -98,6 +111,7 @@ POSTGRES_USER
 POSTGRES_PASSWORD
 POSTGRES_DB
 SYNC_SERVER_JWT_SECRET
+ARIADNE_FILE_KEYRING_PATH
 ```
 
 No secret value is copied into the repository, Compose file, image, command
@@ -108,6 +122,7 @@ Persistent state lives in:
 
 - Docker volume `ariadne-pg-data` for active PostgreSQL data.
 - `/var/backups/ariadne/` for timestamped backup files.
+- `/etc/ariadne/keys/` for root-owned file-content encryption keys.
 
 ### 3.4 Deployment command
 
@@ -124,7 +139,9 @@ Persistent state lives in:
    migrations.
 8. Wait for `/healthz` through nodem2 loopback.
 9. Install/refresh the tracked backup systemd units and timers.
-10. Print service health and the newest backup path.
+10. Install/refresh the root-owned operator service and Unix socket.
+11. Verify dashboard login and the admin API.
+12. Print service health and the newest backup path.
 
 The script uses strict shell settings, invokes commands as argument arrays
 where possible, validates resolved paths, and never removes broad
@@ -246,11 +263,14 @@ duplicated ad hoc SQL conditions throughout every route.
 
 Admins receive authenticated endpoints to:
 
-- List team members and roles.
+- List team members and their active state.
 - Deactivate/reactivate a member.
-- Promote/demote members while preserving at least one active admin.
 
-Members cannot manage membership. Account deletion is out of scope.
+The initial admin role is immutable through the network API, ensuring the
+dashboard has exactly one administrator. Admin recovery or transfer requires
+an explicit nodem2 operator command with console/root access and creates an
+audit record. Members cannot manage membership. Account deletion is out of
+scope.
 
 The CLI receives corresponding `sync members` commands. These are
 administrative conveniences; all authorization remains server-side.
@@ -322,15 +342,202 @@ recovery command; it must not report success-shaped output.
 - Every failure identifies the command/phase and exits non-zero.
 - Secrets are never echoed.
 - Docker health checks cover Postgres and the sync API.
+- The operator service reports typed operation state and bounded progress;
+  it never returns raw shell access.
 - Systemd timer output is available through `journalctl`.
 - The deployment command prints service status without printing environment
   values.
 - Backup metadata and logs contain no database password, JWT secret, user
   password, or bearer token.
 
-## 7. Testing
+## 7. Encrypted Task File History
 
-### 7.1 Authorization
+### 7.1 Capture scope and triggers
+
+Ariadne captures only Git-tracked text files already associated with a task
+through its touched-file tracking.
+
+Captures occur at:
+
+- A successful Git commit detected by `ariadne exec` or `git-sync`.
+- An explicit Ariadne checkpoint.
+- An explicit file-history capture command used by automation.
+
+Each capture records the triggering checkpoint/commit/command, the task,
+workspace label, Git revision when available, and UTC timestamp. It stores:
+
+- A content snapshot for each accepted file.
+- A unified diff against the previous task capture for that file.
+- A capture manifest containing accepted and rejected paths with reasons.
+
+The system does not capture every save or arbitrary files outside the
+task's touched-file set.
+
+### 7.2 Inclusion guardrails
+
+A file is uploaded only when all checks pass:
+
+- It is currently Git-tracked.
+- It is text, not binary.
+- Its path is inside the resolved repository root.
+- It is not matched by secret/generated exclusions.
+- Its uncompressed content is at most 1 MiB.
+- The full capture is at most 10 MiB.
+- Secret scanning finds no credential-like material.
+
+Generated/vendor/build directories use a maintained default denylist, which
+can be extended by a repository `.ariadneignore`. A rejected file creates
+metadata with a stable reason such as `binary`, `oversized`, `generated`,
+`outside_workspace`, or `suspected_secret`; its content never leaves the
+client.
+
+### 7.3 Storage model
+
+New server tables represent:
+
+- `task_file_captures`: one capture event linked to a task and optional
+  checkpoint/commit/command.
+- `task_file_entries`: per-path snapshot/diff metadata in a capture.
+- `encrypted_blobs`: content-addressed ciphertext shared by identical
+  plaintext within the same team.
+
+Snapshots and diffs are encrypted before insertion using AES-256-GCM with a
+fresh nonce and authenticated metadata containing team, task, path, content
+type, and key ID. The database stores ciphertext, nonce, authentication tag,
+ plaintext hash, compressed size, and key ID.
+
+Encryption keys live under `/etc/ariadne/keys/`, outside PostgreSQL,
+container images, and Git. Key rotation creates a new active key while old
+keys remain read-only for historical decryption. Backups record required key
+IDs but do not copy key material into database dumps.
+
+### 7.4 Retention and deletion
+
+File history is retained while its task exists. An admin may explicitly
+delete a task's cloud file history after reauthentication and confirmation.
+Deletion removes references first and garbage-collects encrypted blobs only
+when no remaining entry references them. The action is permanently recorded
+in the admin audit log.
+
+Hard task deletion remains out of scope; normal task archiving retains its
+audit history.
+
+## 8. Dashboard Architecture
+
+### 8.1 Application shape
+
+Add `packages/dashboard`, a React/Vite single-page application built into
+static assets and served by the sync server under `/admin`. It uses a
+dedicated `/api/v1/admin/*` surface rather than calling operational commands
+from the browser.
+
+The selected visual direction is a dark, status-first **Operations Console**
+with persistent navigation and plain-language confirmations. Task detail
+uses the selected **timeline-first audit view**, with a secondary file tree
+and source/diff viewer.
+
+The dashboard is desktop-first but remains usable on tablet-sized screens.
+It is not intended as a general mobile administration interface.
+
+### 8.2 Single-admin authentication
+
+Only the singleton team's active `admin` may access the dashboard. The
+dashboard reuses the Ariadne username/password account but does not expose
+the CLI's long-lived JWT to JavaScript.
+
+Dashboard login creates a short-lived server session in an HttpOnly,
+SameSite=Strict cookie. Because the UI is reachable only through the SSH
+tunnel on loopback HTTP, `Secure` is enabled when HTTPS is present and
+otherwise omitted for the loopback deployment. State-changing requests also
+require a session-bound CSRF token.
+
+Login attempts and privileged actions are rate-limited. Restore, deployment,
+Postgres restart, membership changes, and file-history deletion require
+password reauthentication and a typed confirmation phrase.
+
+### 8.3 Dashboard pages
+
+- **Overview:** sync API, Postgres, operator, CPU, memory, filesystem,
+  database size, backup age, active operations, and warnings.
+- **Tasks:** search/filter remote tasks and open the task audit timeline.
+- **Task audit:** commits, commands, checkpoints, decisions, todos, errors,
+  questions, file captures, encrypted snapshots, and unified/side-by-side
+  diffs.
+- **Users:** list membership and active state, with admin-only member
+  activation/deactivation controls.
+- **Backups:** list metadata, create, verify, download, and guarded restore.
+- **Services:** health and typed restart actions.
+- **Deployments:** current/trusted available revision, migration status,
+  deployment progress, and rollback information.
+- **Logs:** bounded/redacted sync-server, operator, deployment, and backup
+  logs with service/time/severity filters.
+- **Audit log:** immutable dashboard logins and administrative operations.
+
+Source snapshots are syntax-highlighted and read-only. The dashboard does
+not render untrusted HTML from synced files.
+
+### 8.4 Admin API
+
+The admin API provides typed endpoints for:
+
+- Dashboard sessions and reauthentication.
+- Health/metrics summaries.
+- Team membership administration.
+- Task audit timelines, file trees, snapshots, and diffs.
+- Backup operations and bounded download.
+- Service status/restart.
+- Deployment status/start.
+- Redacted log queries.
+- Operation progress and audit history.
+
+Every endpoint requires active admin membership. Responses are schema
+validated, paginated/bounded, and scrubbed of secrets.
+
+Long-running actions create persisted operation records and publish progress
+through server-sent events. Refreshing the browser reconnects to existing
+operations instead of starting duplicates.
+
+## 9. Privileged Operator Service
+
+### 9.1 Boundary
+
+The web application and sync-server container never receive the Docker
+socket and never execute arbitrary shell strings.
+
+A root-owned `ariadne-operator` systemd service listens on a Unix socket.
+The socket is mounted read/write only into the sync-server container and is
+protected by filesystem ownership/mode. Requests are structured and
+allowlisted.
+
+Supported operations are:
+
+- Service and deployment status.
+- Sync-server restart.
+- PostgreSQL restart.
+- Backup create/verify/restore.
+- Bounded, redacted log retrieval.
+- Migration state.
+- Deploy a trusted repository revision.
+- Rollback status/reporting.
+
+There is no generic command endpoint.
+
+### 9.2 Operation safety
+
+- Parameters use strict schemas and enumerations.
+- Paths must resolve inside fixed deployment/backup roots.
+- One mutating operation runs at a time.
+- Every operation has a timeout and cancellation policy.
+- Deployments accept only immutable trusted commit hashes reachable from the
+  configured repository/ref policy.
+- Operations write immutable audit rows with actor, action, parameters
+  stripped of secrets, timestamps, result, and relevant artifact IDs.
+- The operator returns sanitized progress events, not raw environment or
+  unrestricted process output.
+
+## 10. Testing
+
+### 10.1 Authorization
 
 Integration tests using real PostgreSQL will cover:
 
@@ -340,15 +547,51 @@ Integration tests using real PostgreSQL will cover:
 - A user without active membership cannot list, pull, create, or update.
 - Deactivation invalidates access immediately despite a valid JWT.
 - Members cannot manage membership.
-- Admins can manage members.
-- The last active admin cannot be demoted/deactivated.
+- The singleton admin can activate/deactivate members.
+- The network API cannot promote, demote, or deactivate the singleton admin.
+- A root-only recovery command can transfer the admin role while preserving
+  exactly one admin.
 - Inaccessible remote IDs return `404`.
 - Existing data is preserved and scoped correctly by the migration.
 
 Tests will create a second synthetic team directly in the test database to
 prove cross-team isolation even though production uses one team.
 
-### 7.2 Deployment and backups
+### 10.2 File history and encryption
+
+Tests cover:
+
+- Git-tracked touched-file selection.
+- Binary/generated/oversized/out-of-root rejection.
+- Secret detection prevents upload.
+- Capture manifests include rejection reasons without content.
+- Snapshot/diff round trips.
+- AES-GCM ciphertext cannot be read without the correct key.
+- Authentication fails on modified ciphertext/metadata.
+- Content-addressed deduplication is team-scoped.
+- Key rotation can read old captures and writes new captures with the active
+  key.
+- File-history deletion preserves blobs still referenced elsewhere.
+
+### 10.3 Dashboard and admin API
+
+Tests cover:
+
+- Only an active admin can create a dashboard session.
+- HttpOnly session, CSRF, expiry, rate limiting, and reauthentication.
+- Members and deactivated admins cannot access admin endpoints.
+- Task timeline/file APIs remain task/team scoped.
+- Source rendering escapes HTML/script content.
+- Pagination and log-size bounds.
+- Typed operation creation, progress reconnection, locking, timeout, and
+  audit records.
+- Destructive actions require the correct confirmation and reauthentication.
+- React component states: loading, empty, healthy, warning, failure,
+  operation in progress, and disconnected operator.
+- Browser-level login, navigation, task audit, backup, and safe restart
+  flows.
+
+### 10.4 Deployment and backups
 
 Shell-level tests or an isolated Compose test harness will cover:
 
@@ -360,8 +603,10 @@ Shell-level tests or an isolated Compose test harness will cover:
 - Rejection of out-of-directory restore paths and bad checksums.
 - Successful restore into an isolated database.
 - Failure behavior when Postgres or the sync server is unhealthy.
+- Operator Unix-socket permissions and allowlist enforcement.
+- Rejection of arbitrary commands, paths, branches, or revisions.
 
-### 7.3 End-to-end nodem2 validation
+### 10.5 End-to-end nodem2 validation
 
 Before completing rollout:
 
@@ -370,11 +615,16 @@ Before completing rollout:
 3. Confirm the SSH tunnel can reach `/healthz`.
 4. Register/login and push all supported entity types.
 5. Pull/import them into a fresh workspace.
-6. Create a backup and inspect its dump, checksum, and metadata files.
-7. Run the restore-verification job.
-8. Confirm timers are enabled and the next run is scheduled.
+6. Capture touched files and verify encrypted database storage.
+7. Log into `/admin` and inspect the task timeline, snapshot, diff, commands,
+   and Git history.
+8. Create a backup and inspect its dump, checksum, and metadata files.
+9. Run the restore-verification job.
+10. Perform a safe sync-server restart from the dashboard.
+11. Verify deployment status without executing an update.
+12. Confirm timers are enabled and the next run is scheduled.
 
-## 8. Documentation and Generated Guidance
+## 11. Documentation and Generated Guidance
 
 Update:
 
@@ -392,8 +642,11 @@ The generated guidance will teach assistants to:
 - Use the tracked nodem2 deploy/backup commands rather than manually editing
   containers or systemd units.
 - Never display secrets or bypass backup/restore confirmation.
+- Open the dashboard only through the configured SSH tunnel.
+- Treat source snapshots as sensitive encrypted task history.
+- Use dashboard operations rather than arbitrary server commands.
 
-## 9. Security Invariants
+## 12. Security Invariants
 
 - Sync API and PostgreSQL bind to loopback only.
 - SSH host identity remains fingerprint-pinned.
@@ -406,8 +659,17 @@ The generated guidance will teach assistants to:
   deletion is used.
 - Open registration remains permitted only while SSH is the external access
   boundary.
+- Only the active singleton-team admin can access dashboard/admin APIs.
+- The browser never receives the CLI's long-lived JWT.
+- The web/container tier never receives Docker-socket or arbitrary-shell
+  access.
+- File contents are filtered/scanned client-side and encrypted at rest.
+- Encryption keys never enter Git or PostgreSQL dumps.
+- Synced source is rendered as escaped, read-only text.
+- Every privileged operation is allowlisted, reauthenticated when
+  destructive, serialized, and audited.
 
-## 10. Completion Criteria
+## 13. Completion Criteria
 
 The work is complete when:
 
@@ -416,8 +678,19 @@ The work is complete when:
 - Re-running deployment is safe and idempotent.
 - Existing production data survives the authorization migration.
 - Every sync endpoint enforces active single-team membership.
+- Touched Git-tracked text files produce encrypted task snapshots/diffs while
+  rejected files never upload content.
+- The single admin can inspect a complete task audit timeline through
+  `/admin`.
+- Dashboard sessions, CSRF, reauthentication, rate limits, and admin checks
+  pass security tests.
+- The operator service supports only the approved typed operations and never
+  exposes Docker or arbitrary shell execution.
 - Daily backup and weekly verification timers are enabled.
 - A timestamped backup set exists under `/var/backups/ariadne`.
 - A verified restore succeeds in an isolated database.
-- CLI, server, migration, authorization, deployment, and backup tests pass.
+- CLI, server, dashboard, operator, migration, authorization, encryption,
+  deployment, browser, and backup tests pass.
 - The nodem2 production smoke test succeeds through the SSH tunnel.
+- Dashboard login, task audit viewing, backup verification, and safe restart
+  succeed on nodem2.
