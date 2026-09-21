@@ -649,7 +649,7 @@ describe('sync-server: auth + sync routes', () => {
     });
   });
 
-  describe('decisions/errors/open-questions/commands sync (create-once)', () => {
+  describe('decisions/errors/open-questions/commands sync (bidirectional)', () => {
     async function pushTask(app: Express, token: string): Promise<string> {
       const res = await request(app)
         .post('/api/v1/sync/tasks')
@@ -669,64 +669,213 @@ describe('sync-server: auth + sync routes', () => {
       return res.body.results[0].remoteId;
     }
 
-    it('pushes and pulls a decision', async () => {
+    it('re-pushing a decision with its remoteId updates the existing row and pull returns updatedAt', async () => {
       const token = await registerAndLogin();
       const taskRemoteId = await pushTask(app, token);
 
-      const push = await request(app)
+      const first = await request(app)
         .post('/api/v1/sync/decisions')
         .set('Authorization', `Bearer ${token}`)
-        .send({ decisions: [{ localId: 'dec-1', remoteTaskId: taskRemoteId, text: 'Use SQLite', rationale: 'Simplicity', createdAt: '2026-07-01T13:00:00Z' }] });
-      expect(push.status).toBe(200);
-      expect(push.body.results[0].remoteId).toMatch(/^[0-9a-f-]{36}$/);
+        .send({
+          decisions: [{
+            localId: 'dec-1',
+            remoteId: null,
+            remoteTaskId: taskRemoteId,
+            text: 'Use SQLite',
+            rationale: 'Simplicity',
+            supersedesId: null,
+            createdAt: '2026-07-01T13:00:00Z',
+            updatedAt: '2026-07-01T13:00:00Z',
+          }],
+        });
+      const remoteId = first.body.results[0].remoteId;
 
-      const pull = await request(app).get('/api/v1/sync/decisions').query({ taskRemoteId }).set('Authorization', `Bearer ${token}`);
-      expect(pull.body.decisions[0].text).toBe('Use SQLite');
-      expect(pull.body.decisions[0].rationale).toBe('Simplicity');
+      const midpoint = new Date().toISOString();
+      const second = await request(app)
+        .post('/api/v1/sync/decisions')
+        .set('Authorization', `Bearer ${token}`)
+        .send({
+          decisions: [{
+            localId: 'dec-1',
+            remoteId,
+            remoteTaskId: taskRemoteId,
+            text: 'Use Postgres',
+            rationale: 'Shared remote state',
+            supersedesId: null,
+            createdAt: '2026-07-01T13:00:00Z',
+            updatedAt: '2026-07-01T14:00:00Z',
+          }],
+        });
+      expect(second.status).toBe(200);
+      expect(new Date(second.body.results[0].updatedAt).getTime()).toBeGreaterThan(new Date(midpoint).getTime());
+
+      const pull = await request(app)
+        .get('/api/v1/sync/decisions')
+        .query({ taskRemoteId, since: midpoint })
+        .set('Authorization', `Bearer ${token}`);
+      expect(pull.body.decisions).toHaveLength(1);
+      expect(pull.body.decisions[0]).toMatchObject({
+        remoteId,
+        text: 'Use Postgres',
+        rationale: 'Shared remote state',
+        updatedAt: expect.any(String),
+      });
     });
 
-    it('pushes and pulls an error', async () => {
+    it('re-pushing an error with its remoteId updates the existing row and pull returns updatedAt', async () => {
       const token = await registerAndLogin();
       const taskRemoteId = await pushTask(app, token);
 
-      const push = await request(app)
+      const first = await request(app)
         .post('/api/v1/sync/errors')
         .set('Authorization', `Bearer ${token}`)
-        .send({ errors: [{ localId: 'err-1', remoteTaskId: taskRemoteId, message: 'TypeError', resolved: false, createdAt: '2026-07-01T13:00:00Z' }] });
-      expect(push.status).toBe(200);
+        .send({
+          errors: [{
+            localId: 'err-1',
+            remoteId: null,
+            remoteTaskId: taskRemoteId,
+            message: 'TypeError',
+            resolved: false,
+            resolution: null,
+            createdAt: '2026-07-01T13:00:00Z',
+            updatedAt: '2026-07-01T13:00:00Z',
+          }],
+        });
+      const remoteId = first.body.results[0].remoteId;
 
-      const pull = await request(app).get('/api/v1/sync/errors').query({ taskRemoteId }).set('Authorization', `Bearer ${token}`);
-      expect(pull.body.errors[0].message).toBe('TypeError');
-      expect(pull.body.errors[0].resolved).toBe(false);
+      const midpoint = new Date().toISOString();
+      await request(app)
+        .post('/api/v1/sync/errors')
+        .set('Authorization', `Bearer ${token}`)
+        .send({
+          errors: [{
+            localId: 'err-1',
+            remoteId,
+            remoteTaskId: taskRemoteId,
+            message: 'TypeError fixed',
+            resolved: true,
+            resolution: 'Added guard',
+            createdAt: '2026-07-01T13:00:00Z',
+            updatedAt: '2026-07-01T14:00:00Z',
+          }],
+        })
+        .expect(200);
+
+      const pull = await request(app)
+        .get('/api/v1/sync/errors')
+        .query({ taskRemoteId, since: midpoint })
+        .set('Authorization', `Bearer ${token}`);
+      expect(pull.body.errors).toHaveLength(1);
+      expect(pull.body.errors[0]).toMatchObject({
+        remoteId,
+        message: 'TypeError fixed',
+        resolved: true,
+        resolution: 'Added guard',
+        updatedAt: expect.any(String),
+      });
     });
 
-    it('pushes and pulls an open question', async () => {
+    it('re-pushing an open question with its remoteId updates the existing row and pull returns updatedAt', async () => {
       const token = await registerAndLogin();
       const taskRemoteId = await pushTask(app, token);
 
-      const push = await request(app)
+      const first = await request(app)
         .post('/api/v1/sync/open-questions')
         .set('Authorization', `Bearer ${token}`)
-        .send({ openQuestions: [{ localId: 'q-1', remoteTaskId: taskRemoteId, text: 'Which DB?', resolved: false, createdAt: '2026-07-01T13:00:00Z' }] });
-      expect(push.status).toBe(200);
+        .send({
+          openQuestions: [{
+            localId: 'q-1',
+            remoteId: null,
+            remoteTaskId: taskRemoteId,
+            text: 'Which DB?',
+            resolved: false,
+            createdAt: '2026-07-01T13:00:00Z',
+            updatedAt: '2026-07-01T13:00:00Z',
+          }],
+        });
+      const remoteId = first.body.results[0].remoteId;
 
-      const pull = await request(app).get('/api/v1/sync/open-questions').query({ taskRemoteId }).set('Authorization', `Bearer ${token}`);
-      expect(pull.body.openQuestions[0].text).toBe('Which DB?');
+      const midpoint = new Date().toISOString();
+      await request(app)
+        .post('/api/v1/sync/open-questions')
+        .set('Authorization', `Bearer ${token}`)
+        .send({
+          openQuestions: [{
+            localId: 'q-1',
+            remoteId,
+            remoteTaskId: taskRemoteId,
+            text: 'Which SQL engine?',
+            resolved: true,
+            createdAt: '2026-07-01T13:00:00Z',
+            updatedAt: '2026-07-01T14:00:00Z',
+          }],
+        })
+        .expect(200);
+
+      const pull = await request(app)
+        .get('/api/v1/sync/open-questions')
+        .query({ taskRemoteId, since: midpoint })
+        .set('Authorization', `Bearer ${token}`);
+      expect(pull.body.openQuestions).toHaveLength(1);
+      expect(pull.body.openQuestions[0]).toMatchObject({
+        remoteId,
+        text: 'Which SQL engine?',
+        resolved: true,
+        updatedAt: expect.any(String),
+      });
     });
 
-    it('pushes and pulls a command', async () => {
+    it('re-pushing a command with its remoteId updates the existing row and pull returns updatedAt', async () => {
       const token = await registerAndLogin();
       const taskRemoteId = await pushTask(app, token);
 
-      const push = await request(app)
+      const first = await request(app)
         .post('/api/v1/sync/commands')
         .set('Authorization', `Bearer ${token}`)
-        .send({ commands: [{ localId: 'cmd-1', remoteTaskId: taskRemoteId, cmdRedacted: 'npm test', exitCode: 0, createdAt: '2026-07-01T13:00:00Z' }] });
-      expect(push.status).toBe(200);
+        .send({
+          commands: [{
+            localId: 'cmd-1',
+            remoteId: null,
+            remoteTaskId: taskRemoteId,
+            cmdRedacted: 'npm test',
+            exitCode: 1,
+            summary: 'failed',
+            createdAt: '2026-07-01T13:00:00Z',
+            updatedAt: '2026-07-01T13:00:00Z',
+          }],
+        });
+      const remoteId = first.body.results[0].remoteId;
 
-      const pull = await request(app).get('/api/v1/sync/commands').query({ taskRemoteId }).set('Authorization', `Bearer ${token}`);
-      expect(pull.body.commands[0].cmdRedacted).toBe('npm test');
-      expect(pull.body.commands[0].exitCode).toBe(0);
+      const midpoint = new Date().toISOString();
+      await request(app)
+        .post('/api/v1/sync/commands')
+        .set('Authorization', `Bearer ${token}`)
+        .send({
+          commands: [{
+            localId: 'cmd-1',
+            remoteId,
+            remoteTaskId: taskRemoteId,
+            cmdRedacted: 'pnpm test',
+            exitCode: 0,
+            summary: 'passed',
+            createdAt: '2026-07-01T13:00:00Z',
+            updatedAt: '2026-07-01T14:00:00Z',
+          }],
+        })
+        .expect(200);
+
+      const pull = await request(app)
+        .get('/api/v1/sync/commands')
+        .query({ taskRemoteId, since: midpoint })
+        .set('Authorization', `Bearer ${token}`);
+      expect(pull.body.commands).toHaveLength(1);
+      expect(pull.body.commands[0]).toMatchObject({
+        remoteId,
+        cmdRedacted: 'pnpm test',
+        exitCode: 0,
+        summary: 'passed',
+        updatedAt: expect.any(String),
+      });
     });
 
     it('returns 404 when pushing any sub-entity for a task that does not exist', async () => {
@@ -734,7 +883,18 @@ describe('sync-server: auth + sync routes', () => {
       const res = await request(app)
         .post('/api/v1/sync/decisions')
         .set('Authorization', `Bearer ${token}`)
-        .send({ decisions: [{ localId: 'dec-x', remoteTaskId: '00000000-0000-0000-0000-000000000000', text: 'Orphaned', createdAt: '2026-07-01T13:00:00Z' }] });
+        .send({
+          decisions: [{
+            localId: 'dec-x',
+            remoteId: null,
+            remoteTaskId: '00000000-0000-0000-0000-000000000000',
+            text: 'Orphaned',
+            rationale: null,
+            supersedesId: null,
+            createdAt: '2026-07-01T13:00:00Z',
+            updatedAt: '2026-07-01T13:00:00Z',
+          }],
+        });
       expect(res.status).toBe(404);
       expect(res.body.error.code).toBe('task_not_found');
     });

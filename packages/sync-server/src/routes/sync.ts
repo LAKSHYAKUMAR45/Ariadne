@@ -40,6 +40,12 @@ interface TaskRow {
 export function createSyncRouter(pool: Pool): Router {
   const router = Router();
 
+  async function ensureDecisionSupersedesSameTask(supersedesId: string | null | undefined, taskRemoteId: string): Promise<ApiError | null> {
+    if (!supersedesId) return null;
+    const { rows } = await pool.query('SELECT 1 FROM decisions WHERE id = $1 AND task_id = $2', [supersedesId, taskRemoteId]);
+    return rows.length > 0 ? null : new ApiError(400, 'invalid_supersedes_id', `Decision ${supersedesId} does not belong to task ${taskRemoteId}`);
+  }
+
   router.post('/tasks', async (req: AuthenticatedRequest, res) => {
     const parsed = pushTasksSchema.safeParse(req.body);
     if (!parsed.success) {
@@ -351,21 +357,21 @@ export function createSyncRouter(pool: Pool): Router {
   });
 
   // -------------------------------------------------------------------
-  // Decisions, errors, open questions, commands — create-once sync,
-  // mirroring the checkpoints pattern above: push is insert-only (no
-  // remoteId in the push payload), pull is a since-cursor scan by
-  // created_at. A local edit/resolve made *after* the first push is not
-  // automatically re-detected/re-pushed in this phase (documented
-  // limitation — see docs/07-CLOUD-SYNC-API-CONTRACT.md §4.6).
+  // Decisions, errors, open questions, commands — full bidirectional sync,
+  // mirroring the todos pattern above: push upserts by remoteId and pull
+  // uses updated_at cursors. See docs/07-CLOUD-SYNC-API-CONTRACT.md §4.6.
   // -------------------------------------------------------------------
 
   const pushDecisionSchema = z.object({
     localId: z.string().min(1),
+    remoteId: z.string().uuid().nullable(),
     remoteTaskId: z.string().uuid(),
     text: z.string().min(1),
     rationale: z.string().nullable().optional(),
+    supersedesId: z.string().uuid().nullable().optional(),
     workspaceLabel: z.string().max(256).nullable().optional(),
     createdAt: z.string(),
+    updatedAt: z.string(),
   });
   const pushDecisionsSchema = z.object({ decisions: z.array(pushDecisionSchema) });
 
@@ -373,8 +379,10 @@ export function createSyncRouter(pool: Pool): Router {
     id: string;
     text: string;
     rationale: string | null;
+    supersedes_id: string | null;
     workspace_label: string | null;
     created_at: Date;
+    updated_at: Date;
   }
 
   router.post('/decisions', async (req: AuthenticatedRequest, res) => {
@@ -384,20 +392,60 @@ export function createSyncRouter(pool: Pool): Router {
       res.status(err.status).json(errorBody(err));
       return;
     }
-    const results: { localId: string; remoteId: string }[] = [];
+    const results: { localId: string; remoteId: string; updatedAt: string }[] = [];
     for (const decision of parsed.data.decisions) {
-      const taskExists = await pool.query('SELECT 1 FROM tasks WHERE id = $1', [decision.remoteTaskId]);
-      if (taskExists.rows.length === 0) {
-        const err = new ApiError(404, 'task_not_found', `No task with remoteId ${decision.remoteTaskId}`);
-        res.status(err.status).json(errorBody(err));
+      const supersedesError = await ensureDecisionSupersedesSameTask(decision.supersedesId, decision.remoteTaskId);
+      if (supersedesError) {
+        res.status(supersedesError.status).json(errorBody(supersedesError));
         return;
       }
-      const { rows } = await pool.query<{ id: string }>(
-        `INSERT INTO decisions (local_id, task_id, text, rationale, owner_user_id, workspace_label, created_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
-        [decision.localId, decision.remoteTaskId, decision.text, decision.rationale ?? null, req.userId, decision.workspaceLabel ?? null, decision.createdAt]
-      );
-      results.push({ localId: decision.localId, remoteId: rows[0].id });
+      let row: DecisionRow;
+      if (decision.remoteId) {
+        const { rows } = await pool.query<DecisionRow>(
+          `UPDATE decisions
+           SET text = $1, rationale = $2, supersedes_id = $3, workspace_label = $4, updated_at = now()
+           WHERE id = $5 AND task_id = $6
+           RETURNING id, text, rationale, supersedes_id, workspace_label, created_at, updated_at`,
+          [
+            decision.text,
+            decision.rationale ?? null,
+            decision.supersedesId ?? null,
+            decision.workspaceLabel ?? null,
+            decision.remoteId,
+            decision.remoteTaskId,
+          ],
+        );
+        if (rows.length === 0) {
+          const err = new ApiError(404, 'decision_not_found', `No decision with remoteId ${decision.remoteId}`);
+          res.status(err.status).json(errorBody(err));
+          return;
+        }
+        row = rows[0];
+      } else {
+        const taskExists = await pool.query('SELECT 1 FROM tasks WHERE id = $1', [decision.remoteTaskId]);
+        if (taskExists.rows.length === 0) {
+          const err = new ApiError(404, 'task_not_found', `No task with remoteId ${decision.remoteTaskId}`);
+          res.status(err.status).json(errorBody(err));
+          return;
+        }
+        const { rows } = await pool.query<DecisionRow>(
+          `INSERT INTO decisions (local_id, task_id, text, rationale, supersedes_id, owner_user_id, workspace_label, created_at, updated_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now())
+           RETURNING id, text, rationale, supersedes_id, workspace_label, created_at, updated_at`,
+          [
+            decision.localId,
+            decision.remoteTaskId,
+            decision.text,
+            decision.rationale ?? null,
+            decision.supersedesId ?? null,
+            req.userId,
+            decision.workspaceLabel ?? null,
+            decision.createdAt,
+          ],
+        );
+        row = rows[0];
+      }
+      results.push({ localId: decision.localId, remoteId: row.id, updatedAt: row.updated_at.toISOString() });
     }
     res.status(200).json({ results });
   });
@@ -413,12 +461,13 @@ export function createSyncRouter(pool: Pool): Router {
     const serverTime = new Date();
     const { rows } = since
       ? await pool.query<DecisionRow>(
-          `SELECT id, text, rationale, workspace_label, created_at FROM decisions
-           WHERE task_id = $1 AND created_at > $2 ORDER BY created_at ASC`,
+          `SELECT id, text, rationale, supersedes_id, workspace_label, created_at, updated_at FROM decisions
+           WHERE task_id = $1 AND updated_at > $2 ORDER BY updated_at ASC`,
           [taskRemoteId, since]
         )
       : await pool.query<DecisionRow>(
-          `SELECT id, text, rationale, workspace_label, created_at FROM decisions WHERE task_id = $1 ORDER BY created_at ASC`,
+          `SELECT id, text, rationale, supersedes_id, workspace_label, created_at, updated_at FROM decisions
+           WHERE task_id = $1 ORDER BY updated_at ASC`,
           [taskRemoteId]
         );
     res.status(200).json({
@@ -426,8 +475,10 @@ export function createSyncRouter(pool: Pool): Router {
         remoteId: r.id,
         text: r.text,
         rationale: r.rationale,
+        supersedesId: r.supersedes_id,
         workspaceLabel: r.workspace_label,
         createdAt: r.created_at.toISOString(),
+        updatedAt: r.updated_at.toISOString(),
       })),
       serverTime: serverTime.toISOString(),
     });
@@ -435,12 +486,14 @@ export function createSyncRouter(pool: Pool): Router {
 
   const pushErrorSchema = z.object({
     localId: z.string().min(1),
+    remoteId: z.string().uuid().nullable(),
     remoteTaskId: z.string().uuid(),
     message: z.string().min(1),
     resolved: z.boolean(),
     resolution: z.string().nullable().optional(),
     workspaceLabel: z.string().max(256).nullable().optional(),
     createdAt: z.string(),
+    updatedAt: z.string(),
   });
   const pushErrorsSchema = z.object({ errors: z.array(pushErrorSchema) });
 
@@ -451,6 +504,7 @@ export function createSyncRouter(pool: Pool): Router {
     resolution: string | null;
     workspace_label: string | null;
     created_at: Date;
+    updated_at: Date;
   }
 
   router.post('/errors', async (req: AuthenticatedRequest, res) => {
@@ -460,20 +514,55 @@ export function createSyncRouter(pool: Pool): Router {
       res.status(err.status).json(errorBody(err));
       return;
     }
-    const results: { localId: string; remoteId: string }[] = [];
+    const results: { localId: string; remoteId: string; updatedAt: string }[] = [];
     for (const taskError of parsed.data.errors) {
-      const taskExists = await pool.query('SELECT 1 FROM tasks WHERE id = $1', [taskError.remoteTaskId]);
-      if (taskExists.rows.length === 0) {
-        const err = new ApiError(404, 'task_not_found', `No task with remoteId ${taskError.remoteTaskId}`);
-        res.status(err.status).json(errorBody(err));
-        return;
+      let row: ErrorEntityRow;
+      if (taskError.remoteId) {
+        const { rows } = await pool.query<ErrorEntityRow>(
+          `UPDATE errors
+           SET message = $1, resolved = $2, resolution = $3, workspace_label = $4, updated_at = now()
+           WHERE id = $5 AND task_id = $6
+           RETURNING id, message, resolved, resolution, workspace_label, created_at, updated_at`,
+          [
+            taskError.message,
+            taskError.resolved,
+            taskError.resolution ?? null,
+            taskError.workspaceLabel ?? null,
+            taskError.remoteId,
+            taskError.remoteTaskId,
+          ],
+        );
+        if (rows.length === 0) {
+          const err = new ApiError(404, 'error_not_found', `No error with remoteId ${taskError.remoteId}`);
+          res.status(err.status).json(errorBody(err));
+          return;
+        }
+        row = rows[0];
+      } else {
+        const taskExists = await pool.query('SELECT 1 FROM tasks WHERE id = $1', [taskError.remoteTaskId]);
+        if (taskExists.rows.length === 0) {
+          const err = new ApiError(404, 'task_not_found', `No task with remoteId ${taskError.remoteTaskId}`);
+          res.status(err.status).json(errorBody(err));
+          return;
+        }
+        const { rows } = await pool.query<ErrorEntityRow>(
+          `INSERT INTO errors (local_id, task_id, message, resolved, resolution, owner_user_id, workspace_label, created_at, updated_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now())
+           RETURNING id, message, resolved, resolution, workspace_label, created_at, updated_at`,
+          [
+            taskError.localId,
+            taskError.remoteTaskId,
+            taskError.message,
+            taskError.resolved,
+            taskError.resolution ?? null,
+            req.userId,
+            taskError.workspaceLabel ?? null,
+            taskError.createdAt,
+          ],
+        );
+        row = rows[0];
       }
-      const { rows } = await pool.query<{ id: string }>(
-        `INSERT INTO errors (local_id, task_id, message, resolved, resolution, owner_user_id, workspace_label, created_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id`,
-        [taskError.localId, taskError.remoteTaskId, taskError.message, taskError.resolved, taskError.resolution ?? null, req.userId, taskError.workspaceLabel ?? null, taskError.createdAt]
-      );
-      results.push({ localId: taskError.localId, remoteId: rows[0].id });
+      results.push({ localId: taskError.localId, remoteId: row.id, updatedAt: row.updated_at.toISOString() });
     }
     res.status(200).json({ results });
   });
@@ -489,12 +578,13 @@ export function createSyncRouter(pool: Pool): Router {
     const serverTime = new Date();
     const { rows } = since
       ? await pool.query<ErrorEntityRow>(
-          `SELECT id, message, resolved, resolution, workspace_label, created_at FROM errors
-           WHERE task_id = $1 AND created_at > $2 ORDER BY created_at ASC`,
+          `SELECT id, message, resolved, resolution, workspace_label, created_at, updated_at FROM errors
+           WHERE task_id = $1 AND updated_at > $2 ORDER BY updated_at ASC`,
           [taskRemoteId, since]
         )
       : await pool.query<ErrorEntityRow>(
-          `SELECT id, message, resolved, resolution, workspace_label, created_at FROM errors WHERE task_id = $1 ORDER BY created_at ASC`,
+          `SELECT id, message, resolved, resolution, workspace_label, created_at, updated_at FROM errors
+           WHERE task_id = $1 ORDER BY updated_at ASC`,
           [taskRemoteId]
         );
     res.status(200).json({
@@ -505,6 +595,7 @@ export function createSyncRouter(pool: Pool): Router {
         resolution: r.resolution,
         workspaceLabel: r.workspace_label,
         createdAt: r.created_at.toISOString(),
+        updatedAt: r.updated_at.toISOString(),
       })),
       serverTime: serverTime.toISOString(),
     });
@@ -512,11 +603,13 @@ export function createSyncRouter(pool: Pool): Router {
 
   const pushOpenQuestionSchema = z.object({
     localId: z.string().min(1),
+    remoteId: z.string().uuid().nullable(),
     remoteTaskId: z.string().uuid(),
     text: z.string().min(1),
     resolved: z.boolean(),
     workspaceLabel: z.string().max(256).nullable().optional(),
     createdAt: z.string(),
+    updatedAt: z.string(),
   });
   const pushOpenQuestionsSchema = z.object({ openQuestions: z.array(pushOpenQuestionSchema) });
 
@@ -526,6 +619,7 @@ export function createSyncRouter(pool: Pool): Router {
     resolved: boolean;
     workspace_label: string | null;
     created_at: Date;
+    updated_at: Date;
   }
 
   router.post('/open-questions', async (req: AuthenticatedRequest, res) => {
@@ -535,20 +629,39 @@ export function createSyncRouter(pool: Pool): Router {
       res.status(err.status).json(errorBody(err));
       return;
     }
-    const results: { localId: string; remoteId: string }[] = [];
+    const results: { localId: string; remoteId: string; updatedAt: string }[] = [];
     for (const question of parsed.data.openQuestions) {
-      const taskExists = await pool.query('SELECT 1 FROM tasks WHERE id = $1', [question.remoteTaskId]);
-      if (taskExists.rows.length === 0) {
-        const err = new ApiError(404, 'task_not_found', `No task with remoteId ${question.remoteTaskId}`);
-        res.status(err.status).json(errorBody(err));
-        return;
+      let row: OpenQuestionRow;
+      if (question.remoteId) {
+        const { rows } = await pool.query<OpenQuestionRow>(
+          `UPDATE open_questions
+           SET text = $1, resolved = $2, workspace_label = $3, updated_at = now()
+           WHERE id = $4 AND task_id = $5
+           RETURNING id, text, resolved, workspace_label, created_at, updated_at`,
+          [question.text, question.resolved, question.workspaceLabel ?? null, question.remoteId, question.remoteTaskId],
+        );
+        if (rows.length === 0) {
+          const err = new ApiError(404, 'open_question_not_found', `No open question with remoteId ${question.remoteId}`);
+          res.status(err.status).json(errorBody(err));
+          return;
+        }
+        row = rows[0];
+      } else {
+        const taskExists = await pool.query('SELECT 1 FROM tasks WHERE id = $1', [question.remoteTaskId]);
+        if (taskExists.rows.length === 0) {
+          const err = new ApiError(404, 'task_not_found', `No task with remoteId ${question.remoteTaskId}`);
+          res.status(err.status).json(errorBody(err));
+          return;
+        }
+        const { rows } = await pool.query<OpenQuestionRow>(
+          `INSERT INTO open_questions (local_id, task_id, text, resolved, owner_user_id, workspace_label, created_at, updated_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, now())
+           RETURNING id, text, resolved, workspace_label, created_at, updated_at`,
+          [question.localId, question.remoteTaskId, question.text, question.resolved, req.userId, question.workspaceLabel ?? null, question.createdAt],
+        );
+        row = rows[0];
       }
-      const { rows } = await pool.query<{ id: string }>(
-        `INSERT INTO open_questions (local_id, task_id, text, resolved, owner_user_id, workspace_label, created_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
-        [question.localId, question.remoteTaskId, question.text, question.resolved, req.userId, question.workspaceLabel ?? null, question.createdAt]
-      );
-      results.push({ localId: question.localId, remoteId: rows[0].id });
+      results.push({ localId: question.localId, remoteId: row.id, updatedAt: row.updated_at.toISOString() });
     }
     res.status(200).json({ results });
   });
@@ -564,12 +677,13 @@ export function createSyncRouter(pool: Pool): Router {
     const serverTime = new Date();
     const { rows } = since
       ? await pool.query<OpenQuestionRow>(
-          `SELECT id, text, resolved, workspace_label, created_at FROM open_questions
-           WHERE task_id = $1 AND created_at > $2 ORDER BY created_at ASC`,
+          `SELECT id, text, resolved, workspace_label, created_at, updated_at FROM open_questions
+           WHERE task_id = $1 AND updated_at > $2 ORDER BY updated_at ASC`,
           [taskRemoteId, since]
         )
       : await pool.query<OpenQuestionRow>(
-          `SELECT id, text, resolved, workspace_label, created_at FROM open_questions WHERE task_id = $1 ORDER BY created_at ASC`,
+          `SELECT id, text, resolved, workspace_label, created_at, updated_at FROM open_questions
+           WHERE task_id = $1 ORDER BY updated_at ASC`,
           [taskRemoteId]
         );
     res.status(200).json({
@@ -579,6 +693,7 @@ export function createSyncRouter(pool: Pool): Router {
         resolved: r.resolved,
         workspaceLabel: r.workspace_label,
         createdAt: r.created_at.toISOString(),
+        updatedAt: r.updated_at.toISOString(),
       })),
       serverTime: serverTime.toISOString(),
     });
@@ -586,12 +701,14 @@ export function createSyncRouter(pool: Pool): Router {
 
   const pushCommandSchema = z.object({
     localId: z.string().min(1),
+    remoteId: z.string().uuid().nullable(),
     remoteTaskId: z.string().uuid(),
     cmdRedacted: z.string().min(1),
     exitCode: z.number().int().nullable().optional(),
     summary: z.string().nullable().optional(),
     workspaceLabel: z.string().max(256).nullable().optional(),
     createdAt: z.string(),
+    updatedAt: z.string(),
   });
   const pushCommandsSchema = z.object({ commands: z.array(pushCommandSchema) });
 
@@ -602,6 +719,7 @@ export function createSyncRouter(pool: Pool): Router {
     summary: string | null;
     workspace_label: string | null;
     created_at: Date;
+    updated_at: Date;
   }
 
   router.post('/commands', async (req: AuthenticatedRequest, res) => {
@@ -611,20 +729,46 @@ export function createSyncRouter(pool: Pool): Router {
       res.status(err.status).json(errorBody(err));
       return;
     }
-    const results: { localId: string; remoteId: string }[] = [];
+    const results: { localId: string; remoteId: string; updatedAt: string }[] = [];
     for (const command of parsed.data.commands) {
-      const taskExists = await pool.query('SELECT 1 FROM tasks WHERE id = $1', [command.remoteTaskId]);
-      if (taskExists.rows.length === 0) {
-        const err = new ApiError(404, 'task_not_found', `No task with remoteId ${command.remoteTaskId}`);
-        res.status(err.status).json(errorBody(err));
-        return;
+      let row: CommandRow;
+      if (command.remoteId) {
+        const { rows } = await pool.query<CommandRow>(
+          `UPDATE commands
+           SET cmd_redacted = $1, exit_code = $2, summary = $3, workspace_label = $4, updated_at = now()
+           WHERE id = $5 AND task_id = $6
+           RETURNING id, cmd_redacted, exit_code, summary, workspace_label, created_at, updated_at`,
+          [
+            command.cmdRedacted,
+            command.exitCode ?? null,
+            command.summary ?? null,
+            command.workspaceLabel ?? null,
+            command.remoteId,
+            command.remoteTaskId,
+          ],
+        );
+        if (rows.length === 0) {
+          const err = new ApiError(404, 'command_not_found', `No command with remoteId ${command.remoteId}`);
+          res.status(err.status).json(errorBody(err));
+          return;
+        }
+        row = rows[0];
+      } else {
+        const taskExists = await pool.query('SELECT 1 FROM tasks WHERE id = $1', [command.remoteTaskId]);
+        if (taskExists.rows.length === 0) {
+          const err = new ApiError(404, 'task_not_found', `No task with remoteId ${command.remoteTaskId}`);
+          res.status(err.status).json(errorBody(err));
+          return;
+        }
+        const { rows } = await pool.query<CommandRow>(
+          `INSERT INTO commands (local_id, task_id, cmd_redacted, exit_code, summary, owner_user_id, workspace_label, created_at, updated_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now())
+           RETURNING id, cmd_redacted, exit_code, summary, workspace_label, created_at, updated_at`,
+          [command.localId, command.remoteTaskId, command.cmdRedacted, command.exitCode ?? null, command.summary ?? null, req.userId, command.workspaceLabel ?? null, command.createdAt],
+        );
+        row = rows[0];
       }
-      const { rows } = await pool.query<{ id: string }>(
-        `INSERT INTO commands (local_id, task_id, cmd_redacted, exit_code, summary, owner_user_id, workspace_label, created_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id`,
-        [command.localId, command.remoteTaskId, command.cmdRedacted, command.exitCode ?? null, command.summary ?? null, req.userId, command.workspaceLabel ?? null, command.createdAt]
-      );
-      results.push({ localId: command.localId, remoteId: rows[0].id });
+      results.push({ localId: command.localId, remoteId: row.id, updatedAt: row.updated_at.toISOString() });
     }
     res.status(200).json({ results });
   });
@@ -640,12 +784,13 @@ export function createSyncRouter(pool: Pool): Router {
     const serverTime = new Date();
     const { rows } = since
       ? await pool.query<CommandRow>(
-          `SELECT id, cmd_redacted, exit_code, summary, workspace_label, created_at FROM commands
-           WHERE task_id = $1 AND created_at > $2 ORDER BY created_at ASC`,
+          `SELECT id, cmd_redacted, exit_code, summary, workspace_label, created_at, updated_at FROM commands
+           WHERE task_id = $1 AND updated_at > $2 ORDER BY updated_at ASC`,
           [taskRemoteId, since]
         )
       : await pool.query<CommandRow>(
-          `SELECT id, cmd_redacted, exit_code, summary, workspace_label, created_at FROM commands WHERE task_id = $1 ORDER BY created_at ASC`,
+          `SELECT id, cmd_redacted, exit_code, summary, workspace_label, created_at, updated_at FROM commands
+           WHERE task_id = $1 ORDER BY updated_at ASC`,
           [taskRemoteId]
         );
     res.status(200).json({
@@ -656,6 +801,7 @@ export function createSyncRouter(pool: Pool): Router {
         summary: r.summary,
         workspaceLabel: r.workspace_label,
         createdAt: r.created_at.toISOString(),
+        updatedAt: r.updated_at.toISOString(),
       })),
       serverTime: serverTime.toISOString(),
     });

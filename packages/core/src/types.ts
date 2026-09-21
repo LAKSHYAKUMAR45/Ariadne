@@ -81,6 +81,7 @@ export interface Decision {
   rationale: string | null;
   supersedesId: string | null;
   createdAt: string;
+  updatedAt: string;
   remoteId: string | null;
   syncedAt: string | null;
 }
@@ -119,6 +120,7 @@ export interface Command {
   exitCode: number | null;
   summary: string | null;
   createdAt: string;
+  updatedAt: string;
   remoteId: string | null;
   syncedAt: string | null;
 }
@@ -137,6 +139,7 @@ export interface TaskError {
   resolved: boolean;
   resolution: string | null;
   createdAt: string;
+  updatedAt: string;
   remoteId: string | null;
   syncedAt: string | null;
 }
@@ -154,6 +157,7 @@ export interface OpenQuestion {
   text: string;
   resolved: boolean;
   createdAt: string;
+  updatedAt: string;
   remoteId: string | null;
   syncedAt: string | null;
 }

@@ -124,6 +124,7 @@ interface DecisionRow {
   rationale: string | null;
   supersedes_id: string | null;
   created_at: string;
+  updated_at: string;
   remote_id: string | null;
   synced_at: string | null;
 }
@@ -137,6 +138,7 @@ function rowToDecision(row: DecisionRow): Decision {
     rationale: row.rationale,
     supersedesId: row.supersedes_id,
     createdAt: row.created_at,
+    updatedAt: row.updated_at,
     remoteId: row.remote_id,
     syncedAt: row.synced_at,
   };
@@ -175,6 +177,7 @@ interface CommandRow {
   exit_code: number | null;
   summary: string | null;
   created_at: string;
+  updated_at: string;
   remote_id: string | null;
   synced_at: string | null;
 }
@@ -187,6 +190,7 @@ function rowToCommand(row: CommandRow): Command {
     exitCode: row.exit_code,
     summary: row.summary,
     createdAt: row.created_at,
+    updatedAt: row.updated_at,
     remoteId: row.remote_id,
     syncedAt: row.synced_at,
   };
@@ -199,6 +203,7 @@ interface ErrorRow {
   resolved: number;
   resolution: string | null;
   created_at: string;
+  updated_at: string;
   remote_id: string | null;
   synced_at: string | null;
 }
@@ -211,6 +216,7 @@ function rowToError(row: ErrorRow): TaskError {
     resolved: Boolean(row.resolved),
     resolution: row.resolution,
     createdAt: row.created_at,
+    updatedAt: row.updated_at,
     remoteId: row.remote_id,
     syncedAt: row.synced_at,
   };
@@ -222,6 +228,7 @@ interface OpenQuestionRow {
   text: string;
   resolved: number;
   created_at: string;
+  updated_at: string;
   remote_id: string | null;
   synced_at: string | null;
 }
@@ -233,6 +240,7 @@ function rowToOpenQuestion(row: OpenQuestionRow): OpenQuestion {
     text: row.text,
     resolved: Boolean(row.resolved),
     createdAt: row.created_at,
+    updatedAt: row.updated_at,
     remoteId: row.remote_id,
     syncedAt: row.synced_at,
   };
@@ -674,8 +682,8 @@ export class TaskStore {
     const ts = nowIso();
     this.db
       .prepare(
-        `INSERT INTO decisions (id, task_id, checkpoint_id, text, rationale, supersedes_id, created_at)
-         VALUES (@id, @taskId, @checkpointId, @text, @rationale, @supersedesId, @createdAt)`,
+        `INSERT INTO decisions (id, task_id, checkpoint_id, text, rationale, supersedes_id, created_at, updated_at)
+         VALUES (@id, @taskId, @checkpointId, @text, @rationale, @supersedesId, @createdAt, @updatedAt)`,
       )
       .run({
         id,
@@ -685,6 +693,7 @@ export class TaskStore {
         rationale: input.rationale ?? null,
         supersedesId: input.supersedesId ?? null,
         createdAt: ts,
+        updatedAt: ts,
       });
     this.touchTask(input.taskId);
     const row = this.db.prepare(`SELECT * FROM decisions WHERE id = ?`).get(id) as DecisionRow;
@@ -706,13 +715,19 @@ export class TaskStore {
     return row ? rowToDecision(row) : undefined;
   }
 
-  /** Curation: edit a decision's text and/or rationale (e.g. to fix a typo or add missing context) without losing its id/history. */
-  updateDecision(id: string, updates: { text?: string; rationale?: string | null }): void {
+  /** Curation: edit a decision's text, rationale, and/or `supersedesId` (e.g. to fix a typo, add missing context, or mark it as replacing/no-longer-replacing another decision) without losing its id/history. */
+  updateDecision(id: string, updates: { text?: string; rationale?: string | null; supersedesId?: string | null }): void {
     const existing = this.getDecision(id);
     if (!existing) return;
     this.db
-      .prepare(`UPDATE decisions SET text = ?, rationale = ? WHERE id = ?`)
-      .run(updates.text ?? existing.text, updates.rationale !== undefined ? updates.rationale : existing.rationale, id);
+      .prepare(`UPDATE decisions SET text = ?, rationale = ?, supersedes_id = ?, updated_at = ? WHERE id = ?`)
+      .run(
+        updates.text ?? existing.text,
+        updates.rationale !== undefined ? updates.rationale : existing.rationale,
+        updates.supersedesId !== undefined ? updates.supersedesId : existing.supersedesId,
+        nowIso(),
+        id,
+      );
     this.touchTask(existing.taskId);
   }
 
@@ -724,17 +739,11 @@ export class TaskStore {
     this.touchTask(existing.taskId);
   }
 
-  /**
-   * Decisions never pushed yet (`remoteId` null). Like checkpoints,
-   * decisions are treated as create-once for sync purposes: an edit made
-   * locally after the initial push (via `updateDecision`) is not
-   * automatically detected/re-pushed in this phase, since decisions have
-   * no `updated_at` column to compare against `synced_at`.
-   */
   listDecisionsNeedingPush(taskId?: string): Decision[] {
-    const rows = taskId
-      ? (this.db.prepare(`SELECT * FROM decisions WHERE remote_id IS NULL AND task_id = ? ORDER BY created_at ASC`).all(taskId) as DecisionRow[])
-      : (this.db.prepare(`SELECT * FROM decisions WHERE remote_id IS NULL ORDER BY created_at ASC`).all() as DecisionRow[]);
+    const sql = `SELECT * FROM decisions WHERE (remote_id IS NULL OR synced_at IS NULL OR updated_at > synced_at)${
+      taskId ? ' AND task_id = ?' : ''
+    } ORDER BY created_at ASC`;
+    const rows = (taskId ? this.db.prepare(sql).all(taskId) : this.db.prepare(sql).all()) as DecisionRow[];
     return rows.map(rowToDecision);
   }
 
@@ -747,15 +756,44 @@ export class TaskStore {
     return row ? rowToDecision(row) : undefined;
   }
 
+  /** Applies a remote update to an already-linked local decision. Does not touch the parent task's `updatedAt` — inbound data, not a local mutation. */
+  applyPulledDecision(
+    id: string,
+    updates: { text: string; rationale: string | null; supersedesId: string | null; updatedAt: string; syncedAt: string },
+  ): void {
+    this.db
+      .prepare(`UPDATE decisions SET text = ?, rationale = ?, supersedes_id = ?, updated_at = ?, synced_at = ? WHERE id = ?`)
+      .run(updates.text, updates.rationale, updates.supersedesId, updates.updatedAt, updates.syncedAt, id);
+  }
+
   /** Inserts a decision pulled from the sync server that doesn't exist locally yet. Does not touch the parent task's `updatedAt` — inbound data, not a local mutation. */
-  insertPulledDecision(input: { taskId: string; remoteId: string; text: string; rationale: string | null; createdAt: string; syncedAt: string }): Decision {
+  insertPulledDecision(input: {
+    taskId: string;
+    remoteId: string;
+    text: string;
+    rationale: string | null;
+    supersedesId: string | null;
+    createdAt: string;
+    updatedAt: string;
+    syncedAt: string;
+  }): Decision {
     const id = ulid();
     this.db
       .prepare(
-        `INSERT INTO decisions (id, task_id, text, rationale, created_at, remote_id, synced_at)
-         VALUES (@id, @taskId, @text, @rationale, @createdAt, @remoteId, @syncedAt)`,
+        `INSERT INTO decisions (id, task_id, text, rationale, supersedes_id, created_at, updated_at, remote_id, synced_at)
+         VALUES (@id, @taskId, @text, @rationale, @supersedesId, @createdAt, @updatedAt, @remoteId, @syncedAt)`,
       )
-      .run({ id, taskId: input.taskId, text: input.text, rationale: input.rationale, createdAt: input.createdAt, remoteId: input.remoteId, syncedAt: input.syncedAt });
+      .run({
+        id,
+        taskId: input.taskId,
+        text: input.text,
+        rationale: input.rationale,
+        supersedesId: input.supersedesId,
+        createdAt: input.createdAt,
+        updatedAt: input.updatedAt,
+        remoteId: input.remoteId,
+        syncedAt: input.syncedAt,
+      });
     return this.getDecision(id)!;
   }
 
@@ -874,8 +912,8 @@ export class TaskStore {
     const ts = nowIso();
     this.db
       .prepare(
-        `INSERT INTO commands (id, task_id, cmd_redacted, exit_code, summary, created_at)
-         VALUES (@id, @taskId, @cmdRedacted, @exitCode, @summary, @createdAt)`,
+        `INSERT INTO commands (id, task_id, cmd_redacted, exit_code, summary, created_at, updated_at)
+         VALUES (@id, @taskId, @cmdRedacted, @exitCode, @summary, @createdAt, @updatedAt)`,
       )
       .run({
         id,
@@ -884,10 +922,34 @@ export class TaskStore {
         exitCode: input.exitCode ?? null,
         summary: input.summary ?? null,
         createdAt: ts,
+        updatedAt: ts,
       });
     this.touchTask(input.taskId);
     const row = this.db.prepare(`SELECT * FROM commands WHERE id = ?`).get(id) as CommandRow;
     return rowToCommand(row);
+  }
+
+  /**
+   * Auto-resolves any unresolved "Command failed (exit N): <cmd>" errors on
+   * `taskId` whose redacted command text exactly matches `cmdRedacted` —
+   * called after a command with `exitCode === 0` is recorded, so a classic
+   * TDD RED→GREEN rerun (e.g. `pytest some_test.py` failing, then passing
+   * once fixed) stops permanently cluttering `status`/`resume` with a
+   * "failure" that's actually already fixed. Deliberately exact-match only
+   * (no fuzzy matching) to avoid ever resolving an unrelated error by
+   * mistake. Returns the ids of errors it resolved, for callers that want
+   * to report this back to the user/agent.
+   */
+  autoResolveMatchingCommandErrors(taskId: string, cmdRedacted: string): string[] {
+    const suffix = `): ${cmdRedacted}`;
+    const unresolved = this.listErrors(taskId, { resolved: false });
+    const matches = unresolved.filter(
+      (e) => e.message.startsWith('Command failed (exit ') && e.message.endsWith(suffix),
+    );
+    for (const m of matches) {
+      this.resolveError(m.id, 'auto-resolved: this exact command succeeded on a later run');
+    }
+    return matches.map((m) => m.id);
   }
 
   listCommands(taskId: string, limit?: number): Command[] {
@@ -900,11 +962,16 @@ export class TaskStore {
     return rows.map(rowToCommand);
   }
 
-  /** Commands never pushed yet (`remoteId` null). Like checkpoints, commands are append-only/immutable locally — create-once for sync purposes. */
+  getCommand(id: string): Command | undefined {
+    const row = this.db.prepare(`SELECT * FROM commands WHERE id = ?`).get(id) as CommandRow | undefined;
+    return row ? rowToCommand(row) : undefined;
+  }
+
   listCommandsNeedingPush(taskId?: string): Command[] {
-    const rows = taskId
-      ? (this.db.prepare(`SELECT * FROM commands WHERE remote_id IS NULL AND task_id = ? ORDER BY created_at ASC`).all(taskId) as CommandRow[])
-      : (this.db.prepare(`SELECT * FROM commands WHERE remote_id IS NULL ORDER BY created_at ASC`).all() as CommandRow[]);
+    const sql = `SELECT * FROM commands WHERE (remote_id IS NULL OR synced_at IS NULL OR updated_at > synced_at)${
+      taskId ? ' AND task_id = ?' : ''
+    } ORDER BY created_at ASC`;
+    const rows = (taskId ? this.db.prepare(sql).all(taskId) : this.db.prepare(sql).all()) as CommandRow[];
     return rows.map(rowToCommand);
   }
 
@@ -917,15 +984,44 @@ export class TaskStore {
     return row ? rowToCommand(row) : undefined;
   }
 
+  /** Applies a remote update to an already-linked local command. Does not touch the parent task's `updatedAt` — inbound data, not a local mutation. */
+  applyPulledCommand(
+    id: string,
+    updates: { cmdRedacted: string; exitCode: number | null; summary: string | null; updatedAt: string; syncedAt: string },
+  ): void {
+    this.db
+      .prepare(`UPDATE commands SET cmd_redacted = ?, exit_code = ?, summary = ?, updated_at = ?, synced_at = ? WHERE id = ?`)
+      .run(updates.cmdRedacted, updates.exitCode, updates.summary, updates.updatedAt, updates.syncedAt, id);
+  }
+
   /** Inserts a command pulled from the sync server that doesn't exist locally yet. Does not touch the parent task's `updatedAt` — inbound data, not a local mutation. */
-  insertPulledCommand(input: { taskId: string; remoteId: string; cmdRedacted: string; exitCode: number | null; summary: string | null; createdAt: string; syncedAt: string }): Command {
+  insertPulledCommand(input: {
+    taskId: string;
+    remoteId: string;
+    cmdRedacted: string;
+    exitCode: number | null;
+    summary: string | null;
+    createdAt: string;
+    updatedAt: string;
+    syncedAt: string;
+  }): Command {
     const id = ulid();
     this.db
       .prepare(
-        `INSERT INTO commands (id, task_id, cmd_redacted, exit_code, summary, created_at, remote_id, synced_at)
-         VALUES (@id, @taskId, @cmdRedacted, @exitCode, @summary, @createdAt, @remoteId, @syncedAt)`,
+        `INSERT INTO commands (id, task_id, cmd_redacted, exit_code, summary, created_at, updated_at, remote_id, synced_at)
+         VALUES (@id, @taskId, @cmdRedacted, @exitCode, @summary, @createdAt, @updatedAt, @remoteId, @syncedAt)`,
       )
-      .run({ id, taskId: input.taskId, cmdRedacted: input.cmdRedacted, exitCode: input.exitCode, summary: input.summary, createdAt: input.createdAt, remoteId: input.remoteId, syncedAt: input.syncedAt });
+      .run({
+        id,
+        taskId: input.taskId,
+        cmdRedacted: input.cmdRedacted,
+        exitCode: input.exitCode,
+        summary: input.summary,
+        createdAt: input.createdAt,
+        updatedAt: input.updatedAt,
+        remoteId: input.remoteId,
+        syncedAt: input.syncedAt,
+      });
     const row = this.db.prepare(`SELECT * FROM commands WHERE id = ?`).get(id) as CommandRow;
     return rowToCommand(row);
   }
@@ -939,8 +1035,8 @@ export class TaskStore {
     const ts = nowIso();
     this.db
       .prepare(
-        `INSERT INTO errors (id, task_id, message, resolved, resolution, created_at)
-         VALUES (@id, @taskId, @message, @resolved, @resolution, @createdAt)`,
+        `INSERT INTO errors (id, task_id, message, resolved, resolution, created_at, updated_at)
+         VALUES (@id, @taskId, @message, @resolved, @resolution, @createdAt, @updatedAt)`,
       )
       .run({
         id,
@@ -949,6 +1045,7 @@ export class TaskStore {
         resolved: input.resolved ? 1 : 0,
         resolution: input.resolution ?? null,
         createdAt: ts,
+        updatedAt: ts,
       });
     this.touchTask(input.taskId);
     const row = this.db.prepare(`SELECT * FROM errors WHERE id = ?`).get(id) as ErrorRow;
@@ -958,15 +1055,15 @@ export class TaskStore {
   resolveError(id: string, resolution?: string): void {
     const existing = this.getError(id);
     this.db
-      .prepare(`UPDATE errors SET resolved = 1, resolution = ? WHERE id = ?`)
-      .run(resolution ?? null, id);
+      .prepare(`UPDATE errors SET resolved = 1, resolution = ?, updated_at = ? WHERE id = ?`)
+      .run(resolution ?? null, nowIso(), id);
     if (existing) this.touchTask(existing.taskId);
   }
 
   /** Curation: reopen a previously-resolved error (e.g. it recurred, or was resolved by mistake). */
   unresolveError(id: string): void {
     const existing = this.getError(id);
-    this.db.prepare(`UPDATE errors SET resolved = 0, resolution = NULL WHERE id = ?`).run(id);
+    this.db.prepare(`UPDATE errors SET resolved = 0, resolution = NULL, updated_at = ? WHERE id = ?`).run(nowIso(), id);
     if (existing) this.touchTask(existing.taskId);
   }
 
@@ -979,7 +1076,7 @@ export class TaskStore {
   updateError(id: string, message: string): void {
     const existing = this.getError(id);
     if (!existing) return;
-    this.db.prepare(`UPDATE errors SET message = ? WHERE id = ?`).run(message, id);
+    this.db.prepare(`UPDATE errors SET message = ?, updated_at = ? WHERE id = ?`).run(message, nowIso(), id);
     this.touchTask(existing.taskId);
   }
 
@@ -1004,11 +1101,11 @@ export class TaskStore {
     return rows.map(rowToError);
   }
 
-  /** Errors never pushed yet (`remoteId` null). Like checkpoints, errors are create-once for sync purposes: resolving one locally after the initial push is not automatically re-pushed in this phase (no `updated_at` to compare against `synced_at`). */
   listErrorsNeedingPush(taskId?: string): TaskError[] {
-    const rows = taskId
-      ? (this.db.prepare(`SELECT * FROM errors WHERE remote_id IS NULL AND task_id = ? ORDER BY created_at ASC`).all(taskId) as ErrorRow[])
-      : (this.db.prepare(`SELECT * FROM errors WHERE remote_id IS NULL ORDER BY created_at ASC`).all() as ErrorRow[]);
+    const sql = `SELECT * FROM errors WHERE (remote_id IS NULL OR synced_at IS NULL OR updated_at > synced_at)${
+      taskId ? ' AND task_id = ?' : ''
+    } ORDER BY created_at ASC`;
+    const rows = (taskId ? this.db.prepare(sql).all(taskId) : this.db.prepare(sql).all()) as ErrorRow[];
     return rows.map(rowToError);
   }
 
@@ -1021,15 +1118,44 @@ export class TaskStore {
     return row ? rowToError(row) : undefined;
   }
 
+  /** Applies a remote update to an already-linked local error. Does not touch the parent task's `updatedAt` — inbound data, not a local mutation. */
+  applyPulledError(
+    id: string,
+    updates: { message: string; resolved: boolean; resolution: string | null; updatedAt: string; syncedAt: string },
+  ): void {
+    this.db
+      .prepare(`UPDATE errors SET message = ?, resolved = ?, resolution = ?, updated_at = ?, synced_at = ? WHERE id = ?`)
+      .run(updates.message, updates.resolved ? 1 : 0, updates.resolution, updates.updatedAt, updates.syncedAt, id);
+  }
+
   /** Inserts an error pulled from the sync server that doesn't exist locally yet. Does not touch the parent task's `updatedAt` — inbound data, not a local mutation. */
-  insertPulledError(input: { taskId: string; remoteId: string; message: string; resolved: boolean; resolution: string | null; createdAt: string; syncedAt: string }): TaskError {
+  insertPulledError(input: {
+    taskId: string;
+    remoteId: string;
+    message: string;
+    resolved: boolean;
+    resolution: string | null;
+    createdAt: string;
+    updatedAt: string;
+    syncedAt: string;
+  }): TaskError {
     const id = ulid();
     this.db
       .prepare(
-        `INSERT INTO errors (id, task_id, message, resolved, resolution, created_at, remote_id, synced_at)
-         VALUES (@id, @taskId, @message, @resolved, @resolution, @createdAt, @remoteId, @syncedAt)`,
+        `INSERT INTO errors (id, task_id, message, resolved, resolution, created_at, updated_at, remote_id, synced_at)
+         VALUES (@id, @taskId, @message, @resolved, @resolution, @createdAt, @updatedAt, @remoteId, @syncedAt)`,
       )
-      .run({ id, taskId: input.taskId, message: input.message, resolved: input.resolved ? 1 : 0, resolution: input.resolution, createdAt: input.createdAt, remoteId: input.remoteId, syncedAt: input.syncedAt });
+      .run({
+        id,
+        taskId: input.taskId,
+        message: input.message,
+        resolved: input.resolved ? 1 : 0,
+        resolution: input.resolution,
+        createdAt: input.createdAt,
+        updatedAt: input.updatedAt,
+        remoteId: input.remoteId,
+        syncedAt: input.syncedAt,
+      });
     return this.getError(id)!;
   }
 
@@ -1042,8 +1168,8 @@ export class TaskStore {
     const ts = nowIso();
     this.db
       .prepare(
-        `INSERT INTO open_questions (id, task_id, text, resolved, created_at)
-         VALUES (@id, @taskId, @text, @resolved, @createdAt)`,
+        `INSERT INTO open_questions (id, task_id, text, resolved, created_at, updated_at)
+         VALUES (@id, @taskId, @text, @resolved, @createdAt, @updatedAt)`,
       )
       .run({
         id,
@@ -1051,6 +1177,7 @@ export class TaskStore {
         text: input.text,
         resolved: input.resolved ? 1 : 0,
         createdAt: ts,
+        updatedAt: ts,
       });
     this.touchTask(input.taskId);
     const row = this.db
@@ -1061,14 +1188,14 @@ export class TaskStore {
 
   resolveOpenQuestion(id: string): void {
     const existing = this.getOpenQuestion(id);
-    this.db.prepare(`UPDATE open_questions SET resolved = 1 WHERE id = ?`).run(id);
+    this.db.prepare(`UPDATE open_questions SET resolved = 1, updated_at = ? WHERE id = ?`).run(nowIso(), id);
     if (existing) this.touchTask(existing.taskId);
   }
 
   /** Curation: reopen a previously-resolved open question (e.g. the answer turned out to be wrong). */
   unresolveOpenQuestion(id: string): void {
     const existing = this.getOpenQuestion(id);
-    this.db.prepare(`UPDATE open_questions SET resolved = 0 WHERE id = ?`).run(id);
+    this.db.prepare(`UPDATE open_questions SET resolved = 0, updated_at = ? WHERE id = ?`).run(nowIso(), id);
     if (existing) this.touchTask(existing.taskId);
   }
 
@@ -1083,7 +1210,7 @@ export class TaskStore {
   updateOpenQuestion(id: string, text: string): void {
     const existing = this.getOpenQuestion(id);
     if (!existing) return;
-    this.db.prepare(`UPDATE open_questions SET text = ? WHERE id = ?`).run(text, id);
+    this.db.prepare(`UPDATE open_questions SET text = ?, updated_at = ? WHERE id = ?`).run(text, nowIso(), id);
     this.touchTask(existing.taskId);
   }
 
@@ -1108,11 +1235,11 @@ export class TaskStore {
     return rows.map(rowToOpenQuestion);
   }
 
-  /** Open questions never pushed yet (`remoteId` null). Create-once for sync purposes, same as errors/decisions/commands. */
   listOpenQuestionsNeedingPush(taskId?: string): OpenQuestion[] {
-    const rows = taskId
-      ? (this.db.prepare(`SELECT * FROM open_questions WHERE remote_id IS NULL AND task_id = ? ORDER BY created_at ASC`).all(taskId) as OpenQuestionRow[])
-      : (this.db.prepare(`SELECT * FROM open_questions WHERE remote_id IS NULL ORDER BY created_at ASC`).all() as OpenQuestionRow[]);
+    const sql = `SELECT * FROM open_questions WHERE (remote_id IS NULL OR synced_at IS NULL OR updated_at > synced_at)${
+      taskId ? ' AND task_id = ?' : ''
+    } ORDER BY created_at ASC`;
+    const rows = (taskId ? this.db.prepare(sql).all(taskId) : this.db.prepare(sql).all()) as OpenQuestionRow[];
     return rows.map(rowToOpenQuestion);
   }
 
@@ -1125,15 +1252,42 @@ export class TaskStore {
     return row ? rowToOpenQuestion(row) : undefined;
   }
 
+  /** Applies a remote update to an already-linked local open question. Does not touch the parent task's `updatedAt` — inbound data, not a local mutation. */
+  applyPulledOpenQuestion(
+    id: string,
+    updates: { text: string; resolved: boolean; updatedAt: string; syncedAt: string },
+  ): void {
+    this.db
+      .prepare(`UPDATE open_questions SET text = ?, resolved = ?, updated_at = ?, synced_at = ? WHERE id = ?`)
+      .run(updates.text, updates.resolved ? 1 : 0, updates.updatedAt, updates.syncedAt, id);
+  }
+
   /** Inserts an open question pulled from the sync server that doesn't exist locally yet. Does not touch the parent task's `updatedAt` — inbound data, not a local mutation. */
-  insertPulledOpenQuestion(input: { taskId: string; remoteId: string; text: string; resolved: boolean; createdAt: string; syncedAt: string }): OpenQuestion {
+  insertPulledOpenQuestion(input: {
+    taskId: string;
+    remoteId: string;
+    text: string;
+    resolved: boolean;
+    createdAt: string;
+    updatedAt: string;
+    syncedAt: string;
+  }): OpenQuestion {
     const id = ulid();
     this.db
       .prepare(
-        `INSERT INTO open_questions (id, task_id, text, resolved, created_at, remote_id, synced_at)
-         VALUES (@id, @taskId, @text, @resolved, @createdAt, @remoteId, @syncedAt)`,
+        `INSERT INTO open_questions (id, task_id, text, resolved, created_at, updated_at, remote_id, synced_at)
+         VALUES (@id, @taskId, @text, @resolved, @createdAt, @updatedAt, @remoteId, @syncedAt)`,
       )
-      .run({ id, taskId: input.taskId, text: input.text, resolved: input.resolved ? 1 : 0, createdAt: input.createdAt, remoteId: input.remoteId, syncedAt: input.syncedAt });
+      .run({
+        id,
+        taskId: input.taskId,
+        text: input.text,
+        resolved: input.resolved ? 1 : 0,
+        createdAt: input.createdAt,
+        updatedAt: input.updatedAt,
+        remoteId: input.remoteId,
+        syncedAt: input.syncedAt,
+      });
     return this.getOpenQuestion(id)!;
   }
 

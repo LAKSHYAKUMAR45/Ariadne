@@ -122,4 +122,31 @@ describe('MIGRATIONS (real app migrations)', () => {
 
     db.close();
   });
+
+  it('v4 adds updated_at to decisions/errors/open_questions/commands and backfills existing rows from created_at', () => {
+    const db = freshDb();
+    runMigrations(db, MIGRATIONS.filter((m) => m.version <= 3));
+
+    db.prepare(`INSERT INTO tasks (id, title, status, created_at, updated_at) VALUES ('t1', 'Task', 'active', '2020-01-01', '2020-01-01')`).run();
+    db.prepare(`INSERT INTO decisions (id, task_id, text, created_at) VALUES ('d1', 't1', 'Decide', '2020-01-02')`).run();
+    db.prepare(`INSERT INTO errors (id, task_id, message, resolved, created_at) VALUES ('e1', 't1', 'Oops', 0, '2020-01-03')`).run();
+    db.prepare(`INSERT INTO open_questions (id, task_id, text, resolved, created_at) VALUES ('q1', 't1', 'Why?', 0, '2020-01-04')`).run();
+    db.prepare(`INSERT INTO commands (id, task_id, cmd_redacted, created_at) VALUES ('c1', 't1', 'npm test', '2020-01-05')`).run();
+
+    runMigrations(db, MIGRATIONS);
+
+    const version = db.prepare(`SELECT value FROM schema_meta WHERE key = 'schema_version'`).get() as { value: string };
+    expect(version.value).toBe('4');
+    expect(() => db.prepare(`SELECT updated_at FROM decisions`).all()).not.toThrow();
+    expect(() => db.prepare(`SELECT updated_at FROM errors`).all()).not.toThrow();
+    expect(() => db.prepare(`SELECT updated_at FROM open_questions`).all()).not.toThrow();
+    expect(() => db.prepare(`SELECT updated_at FROM commands`).all()).not.toThrow();
+
+    expect((db.prepare(`SELECT created_at, updated_at FROM decisions WHERE id = 'd1'`).get() as { created_at: string; updated_at: string }).updated_at).toBe('2020-01-02');
+    expect((db.prepare(`SELECT created_at, updated_at FROM errors WHERE id = 'e1'`).get() as { created_at: string; updated_at: string }).updated_at).toBe('2020-01-03');
+    expect((db.prepare(`SELECT created_at, updated_at FROM open_questions WHERE id = 'q1'`).get() as { created_at: string; updated_at: string }).updated_at).toBe('2020-01-04');
+    expect((db.prepare(`SELECT created_at, updated_at FROM commands WHERE id = 'c1'`).get() as { created_at: string; updated_at: string }).updated_at).toBe('2020-01-05');
+
+    db.close();
+  });
 });

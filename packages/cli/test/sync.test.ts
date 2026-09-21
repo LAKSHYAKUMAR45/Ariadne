@@ -4,6 +4,7 @@ import * as path from 'node:path';
 import * as os from 'node:os';
 import { openWorkspaceStore, closeRegistry } from '@ariadne-dev/core';
 import * as syncClient from '../src/syncClient.js';
+import * as syncTunnel from '../src/syncTunnel.js';
 import { program } from '../src/index.js';
 
 // Unit-level coverage for `ariadne sync *` — mocks the HTTP layer
@@ -30,6 +31,29 @@ vi.mock('../src/syncClient.js', () => ({
   pushCommands: vi.fn().mockResolvedValue({ results: [] }),
   pullCommands: vi.fn().mockResolvedValue({ commands: [], serverTime: new Date().toISOString() }),
 }));
+
+vi.mock('../src/syncTunnel.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/syncTunnel.js')>();
+  return {
+    ...actual,
+    ensureConfiguredSyncTunnel: vi.fn().mockImplementation(async (config) => config),
+    readProjectSyncConnection: vi.fn().mockReturnValue({
+      profile: 'nodem2',
+      serverUrl: 'http://127.0.0.1:14300',
+      tunnel: {
+        sshHost: 'nodem2',
+        sshUser: 'root',
+        sshHostKey: 'SHA256:5EwJ7UMeWUqsBH7Ws3AoCXT9GAvHw+cI4jbx/hxX6qY',
+        remotePort: 4300,
+        localPort: 14300,
+      },
+    }),
+    bootstrapSshAccess: vi.fn(),
+    ensureSshTunnel: vi.fn(),
+    promptHidden: vi.fn().mockResolvedValue('secret'),
+    runSyncSetup: vi.fn(),
+  };
+});
 
 describe('ariadne sync commands', () => {
   let root: string;
@@ -104,6 +128,7 @@ describe('ariadne sync commands', () => {
     expect(syncClient.login).toHaveBeenCalledWith('http://example.test', 'alice', 'secret');
     const config = readCurrentProfileConfig();
     expect(config).toMatchObject({ serverUrl: 'http://example.test', token: 'tok-123', username: 'alice' });
+    expect(fs.statSync(process.env.ARIADNE_SYNC_CONFIG_PATH!).mode & 0o777).toBe(0o600);
   });
 
   it('register creates the account then logs in', async () => {
@@ -114,6 +139,32 @@ describe('ariadne sync commands', () => {
 
     expect(syncClient.register).toHaveBeenCalledWith('http://example.test', 'bob', 'secret');
     expect(syncClient.login).toHaveBeenCalledWith('http://example.test', 'bob', 'secret');
+  });
+
+  it('setup bootstraps the nodem2 tunnel, prompts for the account password, registers when requested, and stores tunnel metadata', async () => {
+    vi.mocked(syncClient.register).mockResolvedValue({ userId: 'u3', username: 'alice' });
+    vi.mocked(syncClient.login).mockResolvedValue({ token: 'tok-setup', userId: 'u3', username: 'alice' });
+
+    await program.parseAsync(['node', 'ariadne', 'sync', 'setup', 'alice', '--register']);
+
+    expect(syncTunnel.readProjectSyncConnection).toHaveBeenCalledWith(root);
+    expect(syncTunnel.bootstrapSshAccess).toHaveBeenCalled();
+    expect(syncTunnel.ensureSshTunnel).toHaveBeenCalled();
+    expect(syncTunnel.promptHidden).toHaveBeenCalledWith('Ariadne password: ');
+    expect(syncClient.register).toHaveBeenCalledWith('http://127.0.0.1:14300', 'alice', 'secret');
+    expect(syncClient.login).toHaveBeenCalledWith('http://127.0.0.1:14300', 'alice', 'secret');
+    expect(readCurrentProfileConfig()).toMatchObject({
+      serverUrl: 'http://127.0.0.1:14300',
+      username: 'alice',
+      token: 'tok-setup',
+      tunnel: {
+        sshHost: 'nodem2',
+        sshUser: 'root',
+        sshHostKey: 'SHA256:5EwJ7UMeWUqsBH7Ws3AoCXT9GAvHw+cI4jbx/hxX6qY',
+        remotePort: 4300,
+        localPort: 14300,
+      },
+    });
   });
 
   it('supports multiple named profiles: logging into a second profile does not disturb the first, and push/pull respect --profile', async () => {
@@ -137,6 +188,7 @@ describe('ariadne sync commands', () => {
     });
     await program.parseAsync(['node', 'ariadne', 'task', 'new', 'A task']);
     await program.parseAsync(['node', 'ariadne', 'sync', 'push']);
+    expect(syncTunnel.ensureConfiguredSyncTunnel).toHaveBeenCalledWith(expect.objectContaining({ serverUrl: 'http://personal.test' }));
     expect(syncClient.pushTasks).toHaveBeenCalledWith('http://personal.test', 'tok-personal', expect.anything());
 
     // --profile default explicitly targets the other profile without switching current.
@@ -231,7 +283,7 @@ describe('ariadne sync commands', () => {
     expect(loggedLines().some((l) => l.includes('Pushed 1 task'))).toBe(true);
   });
 
-  it('push also sends pending todos (bidirectional) and decisions (create-once) for a linked task', async () => {
+  it('push also sends pending todos, decisions, errors, open questions, and commands for a linked task', async () => {
     writeSyncConfig();
 
     await program.parseAsync(['node', 'ariadne', 'task', 'new', 'Task with sub-entities']);
@@ -240,13 +292,25 @@ describe('ariadne sync commands', () => {
     store.setTaskRemoteSync(task.id, 'remote-task-1', '2026-01-01T00:00:00.000Z');
     const todo = store.createTodo({ taskId: task.id, text: 'Write tests' });
     const decision = store.recordDecision({ taskId: task.id, text: 'Use SQLite' });
+    const taskError = store.recordError({ taskId: task.id, message: 'TypeError' });
+    const question = store.recordOpenQuestion({ taskId: task.id, text: 'Which DB?' });
+    const command = store.recordCommand({ taskId: task.id, cmdRedacted: 'npm test', exitCode: 1, summary: 'failed' });
     store.close();
 
     vi.mocked(syncClient.pushTodos).mockResolvedValue({
       results: [{ localId: todo.id, remoteId: 'remote-todo-1', updatedAt: '2026-01-01T00:00:01.000Z' }],
     });
     vi.mocked(syncClient.pushDecisions).mockResolvedValue({
-      results: [{ localId: decision.id, remoteId: 'remote-dec-1' }],
+      results: [{ localId: decision.id, remoteId: 'remote-dec-1', updatedAt: '2026-01-01T00:00:02.000Z' }],
+    });
+    vi.mocked(syncClient.pushErrors).mockResolvedValue({
+      results: [{ localId: taskError.id, remoteId: 'remote-err-1', updatedAt: '2026-01-01T00:00:03.000Z' }],
+    });
+    vi.mocked(syncClient.pushOpenQuestions).mockResolvedValue({
+      results: [{ localId: question.id, remoteId: 'remote-q-1', updatedAt: '2026-01-01T00:00:04.000Z' }],
+    });
+    vi.mocked(syncClient.pushCommands).mockResolvedValue({
+      results: [{ localId: command.id, remoteId: 'remote-cmd-1', updatedAt: '2026-01-01T00:00:05.000Z' }],
     });
 
     await program.parseAsync(['node', 'ariadne', 'sync', 'push']);
@@ -259,19 +323,81 @@ describe('ariadne sync commands', () => {
     expect(syncClient.pushDecisions).toHaveBeenCalledWith(
       'http://fake-sync-server.test',
       'fake-token',
-      expect.arrayContaining([expect.objectContaining({ localId: decision.id, remoteTaskId: 'remote-task-1', text: 'Use SQLite' })]),
+      expect.arrayContaining([expect.objectContaining({ localId: decision.id, remoteId: null, remoteTaskId: 'remote-task-1', text: 'Use SQLite' })]),
+    );
+    expect(syncClient.pushErrors).toHaveBeenCalledWith(
+      'http://fake-sync-server.test',
+      'fake-token',
+      expect.arrayContaining([expect.objectContaining({ localId: taskError.id, remoteId: null, remoteTaskId: 'remote-task-1', message: 'TypeError' })]),
+    );
+    expect(syncClient.pushOpenQuestions).toHaveBeenCalledWith(
+      'http://fake-sync-server.test',
+      'fake-token',
+      expect.arrayContaining([expect.objectContaining({ localId: question.id, remoteId: null, remoteTaskId: 'remote-task-1', text: 'Which DB?' })]),
+    );
+    expect(syncClient.pushCommands).toHaveBeenCalledWith(
+      'http://fake-sync-server.test',
+      'fake-token',
+      expect.arrayContaining([expect.objectContaining({ localId: command.id, remoteId: null, remoteTaskId: 'remote-task-1', cmdRedacted: 'npm test' })]),
     );
 
     const storeAfter = openWorkspaceStore(root);
     expect(storeAfter.getTodo(todo.id)!.remoteId).toBe('remote-todo-1');
     expect(storeAfter.getDecision(decision.id)!.remoteId).toBe('remote-dec-1');
+    expect(storeAfter.getDecision(decision.id)!.syncedAt).toBe('2026-01-01T00:00:02.000Z');
+    expect(storeAfter.getError(taskError.id)!.remoteId).toBe('remote-err-1');
+    expect(storeAfter.getOpenQuestion(question.id)!.remoteId).toBe('remote-q-1');
+    expect(storeAfter.getCommand(command.id)!.remoteId).toBe('remote-cmd-1');
     storeAfter.close();
 
     expect(loggedLines().some((l) => l.includes('Pushed 1 todo'))).toBe(true);
     expect(loggedLines().some((l) => l.includes('Pushed 1 decision'))).toBe(true);
+    expect(loggedLines().some((l) => l.includes('Pushed 1 error'))).toBe(true);
+    expect(loggedLines().some((l) => l.includes('Pushed 1 open question'))).toBe(true);
+    expect(loggedLines().some((l) => l.includes('Pushed 1 command'))).toBe(true);
   });
 
-  it('pull applies remote todo updates (bidirectional) and inserts new create-once sub-entities for a linked task', async () => {
+  it('push sends a decision supersedes link using the referenced decision remoteId once both rows are linked', async () => {
+    writeSyncConfig();
+
+    await program.parseAsync(['node', 'ariadne', 'task', 'new', 'Task with related decisions']);
+    const store = openWorkspaceStore(root);
+    const [task] = store.listTasks();
+    store.setTaskRemoteSync(task.id, 'remote-task-1', '2026-01-01T00:00:00.000Z');
+    const olderDecision = store.recordDecision({ taskId: task.id, text: 'Use SQLite first' });
+    const newerDecision = store.recordDecision({
+      taskId: task.id,
+      text: 'Use Postgres instead',
+      supersedesId: olderDecision.id,
+    });
+    store.close();
+
+    vi.mocked(syncClient.pushDecisions)
+      .mockResolvedValueOnce({
+        results: [{ localId: olderDecision.id, remoteId: 'remote-dec-older', updatedAt: '2026-01-01T00:00:01.000Z' }],
+      })
+      .mockResolvedValueOnce({
+        results: [{ localId: newerDecision.id, remoteId: 'remote-dec-newer', updatedAt: '2026-01-01T00:00:02.000Z' }],
+      });
+
+    await program.parseAsync(['node', 'ariadne', 'sync', 'push']);
+
+    expect(syncClient.pushDecisions).toHaveBeenCalledTimes(2);
+    expect(syncClient.pushDecisions).toHaveBeenNthCalledWith(
+      1,
+      'http://fake-sync-server.test',
+      'fake-token',
+      expect.arrayContaining([expect.objectContaining({ localId: olderDecision.id, supersedesId: null })]),
+    );
+    expect(syncClient.pushDecisions).toHaveBeenNthCalledWith(
+      2,
+      'http://fake-sync-server.test',
+      'fake-token',
+      expect.arrayContaining([expect.objectContaining({ localId: newerDecision.id, supersedesId: 'remote-dec-older' })]),
+    );
+  });
+
+  it('pull applies remote updates for linked todos/decisions/errors/open questions/commands and inserts newly seen rows', async () => {
     writeSyncConfig();
 
     await program.parseAsync(['node', 'ariadne', 'task', 'new', 'Task with sub-entities']);
@@ -280,6 +406,14 @@ describe('ariadne sync commands', () => {
     store.setTaskRemoteSync(task.id, 'remote-task-1', '2026-01-01T00:00:00.000Z');
     const todo = store.createTodo({ taskId: task.id, text: 'Write tests' });
     store.setTodoRemoteSync(todo.id, 'remote-todo-1', '2026-01-01T00:00:00.000Z');
+    const decision = store.recordDecision({ taskId: task.id, text: 'Use SQLite', rationale: 'simple' });
+    store.setDecisionRemoteSync(decision.id, 'remote-dec-1', '2026-01-01T00:00:00.000Z');
+    const taskError = store.recordError({ taskId: task.id, message: 'TypeError' });
+    store.setErrorRemoteSync(taskError.id, 'remote-err-1', '2026-01-01T00:00:00.000Z');
+    const question = store.recordOpenQuestion({ taskId: task.id, text: 'Which DB?' });
+    store.setOpenQuestionRemoteSync(question.id, 'remote-q-1', '2026-01-01T00:00:00.000Z');
+    const command = store.recordCommand({ taskId: task.id, cmdRedacted: 'npm test', exitCode: 1, summary: 'failed' });
+    store.setCommandRemoteSync(command.id, 'remote-cmd-1', '2026-01-01T00:00:00.000Z');
     store.close();
 
     vi.mocked(syncClient.pullTasks).mockResolvedValue({ tasks: [], serverTime: '2026-02-01T00:00:00.000Z' });
@@ -289,7 +423,31 @@ describe('ariadne sync commands', () => {
       serverTime: '2026-02-01T00:00:00.000Z',
     });
     vi.mocked(syncClient.pullDecisions).mockResolvedValue({
-      decisions: [{ remoteId: 'remote-dec-9', text: 'From teammate', rationale: null, createdAt: '2026-01-15T00:00:00.000Z' }],
+      decisions: [
+        { remoteId: 'remote-dec-1', text: 'Use Postgres', rationale: 'shared', supersedesId: null, createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-02-01T00:00:00.000Z' },
+        { remoteId: 'remote-dec-9', text: 'From teammate', rationale: null, supersedesId: null, createdAt: '2026-01-15T00:00:00.000Z', updatedAt: '2026-02-01T00:00:00.000Z' },
+      ],
+      serverTime: '2026-02-01T00:00:00.000Z',
+    });
+    vi.mocked(syncClient.pullErrors).mockResolvedValue({
+      errors: [
+        { remoteId: 'remote-err-1', message: 'ReferenceError', resolved: true, resolution: 'fixed remotely', createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-02-01T00:00:00.000Z' },
+        { remoteId: 'remote-err-9', message: 'From teammate', resolved: false, resolution: null, createdAt: '2026-01-15T00:00:00.000Z', updatedAt: '2026-02-01T00:00:00.000Z' },
+      ],
+      serverTime: '2026-02-01T00:00:00.000Z',
+    });
+    vi.mocked(syncClient.pullOpenQuestions).mockResolvedValue({
+      openQuestions: [
+        { remoteId: 'remote-q-1', text: 'Which SQL engine?', resolved: true, createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-02-01T00:00:00.000Z' },
+        { remoteId: 'remote-q-9', text: 'From teammate', resolved: false, createdAt: '2026-01-15T00:00:00.000Z', updatedAt: '2026-02-01T00:00:00.000Z' },
+      ],
+      serverTime: '2026-02-01T00:00:00.000Z',
+    });
+    vi.mocked(syncClient.pullCommands).mockResolvedValue({
+      commands: [
+        { remoteId: 'remote-cmd-1', cmdRedacted: 'pnpm test', exitCode: 0, summary: 'passed', createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-02-01T00:00:00.000Z' },
+        { remoteId: 'remote-cmd-9', cmdRedacted: 'pnpm build', exitCode: 0, summary: null, createdAt: '2026-01-15T00:00:00.000Z', updatedAt: '2026-02-01T00:00:00.000Z' },
+      ],
       serverTime: '2026-02-01T00:00:00.000Z',
     });
 
@@ -297,12 +455,117 @@ describe('ariadne sync commands', () => {
 
     const storeAfter = openWorkspaceStore(root);
     expect(storeAfter.getTodo(todo.id)!.status).toBe('done');
-    const decisions = storeAfter.listDecisions(task.id);
-    expect(decisions.some((d) => d.remoteId === 'remote-dec-9' && d.text === 'From teammate')).toBe(true);
+    expect(storeAfter.getDecision(decision.id)).toMatchObject({ text: 'Use Postgres', rationale: 'shared' });
+    expect(storeAfter.getError(taskError.id)).toMatchObject({ message: 'ReferenceError', resolved: true, resolution: 'fixed remotely' });
+    expect(storeAfter.getOpenQuestion(question.id)).toMatchObject({ text: 'Which SQL engine?', resolved: true });
+    expect(storeAfter.getCommand(command.id)).toMatchObject({ cmdRedacted: 'pnpm test', exitCode: 0, summary: 'passed' });
+    expect(storeAfter.listDecisions(task.id).some((d) => d.remoteId === 'remote-dec-9' && d.text === 'From teammate')).toBe(true);
+    expect(storeAfter.listErrors(task.id).some((e) => e.remoteId === 'remote-err-9' && e.message === 'From teammate')).toBe(true);
+    expect(storeAfter.listOpenQuestions(task.id).some((q) => q.remoteId === 'remote-q-9' && q.text === 'From teammate')).toBe(true);
+    expect(storeAfter.listCommands(task.id).some((c) => c.remoteId === 'remote-cmd-9' && c.cmdRedacted === 'pnpm build')).toBe(true);
     storeAfter.close();
 
     expect(loggedLines().some((l) => l.includes('updated 1 existing todo'))).toBe(true);
-    expect(loggedLines().some((l) => l.includes('Pulled 1 new decision'))).toBe(true);
+    expect(loggedLines().some((l) => l.includes('Pulled 1 new decision') && l.includes('updated 1 existing decision'))).toBe(true);
+    expect(loggedLines().some((l) => l.includes('Pulled 1 new error') && l.includes('updated 1 existing error'))).toBe(true);
+    expect(loggedLines().some((l) => l.includes('Pulled 1 new open question') && l.includes('updated 1 existing open question'))).toBe(true);
+    expect(loggedLines().some((l) => l.includes('Pulled 1 new command') && l.includes('updated 1 existing command'))).toBe(true);
+  });
+
+  it('pull detects conflicts on decisions/errors/open questions/commands and honors --on-conflict local-wins', async () => {
+    writeSyncConfig();
+
+    await program.parseAsync(['node', 'ariadne', 'task', 'new', 'Conflicted sub-entities']);
+    const store = openWorkspaceStore(root);
+    const [task] = store.listTasks();
+    store.setTaskRemoteSync(task.id, 'remote-task-1', '2026-01-01T00:00:00.000Z');
+    const decision = store.recordDecision({ taskId: task.id, text: 'Local decision' });
+    store.setDecisionRemoteSync(decision.id, 'remote-dec-1', '2026-01-01T00:00:00.000Z');
+    const taskError = store.recordError({ taskId: task.id, message: 'Local error' });
+    store.setErrorRemoteSync(taskError.id, 'remote-err-1', '2026-01-01T00:00:00.000Z');
+    const question = store.recordOpenQuestion({ taskId: task.id, text: 'Local question' });
+    store.setOpenQuestionRemoteSync(question.id, 'remote-q-1', '2026-01-01T00:00:00.000Z');
+    const command = store.recordCommand({ taskId: task.id, cmdRedacted: 'local cmd', exitCode: 1, summary: 'failed' });
+    store.setCommandRemoteSync(command.id, 'remote-cmd-1', '2026-01-01T00:00:00.000Z');
+    store.updateDecision(decision.id, { text: 'Locally changed decision' });
+    store.updateError(taskError.id, 'Locally changed error');
+    store.updateOpenQuestion(question.id, 'Locally changed question');
+    store.applyPulledCommand(command.id, {
+      cmdRedacted: 'locally changed cmd',
+      exitCode: 1,
+      summary: 'failed',
+      updatedAt: '2026-01-02T00:00:00.000Z',
+      syncedAt: '2026-01-01T00:00:00.000Z',
+    });
+    store.close();
+
+    vi.mocked(syncClient.pullTasks).mockResolvedValue({ tasks: [], serverTime: '2026-02-01T00:00:00.000Z' });
+    vi.mocked(syncClient.pullCheckpoints).mockResolvedValue({ checkpoints: [], serverTime: '2026-02-01T00:00:00.000Z' });
+    vi.mocked(syncClient.pullTodos).mockResolvedValue({ todos: [], serverTime: '2026-02-01T00:00:00.000Z' });
+    vi.mocked(syncClient.pullDecisions).mockResolvedValue({
+      decisions: [{ remoteId: 'remote-dec-1', text: 'Remotely changed decision', rationale: null, supersedesId: null, createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-02-01T00:00:00.000Z' }],
+      serverTime: '2026-02-01T00:00:00.000Z',
+    });
+    vi.mocked(syncClient.pullErrors).mockResolvedValue({
+      errors: [{ remoteId: 'remote-err-1', message: 'Remotely changed error', resolved: true, resolution: 'fixed', createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-02-01T00:00:00.000Z' }],
+      serverTime: '2026-02-01T00:00:00.000Z',
+    });
+    vi.mocked(syncClient.pullOpenQuestions).mockResolvedValue({
+      openQuestions: [{ remoteId: 'remote-q-1', text: 'Remotely changed question', resolved: true, createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-02-01T00:00:00.000Z' }],
+      serverTime: '2026-02-01T00:00:00.000Z',
+    });
+    vi.mocked(syncClient.pullCommands).mockResolvedValue({
+      commands: [{ remoteId: 'remote-cmd-1', cmdRedacted: 'remotely changed cmd', exitCode: 0, summary: 'passed', createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-02-01T00:00:00.000Z' }],
+      serverTime: '2026-02-01T00:00:00.000Z',
+    });
+
+    await program.parseAsync(['node', 'ariadne', 'sync', 'pull', '--on-conflict', 'local-wins']);
+
+    const lines = loggedLines();
+    expect(lines.some((l) => l.includes('⚠ Conflict on decision'))).toBe(true);
+    expect(lines.some((l) => l.includes('⚠ Conflict on error'))).toBe(true);
+    expect(lines.some((l) => l.includes('⚠ Conflict on open question'))).toBe(true);
+    expect(lines.some((l) => l.includes('⚠ Conflict on command'))).toBe(true);
+
+    const storeAfter = openWorkspaceStore(root);
+    expect(storeAfter.getDecision(decision.id)!.text).toBe('Locally changed decision');
+    expect(storeAfter.getError(taskError.id)!.message).toBe('Locally changed error');
+    expect(storeAfter.getOpenQuestion(question.id)!.text).toBe('Locally changed question');
+    expect(storeAfter.getCommand(command.id)!.cmdRedacted).toBe('locally changed cmd');
+    storeAfter.close();
+  });
+
+  it('pull maps a remote decision supersedesId back to the linked local decision id', async () => {
+    writeSyncConfig();
+
+    await program.parseAsync(['node', 'ariadne', 'task', 'new', 'Task with remote decision chain']);
+    const store = openWorkspaceStore(root);
+    const [task] = store.listTasks();
+    store.setTaskRemoteSync(task.id, 'remote-task-1', '2026-01-01T00:00:00.000Z');
+    store.close();
+
+    vi.mocked(syncClient.pullTasks).mockResolvedValue({ tasks: [], serverTime: '2026-02-01T00:00:00.000Z' });
+    vi.mocked(syncClient.pullCheckpoints).mockResolvedValue({ checkpoints: [], serverTime: '2026-02-01T00:00:00.000Z' });
+    vi.mocked(syncClient.pullTodos).mockResolvedValue({ todos: [], serverTime: '2026-02-01T00:00:00.000Z' });
+    vi.mocked(syncClient.pullErrors).mockResolvedValue({ errors: [], serverTime: '2026-02-01T00:00:00.000Z' });
+    vi.mocked(syncClient.pullOpenQuestions).mockResolvedValue({ openQuestions: [], serverTime: '2026-02-01T00:00:00.000Z' });
+    vi.mocked(syncClient.pullCommands).mockResolvedValue({ commands: [], serverTime: '2026-02-01T00:00:00.000Z' });
+    vi.mocked(syncClient.pullDecisions).mockResolvedValue({
+      decisions: [
+        { remoteId: 'remote-dec-older', text: 'Use SQLite first', rationale: null, supersedesId: null, createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-02-01T00:00:00.000Z' },
+        { remoteId: 'remote-dec-newer', text: 'Use Postgres instead', rationale: 'shared', supersedesId: 'remote-dec-older', createdAt: '2026-01-02T00:00:00.000Z', updatedAt: '2026-02-01T00:00:01.000Z' },
+      ],
+      serverTime: '2026-02-01T00:00:02.000Z',
+    });
+
+    await program.parseAsync(['node', 'ariadne', 'sync', 'pull']);
+
+    const storeAfter = openWorkspaceStore(root);
+    const decisions = storeAfter.listDecisions(task.id);
+    const older = decisions.find((d) => d.remoteId === 'remote-dec-older')!;
+    const newer = decisions.find((d) => d.remoteId === 'remote-dec-newer')!;
+    expect(newer.supersedesId).toBe(older.id);
+    storeAfter.close();
   });
 
   it('pull detects a task conflict (changed both locally and remotely) and reports it, defaulting to remote-wins', async () => {

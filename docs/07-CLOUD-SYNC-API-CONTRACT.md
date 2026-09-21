@@ -1,7 +1,8 @@
 # Ariadne — Cloud Sync Server Schema & API Contract
 
 **Status: Phase 0/1 schema + API finalized and implemented; Phase 2
-(sub-entity sync) also implemented — see §4.6.** This is the concrete
+(sub-entity sync) also implemented, and the former create-once limitation
+for decisions/errors/open_questions/commands is now closed — see §4.6.** This is the concrete
 follow-on to `docs/06-CLOUD-SYNC-DESIGN.md` v0.2 (all product/infra
 decisions locked there). This doc defines the actual Postgres schema and
 HTTP API for `packages/sync-server`.
@@ -13,11 +14,13 @@ Implemented:
 - `tasks` and `checkpoints` sync — push (upload local changes) and pull
   (download remote changes), additive-only (no deletes, per design doc §6).
 - `todos`, `decisions`, `errors`, `open_questions`, `commands` sync (§4.6).
-  Todos get full bidirectional sync; the other four are create-once
-  (mirroring checkpoints) — see §4.6 for the exact limitation.
+  All five now get full bidirectional sync (`remoteId` upsert on push,
+  `updated_at`-driven pull cursors, and visible pull-time conflict
+  detection for linked rows) — see §4.6.
 - Visible conflict detection + a `--on-conflict <remote-wins|local-wins>`
-  flag on `ariadne sync pull` for the two bidirectional entity types
-  (tasks, todos) — see §6's pull section for the exact behavior.
+  flag on `ariadne sync pull` for every bidirectional entity type
+  (tasks, todos, decisions, errors, open questions, commands) — see §6's
+  pull section for the exact behavior.
 
 Out of scope (tracked as follow-up work):
 - `files`/`commits` sync — deliberately excluded. These are git/workspace-
@@ -72,6 +75,77 @@ CREATE TABLE checkpoints (
 );
 CREATE INDEX idx_checkpoints_task_created ON checkpoints(task_id, created_at);
 CREATE INDEX idx_checkpoints_created_at ON checkpoints(created_at); -- drives pull's "changed since" query
+
+-- Todos / decisions / errors / open questions / commands: all syncable,
+-- all additive-only, and all now track updated_at so post-create edits can
+-- be re-pushed and re-pulled just like tasks/todos.
+CREATE TABLE todos (
+  id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  local_id        TEXT NOT NULL,
+  task_id         UUID NOT NULL REFERENCES tasks(id),
+  text            TEXT NOT NULL,
+  status          TEXT NOT NULL DEFAULT 'pending',
+  owner_user_id   UUID REFERENCES users(id),
+  workspace_label TEXT,
+  created_at      TIMESTAMPTZ NOT NULL,
+  updated_at      TIMESTAMPTZ NOT NULL
+);
+CREATE INDEX idx_todos_task_updated ON todos(task_id, updated_at);
+
+CREATE TABLE decisions (
+  id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  local_id        TEXT NOT NULL,
+  task_id         UUID NOT NULL REFERENCES tasks(id),
+  text            TEXT NOT NULL,
+  rationale       TEXT,
+  supersedes_id   UUID,
+  owner_user_id   UUID REFERENCES users(id),
+  workspace_label TEXT,
+  created_at      TIMESTAMPTZ NOT NULL,
+  updated_at      TIMESTAMPTZ NOT NULL
+);
+CREATE INDEX idx_decisions_task_updated ON decisions(task_id, updated_at);
+
+CREATE TABLE errors (
+  id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  local_id        TEXT NOT NULL,
+  task_id         UUID NOT NULL REFERENCES tasks(id),
+  message         TEXT NOT NULL,
+  resolved        BOOLEAN NOT NULL DEFAULT false,
+  resolution      TEXT,
+  owner_user_id   UUID REFERENCES users(id),
+  workspace_label TEXT,
+  created_at      TIMESTAMPTZ NOT NULL,
+  updated_at      TIMESTAMPTZ NOT NULL
+);
+CREATE INDEX idx_errors_task_updated ON errors(task_id, updated_at);
+
+CREATE TABLE open_questions (
+  id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  local_id        TEXT NOT NULL,
+  task_id         UUID NOT NULL REFERENCES tasks(id),
+  text            TEXT NOT NULL,
+  resolved        BOOLEAN NOT NULL DEFAULT false,
+  owner_user_id   UUID REFERENCES users(id),
+  workspace_label TEXT,
+  created_at      TIMESTAMPTZ NOT NULL,
+  updated_at      TIMESTAMPTZ NOT NULL
+);
+CREATE INDEX idx_open_questions_task_updated ON open_questions(task_id, updated_at);
+
+CREATE TABLE commands (
+  id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  local_id        TEXT NOT NULL,
+  task_id         UUID NOT NULL REFERENCES tasks(id),
+  cmd_redacted    TEXT NOT NULL,
+  exit_code       INTEGER,
+  summary         TEXT,
+  owner_user_id   UUID REFERENCES users(id),
+  workspace_label TEXT,
+  created_at      TIMESTAMPTZ NOT NULL,
+  updated_at      TIMESTAMPTZ NOT NULL
+);
+CREATE INDEX idx_commands_task_updated ON commands(task_id, updated_at);
 
 -- Schema version bookkeeping, mirroring the client's schema_meta table.
 CREATE TABLE schema_meta (
@@ -357,22 +431,14 @@ curated content, mirroring the tables in `packages/core/src/schema.ts`.
 `files`/`commits` are deliberately **not** included (see §1) — this section
 covers only `todos`, `decisions`, `errors`, `open_questions`, `commands`.
 
-**Todos** get full bidirectional sync (like tasks): push is an upsert keyed
-on `remoteId` (`null` → insert, present → update), and a local edit made
-after the first push (e.g. marking one done) is correctly re-detected and
-re-pushed on the next `sync push`, since `todos.updated_at` is bumped on
-every mutation and compared against `synced_at`.
-
-**Decisions, errors, open questions, commands** get **create-once** sync,
-identical in spirit to checkpoints (§4.3): push is insert-only (no
-`remoteId` in the push payload — there's nothing to upsert), and pull is a
-`since`-cursor scan by `created_at`. **This is a known, deliberate
-limitation**: none of these four have an `updated_at` column, so a local
-edit made *after* the initial push — editing a decision's rationale,
-resolving an error, resolving an open question, editing a command's summary
-— is **not** automatically detected or re-pushed in this phase. The first
-push of each row is what reaches the server; later local edits stay local
-until a future phase adds per-row update tracking for these four types.
+**Todos, decisions, errors, open questions, and commands** all now get the
+same full bidirectional sync shape: push is an upsert keyed on `remoteId`
+(`null` → insert, present → update), and a local edit made after the first
+push is correctly re-detected and re-pushed on the next `sync push`, since
+each table now tracks `updated_at` and the client compares it against
+`synced_at`. Pull uses `updated_at > since`, and the CLI applies the same
+visible conflict reporting / `--on-conflict <remote-wins|local-wins>`
+behavior for these rows that tasks/todos already used.
 
 **`POST /api/v1/sync/todos`** — push (upsert by `remoteId`)
 ```json
@@ -408,20 +474,106 @@ until a future phase adds per-row update tracking for these four types.
 }
 ```
 
-**`POST /api/v1/sync/decisions`** / **`GET /api/v1/sync/decisions?taskRemoteId=<id>&since=<ISO-8601>`**
-— same create-only push / since-cursor pull shape as checkpoints, with
-fields `text`, `rationale` (nullable).
+**`POST /api/v1/sync/decisions`** — push (upsert by `remoteId`)
+```json
+{
+  "decisions": [
+    {
+      "localId": "01J...",
+      "remoteId": null,
+      "remoteTaskId": "9a3f...",
+      "text": "Use Postgres",
+      "rationale": "Shared remote state",
+      "supersedesId": null,
+      "workspaceLabel": "laptop1:org/atom",
+      "createdAt": "2026-07-13T10:00:00Z",
+      "updatedAt": "2026-07-13T10:00:00Z"
+    }
+  ]
+}
+```
+```json
+{ "results": [ { "localId": "01J...", "remoteId": "7b21...", "updatedAt": "2026-07-13T10:00:00Z" } ] }
+```
+
+**`GET /api/v1/sync/decisions?taskRemoteId=<id>&since=<ISO-8601>`**
+```json
+{
+  "decisions": [
+    {
+      "remoteId": "7b21...",
+      "text": "Use Postgres",
+      "rationale": "Shared remote state",
+      "supersedesId": null,
+      "workspaceLabel": "laptop1:org/atom",
+      "createdAt": "...",
+      "updatedAt": "..."
+    }
+  ],
+  "serverTime": "2026-07-13T10:05:00Z"
+}
+```
 
 **`POST /api/v1/sync/errors`** / **`GET /api/v1/sync/errors?taskRemoteId=<id>&since=<ISO-8601>`**
-— fields `message`, `resolved` (boolean), `resolution` (nullable). Note:
-`resolved`/`resolution` reflect the state *at first push* only, per the
-create-once limitation above.
+```json
+{
+  "errors": [
+    {
+      "localId": "01J...",
+      "remoteId": "7b22...",
+      "remoteTaskId": "9a3f...",
+      "message": "TypeError",
+      "resolved": true,
+      "resolution": "Added guard",
+      "workspaceLabel": "laptop1:org/atom",
+      "createdAt": "...",
+      "updatedAt": "..."
+    }
+  ]
+}
+```
+```json
+{
+  "errors": [
+    { "remoteId": "7b22...", "message": "TypeError", "resolved": true, "resolution": "Added guard", "workspaceLabel": "laptop1:org/atom", "createdAt": "...", "updatedAt": "..." }
+  ],
+  "serverTime": "2026-07-13T10:05:00Z"
+}
+```
 
 **`POST /api/v1/sync/open-questions`** / **`GET /api/v1/sync/open-questions?taskRemoteId=<id>&since=<ISO-8601>`**
-— fields `text`, `resolved` (boolean). Response body key is `openQuestions`.
+```json
+{
+  "openQuestions": [
+    { "localId": "01J...", "remoteId": null, "remoteTaskId": "9a3f...", "text": "Which SQL engine?", "resolved": false, "workspaceLabel": "laptop1:org/atom", "createdAt": "...", "updatedAt": "..." }
+  ]
+}
+```
+```json
+{
+  "openQuestions": [
+    { "remoteId": "7b23...", "text": "Which SQL engine?", "resolved": false, "workspaceLabel": "laptop1:org/atom", "createdAt": "...", "updatedAt": "..." }
+  ],
+  "serverTime": "2026-07-13T10:05:00Z"
+}
+```
 
 **`POST /api/v1/sync/commands`** / **`GET /api/v1/sync/commands?taskRemoteId=<id>&since=<ISO-8601>`**
-— fields `cmdRedacted`, `exitCode` (nullable int), `summary` (nullable).
+```json
+{
+  "commands": [
+    { "localId": "01J...", "remoteId": "7b24...", "remoteTaskId": "9a3f...", "cmdRedacted": "pnpm test", "exitCode": 0, "summary": "passed", "workspaceLabel": "laptop1:org/atom", "createdAt": "...", "updatedAt": "..." }
+  ]
+}
+```
+```json
+{
+  "commands": [
+    { "remoteId": "7b24...", "cmdRedacted": "pnpm test", "exitCode": 0, "summary": "passed", "workspaceLabel": "laptop1:org/atom", "createdAt": "...", "updatedAt": "..." }
+  ],
+  "serverTime": "2026-07-13T10:05:00Z"
+}
+```
 
 All five push endpoints follow checkpoints' attribution model (§2.1):
 `owner_user_id` is the pushing account, `workspace_label` is the pushing

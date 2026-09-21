@@ -71,6 +71,22 @@ export const MIGRATIONS: Migration[] = [
       `);
     },
   },
+  {
+    version: 4,
+    description: 'Add updated_at columns to decisions/errors/open_questions/commands and backfill from created_at',
+    up: (db) => {
+      db.exec(`
+        ALTER TABLE decisions ADD COLUMN updated_at TEXT;
+        ALTER TABLE errors ADD COLUMN updated_at TEXT;
+        ALTER TABLE open_questions ADD COLUMN updated_at TEXT;
+        ALTER TABLE commands ADD COLUMN updated_at TEXT;
+        UPDATE decisions SET updated_at = created_at WHERE updated_at IS NULL;
+        UPDATE errors SET updated_at = created_at WHERE updated_at IS NULL;
+        UPDATE open_questions SET updated_at = created_at WHERE updated_at IS NULL;
+        UPDATE commands SET updated_at = created_at WHERE updated_at IS NULL;
+      `);
+    },
+  },
 ];
 
 function getSchemaVersion(db: Database.Database): number {

@@ -43,9 +43,12 @@ export {
   getHeadSha,
   getCurrentBranch,
   listRecentCommits,
+  listCommitFiles,
+  fileRoleFromGitStatus,
+  isGitCommitCommand,
   syncTaskGit,
 } from './GitWatcher.js';
-export type { GitLogEntry, SyncGitResult } from './GitWatcher.js';
+export type { GitLogEntry, GitCommitFileEntry, SyncGitResult } from './GitWatcher.js';
 export {
   DEFAULT_REDACTION_RULES,
   MAX_REDACTED_LENGTH,
