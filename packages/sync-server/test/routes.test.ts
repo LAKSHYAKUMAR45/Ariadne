@@ -142,6 +142,127 @@ describe('sync-server: auth + sync routes', () => {
     });
   });
 
+  describe('admin member routes', () => {
+    async function createAdminFixture() {
+      const teamId = await createDirectTeam('Singleton Admin Team');
+      const admin = await createDirectUser('singleton-admin');
+      const member = await createDirectUser('teammate-member');
+
+      await addMembership(teamId, admin.userId, 'admin');
+      await addMembership(teamId, member.userId, 'member');
+
+      return { teamId, admin, member };
+    }
+
+    it('lists members and lets the singleton admin deactivate then reactivate a member', async () => {
+      const { admin, member } = await createAdminFixture();
+
+      const listRes = await request(app)
+        .get('/api/v1/admin/members')
+        .set(admin.authHeader);
+      expect(listRes.status).toBe(200);
+      expect(listRes.body.members).toHaveLength(2);
+
+      const adminEntry = listRes.body.members.find((entry: { userId: string }) => entry.userId === admin.userId);
+      expect(adminEntry).toMatchObject({
+        userId: admin.userId,
+        username: 'singleton-admin',
+        role: 'admin',
+        active: true,
+      });
+      expect(adminEntry.createdAt).toEqual(expect.any(String));
+
+      const memberEntry = listRes.body.members.find((entry: { userId: string }) => entry.userId === member.userId);
+      expect(memberEntry).toMatchObject({
+        userId: member.userId,
+        username: 'teammate-member',
+        role: 'member',
+        active: true,
+      });
+      expect(memberEntry.createdAt).toEqual(expect.any(String));
+
+      const deactivateRes = await request(app)
+        .patch(`/api/v1/admin/members/${member.userId}`)
+        .set(admin.authHeader)
+        .send({ active: false });
+      expect(deactivateRes.status).toBe(200);
+      expect(deactivateRes.body.member).toMatchObject({
+        userId: member.userId,
+        username: 'teammate-member',
+        role: 'member',
+        active: false,
+      });
+
+      const deactivatedMembership = await pool.query<{ active: boolean }>(
+        'SELECT active FROM team_memberships WHERE user_id = $1',
+        [member.userId],
+      );
+      expect(deactivatedMembership.rows[0].active).toBe(false);
+
+      const reactivateRes = await request(app)
+        .patch(`/api/v1/admin/members/${member.userId}`)
+        .set(admin.authHeader)
+        .send({ active: true });
+      expect(reactivateRes.status).toBe(200);
+      expect(reactivateRes.body.member).toMatchObject({
+        userId: member.userId,
+        username: 'teammate-member',
+        role: 'member',
+        active: true,
+      });
+
+      const reactivatedMembership = await pool.query<{ active: boolean }>(
+        'SELECT active FROM team_memberships WHERE user_id = $1',
+        [member.userId],
+      );
+      expect(reactivatedMembership.rows[0].active).toBe(true);
+    });
+
+    it('returns 403 when a non-admin member calls admin member APIs', async () => {
+      const { member } = await createAdminFixture();
+
+      const listRes = await request(app)
+        .get('/api/v1/admin/members')
+        .set(member.authHeader);
+      expect(listRes.status).toBe(403);
+
+      const patchRes = await request(app)
+        .patch(`/api/v1/admin/members/${member.userId}`)
+        .set(member.authHeader)
+        .send({ active: false });
+      expect(patchRes.status).toBe(403);
+    });
+
+    it('returns 404 when the singleton admin targets an unknown user', async () => {
+      const { admin } = await createAdminFixture();
+
+      const res = await request(app)
+        .patch('/api/v1/admin/members/00000000-0000-0000-0000-000000000099')
+        .set(admin.authHeader)
+        .send({ active: false });
+
+      expect(res.status).toBe(404);
+    });
+
+    it('returns 409 admin_immutable when attempting to mutate the singleton admin', async () => {
+      const { admin } = await createAdminFixture();
+
+      const res = await request(app)
+        .patch(`/api/v1/admin/members/${admin.userId}`)
+        .set(admin.authHeader)
+        .send({ active: false });
+
+      expect(res.status).toBe(409);
+      expect(res.body.error.code).toBe('admin_immutable');
+
+      const membership = await pool.query<{ active: boolean }>(
+        'SELECT active FROM team_memberships WHERE user_id = $1',
+        [admin.userId],
+      );
+      expect(membership.rows[0].active).toBe(true);
+    });
+  });
+
   describe('sync routes require authentication', () => {
     it('rejects a request with no token', async () => {
       const res = await request(app).get('/api/v1/sync/tasks');

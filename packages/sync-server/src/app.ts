@@ -1,5 +1,6 @@
 import express, { type Express } from 'express';
 import type { Pool } from 'pg';
+import { createMembersRouter } from './routes/members.js';
 import { requireAuth } from './middleware.js';
 import { createAuthRouter } from './routes/auth.js';
 import { createSyncRouter } from './routes/sync.js';
@@ -12,6 +13,7 @@ export function createApp(pool: Pool, jwtSecret: string): Express {
   app.get('/healthz', (_req, res) => res.status(200).json({ ok: true }));
 
   app.use('/api/v1/auth', createAuthRouter(pool, jwtSecret));
+  app.use('/api/v1/admin', requireAuth(jwtSecret), createMembersRouter(pool));
   app.use('/api/v1/sync', requireAuth(jwtSecret), createSyncRouter(pool));
 
   return app;
