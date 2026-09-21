@@ -7,6 +7,7 @@ import type { CaptureResult, TaskStore, TodoStatus } from '@ariadne-dev/core';
 import {
   buildContext,
   captureTaskFiles,
+  throwSanitizedTaskFileCaptureFailure,
   syncTaskGit,
   exportTaskMarkdown,
   searchWorkspace,
@@ -63,18 +64,6 @@ function withStore<T>(fn: (store: TaskStore) => T): T {
   }
 }
 
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
-function toError(error: unknown, fallbackMessage: string): Error {
-  if (error instanceof Error) {
-    return error;
-  }
-
-  return new Error(error === undefined ? fallbackMessage : String(error));
-}
-
 function logCaptureResult(result: CaptureResult): void {
   if (result.capture) {
     const byteCount = result.capture.entries.reduce((total, entry) => total + entry.byteLength, 0);
@@ -93,26 +82,11 @@ function logCaptureResult(result: CaptureResult): void {
   }
 }
 
-function recordCaptureFailure(store: TaskStore, taskId: string, context: string, error: unknown): never {
-  const captureError = toError(error, `Task file capture failed after ${context}.`);
-  const message = `Task file capture failed after ${context}: ${errorMessage(captureError)}`;
-  try {
-    store.recordError({ taskId, message });
-  } catch (recordError: unknown) {
-    throw new AggregateError(
-      [captureError, toError(recordError, 'Failed to record task file capture failure.')],
-      `Task file capture failed after ${context}; Ariadne also failed to record the capture failure as a task error.`,
-    );
-  }
-  throw new Error(message, { cause: captureError });
-}
-
 function runTaskFileCapture(
   store: TaskStore,
   taskId: string,
   workspaceRoot: string,
   request: { trigger: 'checkpoint' | 'explicit'; checkpointId?: string },
-  context: string,
 ): void {
   try {
     const result = captureTaskFiles(store, {
@@ -122,8 +96,8 @@ function runTaskFileCapture(
       checkpointId: request.checkpointId,
     });
     logCaptureResult(result);
-  } catch (error: unknown) {
-    recordCaptureFailure(store, taskId, context, error);
+  } catch {
+    throwSanitizedTaskFileCaptureFailure(store, taskId, request.trigger === 'checkpoint' ? 'checkpoint' : 'explicit capture');
   }
 }
 
@@ -261,7 +235,7 @@ program
     withResolvedTask(opts.task, (store, taskId, workspaceRoot) => {
       const cp = store.createCheckpoint({ taskId, level: opts.level, summary });
       console.log(`Recorded ${cp.level} checkpoint ${cp.id}.`);
-      runTaskFileCapture(store, taskId, workspaceRoot, { trigger: 'checkpoint', checkpointId: cp.id }, `checkpoint ${cp.id}`);
+      runTaskFileCapture(store, taskId, workspaceRoot, { trigger: 'checkpoint', checkpointId: cp.id });
     });
   });
 
@@ -270,7 +244,7 @@ program
   .description('Capture tracked, task-touched text files for the current (or given) task')
   .action((taskId: string | undefined) => {
     withResolvedTask(taskId, (store, resolvedTaskId, workspaceRoot) => {
-      runTaskFileCapture(store, resolvedTaskId, workspaceRoot, { trigger: 'explicit' }, 'explicit capture');
+      runTaskFileCapture(store, resolvedTaskId, workspaceRoot, { trigger: 'explicit' });
     });
   });
 

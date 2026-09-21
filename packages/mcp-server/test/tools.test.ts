@@ -3,6 +3,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import { execFileSync } from 'node:child_process';
+import { inspect } from 'node:util';
 import * as core from '@ariadne-dev/core';
 import { TaskStore } from '@ariadne-dev/core';
 import * as tools from '../src/tools.js';
@@ -145,28 +146,57 @@ describe('mcp-server tools', () => {
     expect(store.getTaskFileCaptures(task.id)).toEqual([]);
   });
 
-  it('checkpoint_add surfaces capture and failure-recording errors together without returning a result', () => {
+  it('checkpoint_add records a generic task error and throws a sanitized capture error', () => {
     initRepo(workspaceRoot);
     const task = tools.taskNew(store, workspaceRoot, { title: 'Checkpoint capture failure task' });
-    const captureFailure = new Error('capture exploded with secret contents');
-    const recordFailure = new Error('recordError write failed');
+    const secretMarker = 'mcp-checkpoint-secret-marker';
     vi.spyOn(core, 'captureTaskFiles').mockImplementation(() => {
-      throw captureFailure;
-    });
-    vi.spyOn(TaskStore.prototype, 'recordError').mockImplementation(() => {
-      throw recordFailure;
+      throw new Error(`capture exploded with ${secretMarker}`);
     });
 
     try {
       tools.checkpointAdd(store, workspaceRoot, { summary: 'did stuff' });
       expect.unreachable('checkpointAdd should have thrown');
     } catch (error: unknown) {
-      expect(error).toBeInstanceOf(AggregateError);
-      expect((error as Error).message).toContain('Task file capture failed after checkpoint');
-      expect((error as Error).message).toContain('failed to record the capture failure');
-      expect((error as AggregateError).errors).toEqual([captureFailure, recordFailure]);
-      expect((error as Error).message).not.toContain('secret contents');
-      expect((error as Error).message).not.toContain('recordError write failed');
+      expect(error).toBeInstanceOf(core.TaskFileCaptureFailureError);
+      expect((error as Error).message).toBe('Task file capture failed after checkpoint.');
+      expect(inspect(error, { depth: 8 })).not.toContain(secretMarker);
+    }
+
+    expect(store.listCheckpoints(task.id)).toHaveLength(1);
+    expect(store.getTaskFileCaptures(task.id)).toEqual([]);
+    expect(store.listErrors(task.id)).toMatchObject([
+      { message: 'Task file capture failed after checkpoint.' },
+    ]);
+  });
+
+  it('checkpoint_add surfaces sanitized capture and failure-recording errors together without returning a result', () => {
+    initRepo(workspaceRoot);
+    const task = tools.taskNew(store, workspaceRoot, { title: 'Checkpoint capture failure task' });
+    const captureMarker = 'mcp-checkpoint-capture-secret-marker';
+    const recordMarker = 'mcp-checkpoint-record-secret-marker';
+    vi.spyOn(core, 'captureTaskFiles').mockImplementation(() => {
+      throw new Error(`capture exploded with ${captureMarker}`);
+    });
+    vi.spyOn(TaskStore.prototype, 'recordError').mockImplementation(() => {
+      throw new Error(`recordError write failed with ${recordMarker}`);
+    });
+
+    try {
+      tools.checkpointAdd(store, workspaceRoot, { summary: 'did stuff' });
+      expect.unreachable('checkpointAdd should have thrown');
+    } catch (error: unknown) {
+      expect(error).toBeInstanceOf(core.TaskFileCaptureFailureAggregateError);
+      expect((error as Error).message).toBe(
+        'Task file capture failed after checkpoint, and Ariadne also failed to record that capture failure.',
+      );
+      expect((error as AggregateError).errors).toMatchObject([
+        { message: 'Task file capture failed after checkpoint.' },
+        { message: 'Ariadne failed to record the checkpoint capture failure.' },
+      ]);
+      const rendered = inspect(error, { depth: 8 });
+      expect(rendered).not.toContain(captureMarker);
+      expect(rendered).not.toContain(recordMarker);
     }
 
     expect(store.listCheckpoints(task.id)).toHaveLength(1);

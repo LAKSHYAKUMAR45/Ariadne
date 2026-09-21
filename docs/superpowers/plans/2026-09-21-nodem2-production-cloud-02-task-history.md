@@ -287,6 +287,21 @@ git add packages/cli/src/index.ts packages/cli/test/cli.test.ts packages/mcp-ser
 git commit -m "feat(capture): add checkpoint and explicit file capture"
 ```
 
+#### Task 3 report — round 2
+
+- Replaced the CLI/MCP capture-failure wrappers with shared sanitized core
+  error types so checkpoint/explicit capture failures never persist or surface
+  raw `captureTaskFiles` / `recordError` messages.
+- Single capture-failure paths now record only stable generic task errors and
+  throw stable generic errors without `cause`.
+- Dual-failure paths now throw a sanitized `AggregateError` whose nested errors
+  are wrapper errors only, so object inspection and MCP error envelopes stay
+  content-free even when both capture and failure-recording break.
+- Added regression coverage for CLI checkpoint, CLI explicit capture, MCP
+  checkpoint tool throws, and MCP handler error envelopes using secret marker
+  strings to prove the markers never survive persistence, thrown-object
+  inspection, or serialized MCP responses.
+
 ### Task 4: Server encryption keyring
 
 **Files:**

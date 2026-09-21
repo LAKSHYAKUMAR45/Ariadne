@@ -17,6 +17,7 @@ import type {
 import {
   buildContext,
   captureTaskFiles,
+  throwSanitizedTaskFileCaptureFailure,
   syncTaskGit,
   isGitCommitCommand,
   exportTaskMarkdown,
@@ -198,32 +199,6 @@ function captureSummary(result: CaptureResult): CaptureSummary | null {
   };
 }
 
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
-function toError(error: unknown, fallbackMessage: string): Error {
-  if (error instanceof Error) {
-    return error;
-  }
-
-  return new Error(error === undefined ? fallbackMessage : String(error));
-}
-
-function recordCaptureFailure(store: TaskStore, taskId: string, context: string, error: unknown): never {
-  const captureError = toError(error, `Task file capture failed after ${context}.`);
-  const message = `Task file capture failed after ${context}: ${errorMessage(captureError)}`;
-  try {
-    store.recordError({ taskId, message });
-  } catch (recordError: unknown) {
-    throw new AggregateError(
-      [captureError, toError(recordError, 'Failed to record task file capture failure.')],
-      `Task file capture failed after ${context}; Ariadne also failed to record the capture failure as a task error.`,
-    );
-  }
-  throw new Error(message, { cause: captureError });
-}
-
 export function checkpointAdd(store: TaskStore, workspaceRoot: string, args: CheckpointAddArgs): CheckpointAddResult {
   return withTaskStore(store, workspaceRoot, args.taskId, (s, taskId, resolvedWorkspaceRoot) => {
     const checkpoint = s.createCheckpoint({ taskId, level: args.level ?? 'micro', summary: args.summary });
@@ -240,8 +215,8 @@ export function checkpointAdd(store: TaskStore, workspaceRoot: string, args: Che
         capture: captureSummary(result),
         skipped: result.skipped.map((skip) => ({ ...skip })),
       };
-    } catch (error: unknown) {
-      return recordCaptureFailure(s, taskId, `checkpoint ${checkpoint.id}`, error);
+    } catch {
+      return throwSanitizedTaskFileCaptureFailure(s, taskId, 'checkpoint');
     }
   });
 }

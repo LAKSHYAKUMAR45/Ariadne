@@ -3,6 +3,7 @@ import { execFileSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { inspect } from 'node:util';
 import * as core from '@ariadne-dev/core';
 import { TaskStore, closeRegistry, openWorkspaceStore, setCurrentTaskId } from '@ariadne-dev/core';
 import { program } from '../src/index.js';
@@ -188,27 +189,57 @@ describe('ariadne capture + checkpoint commands', () => {
     store.close();
   });
 
-  it('surfaces checkpoint capture and failure-recording errors together without a success-shaped result', async () => {
+  it('records a generic task error and throws a sanitized checkpoint capture error', async () => {
     const taskId = createCurrentTask('Checkpoint capture failure task');
-    const captureFailure = new Error('capture exploded with secret contents');
-    const recordFailure = new Error('recordError write failed');
+    const secretMarker = 'checkpoint-secret-marker';
     vi.spyOn(core, 'captureTaskFiles').mockImplementation(() => {
-      throw captureFailure;
-    });
-    vi.spyOn(TaskStore.prototype, 'recordError').mockImplementation(() => {
-      throw recordFailure;
+      throw new Error(`capture exploded with ${secretMarker}`);
     });
 
     await expect(program.parseAsync(['node', 'ariadne', 'checkpoint', 'Will fail', '--level', 'micro'])).rejects.toSatisfy(
       (error: unknown) => {
-        expect(error).toBeInstanceOf(AggregateError);
-        expect(error).toMatchObject({
-          message: expect.stringContaining('Task file capture failed after checkpoint'),
-        });
-        expect((error as Error).message).toContain('failed to record the capture failure');
-        expect((error as AggregateError).errors).toEqual([captureFailure, recordFailure]);
-        expect((error as Error).message).not.toContain('secret contents');
-        expect((error as Error).message).not.toContain('recordError write failed');
+        expect(error).toBeInstanceOf(core.TaskFileCaptureFailureError);
+        expect((error as Error).message).toBe('Task file capture failed after checkpoint.');
+        expect(inspect(error, { depth: 8 })).not.toContain(secretMarker);
+        return true;
+      },
+    );
+
+    const store = openWorkspaceStore(root);
+    expect(store.listCheckpoints(taskId)).toHaveLength(1);
+    expect(store.getTaskFileCaptures(taskId)).toEqual([]);
+    expect(store.listErrors(taskId)).toMatchObject([
+      { message: 'Task file capture failed after checkpoint.' },
+    ]);
+    store.close();
+    expect(loggedLines().some((line) => line.startsWith('Capture '))).toBe(false);
+    expect(loggedLines()).not.toContain('No eligible task files captured (0 file(s), 0 byte(s)).');
+  });
+
+  it('surfaces sanitized checkpoint capture and failure-recording errors together without a success-shaped result', async () => {
+    const taskId = createCurrentTask('Checkpoint capture failure task');
+    const captureMarker = 'checkpoint-capture-secret-marker';
+    const recordMarker = 'checkpoint-record-secret-marker';
+    vi.spyOn(core, 'captureTaskFiles').mockImplementation(() => {
+      throw new Error(`capture exploded with ${captureMarker}`);
+    });
+    vi.spyOn(TaskStore.prototype, 'recordError').mockImplementation(() => {
+      throw new Error(`recordError write failed with ${recordMarker}`);
+    });
+
+    await expect(program.parseAsync(['node', 'ariadne', 'checkpoint', 'Will fail', '--level', 'micro'])).rejects.toSatisfy(
+      (error: unknown) => {
+        expect(error).toBeInstanceOf(core.TaskFileCaptureFailureAggregateError);
+        expect((error as Error).message).toBe(
+          'Task file capture failed after checkpoint, and Ariadne also failed to record that capture failure.',
+        );
+        expect((error as AggregateError).errors).toMatchObject([
+          { message: 'Task file capture failed after checkpoint.' },
+          { message: 'Ariadne failed to record the checkpoint capture failure.' },
+        ]);
+        const rendered = inspect(error, { depth: 8 });
+        expect(rendered).not.toContain(captureMarker);
+        expect(rendered).not.toContain(recordMarker);
         return true;
       },
     );
@@ -242,24 +273,53 @@ describe('ariadne capture + checkpoint commands', () => {
     expect(loggedLines()).toContainEqual(expect.stringContaining(`Capture ${capture.id}: 1 file(s),`));
   });
 
-  it('surfaces explicit capture and failure-recording errors together without a success-shaped result', async () => {
+  it('records a generic task error and throws a sanitized explicit capture error', async () => {
     const taskId = createCurrentTask('Explicit capture failure task');
-    const captureFailure = new Error('explicit capture exploded with secret payload');
-    const recordFailure = new Error('recordError insert failed');
+    const secretMarker = 'explicit-secret-marker';
     vi.spyOn(core, 'captureTaskFiles').mockImplementation(() => {
-      throw captureFailure;
-    });
-    vi.spyOn(TaskStore.prototype, 'recordError').mockImplementation(() => {
-      throw recordFailure;
+      throw new Error(`explicit capture exploded with ${secretMarker}`);
     });
 
     await expect(program.parseAsync(['node', 'ariadne', 'capture'])).rejects.toSatisfy((error: unknown) => {
-      expect(error).toBeInstanceOf(AggregateError);
-      expect((error as Error).message).toContain('Task file capture failed after explicit capture');
-      expect((error as Error).message).toContain('failed to record the capture failure');
-      expect((error as AggregateError).errors).toEqual([captureFailure, recordFailure]);
-      expect((error as Error).message).not.toContain('secret payload');
-      expect((error as Error).message).not.toContain('recordError insert failed');
+      expect(error).toBeInstanceOf(core.TaskFileCaptureFailureError);
+      expect((error as Error).message).toBe('Task file capture failed after explicit capture.');
+      expect(inspect(error, { depth: 8 })).not.toContain(secretMarker);
+      return true;
+    });
+
+    const store = openWorkspaceStore(root);
+    expect(store.getTaskFileCaptures(taskId)).toEqual([]);
+    expect(store.listErrors(taskId)).toMatchObject([
+      { message: 'Task file capture failed after explicit capture.' },
+    ]);
+    store.close();
+    expect(loggedLines().some((line) => line.startsWith('Capture '))).toBe(false);
+    expect(loggedLines()).not.toContain('No eligible task files captured (0 file(s), 0 byte(s)).');
+  });
+
+  it('surfaces sanitized explicit capture and failure-recording errors together without a success-shaped result', async () => {
+    const taskId = createCurrentTask('Explicit capture failure task');
+    const captureMarker = 'explicit-capture-secret-marker';
+    const recordMarker = 'explicit-record-secret-marker';
+    vi.spyOn(core, 'captureTaskFiles').mockImplementation(() => {
+      throw new Error(`explicit capture exploded with ${captureMarker}`);
+    });
+    vi.spyOn(TaskStore.prototype, 'recordError').mockImplementation(() => {
+      throw new Error(`recordError insert failed with ${recordMarker}`);
+    });
+
+    await expect(program.parseAsync(['node', 'ariadne', 'capture'])).rejects.toSatisfy((error: unknown) => {
+      expect(error).toBeInstanceOf(core.TaskFileCaptureFailureAggregateError);
+      expect((error as Error).message).toBe(
+        'Task file capture failed after explicit capture, and Ariadne also failed to record that capture failure.',
+      );
+      expect((error as AggregateError).errors).toMatchObject([
+        { message: 'Task file capture failed after explicit capture.' },
+        { message: 'Ariadne failed to record the explicit capture failure.' },
+      ]);
+      const rendered = inspect(error, { depth: 8 });
+      expect(rendered).not.toContain(captureMarker);
+      expect(rendered).not.toContain(recordMarker);
       return true;
     });
 

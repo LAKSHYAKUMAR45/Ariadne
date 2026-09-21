@@ -55,6 +55,13 @@ export {
   DEFAULT_CAPTURE_LIMITS,
   GitCaptureCommandError,
 } from './FileCapture.js';
+export {
+  TaskFileCaptureFailureError,
+  TaskFileCaptureFailureRecordingError,
+  TaskFileCaptureFailureAggregateError,
+  throwSanitizedTaskFileCaptureFailure,
+} from './TaskFileCaptureFailure.js';
+export type { TaskFileCaptureFailureContext } from './TaskFileCaptureFailure.js';
 export type {
   CaptureLimits,
   CaptureRequest,
