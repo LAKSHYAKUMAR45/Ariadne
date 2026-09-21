@@ -7,6 +7,7 @@ import { ApiError } from '../errors.js';
 import { asyncHandler, type AuthenticatedRequest } from '../middleware.js';
 import {
   OperatorClientError,
+  type OperatorClientErrorCode,
   type OperatorClient,
   type OperatorSubmitRequest,
 } from '../operatorClient.js';
@@ -31,6 +32,13 @@ export const DEFAULT_POLL_INTERVAL_MS = 1_000;
 export const DEFAULT_MAX_STREAM_DURATION_MS = 30 * 60 * 1000;
 const MAX_OPERATION_LIST_LIMIT = 200;
 const DEFAULT_OPERATION_LIST_LIMIT = 50;
+const OPERATOR_SUBMISSION_FAILED_MESSAGE = 'Operator submission failed';
+const OPERATOR_SUBMISSION_UNCERTAIN_MESSAGE =
+  'Operator submission status is uncertain; awaiting callback or reconciliation';
+const UNCERTAIN_SUBMISSION_FAILURE_CODES = new Set<OperatorClientErrorCode>([
+  'operator_timeout',
+  'operator_unavailable',
+]);
 
 const OPERATION_ID_PATTERN = /^[A-Za-z0-9_-]{1,200}$/;
 const REVISION_PATTERN = /^[0-9a-f]{40}$/;
@@ -156,7 +164,7 @@ export function createAdminOperationsRouter(
         nextState: 'failed',
         actorUserId,
         source: ADMIN_OPERATION_SOURCE,
-        message: 'Operator submission failed',
+        message: OPERATOR_SUBMISSION_FAILED_MESSAGE,
         // Only the fixed error code is persisted: transport detail can carry
         // deployment paths or command fragments.
         metadata: { reason },
@@ -164,6 +172,33 @@ export function createAdminOperationsRouter(
       });
     } catch (error: unknown) {
       console.error('Failed to record operator submission failure', {
+        operationId,
+        reason,
+        error,
+      });
+    }
+  }
+
+  async function recordUncertainSubmission(
+    operationId: string,
+    actorUserId: string,
+    reason: OperatorClientErrorCode,
+  ): Promise<void> {
+    try {
+      await store.recordAuditEvent({
+        actorUserId,
+        action: 'admin_operation.submission_uncertain',
+        source: ADMIN_OPERATION_SOURCE,
+        outcome: 'queued',
+        metadata: {
+          operationId,
+          state: 'queued',
+          reason,
+          message: OPERATOR_SUBMISSION_UNCERTAIN_MESSAGE,
+        },
+      });
+    } catch (error: unknown) {
+      console.error('Failed to record uncertain operator submission', {
         operationId,
         reason,
         error,
@@ -203,7 +238,11 @@ export function createAdminOperationsRouter(
       await operatorClient.submit(spec.buildOperatorRequest(operationId));
     } catch (error: unknown) {
       if (error instanceof OperatorClientError) {
-        await markSubmissionFailed(operationId, userId, error.code);
+        if (UNCERTAIN_SUBMISSION_FAILURE_CODES.has(error.code)) {
+          await recordUncertainSubmission(operationId, userId, error.code);
+        } else {
+          await markSubmissionFailed(operationId, userId, error.code);
+        }
         throw new ApiError(error.status, error.code, error.message);
       }
       await markSubmissionFailed(operationId, userId, 'operator_submission_error');

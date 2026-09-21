@@ -2689,7 +2689,7 @@ describe('sync-server: admin operator operations', () => {
     expect(restore.body.operation.type).toBe('backup_restore');
   });
 
-  it('marks the operation failed when the operator socket is unavailable', async () => {
+  it('keeps the operation queued when operator availability is uncertain and later success arrives', async () => {
     const unavailableApp = buildReauthenticatedApp({
       operatorClient: createOperatorClient({
         socketPath: path.join(operator.dir, 'absent.sock'),
@@ -2709,9 +2709,38 @@ describe('sync-server: admin operator operations', () => {
 
     const operations = await store.listOperations();
     expect(operations).toHaveLength(1);
-    expect(operations[0].state).toBe('failed');
+    expect(operations[0].state).toBe('queued');
+    const audit = await store.listAuditEvents();
+    expect(
+      audit.some(
+        (event) =>
+          event.action === 'admin_operation.submission_uncertain' &&
+          event.outcome === 'queued' &&
+          event.metadata.operationId === operations[0].id &&
+          event.metadata.reason === 'operator_unavailable' &&
+          event.metadata.message ===
+            'Operator submission status is uncertain; awaiting callback or reconciliation',
+      ),
+    ).toBe(true);
+
+    await store.transitionOperation({
+      id: operations[0].id,
+      nextState: 'running',
+      source: 'operator_callback',
+      message: 'Operator attached after delayed acceptance',
+    });
+    await store.transitionOperation({
+      id: operations[0].id,
+      nextState: 'succeeded',
+      source: 'operator_callback',
+      message: 'Operator completed after delayed acceptance',
+    });
+
+    const afterCallback = await store.getOperation(operations[0].id);
+    expect(afterCallback?.state).toBe('succeeded');
     const events = await store.listOperationEvents(operations[0].id);
-    expect(events.map((event) => event.state)).toEqual(['queued', 'failed']);
+    expect(events.some((event) => event.state === 'running')).toBe(true);
+    expect(events.some((event) => event.state === 'succeeded')).toBe(true);
   });
 
   it('returns 503 and records a failure when no operator socket is configured', async () => {
@@ -2729,7 +2758,7 @@ describe('sync-server: admin operator operations', () => {
     expect(operations[0].state).toBe('failed');
   });
 
-  it('maps an operator timeout to 504 and fails the operation', async () => {
+  it('maps an operator timeout to 504, keeps the operation queued, and allows later failure callbacks', async () => {
     operatorBehaviour = { kind: 'hang' };
 
     const res = await request(adminApp)
@@ -2740,7 +2769,35 @@ describe('sync-server: admin operator operations', () => {
     expect(res.status).toBe(504);
     expect(res.body.error.code).toBe('operator_timeout');
     const operations = await store.listOperations();
-    expect(operations[0].state).toBe('failed');
+    expect(operations[0].state).toBe('queued');
+    const audit = await store.listAuditEvents();
+    expect(
+      audit.some(
+        (event) =>
+          event.action === 'admin_operation.submission_uncertain' &&
+          event.outcome === 'queued' &&
+          event.metadata.operationId === operations[0].id &&
+          event.metadata.reason === 'operator_timeout' &&
+          event.metadata.message ===
+            'Operator submission status is uncertain; awaiting callback or reconciliation',
+      ),
+    ).toBe(true);
+
+    await store.transitionOperation({
+      id: operations[0].id,
+      nextState: 'running',
+      source: 'operator_callback',
+      message: 'Operator reported late start',
+    });
+    await store.transitionOperation({
+      id: operations[0].id,
+      nextState: 'failed',
+      source: 'operator_callback',
+      message: 'Operator eventually reported failure',
+    });
+
+    const afterCallback = await store.getOperation(operations[0].id);
+    expect(afterCallback?.state).toBe('failed');
   });
 
   it('maps a malformed operator response to 502 and fails the operation', async () => {
