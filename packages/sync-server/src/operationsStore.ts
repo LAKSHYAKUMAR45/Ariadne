@@ -173,35 +173,58 @@ interface BackupRecordRow {
 const MAX_OPERATION_OUTPUT_BYTES = 256 * 1024;
 export const OUTPUT_TRUNCATION_MARKER = '\n...[TRUNCATED TO 256 KiB]';
 
-const KNOWN_SECRET_RULES = [
-  { pattern: /\bAKIA[0-9A-Z]{16}\b/g, replace: '***' },
-  { pattern: /\bgh[pousr]_[A-Za-z0-9]{20,}\b/g, replace: '***' },
-  { pattern: /\bxox[baprs]-[A-Za-z0-9-]{10,}\b/g, replace: '***' },
-  { pattern: /\bsk-[A-Za-z0-9]{20,}\b/g, replace: '***' },
+const KNOWN_SECRET_BLOCK_RULES = [
   {
     pattern: /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g,
     replace: '***REDACTED PRIVATE KEY***',
   },
 ] as const;
 
-const SENSITIVE_KEY_NAME =
-  '(?:[A-Z0-9_-]*?(?:PASSWORD|PASSWD|PWD|TOKEN|SECRET|API[-_]?KEY|APIKEY|AUTH|CREDENTIAL|ACCESS[-_]?KEY)[A-Z0-9_-]*)';
+const KNOWN_SECRET_INLINE_RULES = [
+  { pattern: /\bAKIA[0-9A-Z]{16}\b/g, replace: '***' },
+  { pattern: /\bgh[pousr]_[A-Za-z0-9]{20,}\b/g, replace: '***' },
+  { pattern: /\bxox[baprs]-[A-Za-z0-9-]{10,}\b/g, replace: '***' },
+  { pattern: /\bsk-[A-Za-z0-9]{20,}\b/g, replace: '***' },
+] as const;
+
+const SENSITIVE_KEY_CORE =
+  '(?:PASSWORD|PASSWD|PWD|TOKEN|SECRET|API(?:[-_]?KEY)?|AUTH(?:ORIZATION)?|CREDENTIAL|ACCESS(?:[-_]?KEY))';
+
+const SENSITIVE_KEY_NAME = `[A-Z0-9_-]{0,64}${SENSITIVE_KEY_CORE}[A-Z0-9_-]{0,64}`;
+
+const SENSITIVE_VALUE = `(?:"[^"\r\n]*"|'[^'\r\n]*'|\\S+)`;
 
 const ASSIGNMENT_RULES = [
   {
-    pattern: new RegExp(`(--?${SENSITIVE_KEY_NAME}\\S*)([=\\s]+)(\\S+)`, 'gi'),
-    replace: '$1$2***',
+    pattern: new RegExp(
+      `(^|[\\s([{,;])(--?${SENSITIVE_KEY_NAME})([=\\s]+)${SENSITIVE_VALUE}`,
+      'gi',
+    ),
+    replace: '$1$2$3***',
   },
   {
     pattern: new RegExp(
-      `(["']?)(${SENSITIVE_KEY_NAME})\\1(\\s*[:=]\\s*)("[^"]*"|'[^']*'|\\S+)`,
+      `((["']?)${SENSITIVE_KEY_NAME}\\2)(\\s*[:=]\\s*)${SENSITIVE_VALUE}`,
       'gi',
     ),
-    replace: '$1$2$1$3***',
+    replace: '$1$3***',
   },
 ] as const;
 
 const SENSITIVE_KEY_PATTERN = new RegExp(`^${SENSITIVE_KEY_NAME}$`, 'i');
+
+const LIKELY_SECRET_LINE_PATTERN = new RegExp(
+  [
+    '\\bAKIA[0-9A-Z]{8,}\\b',
+    '\\bgh[pousr]_[A-Za-z0-9]{8,}\\b',
+    '\\bxox[baprs]-[A-Za-z0-9-]{8,}\\b',
+    '\\bsk-[A-Za-z0-9]{8,}\\b',
+    '-----BEGIN [A-Z ]*PRIVATE KEY-----',
+    `(?:^|[\\s([{,;])--?${SENSITIVE_KEY_NAME}(?:[=\\s]|$)`,
+    `${SENSITIVE_KEY_NAME}\\s*[:=]`,
+  ].join('|'),
+  'i',
+);
 
 const ALLOWED_TRANSITIONS: Record<
   AdminOperationState,
@@ -218,39 +241,24 @@ function toIsoString(value: Date | null): string | null {
 }
 
 function sanitizeSecrets(text: string): string {
-  return text
+  let sanitized = text;
+  for (const rule of KNOWN_SECRET_BLOCK_RULES) {
+    sanitized = sanitized.replace(rule.pattern, rule.replace);
+  }
+
+  return sanitized
     .split('\n')
     .map((line) => sanitizeSecretsInLine(line))
     .join('\n');
 }
 
 function sanitizeSecretsInLine(line: string): string {
-  const lower = line.toLowerCase();
-  const likelySecret =
-    line.includes('AKIA') ||
-    line.includes('gh') ||
-    line.includes('xox') ||
-    line.includes('sk-') ||
-    lower.includes('private key') ||
-    lower.includes('password') ||
-    lower.includes('passwd') ||
-    lower.includes('pwd') ||
-    lower.includes('token') ||
-    lower.includes('secret') ||
-    lower.includes('api_key') ||
-    lower.includes('apikey') ||
-    lower.includes('api-key') ||
-    lower.includes('auth') ||
-    lower.includes('credential') ||
-    lower.includes('access_key') ||
-    lower.includes('access-key');
-
-  if (!likelySecret) {
+  if (!LIKELY_SECRET_LINE_PATTERN.test(line)) {
     return line;
   }
 
   let sanitized = line;
-  for (const rule of [...KNOWN_SECRET_RULES, ...ASSIGNMENT_RULES]) {
+  for (const rule of [...KNOWN_SECRET_INLINE_RULES, ...ASSIGNMENT_RULES]) {
     sanitized = sanitized.replace(rule.pattern, rule.replace);
   }
   return sanitized;
@@ -271,13 +279,15 @@ function truncateUtf8(text: string, maxBytes: number, marker: string): string {
   return `${truncated}${marker}`;
 }
 
-function sanitizeOutput(output: string | null | undefined): string | null | undefined {
+export function sanitizeOperationOutputForStorage(
+  output: string | null | undefined,
+): string | null | undefined {
   if (output === undefined || output === null) {
     return output;
   }
-  const maybeTruncated = truncateUtf8(output, MAX_OPERATION_OUTPUT_BYTES, OUTPUT_TRUNCATION_MARKER);
+
   return truncateUtf8(
-    sanitizeSecrets(maybeTruncated),
+    sanitizeSecrets(output),
     MAX_OPERATION_OUTPUT_BYTES,
     OUTPUT_TRUNCATION_MARKER,
   );
@@ -479,10 +489,10 @@ export function createOperationsStore(pool: Pool): OperationsStore {
           source: input.source,
           outcome: 'accepted',
           metadata: {
+            ...sanitizeMetadata(input.metadata),
             operationId: input.id,
             type: input.type,
             state: 'queued',
-            ...sanitizeMetadata(input.metadata),
           },
           createdAt: input.createdAt,
         });
@@ -563,7 +573,9 @@ export function createOperationsStore(pool: Pool): OperationsStore {
         const nextCompletedAt =
           input.nextState === 'running' ? null : occurredAt;
         const nextOutput =
-          input.output === undefined ? row.output : sanitizeOutput(input.output);
+          input.output === undefined
+            ? row.output
+            : sanitizeOperationOutputForStorage(input.output);
 
         const { rows } = await client.query<AdminOperationRow>(
           `UPDATE admin_operations
@@ -601,11 +613,12 @@ export function createOperationsStore(pool: Pool): OperationsStore {
           source: input.source,
           outcome: input.nextState,
           metadata: {
+            ...sanitizeMetadata(input.metadata),
             operationId: row.id,
             type: row.type,
             fromState: row.state,
             toState: input.nextState,
-            ...sanitizeMetadata(input.metadata),
+            state: input.nextState,
           },
           createdAt: occurredAt,
         });

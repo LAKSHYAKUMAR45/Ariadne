@@ -81,6 +81,13 @@ CREATE TRIGGER trg_admin_audit_events_append_only
   BEFORE UPDATE OR DELETE ON admin_audit_events
   FOR EACH ROW EXECUTE FUNCTION ariadne_admin_audit_events_append_only();
 
+DROP TRIGGER IF EXISTS trg_admin_audit_events_append_only_truncate
+  ON admin_audit_events;
+
+CREATE TRIGGER trg_admin_audit_events_append_only_truncate
+  BEFORE TRUNCATE ON admin_audit_events
+  FOR EACH STATEMENT EXECUTE FUNCTION ariadne_admin_audit_events_append_only();
+
 CREATE TABLE IF NOT EXISTS backup_records (
   filename                     TEXT PRIMARY KEY
                                CHECK (length(filename) BETWEEN 1 AND 255)

@@ -313,9 +313,14 @@ describe('runMigrations', () => {
        FROM pg_trigger
        WHERE tgrelid = 'admin_audit_events'::regclass AND NOT tgisinternal`,
     );
-    expect(auditTrigger.rows.map((row) => row.tgname)).toContain(
-      'trg_admin_audit_events_append_only',
+    expect(auditTrigger.rows.map((row) => row.tgname)).toEqual(
+      expect.arrayContaining([
+        'trg_admin_audit_events_append_only',
+        'trg_admin_audit_events_append_only_truncate',
+      ]),
     );
+
+    await expect(pool.query('TRUNCATE TABLE admin_audit_events')).rejects.toThrow(/append-only/i);
 
     const backupColumns = await pool.query<{ column_name: string; data_type: string }>(
       `SELECT column_name, data_type

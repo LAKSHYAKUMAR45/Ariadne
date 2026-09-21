@@ -6,6 +6,7 @@ import {
   OUTPUT_TRUNCATION_MARKER,
   OperationTransitionError,
   createOperationsStore,
+  sanitizeOperationOutputForStorage,
   type OperationsStore,
 } from '../src/operationsStore.js';
 import { TEST_DATABASE_URL } from './testConfig.js';
@@ -18,7 +19,6 @@ describe('operationsStore', () => {
 
   beforeAll(async () => {
     pool = createPool(TEST_DATABASE_URL);
-    await runMigrations(pool);
     store = createOperationsStore(pool);
   });
 
@@ -27,15 +27,20 @@ describe('operationsStore', () => {
   });
 
   beforeEach(async () => {
-    await pool.query(
-      'TRUNCATE TABLE admin_operation_events, admin_audit_events, backup_records, admin_operations, team_memberships, teams, users CASCADE',
-    );
-
+    await pool.query('DROP SCHEMA public CASCADE; CREATE SCHEMA public;');
+    await runMigrations(pool);
     teamId = await createSingletonTeam();
     adminUserId = await createAdminUser(teamId, 'alice');
   });
 
   async function createSingletonTeam(): Promise<string> {
+    const existing = await pool.query<{ id: string }>(
+      `SELECT id FROM teams WHERE singleton_key = 'default'`,
+    );
+    if (existing.rows[0]) {
+      return existing.rows[0].id;
+    }
+
     const { rows } = await pool.query<{ id: string }>(
       `INSERT INTO teams (singleton_key, name, created_at)
        VALUES ('default', 'Default team', '2026-09-21T00:00:00.000Z')
@@ -215,6 +220,10 @@ describe('operationsStore', () => {
     const longSecretOutput =
       `TOKEN=abc123\npassword=hunter2\n` +
       `ghp_1234567890abcdefghij1234567890ABCD\n` +
+      `-----BEGIN PRIVATE KEY-----
+line-one-private-key
+line-two-private-key
+-----END PRIVATE KEY-----\n` +
       'x'.repeat(300 * 1024);
 
     const failed = await store.transitionOperation({
@@ -234,7 +243,10 @@ describe('operationsStore', () => {
     expect(failed.output).not.toContain('abc123');
     expect(failed.output).not.toContain('hunter2');
     expect(failed.output).not.toContain('ghp_1234567890abcdefghij1234567890ABCD');
+    expect(failed.output).not.toContain('line-one-private-key');
+    expect(failed.output).not.toContain('line-two-private-key');
     expect(failed.output).toContain('TOKEN=***');
+    expect(failed.output).toContain('***REDACTED PRIVATE KEY***');
     expect(failed.output).toContain('password=***');
     expect(failed.output).toContain(OUTPUT_TRUNCATION_MARKER);
 
@@ -243,6 +255,68 @@ describe('operationsStore', () => {
       command: 'PGPASSWORD=*** pg_restore --dbname=postgres',
       token: '***',
     });
+  });
+
+  it('keeps trusted audit metadata when caller metadata reuses reserved fields', async () => {
+    await store.createOperation({
+      id: 'op-metadata-1',
+      requestedBy: adminUserId,
+      type: 'backup_restore',
+      summary: 'Restore the latest verified backup',
+      source: 'admin_api',
+      createdAt: '2026-09-21T04:30:00.000Z',
+      metadata: {
+        operationId: 'forged-create-operation-id',
+        type: 'service_restart',
+        state: 'failed',
+        phase: 'submitted',
+      },
+    });
+
+    await store.transitionOperation({
+      id: 'op-metadata-1',
+      nextState: 'running',
+      actorUserId: adminUserId,
+      source: 'operator',
+      message: 'Restore started',
+      metadata: {
+        operationId: 'forged-transition-operation-id',
+        type: 'backup_create',
+        fromState: 'failed',
+        toState: 'queued',
+        state: 'failed',
+        executor: 'restore-worker',
+      },
+      occurredAt: '2026-09-21T04:30:05.000Z',
+    });
+
+    const audits = await store.listAuditEvents();
+    expect(audits).toHaveLength(2);
+    expect(audits[1].metadata).toEqual({
+      operationId: 'op-metadata-1',
+      type: 'backup_restore',
+      state: 'queued',
+      phase: 'submitted',
+    });
+    expect(audits[0].metadata).toEqual({
+      operationId: 'op-metadata-1',
+      type: 'backup_restore',
+      fromState: 'queued',
+      toState: 'running',
+      state: 'running',
+      executor: 'restore-worker',
+    });
+  });
+
+  it('sanitizes adversarial long lines within the timeout budget', { timeout: 2_000 }, async () => {
+    const adversarialLine = `prefix:${'through '.repeat(24_000)}`;
+
+    const sanitized = await withTimeout(
+      Promise.resolve(sanitizeOperationOutputForStorage(adversarialLine)),
+      150,
+    );
+
+    expect(sanitized).toBe(adversarialLine);
   });
 
   it('lists operations newest first', async () => {
@@ -335,5 +409,24 @@ describe('operationsStore', () => {
       `SELECT count(*)::int AS count FROM ${table}`,
     );
     return rows[0].count;
+  }
+
+  async function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        reject(new Error(`Operation exceeded ${timeoutMs}ms`));
+      }, timeoutMs);
+
+      promise.then(
+        (value) => {
+          clearTimeout(timeout);
+          resolve(value);
+        },
+        (error: unknown) => {
+          clearTimeout(timeout);
+          reject(error);
+        },
+      );
+    });
   }
 });
