@@ -23,6 +23,15 @@ function commit(dir: string, filename: string, message: string): string {
   return git(['rev-parse', 'HEAD'], dir);
 }
 
+function createGitlinkRepo(): { dir: string; sha: string } {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ariadne-gitlink-target-'));
+  initRepo(dir);
+  fs.writeFileSync(path.join(dir, 'README.md'), 'submodule target\n');
+  git(['add', 'README.md'], dir);
+  git(['commit', '-q', '-m', 'Initial target'], dir);
+  return { dir, sha: git(['rev-parse', 'HEAD'], dir) };
+}
+
 describe('GitWatcher', () => {
   let repoRoot: string;
   let store: TaskStore;
@@ -204,6 +213,33 @@ describe('GitWatcher', () => {
     expect(result.captureFailures[0].sha).toBe(sha);
     expect(store.getTaskFileCaptures(task.id)).toEqual([]);
     expect(store.listErrors(task.id)).toHaveLength(1);
+  });
+
+  it('syncTaskGit skips gitlinks and still captures regular commit files without a capture failure', () => {
+    const task = store.createTask({ title: 'A' });
+    const gitlinkRepo = createGitlinkRepo();
+    try {
+      fs.mkdirSync(path.join(repoRoot, 'src'), { recursive: true });
+      fs.writeFileSync(path.join(repoRoot, 'src', 'app.ts'), 'export const a = 1;\n');
+      git(['add', 'src/app.ts'], repoRoot);
+      git(['update-index', '--add', '--cacheinfo', `160000,${gitlinkRepo.sha},vendor/submodule`], repoRoot);
+      git(['commit', '-q', '-m', 'Add gitlink and app'], repoRoot);
+
+      const result = syncTaskGit(store, task.id, repoRoot);
+
+      expect(result.captureFailures).toEqual([]);
+      expect(result.captures).toHaveLength(1);
+      expect(result.captures[0].entries.map((entry) => entry.path)).toEqual(['src/app.ts']);
+      expect(result.captures[0].entries[0].content).toBe('export const a = 1;\n');
+      expect(result.captures[0].gitCommitSha).toBe(result.recordedCommits[0].sha);
+      expect(result.recordedCommits).toHaveLength(1);
+
+      const captures = store.getTaskFileCaptures(task.id);
+      expect(captures).toHaveLength(1);
+      expect(captures[0].entries.map((entry) => entry.path)).toEqual(['src/app.ts']);
+    } finally {
+      fs.rmSync(gitlinkRepo.dir, { recursive: true, force: true });
+    }
   });
 
   it('isGitCommitCommand recognizes git commit invocations but not lookalikes', () => {

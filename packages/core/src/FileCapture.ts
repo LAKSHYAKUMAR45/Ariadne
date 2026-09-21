@@ -69,11 +69,13 @@ const ALWAYS_EXCLUDED_NAMES = new Set([
  * cheap to lose and expensive to misclassify.
  */
 const PRIVATE_KEY_NAME_PATTERN =
-  /^id_(?:rsa|dsa|ecdsa|ecdsa_sk|ed25519|ed25519_sk)(?:[-_][A-Za-z0-9._-]+)?(?:\.pub)?$/i;
+  /^id_(?:rsa|dsa|ecdsa|ecdsa_sk|ed25519|ed25519_sk)(?:[-_][A-Za-z0-9._-]+)?(?:\.pub)?$/;
 
-const SENSITIVE_NAME_PATTERN = /(credential|token|secret|password|passwd|api[-_]?key)/i;
+const SENSITIVE_NAME_PATTERN = /(credential|token|secret|password|passwd|api[-_]?key)/;
 
 const GIT_SYMLINK_MODE = '120000';
+const GIT_GITLINK_MODE = '160000';
+const GIT_REGULAR_BLOB_MODES = new Set(['100644', '100755']);
 
 /** Upper bound on `git` stderr echoed into an error message. */
 const GIT_DIAGNOSTIC_MAX_CHARS = 200;
@@ -93,6 +95,8 @@ export const DEFAULT_CAPTURE_LIMITS: CaptureLimits = {
 export type CaptureSkipReason =
   | 'untracked'
   | 'symlink'
+  | 'gitlink'
+  | 'unsupported_git_mode'
   | 'binary'
   | 'outside_workspace'
   | 'always_excluded'
@@ -220,11 +224,12 @@ export function isAlwaysExcludedCapturePath(relPath: string): boolean {
   if (segments.length === 0) return true;
 
   for (const segment of segments) {
-    if (ALWAYS_EXCLUDED_SEGMENTS.has(segment)) return true;
-    if (ALWAYS_EXCLUDED_NAMES.has(segment.toLowerCase())) return true;
-    if (PRIVATE_KEY_NAME_PATTERN.test(segment)) return true;
-    if (segment === '.env' || segment.startsWith('.env.')) return true;
-    if (SENSITIVE_NAME_PATTERN.test(segment)) return true;
+    const lowerSegment = segment.toLowerCase();
+    if (ALWAYS_EXCLUDED_SEGMENTS.has(lowerSegment)) return true;
+    if (ALWAYS_EXCLUDED_NAMES.has(lowerSegment)) return true;
+    if (PRIVATE_KEY_NAME_PATTERN.test(lowerSegment)) return true;
+    if (lowerSegment === '.env' || lowerSegment.startsWith('.env.')) return true;
+    if (SENSITIVE_NAME_PATTERN.test(lowerSegment)) return true;
   }
 
   const extension = path.posix.extname(segments[segments.length - 1]).toLowerCase();
@@ -532,6 +537,13 @@ function evaluateCandidatePath(candidate: Candidate, ctx: CaptureContext): Captu
   }
   if (!ctx.isCommitCapture && !worktreePathStaysInsideRoot(relPath, ctx.workspaceRoot)) {
     return 'outside_workspace';
+  }
+
+  if (ctx.isCommitCapture && candidate.mode) {
+    if (candidate.mode === GIT_GITLINK_MODE) return 'gitlink';
+    if (candidate.mode !== GIT_SYMLINK_MODE && !GIT_REGULAR_BLOB_MODES.has(candidate.mode)) {
+      return 'unsupported_git_mode';
+    }
   }
 
   const isSymlink = ctx.isCommitCapture

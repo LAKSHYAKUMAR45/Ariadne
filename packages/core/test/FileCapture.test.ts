@@ -34,6 +34,14 @@ function commitAll(dir: string, message: string, force = false): string {
   return git(['rev-parse', 'HEAD'], dir);
 }
 
+function createGitlinkRepo(): { dir: string; sha: string } {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ariadne-gitlink-target-'));
+  initRepo(dir);
+  write(dir, 'README.md', 'submodule target\n');
+  const sha = commitAll(dir, 'init submodule target');
+  return { dir, sha };
+}
+
 function sha256Utf8(content: string): string {
   return crypto.createHash('sha256').update(Buffer.from(content, 'utf8')).digest('hex');
 }
@@ -206,6 +214,12 @@ describe('FileCapture', () => {
       '.ariadne/state.db',
     ])('always excludes %s', (candidate) => {
       expect(isAlwaysExcludedCapturePath(candidate)).toBe(true);
+    });
+
+    it('matches built-in secret segments case-insensitively', () => {
+      expect(isAlwaysExcludedCapturePath('src/API_KEY.txt')).toBe(true);
+      expect(isAlwaysExcludedCapturePath('Secrets/PasswordStore.ts')).toBe(true);
+      expect(isAlwaysExcludedCapturePath('deploy/ToKeN-cache.json')).toBe(true);
     });
 
     it.each([
@@ -517,6 +531,31 @@ describe('FileCapture', () => {
       expect(skipReason(result, 'link.ts')).toBe('symlink');
     });
 
+    it('skips gitlinks in the commit tree and still captures regular blobs', () => {
+      const gitlinkRepo = createGitlinkRepo();
+      try {
+        write(repoRoot, 'src/app.ts', 'export const a = 1;\n');
+        git(['add', 'src/app.ts'], repoRoot);
+        git(['update-index', '--add', '--cacheinfo', `160000,${gitlinkRepo.sha},vendor/submodule`], repoRoot);
+        git(['commit', '-q', '-m', 'add gitlink and app'], repoRoot);
+        const commitSha = git(['rev-parse', 'HEAD'], repoRoot);
+        store.recordCommit({ sha: commitSha, taskId, message: 'add gitlink and app' });
+
+        const result = captureTaskFiles(store, {
+          taskId,
+          workspace: repoRoot,
+          trigger: 'git_commit',
+          gitCommitSha: commitSha,
+        });
+
+        expect(entryPaths(result)).toEqual(['src/app.ts']);
+        expect(result.capture).not.toBeNull();
+        expect(skipReason(result, 'vendor/submodule')).toBe('gitlink');
+      } finally {
+        fs.rmSync(gitlinkRepo.dir, { recursive: true, force: true });
+      }
+    });
+
     it('throws with bounded diagnostics when a committed blob cannot be read', () => {
       write(repoRoot, 'src/app.ts', 'v1\n');
       const sha = commitAll(repoRoot, 'root commit');
@@ -617,8 +656,8 @@ describe('FileCapture', () => {
       }
     }
 
-    it('diffs tracked paths containing Git pathspec metacharacters literally', () => {
-      if (!filesystemSupportsMetacharacterNames()) return;
+    it('diffs tracked paths containing Git pathspec metacharacters literally', ({ skip }) => {
+      if (!filesystemSupportsMetacharacterNames()) skip();
       write(repoRoot, 'bracketa.ts', 'decoy\n');
       commitAll(repoRoot, 'add metacharacter files');
       for (const name of metacharacterNames) {
@@ -637,8 +676,8 @@ describe('FileCapture', () => {
       }
     });
 
-    it('diffs committed paths containing Git pathspec metacharacters literally', () => {
-      if (!filesystemSupportsMetacharacterNames()) return;
+    it('diffs committed paths containing Git pathspec metacharacters literally', ({ skip }) => {
+      if (!filesystemSupportsMetacharacterNames()) skip();
       commitAll(repoRoot, 'add metacharacter files');
       for (const name of metacharacterNames) {
         write(repoRoot, name, 'v2\n');
