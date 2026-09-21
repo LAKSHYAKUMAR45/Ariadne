@@ -3,6 +3,7 @@ import type { Pool } from 'pg';
 import request from 'supertest';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../src/app.js';
+import { signToken } from '../src/auth.js';
 import { createPool } from '../src/db.js';
 import { runMigrations } from '../src/migrate.js';
 import { TEST_DATABASE_URL, TEST_JWT_SECRET } from './testConfig.js';
@@ -14,6 +15,10 @@ describe('sync-server: auth + sync routes', () => {
   beforeAll(async () => {
     pool = createPool(TEST_DATABASE_URL);
     await runMigrations(pool);
+    // Task 3 needs cross-team fixtures even though registration still creates
+    // a single default team in production today.
+    await pool.query('ALTER TABLE teams ALTER COLUMN singleton_key DROP NOT NULL');
+    await pool.query('ALTER TABLE teams DROP CONSTRAINT IF EXISTS teams_singleton_key_check');
     app = createApp(pool, TEST_JWT_SECRET);
   });
 
@@ -32,6 +37,63 @@ describe('sync-server: auth + sync routes', () => {
     await request(app).post('/api/v1/auth/register').send({ username, password }).expect(201);
     const loginRes = await request(app).post('/api/v1/auth/login').send({ username, password }).expect(200);
     return loginRes.body.token as string;
+  }
+
+  async function createDirectTeam(name: string): Promise<string> {
+    const { rows } = await pool.query<{ id: string }>(
+      'INSERT INTO teams (singleton_key, name) VALUES ($1, $2) RETURNING id',
+      [null, name],
+    );
+    return rows[0].id;
+  }
+
+  async function createDirectUser(
+    username: string,
+  ): Promise<{ userId: string; authHeader: { Authorization: string } }> {
+    const { rows } = await pool.query<{ id: string }>(
+      'INSERT INTO users (username, password_hash) VALUES ($1, $2) RETURNING id',
+      [username, `hash-${username}`],
+    );
+    const userId = rows[0].id;
+    const token = signToken({ sub: userId, username }, TEST_JWT_SECRET);
+    return { userId, authHeader: { Authorization: `Bearer ${token}` } };
+  }
+
+  async function addMembership(
+    teamId: string,
+    userId: string,
+    role: 'admin' | 'member' = 'member',
+  ): Promise<void> {
+    await pool.query(
+      `INSERT INTO team_memberships (team_id, user_id, role, active)
+       VALUES ($1, $2, $3, true)`,
+      [teamId, userId, role],
+    );
+  }
+
+  async function createDirectTask(options: {
+    taskId: string;
+    teamId: string;
+    ownerUserId: string;
+    localId: string;
+    title: string;
+  }): Promise<void> {
+    await pool.query(
+      `INSERT INTO tasks (id, local_id, owner_user_id, title, goal, status, branch, workspace_label, created_at, updated_at, team_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9, $10)`,
+      [
+        options.taskId,
+        options.localId,
+        options.ownerUserId,
+        options.title,
+        null,
+        'active',
+        null,
+        null,
+        '2026-09-21T00:00:00Z',
+        options.teamId,
+      ],
+    );
   }
 
   describe('auth', () => {
@@ -230,7 +292,7 @@ describe('sync-server: auth + sync routes', () => {
       expect(pull.body.serverTime).toBeTruthy();
     });
 
-    it('a different user can read and update a task they do not own (flat access model)', async () => {
+    it('a different user on the same team can read and update a task they do not own', async () => {
       const aliceToken = await registerAndLogin('alice2', 'pw123456');
       const push = await request(app)
         .post('/api/v1/sync/tasks')
@@ -317,7 +379,7 @@ describe('sync-server: auth + sync routes', () => {
       expect(pulledAgain.workspaceLabel).toBe('desktop2:org/atom');
     });
 
-    it('GET /tasks/all lists every task on the server (including from other users) with owner + workspaceLabel', async () => {
+    it('GET /tasks/all lists every task on the caller team with owner + workspaceLabel', async () => {
       const aliceToken = await registerAndLogin('alice3', 'pw123456');
       await request(app)
         .post('/api/v1/sync/tasks')
@@ -354,7 +416,7 @@ describe('sync-server: auth + sync routes', () => {
           ],
         });
 
-      // Bob should see Alice's task too (flat access model) with her username and workspace label.
+      // Bob should see Alice's task too because both users are in the same team.
       const all = await request(app).get('/api/v1/sync/tasks/all').set('Authorization', `Bearer ${bobToken}`);
       expect(all.status).toBe(200);
       expect(all.body.tasks).toHaveLength(2);
@@ -912,6 +974,508 @@ describe('sync-server: auth + sync routes', () => {
         });
       expect(res.status).toBe(404);
       expect(res.body.error.code).toBe('task_not_found');
+    });
+  });
+
+  describe('team-scoped sync authorization', () => {
+    interface TeamScopedFixture {
+      teamAId: string;
+      teamBId: string;
+      teamAUser: { userId: string; authHeader: { Authorization: string } };
+      teamBUser: { userId: string; authHeader: { Authorization: string } };
+      taskAId: string;
+      taskBId: string;
+    }
+
+    async function seedTeamScopedFixture(): Promise<TeamScopedFixture> {
+      const teamAId = await createDirectTeam('Team Alpha');
+      const teamBId = await createDirectTeam('Team Beta');
+      const teamAUser = await createDirectUser('team-alpha-user');
+      const teamBUser = await createDirectUser('team-beta-user');
+
+      await addMembership(teamAId, teamAUser.userId, 'admin');
+      await addMembership(teamBId, teamBUser.userId, 'admin');
+
+      const taskAId = '00000000-0000-0000-0000-000000000301';
+      const taskBId = '00000000-0000-0000-0000-000000000302';
+
+      await createDirectTask({
+        taskId: taskAId,
+        teamId: teamAId,
+        ownerUserId: teamAUser.userId,
+        localId: 'team-a-task',
+        title: 'Team A task',
+      });
+      await createDirectTask({
+        taskId: taskBId,
+        teamId: teamBId,
+        ownerUserId: teamBUser.userId,
+        localId: 'team-b-task',
+        title: 'Team B task',
+      });
+
+      return { teamAId, teamBId, teamAUser, teamBUser, taskAId, taskBId };
+    }
+
+    it('lists and updates only tasks inside the caller team', async () => {
+      const fixture = await seedTeamScopedFixture();
+
+      const incremental = await request(app)
+        .get('/api/v1/sync/tasks')
+        .set(fixture.teamBUser.authHeader)
+        .expect(200);
+      expect(incremental.body.tasks).toHaveLength(1);
+      expect(incremental.body.tasks[0]).toMatchObject({
+        remoteId: fixture.taskBId,
+        title: 'Team B task',
+      });
+
+      const allTasks = await request(app)
+        .get('/api/v1/sync/tasks/all')
+        .set(fixture.teamBUser.authHeader)
+        .expect(200);
+      expect(allTasks.body.tasks).toHaveLength(1);
+      expect(allTasks.body.tasks[0]).toMatchObject({
+        remoteId: fixture.taskBId,
+        title: 'Team B task',
+      });
+
+      const update = await request(app)
+        .post('/api/v1/sync/tasks')
+        .set(fixture.teamBUser.authHeader)
+        .send({
+          tasks: [
+            {
+              localId: 'team-a-task',
+              remoteId: fixture.taskAId,
+              title: 'Unauthorized update',
+              status: 'done',
+              createdAt: '2026-09-21T00:00:00Z',
+              updatedAt: '2026-09-21T01:00:00Z',
+            },
+          ],
+        });
+      expect(update.status).toBe(404);
+      expect(update.body.error.code).toBe('task_not_found');
+    });
+
+    it('denies cross-team checkpoint create and list routes as task_not_found', async () => {
+      const fixture = await seedTeamScopedFixture();
+
+      await pool.query(
+        `INSERT INTO checkpoints (local_id, task_id, level, summary, owner_user_id, workspace_label, created_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+        ['checkpoint-b', fixture.taskBId, 'session', 'Team B checkpoint', fixture.teamBUser.userId, null, '2026-09-21T02:00:00Z'],
+      );
+
+      const allowed = await request(app)
+        .get('/api/v1/sync/checkpoints')
+        .query({ taskRemoteId: fixture.taskBId })
+        .set(fixture.teamBUser.authHeader)
+        .expect(200);
+      expect(allowed.body.checkpoints).toHaveLength(1);
+      expect(allowed.body.checkpoints[0].summary).toBe('Team B checkpoint');
+
+      const deniedCreate = await request(app)
+        .post('/api/v1/sync/checkpoints')
+        .set(fixture.teamBUser.authHeader)
+        .send({
+          checkpoints: [
+            {
+              localId: 'checkpoint-a',
+              remoteTaskId: fixture.taskAId,
+              level: 'micro',
+              summary: 'Should be denied',
+              createdAt: '2026-09-21T02:00:00Z',
+            },
+          ],
+        });
+      expect(deniedCreate.status).toBe(404);
+      expect(deniedCreate.body.error.code).toBe('task_not_found');
+
+      const deniedList = await request(app)
+        .get('/api/v1/sync/checkpoints')
+        .query({ taskRemoteId: fixture.taskAId })
+        .set(fixture.teamBUser.authHeader);
+      expect(deniedList.status).toBe(404);
+      expect(deniedList.body.error.code).toBe('task_not_found');
+    });
+
+    it('denies cross-team todo create, update, and list routes as task_not_found', async () => {
+      const fixture = await seedTeamScopedFixture();
+      const { rows } = await pool.query<{ id: string }>(
+        `INSERT INTO todos (local_id, task_id, text, status, owner_user_id, workspace_label, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $7)
+         RETURNING id`,
+        ['todo-a', fixture.taskAId, 'Team A todo', 'pending', fixture.teamAUser.userId, null, '2026-09-21T02:10:00Z'],
+      );
+      await pool.query(
+        `INSERT INTO todos (local_id, task_id, text, status, owner_user_id, workspace_label, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $7)`,
+        ['todo-b', fixture.taskBId, 'Team B todo', 'pending', fixture.teamBUser.userId, null, '2026-09-21T02:11:00Z'],
+      );
+
+      const allowed = await request(app)
+        .get('/api/v1/sync/todos')
+        .query({ taskRemoteId: fixture.taskBId })
+        .set(fixture.teamBUser.authHeader)
+        .expect(200);
+      expect(allowed.body.todos).toHaveLength(1);
+      expect(allowed.body.todos[0].text).toBe('Team B todo');
+
+      const deniedCreate = await request(app)
+        .post('/api/v1/sync/todos')
+        .set(fixture.teamBUser.authHeader)
+        .send({
+          todos: [
+            {
+              localId: 'todo-new',
+              remoteId: null,
+              remoteTaskId: fixture.taskAId,
+              text: 'Blocked todo',
+              status: 'pending',
+              createdAt: '2026-09-21T02:12:00Z',
+              updatedAt: '2026-09-21T02:12:00Z',
+            },
+          ],
+        });
+      expect(deniedCreate.status).toBe(404);
+      expect(deniedCreate.body.error.code).toBe('task_not_found');
+
+      const deniedUpdate = await request(app)
+        .post('/api/v1/sync/todos')
+        .set(fixture.teamBUser.authHeader)
+        .send({
+          todos: [
+            {
+              localId: 'todo-a',
+              remoteId: rows[0].id,
+              remoteTaskId: fixture.taskAId,
+              text: 'Blocked update',
+              status: 'done',
+              createdAt: '2026-09-21T02:10:00Z',
+              updatedAt: '2026-09-21T02:13:00Z',
+            },
+          ],
+        });
+      expect(deniedUpdate.status).toBe(404);
+      expect(deniedUpdate.body.error.code).toBe('task_not_found');
+
+      const deniedList = await request(app)
+        .get('/api/v1/sync/todos')
+        .query({ taskRemoteId: fixture.taskAId })
+        .set(fixture.teamBUser.authHeader);
+      expect(deniedList.status).toBe(404);
+      expect(deniedList.body.error.code).toBe('task_not_found');
+    });
+
+    it('denies cross-team decision create, update, and list routes as task_not_found', async () => {
+      const fixture = await seedTeamScopedFixture();
+      const { rows } = await pool.query<{ id: string }>(
+        `INSERT INTO decisions (local_id, task_id, text, rationale, supersedes_id, owner_user_id, workspace_label, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8)
+         RETURNING id`,
+        ['decision-a', fixture.taskAId, 'Team A decision', 'A rationale', null, fixture.teamAUser.userId, null, '2026-09-21T02:20:00Z'],
+      );
+      await pool.query(
+        `INSERT INTO decisions (local_id, task_id, text, rationale, supersedes_id, owner_user_id, workspace_label, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8)`,
+        ['decision-b', fixture.taskBId, 'Team B decision', 'B rationale', null, fixture.teamBUser.userId, null, '2026-09-21T02:21:00Z'],
+      );
+
+      const allowed = await request(app)
+        .get('/api/v1/sync/decisions')
+        .query({ taskRemoteId: fixture.taskBId })
+        .set(fixture.teamBUser.authHeader)
+        .expect(200);
+      expect(allowed.body.decisions).toHaveLength(1);
+      expect(allowed.body.decisions[0].text).toBe('Team B decision');
+
+      const deniedCreate = await request(app)
+        .post('/api/v1/sync/decisions')
+        .set(fixture.teamBUser.authHeader)
+        .send({
+          decisions: [
+            {
+              localId: 'decision-new',
+              remoteId: null,
+              remoteTaskId: fixture.taskAId,
+              text: 'Blocked decision',
+              rationale: null,
+              supersedesId: null,
+              createdAt: '2026-09-21T02:22:00Z',
+              updatedAt: '2026-09-21T02:22:00Z',
+            },
+          ],
+        });
+      expect(deniedCreate.status).toBe(404);
+      expect(deniedCreate.body.error.code).toBe('task_not_found');
+
+      const deniedUpdate = await request(app)
+        .post('/api/v1/sync/decisions')
+        .set(fixture.teamBUser.authHeader)
+        .send({
+          decisions: [
+            {
+              localId: 'decision-a',
+              remoteId: rows[0].id,
+              remoteTaskId: fixture.taskAId,
+              text: 'Blocked update',
+              rationale: 'Should fail',
+              supersedesId: null,
+              createdAt: '2026-09-21T02:20:00Z',
+              updatedAt: '2026-09-21T02:23:00Z',
+            },
+          ],
+        });
+      expect(deniedUpdate.status).toBe(404);
+      expect(deniedUpdate.body.error.code).toBe('task_not_found');
+
+      const deniedList = await request(app)
+        .get('/api/v1/sync/decisions')
+        .query({ taskRemoteId: fixture.taskAId })
+        .set(fixture.teamBUser.authHeader);
+      expect(deniedList.status).toBe(404);
+      expect(deniedList.body.error.code).toBe('task_not_found');
+    });
+
+    it('rejects cross-team supersedes ids without revealing the foreign decision', async () => {
+      const fixture = await seedTeamScopedFixture();
+      const { rows } = await pool.query<{ id: string }>(
+        `INSERT INTO decisions (local_id, task_id, text, rationale, supersedes_id, owner_user_id, workspace_label, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8)
+         RETURNING id`,
+        ['decision-a', fixture.taskAId, 'Team A decision', 'A rationale', null, fixture.teamAUser.userId, null, '2026-09-21T02:30:00Z'],
+      );
+
+      const deniedSupersede = await request(app)
+        .post('/api/v1/sync/decisions')
+        .set(fixture.teamBUser.authHeader)
+        .send({
+          decisions: [
+            {
+              localId: 'decision-b',
+              remoteId: null,
+              remoteTaskId: fixture.taskBId,
+              text: 'Team B replacement',
+              rationale: 'Blocked supersede',
+              supersedesId: rows[0].id,
+              createdAt: '2026-09-21T02:31:00Z',
+              updatedAt: '2026-09-21T02:31:00Z',
+            },
+          ],
+        });
+      expect(deniedSupersede.status).toBe(400);
+      expect(deniedSupersede.body.error.code).toBe('invalid_supersedes_id');
+      expect(deniedSupersede.body.error.message).not.toContain('Team A decision');
+    });
+
+    it('denies cross-team error create, update, and list routes as task_not_found', async () => {
+      const fixture = await seedTeamScopedFixture();
+      const { rows } = await pool.query<{ id: string }>(
+        `INSERT INTO errors (local_id, task_id, message, resolved, resolution, owner_user_id, workspace_label, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8)
+         RETURNING id`,
+        ['error-a', fixture.taskAId, 'Team A error', false, null, fixture.teamAUser.userId, null, '2026-09-21T02:40:00Z'],
+      );
+      await pool.query(
+        `INSERT INTO errors (local_id, task_id, message, resolved, resolution, owner_user_id, workspace_label, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8)`,
+        ['error-b', fixture.taskBId, 'Team B error', false, null, fixture.teamBUser.userId, null, '2026-09-21T02:41:00Z'],
+      );
+
+      const allowed = await request(app)
+        .get('/api/v1/sync/errors')
+        .query({ taskRemoteId: fixture.taskBId })
+        .set(fixture.teamBUser.authHeader)
+        .expect(200);
+      expect(allowed.body.errors).toHaveLength(1);
+      expect(allowed.body.errors[0].message).toBe('Team B error');
+
+      const deniedCreate = await request(app)
+        .post('/api/v1/sync/errors')
+        .set(fixture.teamBUser.authHeader)
+        .send({
+          errors: [
+            {
+              localId: 'error-new',
+              remoteId: null,
+              remoteTaskId: fixture.taskAId,
+              message: 'Blocked error',
+              resolved: false,
+              resolution: null,
+              createdAt: '2026-09-21T02:42:00Z',
+              updatedAt: '2026-09-21T02:42:00Z',
+            },
+          ],
+        });
+      expect(deniedCreate.status).toBe(404);
+      expect(deniedCreate.body.error.code).toBe('task_not_found');
+
+      const deniedUpdate = await request(app)
+        .post('/api/v1/sync/errors')
+        .set(fixture.teamBUser.authHeader)
+        .send({
+          errors: [
+            {
+              localId: 'error-a',
+              remoteId: rows[0].id,
+              remoteTaskId: fixture.taskAId,
+              message: 'Blocked update',
+              resolved: true,
+              resolution: 'Should fail',
+              createdAt: '2026-09-21T02:40:00Z',
+              updatedAt: '2026-09-21T02:43:00Z',
+            },
+          ],
+        });
+      expect(deniedUpdate.status).toBe(404);
+      expect(deniedUpdate.body.error.code).toBe('task_not_found');
+
+      const deniedList = await request(app)
+        .get('/api/v1/sync/errors')
+        .query({ taskRemoteId: fixture.taskAId })
+        .set(fixture.teamBUser.authHeader);
+      expect(deniedList.status).toBe(404);
+      expect(deniedList.body.error.code).toBe('task_not_found');
+    });
+
+    it('denies cross-team open-question create, update, and list routes as task_not_found', async () => {
+      const fixture = await seedTeamScopedFixture();
+      const { rows } = await pool.query<{ id: string }>(
+        `INSERT INTO open_questions (local_id, task_id, text, resolved, owner_user_id, workspace_label, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $7)
+         RETURNING id`,
+        ['question-a', fixture.taskAId, 'Team A question', false, fixture.teamAUser.userId, null, '2026-09-21T02:50:00Z'],
+      );
+      await pool.query(
+        `INSERT INTO open_questions (local_id, task_id, text, resolved, owner_user_id, workspace_label, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $7)`,
+        ['question-b', fixture.taskBId, 'Team B question', false, fixture.teamBUser.userId, null, '2026-09-21T02:51:00Z'],
+      );
+
+      const allowed = await request(app)
+        .get('/api/v1/sync/open-questions')
+        .query({ taskRemoteId: fixture.taskBId })
+        .set(fixture.teamBUser.authHeader)
+        .expect(200);
+      expect(allowed.body.openQuestions).toHaveLength(1);
+      expect(allowed.body.openQuestions[0].text).toBe('Team B question');
+
+      const deniedCreate = await request(app)
+        .post('/api/v1/sync/open-questions')
+        .set(fixture.teamBUser.authHeader)
+        .send({
+          openQuestions: [
+            {
+              localId: 'question-new',
+              remoteId: null,
+              remoteTaskId: fixture.taskAId,
+              text: 'Blocked question',
+              resolved: false,
+              createdAt: '2026-09-21T02:52:00Z',
+              updatedAt: '2026-09-21T02:52:00Z',
+            },
+          ],
+        });
+      expect(deniedCreate.status).toBe(404);
+      expect(deniedCreate.body.error.code).toBe('task_not_found');
+
+      const deniedUpdate = await request(app)
+        .post('/api/v1/sync/open-questions')
+        .set(fixture.teamBUser.authHeader)
+        .send({
+          openQuestions: [
+            {
+              localId: 'question-a',
+              remoteId: rows[0].id,
+              remoteTaskId: fixture.taskAId,
+              text: 'Blocked update',
+              resolved: true,
+              createdAt: '2026-09-21T02:50:00Z',
+              updatedAt: '2026-09-21T02:53:00Z',
+            },
+          ],
+        });
+      expect(deniedUpdate.status).toBe(404);
+      expect(deniedUpdate.body.error.code).toBe('task_not_found');
+
+      const deniedList = await request(app)
+        .get('/api/v1/sync/open-questions')
+        .query({ taskRemoteId: fixture.taskAId })
+        .set(fixture.teamBUser.authHeader);
+      expect(deniedList.status).toBe(404);
+      expect(deniedList.body.error.code).toBe('task_not_found');
+    });
+
+    it('denies cross-team command create, update, and list routes as task_not_found', async () => {
+      const fixture = await seedTeamScopedFixture();
+      const { rows } = await pool.query<{ id: string }>(
+        `INSERT INTO commands (local_id, task_id, cmd_redacted, exit_code, summary, owner_user_id, workspace_label, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8)
+         RETURNING id`,
+        ['command-a', fixture.taskAId, 'make build', 1, 'failed', fixture.teamAUser.userId, null, '2026-09-21T03:00:00Z'],
+      );
+      await pool.query(
+        `INSERT INTO commands (local_id, task_id, cmd_redacted, exit_code, summary, owner_user_id, workspace_label, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8)`,
+        ['command-b', fixture.taskBId, 'pnpm test', 0, 'passed', fixture.teamBUser.userId, null, '2026-09-21T03:01:00Z'],
+      );
+
+      const allowed = await request(app)
+        .get('/api/v1/sync/commands')
+        .query({ taskRemoteId: fixture.taskBId })
+        .set(fixture.teamBUser.authHeader)
+        .expect(200);
+      expect(allowed.body.commands).toHaveLength(1);
+      expect(allowed.body.commands[0].cmdRedacted).toBe('pnpm test');
+
+      const deniedCreate = await request(app)
+        .post('/api/v1/sync/commands')
+        .set(fixture.teamBUser.authHeader)
+        .send({
+          commands: [
+            {
+              localId: 'command-new',
+              remoteId: null,
+              remoteTaskId: fixture.taskAId,
+              cmdRedacted: 'rm -rf /tmp',
+              exitCode: 1,
+              summary: 'blocked',
+              createdAt: '2026-09-21T03:02:00Z',
+              updatedAt: '2026-09-21T03:02:00Z',
+            },
+          ],
+        });
+      expect(deniedCreate.status).toBe(404);
+      expect(deniedCreate.body.error.code).toBe('task_not_found');
+
+      const deniedUpdate = await request(app)
+        .post('/api/v1/sync/commands')
+        .set(fixture.teamBUser.authHeader)
+        .send({
+          commands: [
+            {
+              localId: 'command-a',
+              remoteId: rows[0].id,
+              remoteTaskId: fixture.taskAId,
+              cmdRedacted: 'Blocked update',
+              exitCode: 0,
+              summary: 'should fail',
+              createdAt: '2026-09-21T03:00:00Z',
+              updatedAt: '2026-09-21T03:03:00Z',
+            },
+          ],
+        });
+      expect(deniedUpdate.status).toBe(404);
+      expect(deniedUpdate.body.error.code).toBe('task_not_found');
+
+      const deniedList = await request(app)
+        .get('/api/v1/sync/commands')
+        .query({ taskRemoteId: fixture.taskAId })
+        .set(fixture.teamBUser.authHeader);
+      expect(deniedList.status).toBe(404);
+      expect(deniedList.body.error.code).toBe('task_not_found');
     });
   });
 });

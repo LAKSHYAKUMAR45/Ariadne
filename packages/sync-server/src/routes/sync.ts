@@ -1,8 +1,10 @@
-import { Router } from 'express';
+import { Router, type Response } from 'express';
 import type { Pool } from 'pg';
 import { z } from 'zod';
 import { ApiError, errorBody } from '../errors.js';
 import type { AuthenticatedRequest } from '../middleware.js';
+import { inaccessibleTaskError, requireTeamTask } from '../taskAccess.js';
+import { requireActiveMembership, type ActiveMembership } from '../teamAccess.js';
 
 const pushTaskSchema = z.object({
   localId: z.string().min(1),
@@ -33,29 +35,65 @@ interface TaskRow {
 /**
  * Push + pull endpoints for tasks and checkpoints, per
  * docs/07-CLOUD-SYNC-API-CONTRACT.md §4.2/§4.3. Additive-only (no delete
- * endpoint), flat access (any authenticated user may read/write any row —
- * `owner_user_id` is bookkeeping, not an access gate), per
- * docs/06-CLOUD-SYNC-DESIGN.md v0.2 §6.
+ * endpoint). Access is scoped by the caller's active team membership:
+ * every protected task read/write filters on `tasks.team_id`, while
+ * sub-entity routes first verify that the referenced parent task is
+ * visible to the caller.
  */
 export function createSyncRouter(pool: Pool): Router {
   const router = Router();
 
-  async function getSingletonTeamId(): Promise<string> {
-    const { rows } = await pool.query<{ id: string }>(
-      'SELECT id FROM teams WHERE singleton_key = $1',
-      ['default'],
-    );
-    const teamId = rows[0]?.id;
-    if (!teamId) {
-      throw new Error('Singleton team is missing; run the authorization migration before syncing tasks');
+  async function requireMembership(
+    req: AuthenticatedRequest,
+    res: Response,
+  ): Promise<ActiveMembership | null> {
+    try {
+      return await requireActiveMembership(pool, req.userId!);
+    } catch (error: unknown) {
+      if (error instanceof ApiError) {
+        res.status(error.status).json(errorBody(error));
+        return null;
+      }
+      throw error;
     }
-    return teamId;
   }
 
-  async function ensureDecisionSupersedesSameTask(supersedesId: string | null | undefined, taskRemoteId: string): Promise<ApiError | null> {
-    if (!supersedesId) return null;
-    const { rows } = await pool.query('SELECT 1 FROM decisions WHERE id = $1 AND task_id = $2', [supersedesId, taskRemoteId]);
-    return rows.length > 0 ? null : new ApiError(400, 'invalid_supersedes_id', `Decision ${supersedesId} does not belong to task ${taskRemoteId}`);
+  async function requireAccessibleTask(
+    teamId: string,
+    taskId: string,
+    res: Response,
+  ): Promise<boolean> {
+    try {
+      await requireTeamTask(pool, teamId, taskId);
+      return true;
+    } catch (error: unknown) {
+      if (error instanceof ApiError) {
+        res.status(error.status).json(errorBody(error));
+        return false;
+      }
+      throw error;
+    }
+  }
+
+  async function ensureDecisionSupersedesSameTask(
+    supersedesId: string | null | undefined,
+    taskRemoteId: string,
+  ): Promise<ApiError | null> {
+    if (!supersedesId) {
+      return null;
+    }
+
+    const { rows } = await pool.query(
+      'SELECT 1 FROM decisions WHERE id = $1 AND task_id = $2',
+      [supersedesId, taskRemoteId],
+    );
+    return rows.length > 0
+      ? null
+      : new ApiError(
+          400,
+          'invalid_supersedes_id',
+          'supersedesId must refer to a decision on the same task',
+        );
   }
 
   router.post('/tasks', async (req: AuthenticatedRequest, res) => {
@@ -66,8 +104,12 @@ export function createSyncRouter(pool: Pool): Router {
       return;
     }
 
+    const membership = await requireMembership(req, res);
+    if (!membership) {
+      return;
+    }
+
     const results: { localId: string; remoteId: string; updatedAt: string }[] = [];
-    const teamId = await getSingletonTeamId();
     for (const task of parsed.data.tasks) {
       let row: TaskRow;
       if (task.remoteId) {
@@ -76,12 +118,21 @@ export function createSyncRouter(pool: Pool): Router {
         // recent workspace/machine to push this task (not just its origin).
         const { rows } = await pool.query<TaskRow>(
           `UPDATE tasks SET title = $1, goal = $2, status = $3, branch = $4, workspace_label = $5, updated_at = now()
-           WHERE id = $6 RETURNING id, local_id, title, goal, status, branch, workspace_label, created_at, updated_at`,
-          [task.title, task.goal ?? null, task.status, task.branch ?? null, task.workspaceLabel ?? null, task.remoteId]
+           WHERE id = $6 AND team_id = $7
+           RETURNING id, local_id, title, goal, status, branch, workspace_label, created_at, updated_at`,
+          [
+            task.title,
+            task.goal ?? null,
+            task.status,
+            task.branch ?? null,
+            task.workspaceLabel ?? null,
+            task.remoteId,
+            membership.teamId,
+          ],
         );
         if (rows.length === 0) {
-          const err = new ApiError(404, 'task_not_found', `No task with remoteId ${task.remoteId}`);
-          res.status(err.status).json(errorBody(err));
+          const inaccessible = inaccessibleTaskError(task.remoteId);
+          res.status(inaccessible.status).json(errorBody(inaccessible));
           return;
         }
         row = rows[0];
@@ -99,7 +150,7 @@ export function createSyncRouter(pool: Pool): Router {
             task.branch ?? null,
             task.workspaceLabel ?? null,
             task.createdAt,
-            teamId,
+            membership.teamId,
           ],
         );
         row = rows[0];
@@ -119,6 +170,11 @@ export function createSyncRouter(pool: Pool): Router {
   }
 
   router.get('/tasks', async (req, res) => {
+    const membership = await requireMembership(req as AuthenticatedRequest, res);
+    if (!membership) {
+      return;
+    }
+
     const since = typeof req.query.since === 'string' ? req.query.since : null;
     const { limit, offset } = parsePagination(req.query as Record<string, unknown>);
     const serverTime = new Date();
@@ -127,13 +183,14 @@ export function createSyncRouter(pool: Pool): Router {
     const { rows } = since
       ? await pool.query<TaskRow>(
           `SELECT id, local_id, title, goal, status, branch, workspace_label, created_at, updated_at FROM tasks
-           WHERE updated_at > $1 ORDER BY updated_at ASC LIMIT $2 OFFSET $3`,
-          [since, limit + 1, offset]
+           WHERE team_id = $1 AND updated_at > $2 ORDER BY updated_at ASC LIMIT $3 OFFSET $4`,
+          [membership.teamId, since, limit + 1, offset]
         )
       : await pool.query<TaskRow>(
           `SELECT id, local_id, title, goal, status, branch, workspace_label, created_at, updated_at FROM tasks
-           ORDER BY updated_at ASC LIMIT $1 OFFSET $2`,
-          [limit + 1, offset]
+           WHERE team_id = $1
+           ORDER BY updated_at ASC LIMIT $2 OFFSET $3`,
+          [membership.teamId, limit + 1, offset]
         );
     const hasMore = rows.length > limit;
     const page = hasMore ? rows.slice(0, limit) : rows;
@@ -169,12 +226,18 @@ export function createSyncRouter(pool: Pool): Router {
    * it, but the server itself never returns an unbounded result set.
    */
   router.get('/tasks/all', async (req, res) => {
+    const membership = await requireMembership(req as AuthenticatedRequest, res);
+    if (!membership) {
+      return;
+    }
+
     const { limit, offset } = parsePagination(req.query as Record<string, unknown>);
     const { rows } = await pool.query<TaskWithOwnerRow>(
       `SELECT t.id, t.local_id, t.title, t.goal, t.status, t.branch, t.workspace_label, t.created_at, t.updated_at, u.username
        FROM tasks t JOIN users u ON u.id = t.owner_user_id
-       ORDER BY t.updated_at DESC LIMIT $1 OFFSET $2`,
-      [limit + 1, offset]
+       WHERE t.team_id = $1
+       ORDER BY t.updated_at DESC LIMIT $2 OFFSET $3`,
+      [membership.teamId, limit + 1, offset]
     );
     const hasMore = rows.length > limit;
     const page = hasMore ? rows.slice(0, limit) : rows;
@@ -221,12 +284,15 @@ export function createSyncRouter(pool: Pool): Router {
       return;
     }
 
+    const membership = await requireMembership(req, res);
+    if (!membership) {
+      return;
+    }
+
     const results: { localId: string; remoteId: string }[] = [];
     for (const checkpoint of parsed.data.checkpoints) {
-      const taskExists = await pool.query('SELECT 1 FROM tasks WHERE id = $1', [checkpoint.remoteTaskId]);
-      if (taskExists.rows.length === 0) {
-        const err = new ApiError(404, 'task_not_found', `No task with remoteId ${checkpoint.remoteTaskId}`);
-        res.status(err.status).json(errorBody(err));
+      const accessible = await requireAccessibleTask(membership.teamId, checkpoint.remoteTaskId, res);
+      if (!accessible) {
         return;
       }
       // Attribution is who/where actually pushed this checkpoint, which can
@@ -243,10 +309,19 @@ export function createSyncRouter(pool: Pool): Router {
   });
 
   router.get('/checkpoints', async (req, res) => {
+    const membership = await requireMembership(req as AuthenticatedRequest, res);
+    if (!membership) {
+      return;
+    }
+
     const taskRemoteId = typeof req.query.taskRemoteId === 'string' ? req.query.taskRemoteId : null;
     if (!taskRemoteId) {
       const err = new ApiError(400, 'invalid_request', 'taskRemoteId query parameter is required');
       res.status(err.status).json(errorBody(err));
+      return;
+    }
+    const accessible = await requireAccessibleTask(membership.teamId, taskRemoteId, res);
+    if (!accessible) {
       return;
     }
     const since = typeof req.query.since === 'string' ? req.query.since : null;
@@ -311,8 +386,18 @@ export function createSyncRouter(pool: Pool): Router {
       return;
     }
 
+    const membership = await requireMembership(req, res);
+    if (!membership) {
+      return;
+    }
+
     const results: { localId: string; remoteId: string; updatedAt: string }[] = [];
     for (const todo of parsed.data.todos) {
+      const accessible = await requireAccessibleTask(membership.teamId, todo.remoteTaskId, res);
+      if (!accessible) {
+        return;
+      }
+
       let row: TodoRow;
       if (todo.remoteId) {
         const { rows } = await pool.query<TodoRow>(
@@ -327,12 +412,6 @@ export function createSyncRouter(pool: Pool): Router {
         }
         row = rows[0];
       } else {
-        const taskExists = await pool.query('SELECT 1 FROM tasks WHERE id = $1', [todo.remoteTaskId]);
-        if (taskExists.rows.length === 0) {
-          const err = new ApiError(404, 'task_not_found', `No task with remoteId ${todo.remoteTaskId}`);
-          res.status(err.status).json(errorBody(err));
-          return;
-        }
         const { rows } = await pool.query<TodoRow>(
           `INSERT INTO todos (local_id, task_id, text, status, owner_user_id, workspace_label, created_at, updated_at)
            VALUES ($1, $2, $3, $4, $5, $6, $7, $7)
@@ -347,10 +426,19 @@ export function createSyncRouter(pool: Pool): Router {
   });
 
   router.get('/todos', async (req, res) => {
+    const membership = await requireMembership(req as AuthenticatedRequest, res);
+    if (!membership) {
+      return;
+    }
+
     const taskRemoteId = typeof req.query.taskRemoteId === 'string' ? req.query.taskRemoteId : null;
     if (!taskRemoteId) {
       const err = new ApiError(400, 'invalid_request', 'taskRemoteId query parameter is required');
       res.status(err.status).json(errorBody(err));
+      return;
+    }
+    const accessible = await requireAccessibleTask(membership.teamId, taskRemoteId, res);
+    if (!accessible) {
       return;
     }
     const since = typeof req.query.since === 'string' ? req.query.since : null;
@@ -415,8 +503,19 @@ export function createSyncRouter(pool: Pool): Router {
       res.status(err.status).json(errorBody(err));
       return;
     }
+
+    const membership = await requireMembership(req, res);
+    if (!membership) {
+      return;
+    }
+
     const results: { localId: string; remoteId: string; updatedAt: string }[] = [];
     for (const decision of parsed.data.decisions) {
+      const accessible = await requireAccessibleTask(membership.teamId, decision.remoteTaskId, res);
+      if (!accessible) {
+        return;
+      }
+
       const supersedesError = await ensureDecisionSupersedesSameTask(decision.supersedesId, decision.remoteTaskId);
       if (supersedesError) {
         res.status(supersedesError.status).json(errorBody(supersedesError));
@@ -445,12 +544,6 @@ export function createSyncRouter(pool: Pool): Router {
         }
         row = rows[0];
       } else {
-        const taskExists = await pool.query('SELECT 1 FROM tasks WHERE id = $1', [decision.remoteTaskId]);
-        if (taskExists.rows.length === 0) {
-          const err = new ApiError(404, 'task_not_found', `No task with remoteId ${decision.remoteTaskId}`);
-          res.status(err.status).json(errorBody(err));
-          return;
-        }
         const { rows } = await pool.query<DecisionRow>(
           `INSERT INTO decisions (local_id, task_id, text, rationale, supersedes_id, owner_user_id, workspace_label, created_at, updated_at)
            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now())
@@ -474,10 +567,19 @@ export function createSyncRouter(pool: Pool): Router {
   });
 
   router.get('/decisions', async (req, res) => {
+    const membership = await requireMembership(req as AuthenticatedRequest, res);
+    if (!membership) {
+      return;
+    }
+
     const taskRemoteId = typeof req.query.taskRemoteId === 'string' ? req.query.taskRemoteId : null;
     if (!taskRemoteId) {
       const err = new ApiError(400, 'invalid_request', 'taskRemoteId query parameter is required');
       res.status(err.status).json(errorBody(err));
+      return;
+    }
+    const accessible = await requireAccessibleTask(membership.teamId, taskRemoteId, res);
+    if (!accessible) {
       return;
     }
     const since = typeof req.query.since === 'string' ? req.query.since : null;
@@ -537,8 +639,19 @@ export function createSyncRouter(pool: Pool): Router {
       res.status(err.status).json(errorBody(err));
       return;
     }
+
+    const membership = await requireMembership(req, res);
+    if (!membership) {
+      return;
+    }
+
     const results: { localId: string; remoteId: string; updatedAt: string }[] = [];
     for (const taskError of parsed.data.errors) {
+      const accessible = await requireAccessibleTask(membership.teamId, taskError.remoteTaskId, res);
+      if (!accessible) {
+        return;
+      }
+
       let row: ErrorEntityRow;
       if (taskError.remoteId) {
         const { rows } = await pool.query<ErrorEntityRow>(
@@ -562,12 +675,6 @@ export function createSyncRouter(pool: Pool): Router {
         }
         row = rows[0];
       } else {
-        const taskExists = await pool.query('SELECT 1 FROM tasks WHERE id = $1', [taskError.remoteTaskId]);
-        if (taskExists.rows.length === 0) {
-          const err = new ApiError(404, 'task_not_found', `No task with remoteId ${taskError.remoteTaskId}`);
-          res.status(err.status).json(errorBody(err));
-          return;
-        }
         const { rows } = await pool.query<ErrorEntityRow>(
           `INSERT INTO errors (local_id, task_id, message, resolved, resolution, owner_user_id, workspace_label, created_at, updated_at)
            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now())
@@ -591,10 +698,19 @@ export function createSyncRouter(pool: Pool): Router {
   });
 
   router.get('/errors', async (req, res) => {
+    const membership = await requireMembership(req as AuthenticatedRequest, res);
+    if (!membership) {
+      return;
+    }
+
     const taskRemoteId = typeof req.query.taskRemoteId === 'string' ? req.query.taskRemoteId : null;
     if (!taskRemoteId) {
       const err = new ApiError(400, 'invalid_request', 'taskRemoteId query parameter is required');
       res.status(err.status).json(errorBody(err));
+      return;
+    }
+    const accessible = await requireAccessibleTask(membership.teamId, taskRemoteId, res);
+    if (!accessible) {
       return;
     }
     const since = typeof req.query.since === 'string' ? req.query.since : null;
@@ -652,8 +768,19 @@ export function createSyncRouter(pool: Pool): Router {
       res.status(err.status).json(errorBody(err));
       return;
     }
+
+    const membership = await requireMembership(req, res);
+    if (!membership) {
+      return;
+    }
+
     const results: { localId: string; remoteId: string; updatedAt: string }[] = [];
     for (const question of parsed.data.openQuestions) {
+      const accessible = await requireAccessibleTask(membership.teamId, question.remoteTaskId, res);
+      if (!accessible) {
+        return;
+      }
+
       let row: OpenQuestionRow;
       if (question.remoteId) {
         const { rows } = await pool.query<OpenQuestionRow>(
@@ -670,12 +797,6 @@ export function createSyncRouter(pool: Pool): Router {
         }
         row = rows[0];
       } else {
-        const taskExists = await pool.query('SELECT 1 FROM tasks WHERE id = $1', [question.remoteTaskId]);
-        if (taskExists.rows.length === 0) {
-          const err = new ApiError(404, 'task_not_found', `No task with remoteId ${question.remoteTaskId}`);
-          res.status(err.status).json(errorBody(err));
-          return;
-        }
         const { rows } = await pool.query<OpenQuestionRow>(
           `INSERT INTO open_questions (local_id, task_id, text, resolved, owner_user_id, workspace_label, created_at, updated_at)
            VALUES ($1, $2, $3, $4, $5, $6, $7, now())
@@ -690,10 +811,19 @@ export function createSyncRouter(pool: Pool): Router {
   });
 
   router.get('/open-questions', async (req, res) => {
+    const membership = await requireMembership(req as AuthenticatedRequest, res);
+    if (!membership) {
+      return;
+    }
+
     const taskRemoteId = typeof req.query.taskRemoteId === 'string' ? req.query.taskRemoteId : null;
     if (!taskRemoteId) {
       const err = new ApiError(400, 'invalid_request', 'taskRemoteId query parameter is required');
       res.status(err.status).json(errorBody(err));
+      return;
+    }
+    const accessible = await requireAccessibleTask(membership.teamId, taskRemoteId, res);
+    if (!accessible) {
       return;
     }
     const since = typeof req.query.since === 'string' ? req.query.since : null;
@@ -752,8 +882,19 @@ export function createSyncRouter(pool: Pool): Router {
       res.status(err.status).json(errorBody(err));
       return;
     }
+
+    const membership = await requireMembership(req, res);
+    if (!membership) {
+      return;
+    }
+
     const results: { localId: string; remoteId: string; updatedAt: string }[] = [];
     for (const command of parsed.data.commands) {
+      const accessible = await requireAccessibleTask(membership.teamId, command.remoteTaskId, res);
+      if (!accessible) {
+        return;
+      }
+
       let row: CommandRow;
       if (command.remoteId) {
         const { rows } = await pool.query<CommandRow>(
@@ -777,12 +918,6 @@ export function createSyncRouter(pool: Pool): Router {
         }
         row = rows[0];
       } else {
-        const taskExists = await pool.query('SELECT 1 FROM tasks WHERE id = $1', [command.remoteTaskId]);
-        if (taskExists.rows.length === 0) {
-          const err = new ApiError(404, 'task_not_found', `No task with remoteId ${command.remoteTaskId}`);
-          res.status(err.status).json(errorBody(err));
-          return;
-        }
         const { rows } = await pool.query<CommandRow>(
           `INSERT INTO commands (local_id, task_id, cmd_redacted, exit_code, summary, owner_user_id, workspace_label, created_at, updated_at)
            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now())
@@ -797,10 +932,19 @@ export function createSyncRouter(pool: Pool): Router {
   });
 
   router.get('/commands', async (req, res) => {
+    const membership = await requireMembership(req as AuthenticatedRequest, res);
+    if (!membership) {
+      return;
+    }
+
     const taskRemoteId = typeof req.query.taskRemoteId === 'string' ? req.query.taskRemoteId : null;
     if (!taskRemoteId) {
       const err = new ApiError(400, 'invalid_request', 'taskRemoteId query parameter is required');
       res.status(err.status).json(errorBody(err));
+      return;
+    }
+    const accessible = await requireAccessibleTask(membership.teamId, taskRemoteId, res);
+    if (!accessible) {
       return;
     }
     const since = typeof req.query.since === 'string' ? req.query.since : null;
