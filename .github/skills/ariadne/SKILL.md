@@ -24,6 +24,10 @@ which is lost when the session ends.
   command again successfully auto-resolves it — no manual cleanup needed.
 - Whenever there's an **open question** blocking progress:
   `ariadne question add "<text>"`.
+- Before a **risky or broad change**: `ariadne capture [task-id]` to persist a
+  safe snapshot of the tracked, task-touched, plain-text files Ariadne is
+  allowed to keep. It intentionally skips secrets, build output, vendored
+  code, binaries, symlinks, oversized files, and `.ariadneignore`d paths.
 - At a natural stopping point (a working increment, end of session):
   `ariadne checkpoint "<summary>" -l micro|session|milestone`.
 
@@ -44,6 +48,7 @@ ariadne task edit [id] --title "<t>" --goal "<g>"
 
 # Capture structured memory
 ariadne checkpoint "<summary>" -l micro|session|milestone
+ariadne capture [task-id]          # explicit safe file capture; prints id/count/bytes + skipped path/reason only
 ariadne decision "<text>" -r "<rationale>" [--supersedes <decision-id>]
 ariadne todo add "<text>"                 # + list/done/reopen/block/edit/delete
 ariadne error add "<message>"             # + list/resolve/reopen/edit/delete
@@ -76,11 +81,15 @@ ariadne sync pull [--import-new]
 3. As you work, record decisions/todos/errors/questions as they come up,
    not in a batch at the end — memory captured in the moment is more
    accurate than a reconstruction later.
-4. Use `ariadne exec <cmd>` (instead of running `<cmd>` directly) for
+4. Before risky edits or large refactors, run `ariadne capture [task-id]`.
+   It captures tracked, task-touched, plain-text files only and reports
+   skipped path + reason instead of printing file contents.
+5. Use `ariadne exec <cmd>` (instead of running `<cmd>` directly) for
    commands whose pass/fail result is worth remembering, e.g. test runs or
    builds — it auto-logs failures as errors and auto-resolves them once the
    same command succeeds.
-5. Add a checkpoint at a meaningful stopping point.
+6. Add a checkpoint at a meaningful stopping point; successful checkpoints
+   also trigger the same safe file capture automatically.
 
 ## Cloud sync setup
 
@@ -102,3 +111,6 @@ ariadne sync pull [--import-new]
   cloud sync (`ariadne sync ...`) has been explicitly configured.
 - Safe to run from any subdirectory of the repo — Ariadne walks up to find
   the workspace root (nearest `.git` or `.ariadne`).
+- File capture is intentionally narrow: tracked, task-touched, plain-text
+  files only. Ariadne reports capture id/count/bytes and skipped path + reason,
+  never captured file contents.

@@ -29,6 +29,12 @@ describe('mcp-server cross-workspace tools', () => {
     closeRegistry();
   });
 
+  function initRepo(dir: string): void {
+    execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: dir });
+    execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: dir });
+    execFileSync('git', ['config', 'user.name', 'Test'], { cwd: dir });
+  }
+
   afterEach(() => {
     process.env.ARIADNE_REGISTRY_PATH = previousRegistryPath;
     closeRegistry();
@@ -36,13 +42,14 @@ describe('mcp-server cross-workspace tools', () => {
   });
 
   it('checkpoint_add writes into the owning workspace when taskId belongs elsewhere', () => {
+    initRepo(rootB);
     const storeB = openWorkspaceStore(rootB);
     const task = tools.taskNew(storeB, rootB, { title: 'Task in B' });
     storeB.close();
 
     const storeA = openWorkspaceStore(rootA);
     const checkpoint = tools.checkpointAdd(storeA, rootA, { summary: 'from A', taskId: task.id });
-    expect(checkpoint.taskId).toBe(task.id);
+    expect(checkpoint.checkpoint.taskId).toBe(task.id);
     storeA.close();
 
     // Verify it actually landed in B's own store, not A's.
@@ -87,6 +94,7 @@ describe('mcp-server cross-workspace tools', () => {
   });
 
   it('search with allWorkspaces finds matches across workspaces', () => {
+    initRepo(rootA);
     const storeA = openWorkspaceStore(rootA);
     const taskA = tools.taskNew(storeA, rootA, { title: 'Alpha task' });
     tools.checkpointAdd(storeA, rootA, { summary: 'a very unique marker string', taskId: taskA.id });

@@ -90,6 +90,10 @@ describe('generateAriadneSkillAndAgent', () => {
     expect(buildSkillMarkdown()).toContain('ariadne sync setup');
     expect(buildAgentMarkdown()).toContain('ariadne sync setup');
     expect(buildSkillMarkdown()).toContain('never stores the SSH password');
+    expect(buildSkillMarkdown()).toContain('ariadne capture [task-id]');
+    expect(buildSkillMarkdown()).toContain('tracked, task-touched, plain-text files only');
+    expect(buildAgentMarkdown()).toContain('ariadne capture [task-id]');
+    expect(buildAgentMarkdown()).toContain('skipped path + reason');
     const generatedConfig = JSON.parse(fs.readFileSync(path.join(root, SYNC_CONFIG_RELATIVE_PATH), 'utf8'));
     expect(generatedConfig.sshHostKey).toMatch(/^SHA256:/);
   });

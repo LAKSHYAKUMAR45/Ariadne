@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
+import { execFileSync } from 'node:child_process';
 import { TaskStore } from '@ariadne-dev/core';
 import { createAriadneMcpServer } from '../src/server.js';
 
@@ -84,6 +85,9 @@ describe('createAriadneMcpServer tool handlers (success + error envelopes)', () 
     try {
       const created = await tools.task_new.handler({ title: 'Checkpoint handler task' });
       const task = JSON.parse(created.content[0].text);
+      execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: workspaceRoot });
+      execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: workspaceRoot });
+      execFileSync('git', ['config', 'user.name', 'Test'], { cwd: workspaceRoot });
 
       // The MCP SDK validates inputSchema (a zod enum) before invoking our
       // handler, so an invalid level never reaches tools.ts — it's rejected
@@ -96,8 +100,9 @@ describe('createAriadneMcpServer tool handlers (success + error envelopes)', () 
         summary: 'Valid checkpoint',
       });
       expect(result.isError).toBeUndefined();
-      const checkpoint = JSON.parse(result.content[0].text);
-      expect(checkpoint.summary).toBe('Valid checkpoint');
+      const payload = JSON.parse(result.content[0].text);
+      expect(payload.checkpoint.summary).toBe('Valid checkpoint');
+      expect(payload.capture).toBeNull();
     } finally {
       cleanup(workspaceRoot, store);
     }

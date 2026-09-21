@@ -11,6 +11,28 @@ describe('mcp-server tools', () => {
   let store: TaskStore;
   let workspaceRoot: string;
 
+  function git(args: string[], cwd: string): string {
+    return execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
+  }
+
+  function initRepo(dir: string): void {
+    git(['init', '-q', '-b', 'main'], dir);
+    git(['config', 'user.email', 'test@example.com'], dir);
+    git(['config', 'user.name', 'Test'], dir);
+  }
+
+  function write(relPath: string, content: string): void {
+    const fullPath = path.join(workspaceRoot, relPath);
+    fs.mkdirSync(path.dirname(fullPath), { recursive: true });
+    fs.writeFileSync(fullPath, content, 'utf8');
+  }
+
+  function commitAll(message: string, force = false): string {
+    git(force ? ['add', '-f', '-A'] : ['add', '-A'], workspaceRoot);
+    git(['commit', '-q', '-m', message], workspaceRoot);
+    return git(['rev-parse', 'HEAD'], workspaceRoot);
+  }
+
   beforeEach(() => {
     store = new TaskStore(':memory:');
     workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'ariadne-mcp-test-'));
@@ -69,11 +91,12 @@ describe('mcp-server tools', () => {
   });
 
   it('checkpoint_add, todo_add/list/done, decision_add, error_add/resolve operate on the current task', () => {
+    initRepo(workspaceRoot);
     const task = tools.taskNew(store, workspaceRoot, { title: 'A' });
 
     const cp = tools.checkpointAdd(store, workspaceRoot, { summary: 'did stuff' });
-    expect(cp.taskId).toBe(task.id);
-    expect(cp.level).toBe('micro');
+    expect(cp.checkpoint.taskId).toBe(task.id);
+    expect(cp.checkpoint.level).toBe('micro');
 
     const todo = tools.todoAdd(store, workspaceRoot, { text: 'write tests' });
     expect(tools.todoList(store, workspaceRoot, {}).map((t) => t.id)).toContain(todo.id);
@@ -86,6 +109,38 @@ describe('mcp-server tools', () => {
     const error = tools.errorAdd(store, workspaceRoot, { message: 'build failed' });
     tools.errorResolve(store, workspaceRoot, { errorId: error.id, resolution: 'fixed typo' });
     expect(store.listErrors(task.id, { resolved: false })).toHaveLength(0);
+  });
+
+  it('captures files after a checkpoint is persisted', () => {
+    initRepo(workspaceRoot);
+    const task = tools.taskNew(store, workspaceRoot, { title: 'Checkpoint capture task' });
+    write('src/app.ts', 'export const value = 1;\n');
+    commitAll('Add app');
+    write('src/app.ts', 'export const value = 2;\n');
+    store.touchFile({ taskId: task.id, path: 'src/app.ts', role: 'edited' });
+
+    const result = tools.checkpointAdd(store, workspaceRoot, { summary: 'did stuff' });
+    const persistedCapture = store.getTaskFileCaptures(task.id)[0]!;
+
+    expect(result.capture).not.toBeNull();
+    expect(result.capture?.id).toBe(persistedCapture.id);
+    expect(result.capture?.fileCount).toBe(1);
+    expect(result.capture?.byteCount).toBe(Buffer.byteLength('export const value = 2;\n', 'utf8'));
+    expect(persistedCapture.checkpointId).toBe(result.checkpoint.id);
+    expect(persistedCapture.entries.map((entry) => entry.path)).toEqual(['src/app.ts']);
+    expect(result.skipped).toEqual([]);
+  });
+
+  it('does not capture when checkpoint creation fails', () => {
+    initRepo(workspaceRoot);
+    const task = tools.taskNew(store, workspaceRoot, { title: 'Failing checkpoint task' });
+    const failing = Object.create(store) as TaskStore;
+    (failing as unknown as { createCheckpoint: () => never }).createCheckpoint = () => {
+      throw new Error('checkpoint write failed');
+    };
+
+    expect(() => tools.checkpointAdd(failing, workspaceRoot, { summary: 'did stuff' })).toThrow('checkpoint write failed');
+    expect(store.getTaskFileCaptures(task.id)).toEqual([]);
   });
 
   it('command_log records a successful command without adding an error', () => {
@@ -189,6 +244,7 @@ describe('mcp-server tools', () => {
   });
 
   it('get_context assembles the full task context as structured data', () => {
+    initRepo(workspaceRoot);
     const task = tools.taskNew(store, workspaceRoot, { title: 'Fix login bug' });
     tools.checkpointAdd(store, workspaceRoot, { summary: 'first checkpoint' });
     tools.todoAdd(store, workspaceRoot, { text: 'write tests' });
@@ -229,6 +285,7 @@ describe('mcp-server tools', () => {
   });
 
   it('export_task renders the current task as Markdown', () => {
+    initRepo(workspaceRoot);
     const task = tools.taskNew(store, workspaceRoot, { title: 'Fix login bug' });
     tools.checkpointAdd(store, workspaceRoot, { summary: 'first checkpoint' });
 

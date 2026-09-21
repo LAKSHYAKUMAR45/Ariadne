@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { execFileSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
@@ -226,6 +227,9 @@ describe('ariadne curation commands (todo/decision/error/question/checkpoint/exp
 
   it('checkpoint records a checkpoint at the given level for the current task', async () => {
     setCurrentTask('Checkpoint task');
+    execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: root });
+    execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: root });
+    execFileSync('git', ['config', 'user.name', 'Test'], { cwd: root });
 
     await program.parseAsync(['node', 'ariadne', 'checkpoint', 'Finished the schema', '--level', 'session']);
 

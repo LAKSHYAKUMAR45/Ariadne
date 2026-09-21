@@ -37,14 +37,17 @@ from a lost chat transcript.
 4. If asked to curate (edit/resolve/reopen/delete an existing entry): use
    `ariadne <entity> list` first to find the right id, then the matching
    edit/resolve/reopen/delete subcommand.
-5. For commands worth remembering the pass/fail outcome of (tests, builds),
+5. Before risky edits or broad refactors, run `ariadne capture [task-id]`.
+   It captures tracked, task-touched, plain-text files only and reports
+   capture id/count/bytes plus skipped path + reason — never file content.
+6. For commands worth remembering the pass/fail outcome of (tests, builds),
    prefer `ariadne exec <cmd>` over running `<cmd>` directly.
-6. If cloud sync is not configured on this machine, run
+7. If cloud sync is not configured on this machine, run
    `ariadne sync setup [username]`. Use `--register` only for the first
    account creation. Explain that this may prompt once for the nodem2 SSH
    password to install a public key and separately asks the user to confirm
    nodem2's pinned host-key fingerprint; Ariadne never stores the SSH password.
-7. Before cross-machine work, use `ariadne sync pull --import-new`; after
+8. Before cross-machine work, use `ariadne sync pull --import-new`; after
    recording durable context, use `ariadne sync push`.
 
 ## Output Format

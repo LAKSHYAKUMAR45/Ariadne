@@ -16,6 +16,7 @@ import type {
 } from '@ariadne-dev/core';
 import {
   buildContext,
+  captureTaskFiles,
   syncTaskGit,
   isGitCommitCommand,
   exportTaskMarkdown,
@@ -32,6 +33,7 @@ import {
 } from '@ariadne-dev/core';
 import type { GraphifyResult } from '@ariadne-dev/core';
 import type { CrossWorkspaceTask, CrossWorkspaceSearchResult } from '@ariadne-dev/core';
+import type { CaptureResult, CaptureSkip } from '@ariadne-dev/core';
 import { readCurrentTaskId, setCurrentTaskId } from './workspace.js';
 
 /**
@@ -172,10 +174,64 @@ export interface CheckpointAddArgs {
   taskId?: string;
 }
 
-export function checkpointAdd(store: TaskStore, workspaceRoot: string, args: CheckpointAddArgs): Checkpoint {
-  return withTaskStore(store, workspaceRoot, args.taskId, (s, taskId) =>
-    s.createCheckpoint({ taskId, level: args.level ?? 'micro', summary: args.summary }),
-  );
+export interface CaptureSummary {
+  id: string;
+  fileCount: number;
+  byteCount: number;
+}
+
+export interface CheckpointAddResult {
+  checkpoint: Checkpoint;
+  capture: CaptureSummary | null;
+  skipped: CaptureSkip[];
+}
+
+function captureSummary(result: CaptureResult): CaptureSummary | null {
+  if (!result.capture) {
+    return null;
+  }
+
+  return {
+    id: result.capture.id,
+    fileCount: result.capture.entries.length,
+    byteCount: result.capture.entries.reduce((total, entry) => total + entry.byteLength, 0),
+  };
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function recordCaptureFailure(store: TaskStore, taskId: string, context: string, error: unknown): never {
+  const message = `Task file capture failed after ${context}: ${errorMessage(error)}`;
+  try {
+    store.recordError({ taskId, message });
+  } catch {
+    // Recording the failure must never mask the original capture error.
+  }
+  throw new Error(message);
+}
+
+export function checkpointAdd(store: TaskStore, workspaceRoot: string, args: CheckpointAddArgs): CheckpointAddResult {
+  return withTaskStore(store, workspaceRoot, args.taskId, (s, taskId, resolvedWorkspaceRoot) => {
+    const checkpoint = s.createCheckpoint({ taskId, level: args.level ?? 'micro', summary: args.summary });
+    try {
+      const result = captureTaskFiles(s, {
+        taskId,
+        workspace: resolvedWorkspaceRoot,
+        trigger: 'checkpoint',
+        checkpointId: checkpoint.id,
+      });
+
+      return {
+        checkpoint,
+        capture: captureSummary(result),
+        skipped: result.skipped.map((skip) => ({ ...skip })),
+      };
+    } catch (error: unknown) {
+      return recordCaptureFailure(s, taskId, `checkpoint ${checkpoint.id}`, error);
+    }
+  });
 }
 
 export interface TodoAddArgs {
