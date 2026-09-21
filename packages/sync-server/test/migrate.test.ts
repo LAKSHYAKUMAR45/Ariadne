@@ -124,12 +124,43 @@ describe('runMigrations', () => {
       const teams = await pool.query('SELECT id, singleton_key FROM teams');
       expect(teams.rows).toHaveLength(1);
       expect(teams.rows[0].singleton_key).toBe('default');
+      const teamId = teams.rows[0].id;
+
+      const schemaVersion = await pool.query<{ value: string }>(
+        `SELECT value FROM schema_meta WHERE key = 'schema_version'`,
+      );
+      expect(schemaVersion.rows).toHaveLength(1);
+      expect(schemaVersion.rows[0].value).toBe('6');
 
       const memberships = await pool.query(
-        'SELECT user_id, role, active FROM team_memberships ORDER BY created_at ASC',
+        `SELECT u.username, m.role, m.active
+         FROM team_memberships m
+         JOIN users u ON u.id = m.user_id
+         ORDER BY u.username ASC`,
       );
-      expect(memberships.rows.map((row) => row.role)).toEqual(['admin', 'member']);
-      expect(memberships.rows.every((row) => row.active)).toBe(true);
+      expect(memberships.rows).toEqual([
+        { username: 'alice', role: 'admin', active: true },
+        { username: 'bob', role: 'member', active: true },
+      ]);
+
+      const duplicateAdmin = await pool.query<{ id: string }>(
+        `INSERT INTO users (username, password_hash, created_at)
+         VALUES ('carol', 'hash-carol', '2026-01-03T00:00:00Z')
+         RETURNING id`,
+      );
+      await expect(
+        pool.query(
+          `INSERT INTO team_memberships (team_id, user_id, role, active)
+           VALUES ($1, $2, 'admin', true)`,
+          [teamId, duplicateAdmin.rows[0].id],
+        ),
+      ).rejects.toMatchObject({ code: '23505' });
+
+      const taskTeams = await pool.query<{ id: string; team_id: string | null }>(
+        'SELECT id, team_id FROM tasks ORDER BY local_id ASC',
+      );
+      expect(taskTeams.rows).toHaveLength(2);
+      expect(taskTeams.rows.every((row) => row.team_id === teamId)).toBe(true);
 
       const unscoped = await pool.query('SELECT count(*)::int AS count FROM tasks WHERE team_id IS NULL');
       expect(unscoped.rows[0].count).toBe(0);
