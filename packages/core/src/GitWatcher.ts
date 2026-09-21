@@ -1,6 +1,8 @@
 import { execFileSync } from 'node:child_process';
+import { captureTaskFiles } from './FileCapture.js';
+import type { CaptureLimits } from './FileCapture.js';
 import type { TaskStore } from './TaskStore.js';
-import type { FileRole } from './types.js';
+import type { FileRole, TaskFileCaptureWithEntries } from './types.js';
 
 /**
  * Editor-agnostic git capture — the `GitWatcher` from
@@ -120,10 +122,57 @@ export function isGitCommitCommand(cmdRedacted: string): boolean {
   return false;
 }
 
+export interface GitCaptureFailure {
+  sha: string;
+  message: string;
+}
+
 export interface SyncGitResult {
   branchChanged: boolean;
   newBranch: string | null;
   recordedCommits: GitLogEntry[];
+  /** Immutable file captures created for the newly recorded commits. */
+  captures: TaskFileCaptureWithEntries[];
+  /** Commits whose file capture failed — recorded as task errors, never silently ignored. */
+  captureFailures: GitCaptureFailure[];
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * Captures the files of a freshly recorded commit. A capture failure must be
+ * visible (recorded as a task error and returned to the caller) and must never
+ * leave a partial/implied capture behind for that commit.
+ */
+function captureCommitFiles(
+  store: TaskStore,
+  taskId: string,
+  repoRoot: string,
+  sha: string,
+  limits: CaptureLimits | undefined,
+  captures: TaskFileCaptureWithEntries[],
+  failures: GitCaptureFailure[],
+): void {
+  try {
+    const result = captureTaskFiles(
+      store,
+      { taskId, workspace: repoRoot, trigger: 'git_commit', gitCommitSha: sha },
+      limits,
+    );
+    if (result.capture) {
+      captures.push(result.capture);
+    }
+  } catch (error: unknown) {
+    const message = `Task file capture failed for commit ${sha}: ${errorMessage(error)}`;
+    failures.push({ sha, message });
+    try {
+      store.recordError({ taskId, message });
+    } catch {
+      // Recording the failure must never mask the original sync result.
+    }
+  }
 }
 
 /**
@@ -136,7 +185,7 @@ export function syncTaskGit(
   store: TaskStore,
   taskId: string,
   repoRoot: string,
-  options: { commitLimit?: number } = {},
+  options: { commitLimit?: number; captureLimits?: CaptureLimits } = {},
 ): SyncGitResult {
   const task = store.getTask(taskId);
   if (!task) {
@@ -160,6 +209,8 @@ export function syncTaskGit(
 
   // `git log` returns newest-first; record oldest-first so created_at ordering matches commit order.
   const recordedCommits: GitLogEntry[] = [];
+  const captures: TaskFileCaptureWithEntries[] = [];
+  const captureFailures: GitCaptureFailure[] = [];
   for (const commit of [...toRecord].reverse()) {
     store.recordCommit({ sha: commit.sha, taskId, message: commit.message || null });
     recordedCommits.push(commit);
@@ -170,7 +221,17 @@ export function syncTaskGit(
     for (const changed of listCommitFiles(repoRoot, commit.sha)) {
       store.touchFile({ taskId, path: changed.path, role: fileRoleFromGitStatus(changed.status) });
     }
+    // Only after the commit and its touched files are recorded locally does
+    // the immutable file capture run, so a capture always references a commit
+    // row that already exists.
+    captureCommitFiles(store, taskId, repoRoot, commit.sha, options.captureLimits, captures, captureFailures);
   }
 
-  return { branchChanged, newBranch: branchChanged ? branch : null, recordedCommits };
+  return {
+    branchChanged,
+    newBranch: branchChanged ? branch : null,
+    recordedCommits,
+    captures,
+    captureFailures,
+  };
 }

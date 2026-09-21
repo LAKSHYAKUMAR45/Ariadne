@@ -135,6 +135,62 @@ describe('GitWatcher', () => {
     expect(byPath.get('a.txt')).toBe('edited'); // last commit modified it, so "edited" wins over the earlier "created"
   });
 
+  it('syncTaskGit captures the committed file contents for each new commit', () => {
+    const task = store.createTask({ title: 'A' });
+    const sha1 = commit(repoRoot, 'a.txt', 'First commit');
+    fs.writeFileSync(path.join(repoRoot, 'a.txt'), 'second version\n');
+    git(['add', 'a.txt'], repoRoot);
+    git(['commit', '-q', '-m', 'Second commit'], repoRoot);
+    const sha2 = git(['rev-parse', 'HEAD'], repoRoot);
+    // Worktree drifts after the commit -- the capture must use the commit blob.
+    fs.writeFileSync(path.join(repoRoot, 'a.txt'), 'uncommitted\n');
+
+    const result = syncTaskGit(store, task.id, repoRoot);
+
+    expect(result.captureFailures).toEqual([]);
+    expect(result.captures.map((c) => c.gitCommitSha)).toEqual([sha1, sha2]);
+
+    const captures = store.getTaskFileCaptures(task.id);
+    expect(captures).toHaveLength(2);
+    const second = captures.find((c) => c.gitCommitSha === sha2)!;
+    expect(second.trigger).toBe('git_commit');
+    expect(second.entries.map((e) => e.path)).toEqual(['a.txt']);
+    expect(second.entries[0].content).toBe('second version\n');
+  });
+
+  it('syncTaskGit does not duplicate captures when re-synced', () => {
+    const task = store.createTask({ title: 'A' });
+    commit(repoRoot, 'a.txt', 'First commit');
+
+    syncTaskGit(store, task.id, repoRoot);
+    const second = syncTaskGit(store, task.id, repoRoot);
+
+    expect(second.captures).toEqual([]);
+    expect(store.getTaskFileCaptures(task.id)).toHaveLength(1);
+  });
+
+  it('syncTaskGit surfaces and records capture failures without marking the commit captured', () => {
+    const task = store.createTask({ title: 'A' });
+    const sha = commit(repoRoot, 'a.txt', 'First commit');
+    const failing = Object.create(store) as TaskStore;
+    (failing as unknown as { createTaskFileCapture: () => never }).createTaskFileCapture = () => {
+      throw new Error('disk exploded');
+    };
+
+    const result = syncTaskGit(failing, task.id, repoRoot);
+
+    expect(result.recordedCommits.map((c) => c.sha)).toEqual([sha]);
+    expect(result.captures).toEqual([]);
+    expect(result.captureFailures).toEqual([
+      { sha, message: expect.stringContaining('disk exploded') },
+    ]);
+    expect(store.getTaskFileCaptures(task.id)).toEqual([]);
+    const errors = store.listErrors(task.id);
+    expect(errors).toHaveLength(1);
+    expect(errors[0].message).toContain(sha);
+    expect(errors[0].message).toContain('disk exploded');
+  });
+
   it('isGitCommitCommand recognizes git commit invocations but not lookalikes', () => {
     expect(isGitCommitCommand('git commit -m "fix bug"')).toBe(true);
     expect(isGitCommitCommand('cd repo && git commit -m "fix"')).toBe(true);

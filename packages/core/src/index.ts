@@ -48,7 +48,15 @@ export {
   isGitCommitCommand,
   syncTaskGit,
 } from './GitWatcher.js';
-export type { GitLogEntry, GitCommitFileEntry, SyncGitResult } from './GitWatcher.js';
+export type { GitLogEntry, GitCommitFileEntry, SyncGitResult, GitCaptureFailure } from './GitWatcher.js';
+export { captureTaskFiles, isAlwaysExcludedCapturePath, DEFAULT_CAPTURE_LIMITS } from './FileCapture.js';
+export type {
+  CaptureLimits,
+  CaptureRequest,
+  CaptureResult,
+  CaptureSkip,
+  CaptureSkipReason,
+} from './FileCapture.js';
 export {
   DEFAULT_REDACTION_RULES,
   MAX_REDACTED_LENGTH,
