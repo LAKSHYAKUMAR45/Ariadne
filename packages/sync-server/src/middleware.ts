@@ -15,13 +15,41 @@ export function asyncHandler<TRequest extends Request = Request>(
   };
 }
 
-/** Express middleware requiring `Authorization: Bearer <token>`, per docs/07-CLOUD-SYNC-API-CONTRACT.md §4. */
+interface JsonParseError extends SyntaxError {
+  status: number;
+  type: 'entity.parse.failed';
+  body: string;
+}
+
+function isJsonParseError(error: unknown): error is JsonParseError {
+  if (!(error instanceof SyntaxError)) {
+    return false;
+  }
+
+  if (typeof error !== 'object' || error === null) {
+    return false;
+  }
+
+  const candidate = error as Partial<JsonParseError> & {
+    type?: unknown;
+    body?: unknown;
+    status?: unknown;
+  };
+
+  return (
+    candidate.type === 'entity.parse.failed' &&
+    candidate.status === 400 &&
+    typeof candidate.body === 'string'
+  );
+}
+
+/** Express middleware requiring `Authorization: ****** per docs/07-CLOUD-SYNC-API-CONTRACT.md §4. */
 export function requireAuth(jwtSecret: string) {
   return (req: AuthenticatedRequest, res: Response, next: NextFunction): void => {
     const header = req.header('authorization');
     const token = header?.startsWith('Bearer ') ? header.slice('Bearer '.length) : null;
     if (!token) {
-      const err = new ApiError(401, 'missing_token', 'Authorization: Bearer <token> header is required');
+      const err = new ApiError(401, 'missing_token', 'Authorization: ****** header is required');
       res.status(err.status).json(errorBody(err));
       return;
     }
@@ -45,6 +73,23 @@ export const handleUnexpectedError: ErrorRequestHandler = (error, req, res, next
 
   if (error instanceof ApiError) {
     res.status(error.status).json(errorBody(error));
+    return;
+  }
+
+  if (isJsonParseError(error)) {
+    const authenticatedRequest = req as AuthenticatedRequest;
+    console.error('Malformed JSON request', {
+      method: req.method,
+      path: req.originalUrl,
+      userId: authenticatedRequest.userId ?? null,
+      error: {
+        type: error.type,
+        status: error.status,
+        message: error.message,
+      },
+    });
+    const err = new ApiError(400, 'invalid_request', 'Invalid request body');
+    res.status(err.status).json(errorBody(err));
     return;
   }
 

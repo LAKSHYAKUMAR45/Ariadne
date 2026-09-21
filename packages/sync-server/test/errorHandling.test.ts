@@ -43,6 +43,17 @@ function expectInternalErrorResponse(response: request.Response, leakedValues: s
   }
 }
 
+function expectInvalidRequestResponse(response: request.Response): void {
+  expect(response.status).toBe(400);
+  expect(response.headers['content-type']).toMatch(/application\/json/);
+  expect(response.body).toEqual({
+    error: {
+      code: 'invalid_request',
+      message: 'Invalid request body',
+    },
+  });
+}
+
 describe('sync-server: unexpected error handling', () => {
   afterEach(() => {
     vi.restoreAllMocks();
@@ -127,5 +138,34 @@ describe('sync-server: unexpected error handling', () => {
       userId: 'admin-1',
     });
     expect(logSpy.mock.calls[0][1]).not.toHaveProperty('body');
+  });
+
+  it('returns a stable 400 invalid_request for malformed JSON and does not leak parser details', async () => {
+    const logSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const app = createApp(
+      createPoolWithQuery(vi.fn<Pool['query']>().mockResolvedValue(result([]))),
+      TEST_JWT_SECRET,
+    );
+    const malformedBody = '{"username":"leak-me"';
+
+    const response = await request(app)
+      .post('/api/v1/auth/register')
+      .set('Content-Type', 'application/json')
+      .send(malformedBody);
+
+    expectInvalidRequestResponse(response);
+    expect(response.text).not.toContain(malformedBody);
+    expect(response.text).not.toContain('Unexpected token');
+    expect(response.text).not.toContain('SyntaxError');
+    expect(response.text).not.toContain('stack');
+    expect(logSpy).toHaveBeenCalledOnce();
+    expect(logSpy.mock.calls[0][0]).toContain('Malformed JSON request');
+    expect(logSpy.mock.calls[0][1]).toMatchObject({
+      method: 'POST',
+      path: '/api/v1/auth/register',
+      userId: null,
+    });
+    expect(logSpy.mock.calls[0][1]).not.toHaveProperty('body');
+    expect(JSON.stringify(logSpy.mock.calls[0][1])).not.toContain('leak-me');
   });
 });
