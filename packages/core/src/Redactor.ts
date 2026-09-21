@@ -62,17 +62,40 @@ export const DEFAULT_REDACTION_RULES: RedactionRule[] = [...KNOWN_TOKEN_RULES, .
 
 export const MAX_REDACTED_LENGTH = 500;
 
+/** Appended when a command is cut short by `MAX_REDACTED_LENGTH`, so a truncated command in `commands`/`errors` reads as "cut off here" rather than as a mangled, complete-looking string. */
+const TRUNCATION_SUFFIX = ' …[truncated]';
+
 /**
  * Redacts likely secrets from a single line of text (e.g. a terminal command
  * or its output) using pattern-based rules, then truncates to a bounded
  * length so a single pasted blob can't blow up storage.
+ *
+ * Multi-line input (a heredoc, a pasted multi-line script, etc.) is first
+ * collapsed to its first line plus a "+N more lines" summary. Without this,
+ * a long heredoc would get sliced apart by the length cap below at an
+ * arbitrary byte offset — often mid-token, deep inside the *body* of the
+ * heredoc rather than its meaningful first line — leaving an unreadable
+ * fragment in `commands.cmd_redacted` / the auto-generated "Command failed"
+ * error message.
  */
 export function redact(text: string, rules: RedactionRule[] = DEFAULT_REDACTION_RULES): string {
   let result = text;
   for (const rule of rules) {
     result = result.replace(rule.pattern, rule.replace as string);
   }
-  return result.slice(0, MAX_REDACTED_LENGTH);
+
+  const lines = result.split('\n');
+  if (lines.length > 1) {
+    const extra = lines.length - 1;
+    result = `${lines[0].trimEnd()} …(+${extra} more line${extra === 1 ? '' : 's'})`;
+  }
+
+  if (result.length > MAX_REDACTED_LENGTH) {
+    const budget = MAX_REDACTED_LENGTH - TRUNCATION_SUFFIX.length;
+    result = `${result.slice(0, budget)}${TRUNCATION_SUFFIX}`;
+  }
+
+  return result;
 }
 
 /** Back-compat alias matching the extension's original function name. */

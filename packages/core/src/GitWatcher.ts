@@ -1,5 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import type { TaskStore } from './TaskStore.js';
+import type { FileRole } from './types.js';
 
 /**
  * Editor-agnostic git capture — the `GitWatcher` from
@@ -54,6 +55,71 @@ export function listRecentCommits(repoRoot: string, limit = 50): GitLogEntry[] {
     });
 }
 
+export interface GitCommitFileEntry {
+  path: string;
+  /** Raw git diff-tree status letter (A/M/D/R/C/...), before mapping to a `FileRole`. */
+  status: string;
+}
+
+/** Lists the files changed by a single commit, via `git diff-tree`. Best-effort: returns `[]` if the sha/repo is unavailable. */
+export function listCommitFiles(repoRoot: string, sha: string): GitCommitFileEntry[] {
+  // `--root` makes diff-tree show the full file list for a repo's very first
+  // commit too (which has no parent to diff against).
+  const out = git(['diff-tree', '--no-commit-id', '--name-status', '-r', '--root', sha], repoRoot);
+  if (!out) return [];
+  return out
+    .split('\n')
+    .filter(Boolean)
+    .map((line) => {
+      const [status, ...rest] = line.split('\t');
+      return { status, path: rest.join('\t') };
+    })
+    .filter((entry) => entry.path);
+}
+
+/** Maps a `git diff-tree --name-status` letter to Ariadne's `FileRole`. Renames/copies (R/C) and modifications (M) all count as "edited" — the pre-rename path isn't tracked separately. */
+export function fileRoleFromGitStatus(status: string): FileRole {
+  if (status.startsWith('A')) return 'created';
+  if (status.startsWith('D')) return 'deleted';
+  return 'edited';
+}
+
+/**
+ * Detects a `git commit` invocation (as opposed to `git commit-graph`,
+ * `git log --grep=commit`, etc.) in an already-redacted command string, so
+ * callers can auto-trigger `syncTaskGit` right after one succeeds — see
+ * `commandLog`'s and `runTaskExec`'s use of this.
+ *
+ * Tokenizes each `&&`/`;`/`|`-separated segment and walks forward from a
+ * `git` token, skipping option tokens (and, for a single-dash short option
+ * like `-C <dir>`, its following value token) until it finds the first
+ * non-option token — that token must be exactly `commit` for a match. This
+ * is more reliable than a single regex for options that take a value
+ * (`git -C repo commit ...`) without also matching unrelated subcommands
+ * or flags that merely contain the word "commit".
+ */
+export function isGitCommitCommand(cmdRedacted: string): boolean {
+  for (const segment of cmdRedacted.split(/&&|;|\|/)) {
+    const tokens = segment.trim().split(/\s+/).filter(Boolean);
+    const gitIndex = tokens.indexOf('git');
+    if (gitIndex === -1) continue;
+    for (let i = gitIndex + 1; i < tokens.length; i++) {
+      const token = tokens[i];
+      if (token.startsWith('-')) {
+        // A single-dash short option without an "=" (e.g. `-C`) takes its
+        // value as the next token; a long option (`--foo`) or one with an
+        // inline value (`-c foo=bar` is passed as one token here anyway,
+        // `--foo=bar`) does not need special handling beyond being skipped.
+        if (!token.startsWith('--') && !token.includes('=')) i++;
+        continue;
+      }
+      if (token === 'commit') return true;
+      break; // first non-option token isn't "commit" -> not a commit invocation in this segment
+    }
+  }
+  return false;
+}
+
 export interface SyncGitResult {
   branchChanged: boolean;
   newBranch: string | null;
@@ -97,6 +163,13 @@ export function syncTaskGit(
   for (const commit of [...toRecord].reverse()) {
     store.recordCommit({ sha: commit.sha, taskId, message: commit.message || null });
     recordedCommits.push(commit);
+    // Backfill `files` from the commit's own diff — this is what lets
+    // `recentFiles` in status/resume/get_context reflect real work even for
+    // CLI/MCP-driven sessions that have no editor-level "file saved" event
+    // to hook into; every commit already carries its own file list for free.
+    for (const changed of listCommitFiles(repoRoot, commit.sha)) {
+      store.touchFile({ taskId, path: changed.path, role: fileRoleFromGitStatus(changed.status) });
+    }
   }
 
   return { branchChanged, newBranch: branchChanged ? branch : null, recordedCommits };

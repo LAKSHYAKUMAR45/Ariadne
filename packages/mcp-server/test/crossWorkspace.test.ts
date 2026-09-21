@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
+import { execFileSync } from 'node:child_process';
 import { closeRegistry } from '@ariadne-dev/core';
 import * as tools from '../src/tools.js';
 import { openWorkspaceStore } from '../src/workspace.js';
@@ -139,6 +140,33 @@ describe('mcp-server cross-workspace tools', () => {
     const verifyB = openWorkspaceStore(rootB);
     expect(verifyB.listCommands(task.id, 10).some((c) => c.cmdRedacted === 'npm run build')).toBe(true);
     expect(verifyB.listErrors(task.id, { resolved: false }).some((e) => e.message.includes('npm run build'))).toBe(true);
+    verifyB.close();
+  });
+
+  it('command_log auto-git-syncs a "git commit" against the task\'s own workspace, not the caller\'s', () => {
+    // rootA is a plain directory (not a git repo); rootB is a real repo.
+    // The task lives in B, but the tool call is made with A's store/root —
+    // regression test for a bug where the sync used the caller's
+    // workspaceRoot instead of the resolved cross-workspace one.
+    execFileSync('git', ['init', '-q'], { cwd: rootB });
+    execFileSync('git', ['config', 'user.email', 'a@a.com'], { cwd: rootB });
+    execFileSync('git', ['config', 'user.name', 'a'], { cwd: rootB });
+
+    const storeB = openWorkspaceStore(rootB);
+    const task = tools.taskNew(storeB, rootB, { title: 'Task in B' });
+    storeB.close();
+
+    fs.writeFileSync(path.join(rootB, 'a.txt'), 'a');
+    execFileSync('git', ['add', 'a.txt'], { cwd: rootB });
+    execFileSync('git', ['commit', '-q', '-m', 'Add a.txt'], { cwd: rootB });
+
+    const storeA = openWorkspaceStore(rootA);
+    tools.commandLog(storeA, rootA, { command: 'git commit -m "Add a.txt"', exitCode: 0, taskId: task.id });
+    storeA.close();
+
+    const verifyB = openWorkspaceStore(rootB);
+    expect(verifyB.listCommits(task.id)).toHaveLength(1);
+    expect(verifyB.listFiles(task.id).map((f) => f.path)).toContain('a.txt');
     verifyB.close();
   });
 

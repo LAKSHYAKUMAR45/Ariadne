@@ -265,8 +265,8 @@ export function createAriadneMcpServer(options?: { workspaceRoot?: string; store
     'decision_add',
     {
       title: 'Record a decision',
-      description: 'Records a decision (with optional rationale) for the current (or given) task. Works even if taskId belongs to a different workspace (falls back to the cross-workspace registry).',
-      inputSchema: { text: z.string(), rationale: z.string().optional(), taskId: z.string().optional() },
+      description: 'Records a decision (with optional rationale) for the current (or given) task. Pass supersedesId to mark this decision as replacing an earlier one, demoting that older decision from "current" to "historical" in status/resume/get_context. Works even if taskId belongs to a different workspace (falls back to the cross-workspace registry).',
+      inputSchema: { text: z.string(), rationale: z.string().optional(), taskId: z.string().optional(), supersedesId: z.string().optional() },
     },
     async (args) => {
       try {
@@ -297,8 +297,8 @@ export function createAriadneMcpServer(options?: { workspaceRoot?: string; store
     'decision_edit',
     {
       title: 'Edit a decision',
-      description: 'Edits a decision\'s text and/or rationale (curation). Pass taskId if the decision belongs to a different workspace than the current one.',
-      inputSchema: { decisionId: z.string(), text: z.string().optional(), rationale: z.string().optional(), taskId: z.string().optional() },
+      description: 'Edits a decision\'s text, rationale, and/or supersedesId (curation). Pass an empty string for supersedesId to clear it. Pass taskId if the decision belongs to a different workspace than the current one.',
+      inputSchema: { decisionId: z.string(), text: z.string().optional(), rationale: z.string().optional(), taskId: z.string().optional(), supersedesId: z.string().optional() },
     },
     async (args) => {
       try {

@@ -120,6 +120,36 @@ describe('mcp-server tools', () => {
     expect(cmd.cmdRedacted).not.toContain('sk-abcdefghijklmnop1234567890');
   });
 
+  it('command_log auto-resolves an earlier "Command failed" error once the exact same command succeeds', () => {
+    const task = tools.taskNew(store, workspaceRoot, { title: 'A' });
+
+    tools.commandLog(store, workspaceRoot, { command: 'pytest test_x.py', exitCode: 1 });
+    expect(store.listErrors(task.id, { resolved: false })).toHaveLength(1);
+
+    tools.commandLog(store, workspaceRoot, { command: 'pytest test_x.py', exitCode: 0 });
+    expect(store.listErrors(task.id, { resolved: false })).toHaveLength(0);
+    expect(store.listErrors(task.id, { resolved: true })).toHaveLength(1);
+  });
+
+  it('command_log auto-triggers a git-sync (commits + files) on a successful "git commit"', () => {
+    execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: workspaceRoot });
+    execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: workspaceRoot });
+    execFileSync('git', ['config', 'user.name', 'Test'], { cwd: workspaceRoot });
+    const task = tools.taskNew(store, workspaceRoot, { title: 'A' });
+
+    fs.writeFileSync(path.join(workspaceRoot, 'a.txt'), 'a');
+    execFileSync('git', ['add', 'a.txt'], { cwd: workspaceRoot });
+    // The MCP client already ran the commit itself via its own shell tool;
+    // command_log only reports it happened (and, on success, auto-syncs).
+    execFileSync('git', ['commit', '-q', '-m', 'Add a.txt'], { cwd: workspaceRoot });
+
+    tools.commandLog(store, workspaceRoot, { command: 'git commit -m "Add a.txt"', exitCode: 0 });
+
+    expect(store.listCommits(task.id)).toHaveLength(1);
+    expect(store.listCommits(task.id)[0].message).toBe('Add a.txt');
+    expect(store.listFiles(task.id).map((f) => f.path)).toContain('a.txt');
+  });
+
   it('question_add/list/resolve operate on the current task', () => {
     const task = tools.taskNew(store, workspaceRoot, { title: 'A' });
 
@@ -250,6 +280,28 @@ describe('mcp-server tools', () => {
 
     tools.decisionDelete(store, workspaceRoot, { decisionId: decision.id });
     expect(store.getDecision(decision.id)).toBeUndefined();
+  });
+
+  it('decision_add accepts supersedesId to demote an earlier decision to "historical"', () => {
+    tools.taskNew(store, workspaceRoot, { title: 'Task' });
+    const older = tools.decisionAdd(store, workspaceRoot, { text: 'Use fixed delay retries' });
+    const newer = tools.decisionAdd(store, workspaceRoot, {
+      text: 'Use exponential backoff instead',
+      supersedesId: older.id,
+    });
+    expect(newer.supersedesId).toBe(older.id);
+  });
+
+  it('decision_edit can set and clear supersedesId (curation)', () => {
+    tools.taskNew(store, workspaceRoot, { title: 'Task' });
+    const older = tools.decisionAdd(store, workspaceRoot, { text: 'Use fixed delay retries' });
+    const newer = tools.decisionAdd(store, workspaceRoot, { text: 'Use exponential backoff instead' });
+
+    tools.decisionEdit(store, workspaceRoot, { decisionId: newer.id, supersedesId: older.id });
+    expect(store.getDecision(newer.id)?.supersedesId).toBe(older.id);
+
+    tools.decisionEdit(store, workspaceRoot, { decisionId: newer.id, supersedesId: '' });
+    expect(store.getDecision(newer.id)?.supersedesId).toBeNull();
   });
 
   it('error curation: reopen, edit, delete', () => {

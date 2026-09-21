@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { EventEmitter } from 'node:events';
+import { execFileSync } from 'node:child_process';
 import type { ChildProcess } from 'node:child_process';
 import { openWorkspaceStore, setCurrentTaskId } from '@ariadne-dev/core';
 import { runTaskExec } from '../src/exec.js';
@@ -106,6 +107,69 @@ describe('ariadne exec', () => {
       expect(commands).toHaveLength(1);
       expect(commands[0].cmdRedacted).toContain('***');
       expect(commands[0].cmdRedacted).not.toContain('abc123');
+    } finally {
+      store.close();
+    }
+  });
+
+  it('auto-resolves an earlier "Command failed" error once the exact same command succeeds on rerun', async () => {
+    const root = makeWorkspace('auto-resolve');
+    const store = openWorkspaceStore(root);
+    const task = store.createTask({ title: 'Exec auto-resolve' });
+    setCurrentTaskId(task.id, root);
+
+    try {
+      const failSpawn = vi.fn(() => {
+        const child = new FakeChildProcess() as ChildProcess;
+        process.nextTick(() => child.emit('close', 1, null));
+        return child;
+      });
+      await runTaskExec(store, task.id, 'pytest', ['test_x.py'], { spawnImpl: failSpawn });
+      expect(store.listErrors(task.id, { resolved: false })).toHaveLength(1);
+
+      const successSpawn = vi.fn(() => {
+        const child = new FakeChildProcess() as ChildProcess;
+        process.nextTick(() => child.emit('close', 0, null));
+        return child;
+      });
+      await runTaskExec(store, task.id, 'pytest', ['test_x.py'], { spawnImpl: successSpawn });
+
+      expect(store.listErrors(task.id, { resolved: false })).toHaveLength(0);
+      expect(store.listErrors(task.id, { resolved: true })).toHaveLength(1);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('auto-syncs commits + files from git after a successful "git commit" via exec', async () => {
+    const root = makeWorkspace('exec-git-sync');
+    fs.rmSync(path.join(root, '.git'), { recursive: true, force: true }); // replace the fake .git dir with a real repo
+    execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: root });
+    execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: root });
+    execFileSync('git', ['config', 'user.name', 'Test'], { cwd: root });
+
+    const store = openWorkspaceStore(root);
+    const task = store.createTask({ title: 'Exec git sync' });
+    setCurrentTaskId(task.id, root);
+
+    try {
+      fs.writeFileSync(path.join(root, 'a.txt'), 'a');
+      execFileSync('git', ['add', 'a.txt'], { cwd: root });
+
+      // The fake spawnImpl below stands in for the real `git commit`
+      // process exiting 0 — actually create the commit in the real repo
+      // first so syncTaskGit (triggered afterwards) has something to find.
+      const spawnImpl = vi.fn(() => {
+        execFileSync('git', ['commit', '-q', '-m', 'Add a.txt'], { cwd: root });
+        const child = new FakeChildProcess() as ChildProcess;
+        process.nextTick(() => child.emit('close', 0, null));
+        return child;
+      });
+      await runTaskExec(store, task.id, 'git', ['commit', '-m', 'Add a.txt'], { spawnImpl, workspaceRoot: root });
+
+      expect(store.listCommits(task.id)).toHaveLength(1);
+      expect(store.listCommits(task.id)[0].message).toBe('Add a.txt');
+      expect(store.listFiles(task.id).map((f) => f.path)).toContain('a.txt');
     } finally {
       store.close();
     }

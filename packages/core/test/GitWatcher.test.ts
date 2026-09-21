@@ -4,7 +4,7 @@ import * as path from 'node:path';
 import * as os from 'node:os';
 import { execFileSync } from 'node:child_process';
 import { TaskStore } from '../src/TaskStore.js';
-import { getHeadSha, getCurrentBranch, listRecentCommits, syncTaskGit } from '../src/GitWatcher.js';
+import { getHeadSha, getCurrentBranch, listRecentCommits, syncTaskGit, isGitCommitCommand } from '../src/GitWatcher.js';
 
 function git(args: string[], cwd: string): string {
   return execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
@@ -118,5 +118,29 @@ describe('GitWatcher', () => {
     expect(second.recordedCommits).toEqual([]);
     expect(store.listCommits(taskB.id)).toEqual([]);
     expect(store.listCommits(taskA.id).map((c) => c.sha)).toEqual([sha1]);
+  });
+
+  it('syncTaskGit also records the files each new commit touched, with role derived from git status', () => {
+    const task = store.createTask({ title: 'A' });
+    commit(repoRoot, 'a.txt', 'First commit'); // creates a.txt
+    fs.writeFileSync(path.join(repoRoot, 'a.txt'), 'changed\n');
+    git(['add', 'a.txt'], repoRoot);
+    git(['rm', '-q', '--cached', '--ignore-unmatch', 'nonexistent'], repoRoot); // no-op, keeps helper generic
+    git(['commit', '-q', '-m', 'Second commit'], repoRoot); // modifies a.txt
+
+    syncTaskGit(store, task.id, repoRoot);
+
+    const files = store.listFiles(task.id);
+    const byPath = new Map(files.map((f) => [f.path, f.role]));
+    expect(byPath.get('a.txt')).toBe('edited'); // last commit modified it, so "edited" wins over the earlier "created"
+  });
+
+  it('isGitCommitCommand recognizes git commit invocations but not lookalikes', () => {
+    expect(isGitCommitCommand('git commit -m "fix bug"')).toBe(true);
+    expect(isGitCommitCommand('cd repo && git commit -m "fix"')).toBe(true);
+    expect(isGitCommitCommand('git -C repo commit -m "fix"')).toBe(true);
+    expect(isGitCommitCommand('git commit-graph write')).toBe(false);
+    expect(isGitCommitCommand('git log --grep=commit')).toBe(false);
+    expect(isGitCommitCommand('npm test')).toBe(false);
   });
 });
