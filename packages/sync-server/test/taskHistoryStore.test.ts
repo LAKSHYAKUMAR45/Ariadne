@@ -13,6 +13,7 @@ import {
   type TaskHistoryStore,
 } from '../src/taskHistoryStore.js';
 import { TEST_DATABASE_URL } from './testConfig.js';
+import { CORE_FIXTURE_TABLES, truncateFixtureTables } from './dbCleanup.js';
 import {
   relaxSingletonTeamConstraints,
   restoreSingletonTeamConstraints,
@@ -88,9 +89,7 @@ describe('taskHistoryStore', () => {
   });
 
   beforeEach(async () => {
-    await pool.query(
-      'TRUNCATE TABLE todos, decisions, errors, open_questions, commands, checkpoints, tasks, team_memberships, teams, users CASCADE',
-    );
+    await truncateFixtureTables(pool, CORE_FIXTURE_TABLES);
 
     keyring = keyringWith(KEY_ONE, [KEY_ONE]);
     store = createTaskHistoryStore(pool, keyring);
@@ -757,7 +756,7 @@ describe('taskHistoryStore', () => {
     const sharedDiff = '+concurrently shared body\n';
 
     for (let round = 0; round < 5; round += 1) {
-      await pool.query('TRUNCATE TABLE task_file_capture_entries, task_file_captures CASCADE');
+      await truncateFixtureTables(pool, ['task_file_capture_entries', 'task_file_captures']);
       await pool.query('DELETE FROM encrypted_blobs');
 
       await store.storeCapture(

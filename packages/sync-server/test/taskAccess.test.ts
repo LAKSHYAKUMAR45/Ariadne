@@ -5,6 +5,7 @@ import { ApiError } from '../src/errors.js';
 import { runMigrations } from '../src/migrate.js';
 import { inaccessibleTaskError, requireTeamTask } from '../src/taskAccess.js';
 import { TEST_DATABASE_URL } from './testConfig.js';
+import { CORE_FIXTURE_TABLES, truncateFixtureTables } from './dbCleanup.js';
 import {
   relaxSingletonTeamConstraints,
   restoreSingletonTeamConstraints,
@@ -27,9 +28,7 @@ describe('taskAccess', () => {
   });
 
   beforeEach(async () => {
-    await pool.query(
-      'TRUNCATE TABLE todos, decisions, errors, open_questions, commands, checkpoints, tasks, team_memberships, teams, users CASCADE',
-    );
+    await truncateFixtureTables(pool, CORE_FIXTURE_TABLES);
   });
 
   async function createTeam(name: string): Promise<string> {

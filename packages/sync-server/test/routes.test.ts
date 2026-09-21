@@ -13,6 +13,7 @@ import { signToken } from '../src/auth.js';
 import { createPool } from '../src/db.js';
 import { runMigrations } from '../src/migrate.js';
 import { TEST_DATABASE_URL, TEST_JWT_SECRET } from './testConfig.js';
+import { TASK_HISTORY_FIXTURE_TABLES, truncateFixtureTables } from './dbCleanup.js';
 import { createTestEncryptionKeyring } from './testKeyring.js';
 import {
   relaxSingletonTeamConstraints,
@@ -39,9 +40,7 @@ describe('sync-server: auth + sync routes', () => {
 
   beforeEach(async () => {
     // Isolate each test: wipe all sync-relevant tables (CASCADE handles FKs).
-    await pool.query(
-      'TRUNCATE TABLE task_file_capture_entries, task_file_captures, task_file_history_deletions, encrypted_blobs, todos, decisions, errors, open_questions, commands, checkpoints, tasks, team_memberships, teams, users CASCADE',
-    );
+    await truncateFixtureTables(pool, TASK_HISTORY_FIXTURE_TABLES);
   });
 
   async function registerAndLogin(username = 'alice', password = 'hunter2') {

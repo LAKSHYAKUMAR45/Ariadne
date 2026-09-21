@@ -7,6 +7,13 @@ export type {
   OperatorProgressEvent,
   OperatorResultEvent,
 } from './executor.js';
+export {
+  OperationAdmissionRegistry,
+  createSerialQueue,
+  DEFAULT_TERMINAL_CACHE_MAX_ENTRIES,
+  DEFAULT_TERMINAL_CACHE_TTL_MS,
+} from './admission.js';
+export type { AdmissionDecision, SerialQueue } from './admission.js';
 export { parseOperatorRequest, type OperatorAccepted, type OperatorRequest } from './protocol.js';
 export {
   MAX_OPERATOR_REQUEST_BODY_BYTES,

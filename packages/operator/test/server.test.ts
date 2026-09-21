@@ -572,4 +572,148 @@ describe('createOperatorServer', () => {
 
     await server.close();
   });
+  it('admits exactly one of two simultaneous distinct operations', async () => {
+    const directory = await createTempDirectory();
+    const socketPath = path.join(directory, 'operator.sock');
+    const executed: string[] = [];
+    const releases: Array<() => void> = [];
+
+    const server = createOperatorServer({
+      socketPath,
+      executeOperation: async (operatorRequest) => {
+        executed.push(operatorRequest.operationId);
+        await new Promise<void>((resolve) => {
+          releases.push(resolve);
+        });
+      },
+    });
+
+    await server.start();
+
+    // Both requests are dispatched before either response is read, so the
+    // admission decision has to be atomic across the awaited body parsing.
+    const [firstResponse, secondResponse] = await Promise.all([
+      request(socketPath, {
+        body: JSON.stringify({ operationId: 'op-race-1', type: 'backup_create' }),
+      }),
+      request(socketPath, {
+        body: JSON.stringify({ operationId: 'op-race-2', type: 'backup_create' }),
+      }),
+    ]);
+
+    const statuses = [firstResponse.statusCode, secondResponse.statusCode].sort();
+    expect(statuses).toEqual([202, 409]);
+
+    const busyResponse = firstResponse.statusCode === 409 ? firstResponse : secondResponse;
+    expect(JSON.parse(busyResponse.body)).toEqual({ error: 'operator_busy' });
+
+    const acceptedResponse = firstResponse.statusCode === 202 ? firstResponse : secondResponse;
+    const acceptedId = (JSON.parse(acceptedResponse.body) as { operationId: string }).operationId;
+
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(executed).toEqual([acceptedId]);
+
+    const rejectedId = acceptedId === 'op-race-1' ? 'op-race-2' : 'op-race-1';
+
+    // The rejected id was never reserved nor cached as terminal, so it must be
+    // executable once the operator is idle again.
+    releases.forEach((release) => release());
+    const retry = await waitForAccepted(
+      socketPath,
+      JSON.stringify({ operationId: rejectedId, type: 'backup_create' }),
+    );
+    expect(retry.statusCode).toBe(202);
+
+    for (let attempt = 0; attempt < 50 && executed.length < 2; attempt += 1) {
+      releases.forEach((release) => release());
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    expect(executed).toEqual([acceptedId, rejectedId]);
+
+    releases.forEach((release) => release());
+    await server.close();
+  });
+
+  it('serializes duplicate simultaneous requests into a single execution', async () => {
+    const directory = await createTempDirectory();
+    const socketPath = path.join(directory, 'operator.sock');
+    const executed: string[] = [];
+    const releases: Array<() => void> = [];
+
+    const server = createOperatorServer({
+      socketPath,
+      executeOperation: async (operatorRequest) => {
+        executed.push(operatorRequest.operationId);
+        await new Promise<void>((resolve) => {
+          releases.push(resolve);
+        });
+      },
+    });
+
+    await server.start();
+
+    const body = JSON.stringify({ operationId: 'op-dup-race', type: 'backup_create' });
+    const responses = await Promise.all([
+      request(socketPath, { body }),
+      request(socketPath, { body }),
+      request(socketPath, { body }),
+    ]);
+
+    for (const response of responses) {
+      expect(response.statusCode).toBe(202);
+      expect(JSON.parse(response.body)).toEqual({
+        operationId: 'op-dup-race',
+        accepted: true,
+      });
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(executed).toEqual(['op-dup-race']);
+
+    releases.forEach((release) => release());
+    await server.close();
+  });
+
+  it('never reserves an operation id for a request that fails validation', async () => {
+    const directory = await createTempDirectory();
+    const socketPath = path.join(directory, 'operator.sock');
+    const executed: string[] = [];
+
+    const server = createOperatorServer({
+      socketPath,
+      executeOperation: async (operatorRequest) => {
+        executed.push(operatorRequest.operationId);
+      },
+    });
+
+    await server.start();
+
+    const invalid = await request(socketPath, {
+      body: JSON.stringify({
+        operationId: 'op-invalid',
+        type: 'backup_create',
+        unexpected: true,
+      }),
+    });
+    expect(invalid.statusCode).toBe(400);
+    expect(JSON.parse(invalid.body)).toEqual({ error: 'invalid_request' });
+
+    const malformed = await request(socketPath, { body: '{' });
+    expect(malformed.statusCode).toBe(400);
+    expect(JSON.parse(malformed.body)).toEqual({ error: 'invalid_json' });
+
+    // A failed validation must not have reserved `op-invalid`, so the same id
+    // is still admissible and executable once it is sent correctly.
+    const accepted = await request(socketPath, {
+      body: JSON.stringify({ operationId: 'op-invalid', type: 'backup_create' }),
+    });
+    expect(accepted.statusCode).toBe(202);
+
+    for (let attempt = 0; attempt < 50 && executed.length === 0; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    expect(executed).toEqual(['op-invalid']);
+
+    await server.close();
+  });
 });

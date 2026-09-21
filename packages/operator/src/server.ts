@@ -3,14 +3,19 @@ import path from 'node:path';
 import { chmod, lstat, rm } from 'node:fs/promises';
 import { parseOperatorRequest, type OperatorAccepted, type OperatorRequest } from './protocol.js';
 import {
+  OperationAdmissionRegistry,
+  createSerialQueue,
+  DEFAULT_TERMINAL_CACHE_MAX_ENTRIES,
+  DEFAULT_TERMINAL_CACHE_TTL_MS,
+} from './admission.js';
+import {
   createOperatorExecutor,
   type OperatorEventSink,
   type OperatorExecutor,
 } from './executor.js';
 
 export const MAX_OPERATOR_REQUEST_BODY_BYTES = 8 * 1024;
-export const DEFAULT_TERMINAL_CACHE_TTL_MS = 15 * 60 * 1000;
-export const DEFAULT_TERMINAL_CACHE_MAX_ENTRIES = 512;
+export { DEFAULT_TERMINAL_CACHE_TTL_MS, DEFAULT_TERMINAL_CACHE_MAX_ENTRIES };
 export const DEFAULT_HEADERS_TIMEOUT_MS = 10 * 1000;
 export const DEFAULT_REQUEST_TIMEOUT_MS = 20 * 1000;
 export const SOCKET_CREATION_UMASK = 0o177;
@@ -48,60 +53,6 @@ class OperatorServerConfigError extends Error {
   constructor(message: string) {
     super(message);
     this.name = 'OperatorServerConfigError';
-  }
-}
-
-interface TerminalCacheEntry {
-  accepted: OperatorAccepted;
-  expiresAt: number;
-}
-
-/** Bounded TTL + LRU cache of terminal acceptances, keyed by operation id. */
-class TerminalAcceptanceCache {
-  private readonly entries = new Map<string, TerminalCacheEntry>();
-
-  constructor(
-    private readonly ttlMs: number,
-    private readonly maxEntries: number,
-    private readonly now: () => number = Date.now,
-  ) {}
-
-  get(operationId: string): OperatorAccepted | undefined {
-    const entry = this.entries.get(operationId);
-    if (!entry) {
-      return undefined;
-    }
-    if (entry.expiresAt <= this.now()) {
-      this.entries.delete(operationId);
-      return undefined;
-    }
-
-    this.entries.delete(operationId);
-    this.entries.set(operationId, entry);
-    return entry.accepted;
-  }
-
-  set(operationId: string, accepted: OperatorAccepted): void {
-    this.entries.delete(operationId);
-    this.entries.set(operationId, { accepted, expiresAt: this.now() + this.ttlMs });
-    this.prune();
-  }
-
-  private prune(): void {
-    const currentTime = this.now();
-    for (const [key, entry] of this.entries) {
-      if (entry.expiresAt <= currentTime) {
-        this.entries.delete(key);
-      }
-    }
-
-    while (this.entries.size > this.maxEntries) {
-      const oldestKey = this.entries.keys().next().value;
-      if (oldestKey === undefined) {
-        return;
-      }
-      this.entries.delete(oldestKey);
-    }
   }
 }
 
@@ -267,12 +218,11 @@ export function createOperatorServer(options: CreateOperatorServerOptions): Oper
     options.executeOperation ??
     ((request, eventSink) => defaultExecutor.execute(request, eventSink));
 
-  const terminalCache = new TerminalAcceptanceCache(
-    options.terminalCacheTtlMs ?? DEFAULT_TERMINAL_CACHE_TTL_MS,
-    options.terminalCacheMaxEntries ?? DEFAULT_TERMINAL_CACHE_MAX_ENTRIES,
-  );
-  const activeById = new Map<string, OperatorAccepted>();
-  let activeOperationId: string | null = null;
+  const admissions = new OperationAdmissionRegistry({
+    ttlMs: options.terminalCacheTtlMs,
+    maxEntries: options.terminalCacheMaxEntries,
+  });
+  const admitExclusively = createSerialQueue();
 
   const connectionsCheckingIntervalMs = Math.max(
     250,
@@ -306,36 +256,31 @@ export function createOperatorServer(options: CreateOperatorServerOptions): Oper
         return;
       }
 
+      // Validation happens before any reservation so a rejected request never
+      // claims (or burns) its operation id.
       const operatorRequest = parseOperatorRequest(parsedBody);
-      const previousAcceptance =
-        activeById.get(operatorRequest.operationId) ??
-        terminalCache.get(operatorRequest.operationId);
 
-      if (previousAcceptance) {
-        writeJson(response, 202, previousAcceptance);
-        return;
-      }
+      // Reservation and dispatch run inside one serialized section, so two
+      // requests that both finished body parsing cannot both see an idle
+      // operator and execute.
+      await admitExclusively(() => {
+        const decision = admissions.reserve(operatorRequest.operationId);
 
-      if (activeOperationId && activeOperationId !== operatorRequest.operationId) {
-        writeJson(response, 409, { error: 'operator_busy' });
-        return;
-      }
-
-      const acceptedResponse: OperatorAccepted = {
-        operationId: operatorRequest.operationId,
-        accepted: true,
-      };
-
-      activeOperationId = operatorRequest.operationId;
-      activeById.set(operatorRequest.operationId, acceptedResponse);
-      writeJson(response, 202, acceptedResponse);
-
-      void runAcceptedOperation(operatorRequest, executeOperation, reporter, () => {
-        activeById.delete(operatorRequest.operationId);
-        terminalCache.set(operatorRequest.operationId, acceptedResponse);
-        if (activeOperationId === operatorRequest.operationId) {
-          activeOperationId = null;
+        if (decision.kind === 'duplicate') {
+          writeJson(response, 202, decision.accepted);
+          return;
         }
+
+        if (decision.kind === 'busy') {
+          writeJson(response, 409, { error: 'operator_busy' });
+          return;
+        }
+
+        writeJson(response, 202, decision.accepted);
+
+        void runAcceptedOperation(operatorRequest, executeOperation, reporter, () => {
+          admissions.settle(operatorRequest.operationId);
+        });
       });
     } catch (error: unknown) {
       if (error instanceof Error && error.name === 'ZodError') {

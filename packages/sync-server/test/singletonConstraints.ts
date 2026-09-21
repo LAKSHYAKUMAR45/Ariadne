@@ -1,4 +1,5 @@
 import type { Pool } from 'pg';
+import { CORE_FIXTURE_TABLES, truncateFixtureTables } from './dbCleanup.js';
 
 /**
  * Test-only helpers for the cross-team fixtures. Production only ever has the
@@ -16,9 +17,7 @@ export async function relaxSingletonTeamConstraints(pool: Pool): Promise<void> {
 export async function restoreSingletonTeamConstraints(pool: Pool): Promise<void> {
   // Fixture rows use non-default singleton keys, so they must go before the
   // original constraints can be re-applied.
-  await pool.query(
-    'TRUNCATE TABLE todos, decisions, errors, open_questions, commands, checkpoints, tasks, team_memberships, teams, users CASCADE',
-  );
+  await truncateFixtureTables(pool, CORE_FIXTURE_TABLES);
   await pool.query('ALTER TABLE teams ALTER COLUMN singleton_key SET NOT NULL');
   await pool.query('ALTER TABLE teams DROP CONSTRAINT IF EXISTS teams_singleton_key_check');
   await pool.query(

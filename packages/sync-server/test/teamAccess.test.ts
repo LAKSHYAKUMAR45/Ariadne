@@ -4,6 +4,7 @@ import { createPool } from '../src/db.js';
 import { runMigrations } from '../src/migrate.js';
 import { registerIntoSingletonTeam, requireActiveMembership } from '../src/teamAccess.js';
 import { TEST_DATABASE_URL } from './testConfig.js';
+import { CORE_FIXTURE_TABLES, truncateFixtureTables } from './dbCleanup.js';
 
 describe('teamAccess', () => {
   let pool: Pool;
@@ -18,9 +19,7 @@ describe('teamAccess', () => {
   });
 
   beforeEach(async () => {
-    await pool.query(
-      'TRUNCATE TABLE todos, decisions, errors, open_questions, commands, checkpoints, tasks, team_memberships, teams, users CASCADE',
-    );
+    await truncateFixtureTables(pool, CORE_FIXTURE_TABLES);
   });
 
   it('makes the first registered user admin and later users members', async () => {
