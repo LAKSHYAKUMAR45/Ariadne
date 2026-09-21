@@ -1,8 +1,9 @@
-import { Router, type NextFunction } from 'express';
+import { Router } from 'express';
 import type { Pool } from 'pg';
 import { z } from 'zod';
 import { hashPassword, signToken, verifyPassword } from '../auth.js';
 import { ApiError, errorBody } from '../errors.js';
+import { asyncHandler } from '../middleware.js';
 import { registerIntoSingletonTeam } from '../teamAccess.js';
 
 const credentialsSchema = z.object({
@@ -13,7 +14,7 @@ const credentialsSchema = z.object({
 export function createAuthRouter(pool: Pool, jwtSecret: string): Router {
   const router = Router();
 
-  router.post('/register', async (req, res, next: NextFunction) => {
+  router.post('/register', asyncHandler(async (req, res, next) => {
     const parsed = credentialsSchema.safeParse(req.body);
     if (!parsed.success) {
       const err = new ApiError(400, 'invalid_request', parsed.error.message);
@@ -40,9 +41,9 @@ export function createAuthRouter(pool: Pool, jwtSecret: string): Router {
       }
       next(error);
     }
-  });
+  }));
 
-  router.post('/login', async (req, res) => {
+  router.post('/login', asyncHandler(async (req, res) => {
     const parsed = credentialsSchema.safeParse(req.body);
     if (!parsed.success) {
       const err = new ApiError(400, 'invalid_request', parsed.error.message);
@@ -65,7 +66,7 @@ export function createAuthRouter(pool: Pool, jwtSecret: string): Router {
 
     const token = signToken({ sub: user.id, username }, jwtSecret);
     res.status(200).json({ token, userId: user.id, username });
-  });
+  }));
 
   return router;
 }

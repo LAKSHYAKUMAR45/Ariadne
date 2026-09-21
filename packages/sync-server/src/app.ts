@@ -1,7 +1,7 @@
 import express, { type Express } from 'express';
 import type { Pool } from 'pg';
 import { createMembersRouter } from './routes/members.js';
-import { requireAuth } from './middleware.js';
+import { handleUnexpectedError, requireAuth } from './middleware.js';
 import { createAuthRouter } from './routes/auth.js';
 import { createSyncRouter } from './routes/sync.js';
 
@@ -15,6 +15,7 @@ export function createApp(pool: Pool, jwtSecret: string): Express {
   app.use('/api/v1/auth', createAuthRouter(pool, jwtSecret));
   app.use('/api/v1/admin', requireAuth(jwtSecret), createMembersRouter(pool));
   app.use('/api/v1/sync', requireAuth(jwtSecret), createSyncRouter(pool));
+  app.use(handleUnexpectedError);
 
   return app;
 }

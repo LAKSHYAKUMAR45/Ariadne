@@ -2,7 +2,7 @@ import { Router, type Response } from 'express';
 import type { Pool } from 'pg';
 import { z } from 'zod';
 import { ApiError, errorBody } from '../errors.js';
-import type { AuthenticatedRequest } from '../middleware.js';
+import { asyncHandler, type AuthenticatedRequest } from '../middleware.js';
 import { inaccessibleTaskError, requireTeamTask } from '../taskAccess.js';
 import { requireActiveMembership, type ActiveMembership } from '../teamAccess.js';
 
@@ -96,7 +96,7 @@ export function createSyncRouter(pool: Pool): Router {
         );
   }
 
-  router.post('/tasks', async (req: AuthenticatedRequest, res) => {
+  router.post('/tasks', asyncHandler(async (req: AuthenticatedRequest, res) => {
     const parsed = pushTasksSchema.safeParse(req.body);
     if (!parsed.success) {
       const err = new ApiError(400, 'invalid_request', parsed.error.message);
@@ -158,7 +158,7 @@ export function createSyncRouter(pool: Pool): Router {
       results.push({ localId: task.localId, remoteId: row.id, updatedAt: row.updated_at.toISOString() });
     }
     res.status(200).json({ results });
-  });
+  }));
 
   /** Parses/clamps `limit`/`offset` query params shared by the paginated list endpoints below (§4.5). */
   function parsePagination(query: Record<string, unknown>): { limit: number; offset: number } {
@@ -169,7 +169,7 @@ export function createSyncRouter(pool: Pool): Router {
     return { limit, offset };
   }
 
-  router.get('/tasks', async (req, res) => {
+  router.get('/tasks', asyncHandler(async (req, res) => {
     const membership = await requireMembership(req as AuthenticatedRequest, res);
     if (!membership) {
       return;
@@ -210,7 +210,7 @@ export function createSyncRouter(pool: Pool): Router {
       hasMore,
       nextOffset: hasMore ? offset + limit : null,
     });
-  });
+  }));
 
   interface TaskWithOwnerRow extends TaskRow {
     username: string;
@@ -225,7 +225,7 @@ export function createSyncRouter(pool: Pool): Router {
    * `limit`/`offset` (§4.5) — the CLI transparently pages through all of
    * it, but the server itself never returns an unbounded result set.
    */
-  router.get('/tasks/all', async (req, res) => {
+  router.get('/tasks/all', asyncHandler(async (req, res) => {
     const membership = await requireMembership(req as AuthenticatedRequest, res);
     if (!membership) {
       return;
@@ -256,7 +256,7 @@ export function createSyncRouter(pool: Pool): Router {
       hasMore,
       nextOffset: hasMore ? offset + limit : null,
     });
-  });
+  }));
 
   const pushCheckpointSchema = z.object({
     localId: z.string().min(1),
@@ -276,7 +276,7 @@ export function createSyncRouter(pool: Pool): Router {
     created_at: Date;
   }
 
-  router.post('/checkpoints', async (req: AuthenticatedRequest, res) => {
+  router.post('/checkpoints', asyncHandler(async (req: AuthenticatedRequest, res) => {
     const parsed = pushCheckpointsSchema.safeParse(req.body);
     if (!parsed.success) {
       const err = new ApiError(400, 'invalid_request', parsed.error.message);
@@ -306,9 +306,9 @@ export function createSyncRouter(pool: Pool): Router {
       results.push({ localId: checkpoint.localId, remoteId: rows[0].id });
     }
     res.status(200).json({ results });
-  });
+  }));
 
-  router.get('/checkpoints', async (req, res) => {
+  router.get('/checkpoints', asyncHandler(async (req, res) => {
     const membership = await requireMembership(req as AuthenticatedRequest, res);
     if (!membership) {
       return;
@@ -347,7 +347,7 @@ export function createSyncRouter(pool: Pool): Router {
       })),
       serverTime: serverTime.toISOString(),
     });
-  });
+  }));
 
   // -------------------------------------------------------------------
   // Todos — the one sub-entity type with full bidirectional sync (an
@@ -378,7 +378,7 @@ export function createSyncRouter(pool: Pool): Router {
     updated_at: Date;
   }
 
-  router.post('/todos', async (req: AuthenticatedRequest, res) => {
+  router.post('/todos', asyncHandler(async (req: AuthenticatedRequest, res) => {
     const parsed = pushTodosSchema.safeParse(req.body);
     if (!parsed.success) {
       const err = new ApiError(400, 'invalid_request', parsed.error.message);
@@ -423,9 +423,9 @@ export function createSyncRouter(pool: Pool): Router {
       results.push({ localId: todo.localId, remoteId: row.id, updatedAt: row.updated_at.toISOString() });
     }
     res.status(200).json({ results });
-  });
+  }));
 
-  router.get('/todos', async (req, res) => {
+  router.get('/todos', asyncHandler(async (req, res) => {
     const membership = await requireMembership(req as AuthenticatedRequest, res);
     if (!membership) {
       return;
@@ -465,7 +465,7 @@ export function createSyncRouter(pool: Pool): Router {
       })),
       serverTime: serverTime.toISOString(),
     });
-  });
+  }));
 
   // -------------------------------------------------------------------
   // Decisions, errors, open questions, commands — full bidirectional sync,
@@ -496,7 +496,7 @@ export function createSyncRouter(pool: Pool): Router {
     updated_at: Date;
   }
 
-  router.post('/decisions', async (req: AuthenticatedRequest, res) => {
+  router.post('/decisions', asyncHandler(async (req: AuthenticatedRequest, res) => {
     const parsed = pushDecisionsSchema.safeParse(req.body);
     if (!parsed.success) {
       const err = new ApiError(400, 'invalid_request', parsed.error.message);
@@ -564,9 +564,9 @@ export function createSyncRouter(pool: Pool): Router {
       results.push({ localId: decision.localId, remoteId: row.id, updatedAt: row.updated_at.toISOString() });
     }
     res.status(200).json({ results });
-  });
+  }));
 
-  router.get('/decisions', async (req, res) => {
+  router.get('/decisions', asyncHandler(async (req, res) => {
     const membership = await requireMembership(req as AuthenticatedRequest, res);
     if (!membership) {
       return;
@@ -607,7 +607,7 @@ export function createSyncRouter(pool: Pool): Router {
       })),
       serverTime: serverTime.toISOString(),
     });
-  });
+  }));
 
   const pushErrorSchema = z.object({
     localId: z.string().min(1),
@@ -632,7 +632,7 @@ export function createSyncRouter(pool: Pool): Router {
     updated_at: Date;
   }
 
-  router.post('/errors', async (req: AuthenticatedRequest, res) => {
+  router.post('/errors', asyncHandler(async (req: AuthenticatedRequest, res) => {
     const parsed = pushErrorsSchema.safeParse(req.body);
     if (!parsed.success) {
       const err = new ApiError(400, 'invalid_request', parsed.error.message);
@@ -695,9 +695,9 @@ export function createSyncRouter(pool: Pool): Router {
       results.push({ localId: taskError.localId, remoteId: row.id, updatedAt: row.updated_at.toISOString() });
     }
     res.status(200).json({ results });
-  });
+  }));
 
-  router.get('/errors', async (req, res) => {
+  router.get('/errors', asyncHandler(async (req, res) => {
     const membership = await requireMembership(req as AuthenticatedRequest, res);
     if (!membership) {
       return;
@@ -738,7 +738,7 @@ export function createSyncRouter(pool: Pool): Router {
       })),
       serverTime: serverTime.toISOString(),
     });
-  });
+  }));
 
   const pushOpenQuestionSchema = z.object({
     localId: z.string().min(1),
@@ -761,7 +761,7 @@ export function createSyncRouter(pool: Pool): Router {
     updated_at: Date;
   }
 
-  router.post('/open-questions', async (req: AuthenticatedRequest, res) => {
+  router.post('/open-questions', asyncHandler(async (req: AuthenticatedRequest, res) => {
     const parsed = pushOpenQuestionsSchema.safeParse(req.body);
     if (!parsed.success) {
       const err = new ApiError(400, 'invalid_request', parsed.error.message);
@@ -808,9 +808,9 @@ export function createSyncRouter(pool: Pool): Router {
       results.push({ localId: question.localId, remoteId: row.id, updatedAt: row.updated_at.toISOString() });
     }
     res.status(200).json({ results });
-  });
+  }));
 
-  router.get('/open-questions', async (req, res) => {
+  router.get('/open-questions', asyncHandler(async (req, res) => {
     const membership = await requireMembership(req as AuthenticatedRequest, res);
     if (!membership) {
       return;
@@ -850,7 +850,7 @@ export function createSyncRouter(pool: Pool): Router {
       })),
       serverTime: serverTime.toISOString(),
     });
-  });
+  }));
 
   const pushCommandSchema = z.object({
     localId: z.string().min(1),
@@ -875,7 +875,7 @@ export function createSyncRouter(pool: Pool): Router {
     updated_at: Date;
   }
 
-  router.post('/commands', async (req: AuthenticatedRequest, res) => {
+  router.post('/commands', asyncHandler(async (req: AuthenticatedRequest, res) => {
     const parsed = pushCommandsSchema.safeParse(req.body);
     if (!parsed.success) {
       const err = new ApiError(400, 'invalid_request', parsed.error.message);
@@ -929,9 +929,9 @@ export function createSyncRouter(pool: Pool): Router {
       results.push({ localId: command.localId, remoteId: row.id, updatedAt: row.updated_at.toISOString() });
     }
     res.status(200).json({ results });
-  });
+  }));
 
-  router.get('/commands', async (req, res) => {
+  router.get('/commands', asyncHandler(async (req, res) => {
     const membership = await requireMembership(req as AuthenticatedRequest, res);
     if (!membership) {
       return;
@@ -972,7 +972,7 @@ export function createSyncRouter(pool: Pool): Router {
       })),
       serverTime: serverTime.toISOString(),
     });
-  });
+  }));
 
   return router;
 }

@@ -3,7 +3,7 @@ import type { Pool } from 'pg';
 import { z } from 'zod';
 import { requireSingletonAdmin } from '../adminAccess.js';
 import { ApiError, errorBody } from '../errors.js';
-import type { AuthenticatedRequest } from '../middleware.js';
+import { asyncHandler, type AuthenticatedRequest } from '../middleware.js';
 import type { ActiveMembership } from '../teamAccess.js';
 
 const patchMemberSchema = z
@@ -56,7 +56,7 @@ export function createMembersRouter(pool: Pool): Router {
     }
   }
 
-  router.get('/members', async (req: AuthenticatedRequest, res) => {
+  router.get('/members', asyncHandler(async (req: AuthenticatedRequest, res) => {
     const adminMembership = await requireAdmin(req, res);
     if (!adminMembership) {
       return;
@@ -76,9 +76,9 @@ export function createMembersRouter(pool: Pool): Router {
     );
 
     res.status(200).json({ members: rows.map(toTeamMemberView) });
-  });
+  }));
 
-  router.patch('/members/:userId', async (req: AuthenticatedRequest, res) => {
+  router.patch('/members/:userId', asyncHandler(async (req: AuthenticatedRequest, res, next) => {
     const adminMembership = await requireAdmin(req, res);
     if (!adminMembership) {
       return;
@@ -144,11 +144,12 @@ export function createMembersRouter(pool: Pool): Router {
 
     const updatedMember = updatedRows[0];
     if (!updatedMember) {
-       throw new Error(`Member update for ${req.params.userId} returned no row`);
+      next(new Error(`Member update for ${req.params.userId} returned no row`));
+      return;
     }
 
     res.status(200).json({ member: toTeamMemberView(updatedMember) });
-  });
+  }));
 
   return router;
 }

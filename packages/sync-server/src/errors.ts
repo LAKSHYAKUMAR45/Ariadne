@@ -12,3 +12,9 @@ export class ApiError extends Error {
 export function errorBody(err: ApiError) {
   return { error: { code: err.code, message: err.message } };
 }
+
+const INTERNAL_ERROR = new ApiError(500, 'internal_error', 'An unexpected error occurred');
+
+export function internalErrorBody() {
+  return errorBody(INTERNAL_ERROR);
+}
