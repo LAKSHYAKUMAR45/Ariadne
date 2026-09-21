@@ -20,6 +20,7 @@ Set via environment variables:
 | Variable                 | Required | Default | Description                                  |
 | ------------------------ | -------- | ------- | --------------------------------------------- |
 | `DATABASE_URL`            | yes      | —       | Postgres connection string                    |
+| `ENCRYPTION_KEY_DIR`      | yes      | —       | Owner-only directory containing `active-key-id` and AES-256-GCM key files |
 | `SYNC_SERVER_JWT_SECRET`  | yes      | —       | Secret used to sign/verify auth JWTs          |
 | `HOST`                    | no       | `127.0.0.1` | Bind address; use `0.0.0.0` only behind a secured reverse proxy or firewall |
 | `PORT`                    | no       | `4300`  | Port the HTTP server listens on               |
@@ -30,7 +31,8 @@ Set via environment variables:
 pnpm install
 pnpm --filter @ariadne-dev/sync-server run build
 
-export DATABASE_URL="postgres://postgres:ariadne@localhost:5432/ariadne_sync"
+export DATABASE_URL="postgresql://localhost:5432/ariadne_sync"
+export ENCRYPTION_KEY_DIR="/etc/ariadne/keys"
 export SYNC_SERVER_JWT_SECRET="change-me"
 
 pnpm --filter @ariadne-dev/sync-server run migrate   # applies migrations/*.sql
@@ -45,6 +47,20 @@ exposure is intentional and protected.
 `pnpm start` (via `src/index.ts`) also runs pending migrations automatically
 on boot, so the explicit `migrate` step above is mainly useful for CI/ops
 scripts that want migrations applied as a separate, checkable step.
+
+`ENCRYPTION_KEY_DIR` must point at an owner-only directory (for example mode
+`0700`) containing:
+
+```text
+/etc/ariadne/keys/
+  active-key-id
+  <key-id>.key
+```
+
+`active-key-id` and every `<key-id>.key` file must be mode `0600`. Each key
+file must contain either exactly 32 raw bytes or exactly 64 lowercase hex
+characters. The active key encrypts new content; retained older key files stay
+available for historical decryption after rotation.
 
 ## Local Postgres via Docker
 
@@ -74,9 +90,9 @@ pnpm --filter @ariadne-dev/sync-server test
 ```
 
 `TEST_DATABASE_URL` defaults to
-`postgres://postgres:ariadne@localhost:55432/ariadne_sync_test` (matching the
-container above); override it if you use a different host/port/db name. Each
-test file resets the shared test database's schema/data before it runs
+`postgresql://postgres:ariadne@localhost:55432/ariadne_sync_test` (matching
+the container above); override it if you use a different host/port/db name.
+Each test file resets the shared test database's schema/data before it runs
 (`test/globalSetup.ts` drops+recreates the `public` schema once for the
 whole run; `routes.test.ts` also `TRUNCATE`s between individual tests), so
 the suite is safe to re-run repeatedly without manually resetting the

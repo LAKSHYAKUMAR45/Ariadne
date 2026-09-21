@@ -2,6 +2,7 @@
 import { createApp } from './app.js';
 import { loadConfig } from './config.js';
 import { createPool } from './db.js';
+import { loadEncryptionKeyring } from './encryption.js';
 import { runMigrations } from './migrate.js';
 
 /**
@@ -10,6 +11,7 @@ import { runMigrations } from './migrate.js';
  */
 async function main(): Promise<void> {
   const config = loadConfig();
+  const encryptionKeyring = loadEncryptionKeyring(config.encryptionKeyDir);
   const pool = createPool(config.databaseUrl);
 
   const applied = await runMigrations(pool);
@@ -17,7 +19,7 @@ async function main(): Promise<void> {
     console.log(`Applied ${applied.length} migration(s): ${applied.join(', ')}`);
   }
 
-  const app = createApp(pool, config.jwtSecret);
+  const app = createApp(pool, config.jwtSecret, { encryptionKeyring });
   app.listen(config.port, config.host, () => {
     console.log(`ariadne-sync-server listening on ${config.host}:${config.port}`);
   });
@@ -33,4 +35,5 @@ if (require.main === module) {
 export { createApp } from './app.js';
 export { loadConfig } from './config.js';
 export { createPool } from './db.js';
+export { loadEncryptionKeyring } from './encryption.js';
 export { runMigrations } from './migrate.js';
