@@ -1161,6 +1161,35 @@ describe('sync-server: auth + sync routes', () => {
       expect(deniedUpdate.status).toBe(404);
       expect(deniedUpdate.body.error.code).toBe('task_not_found');
 
+      const foreignUpdate = await request(app)
+        .post('/api/v1/sync/todos')
+        .set(fixture.teamBUser.authHeader)
+        .send({
+          todos: [
+            {
+              localId: 'todo-a',
+              remoteId: rows[0].id,
+              remoteTaskId: fixture.taskBId,
+              text: 'Foreign update should not apply',
+              status: 'done',
+              createdAt: '2026-09-21T02:10:00Z',
+              updatedAt: '2026-09-21T02:14:00Z',
+            },
+          ],
+        });
+      expect(foreignUpdate.status).toBe(404);
+      expect(foreignUpdate.body.error.code).toBe('todo_not_found');
+
+      const foreignRow = await pool.query<{ text: string; status: string; task_id: string }>(
+        'SELECT text, status, task_id FROM todos WHERE id = $1',
+        [rows[0].id],
+      );
+      expect(foreignRow.rows[0]).toMatchObject({
+        text: 'Team A todo',
+        status: 'pending',
+        task_id: fixture.taskAId,
+      });
+
       const deniedList = await request(app)
         .get('/api/v1/sync/todos')
         .query({ taskRemoteId: fixture.taskAId })

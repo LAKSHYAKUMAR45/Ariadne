@@ -402,8 +402,8 @@ export function createSyncRouter(pool: Pool): Router {
       if (todo.remoteId) {
         const { rows } = await pool.query<TodoRow>(
           `UPDATE todos SET text = $1, status = $2, workspace_label = $3, updated_at = $4
-           WHERE id = $5 RETURNING id, text, status, workspace_label, created_at, updated_at`,
-          [todo.text, todo.status, todo.workspaceLabel ?? null, todo.updatedAt, todo.remoteId]
+           WHERE id = $5 AND task_id = $6 RETURNING id, text, status, workspace_label, created_at, updated_at`,
+          [todo.text, todo.status, todo.workspaceLabel ?? null, todo.updatedAt, todo.remoteId, todo.remoteTaskId]
         );
         if (rows.length === 0) {
           const err = new ApiError(404, 'todo_not_found', `No todo with remoteId ${todo.remoteId}`);
