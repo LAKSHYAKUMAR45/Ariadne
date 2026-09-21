@@ -1,16 +1,20 @@
 # Ariadne — Cloud Sync Server Schema & API Contract
 
-**Status: Phase 0/1 schema + API finalized and implemented; Phase 2
-(sub-entity sync) also implemented, and the former create-once limitation
-for decisions/errors/open_questions/commands is now closed — see §4.6.** This is the concrete
-follow-on to `docs/06-CLOUD-SYNC-DESIGN.md` v0.2 (all product/infra
-decisions locked there). This doc defines the actual Postgres schema and
-HTTP API for `packages/sync-server`.
+**Status: Phase 0/1 schema + API finalized and implemented for the
+singleton-team model; Phase 2 (sub-entity sync) is also implemented, and the
+former create-once limitation for decisions/errors/open_questions/commands is
+now closed — see §4.6.** The bearer-authenticated `/api/v1/admin/*` surface
+is temporary and will be replaced by browser-session auth in the later
+dashboard rollout. This is the concrete follow-on to
+`docs/06-CLOUD-SYNC-DESIGN.md` v0.2 (all product/infra decisions locked
+there). This doc defines the actual Postgres schema and HTTP API for
+`packages/sync-server`.
 
 ## 1. Scope
 
 Implemented:
-- User accounts (username/password).
+- User accounts and singleton-team membership (first registration becomes
+  admin; later registrations join the same team as active members).
 - `tasks` and `checkpoints` sync — push (upload local changes) and pull
   (download remote changes), additive-only (no deletes, per design doc §6).
 - `todos`, `decisions`, `errors`, `open_questions`, `commands` sync (§4.6).
@@ -21,6 +25,8 @@ Implemented:
   flag on `ariadne sync pull` for every bidirectional entity type
   (tasks, todos, decisions, errors, open questions, commands) — see §6's
   pull section for the exact behavior.
+- Active-membership enforcement on every protected sync route, with
+  inaccessible task IDs hidden behind `404 Not Found`.
 
 Out of scope (tracked as follow-up work):
 - `files`/`commits` sync — deliberately excluded. These are git/workspace-
@@ -194,9 +200,9 @@ Notes:
   additive-only/conflict-free; if this becomes a real need later, revisit
   as its own design doc rather than bolting deletes on ad hoc.
 - **Singleton-team authorization** — this release keeps one team per
-  server, not per-user ACLs or flat access. Protected queries must scope
-  through `tasks.team_id` / `team_memberships`; `owner_user_id` on `tasks`
-  is provenance only, not an authorization boundary.
+  server, not per-user ACLs or cross-team flat access. Protected queries
+  must scope through `tasks.team_id` / `team_memberships`; `owner_user_id`
+  on `tasks` is provenance only, not an authorization boundary.
 - `local_id` + `owner_user_id`/`task_id`/`team_id` let the server stay a
   plain mirror of client data without needing to understand workspace-local
   ULIDs as primary keys — the server mints its own UUIDs, which the client
@@ -269,6 +275,9 @@ except `/auth/register` and `/auth/login` require `Authorization: Bearer
   logged or returned.
 - The first successful registration becomes the singleton team's `admin`;
   later registrations join the same team as `member`.
+- Registration is intentionally open for the internal deployment, but the
+  server is expected to be reached through the project SSH tunnel or another
+  secured transport, not exposed directly to the public internet.
 
 **`POST /api/v1/auth/login`**
 ```json
@@ -283,9 +292,24 @@ except `/auth/register` and `/auth/login` require `Authorization: Bearer
   (internal-use tool — long-lived tokens are an acceptable tradeoff here;
   revisit if this is ever exposed beyond the current trusted deployment).
 
+**`GET /api/v1/admin/members`** / **`PATCH /api/v1/admin/members/:userId`**
+— temporary bearer-authenticated singleton-admin member management
+- Requires the same bearer JWT as the sync routes plus an active admin
+  membership.
+- `GET` lists the singleton team's members with `role` and `active` state.
+- `PATCH` toggles `active` for non-admin members only.
+- `403 Forbidden` if the caller is not the active singleton admin.
+- `404 Not Found` if the target user is not a member of the singleton team.
+- `409 Conflict` (`admin_immutable`) if the target is the singleton admin;
+  the network API cannot promote, demote, or deactivate that account.
+- This surface is temporary; the dashboard rollout will replace it with
+  browser-session auth before production deployment.
+
 ### 4.2 Sync — tasks
 
 **`POST /api/v1/sync/tasks`** — push (create or update)
+The caller must be an active member of the singleton team. Tasks are shared
+within that team only; there is no per-task ACL.
 ```json
 // Request: array of tasks changed locally since last sync
 {
@@ -324,9 +348,9 @@ except `/auth/register` and `/auth/login` require `Authorization: Bearer
   default, or `local-wins` to re-push the local value on the next push).
   This satisfies the design doc's "visible warning, pick a side via flag"
   requirement without building full per-field/CRDT merge.
-- `403 Forbidden` is never returned for a task another user owns — per the
-  flat-access model, ownership doesn't gate writes; `owner_user_id` is set
-  once at creation time only.
+- `404 Not Found` if `remoteId` points at a task outside the caller's active
+  team or the task does not exist. The API intentionally hides inaccessible
+  resources rather than confirming cross-team existence.
 
 **`GET /api/v1/sync/tasks?since=<ISO-8601 timestamp>&limit=<n>&offset=<n>`** — pull
 ```json
@@ -355,6 +379,7 @@ except `/auth/register` and `/auth/login` require `Authorization: Bearer
   page, to avoid missing rows written between the query and the response.
   When a pull spans multiple pages (see below), the client stores the
   **last** page's `serverTime`, not the first's.
+- Only tasks in the caller's active team are included.
 - **Pagination (§4.5)**: `limit` defaults to 200, clamped to a max of 500;
   `offset` defaults to 0. `hasMore`/`nextOffset` let the caller page
   through results larger than one `limit`. `ariadne sync pull` loops
@@ -374,7 +399,9 @@ except `/auth/register` and `/auth/login` require `Authorization: Bearer
 
 **`GET /api/v1/sync/tasks/all?limit=<n>&offset=<n>`** — browse-only listing
 of every task on the server, regardless of whether the caller's workspace
-has ever linked it. Backs `ariadne sync list-remote`. No `since` filtering
+has ever linked it. Backs `ariadne sync list-remote`. The endpoint is still
+restricted to the caller's active team; it is browse-only within that team,
+not a cross-team leak. No `since` filtering.
 (always returns tasks ordered newest-updated first) — paginated the same
 way as `GET /tasks` (§4.5): `limit`/`offset` query params, `hasMore`/
 `nextOffset` in the response. Both `ariadne sync list-remote` and
@@ -422,10 +449,12 @@ immutable once written, matching the local schema's append-only design)
 { "results": [ { "localId": "01J...", "remoteId": "7b21..." } ] }
 ```
 - `404 Not Found` if `remoteTaskId` doesn't exist on the server (client must
-  push the parent task first).
+  push the parent task first). The same 404 applies if the task exists but is
+  outside the caller's active team.
 - No update/upsert case — checkpoints are write-once.
 
 **`GET /api/v1/sync/checkpoints?taskRemoteId=<id>&since=<ISO-8601>`** — pull
+Only checkpoints for tasks visible to the caller's active team are returned.
 ```json
 // Response 200
 {
@@ -472,6 +501,8 @@ visible conflict reporting / `--on-conflict <remote-wins|local-wins>`
 behavior for these rows that tasks/todos already used.
 
 **`POST /api/v1/sync/todos`** — push (upsert by `remoteId`)
+The same active-team scoping and 404-hiding rules apply to every sub-entity
+endpoint below.
 ```json
 // Request
 {
@@ -493,8 +524,11 @@ behavior for these rows that tasks/todos already used.
 ```
 - `404 Not Found` (`task_not_found`) if `remoteTaskId` doesn't exist (on a first push).
 - `404 Not Found` (`todo_not_found`) if `remoteId` doesn't exist (on an update push).
+- `404 Not Found` if the task exists but is outside the caller's active
+  team.
 
 **`GET /api/v1/sync/todos?taskRemoteId=<id>&since=<ISO-8601>`** — pull, filtered by `updated_at > since`
+The caller only sees rows for tasks in the active team.
 ```json
 // Response 200
 {
@@ -528,6 +562,7 @@ behavior for these rows that tasks/todos already used.
 ```
 
 **`GET /api/v1/sync/decisions?taskRemoteId=<id>&since=<ISO-8601>`**
+The caller only sees decisions for tasks in the active team.
 ```json
 {
   "decisions": [
@@ -546,6 +581,7 @@ behavior for these rows that tasks/todos already used.
 ```
 
 **`POST /api/v1/sync/errors`** / **`GET /api/v1/sync/errors?taskRemoteId=<id>&since=<ISO-8601>`**
+The caller only sees errors for tasks in the active team.
 ```json
 {
   "errors": [
@@ -573,6 +609,7 @@ behavior for these rows that tasks/todos already used.
 ```
 
 **`POST /api/v1/sync/open-questions`** / **`GET /api/v1/sync/open-questions?taskRemoteId=<id>&since=<ISO-8601>`**
+The caller only sees open questions for tasks in the active team.
 ```json
 {
   "openQuestions": [
@@ -590,6 +627,7 @@ behavior for these rows that tasks/todos already used.
 ```
 
 **`POST /api/v1/sync/commands`** / **`GET /api/v1/sync/commands?taskRemoteId=<id>&since=<ISO-8601>`**
+The caller only sees commands for tasks in the active team.
 ```json
 {
   "commands": [

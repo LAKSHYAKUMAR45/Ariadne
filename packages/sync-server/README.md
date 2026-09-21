@@ -1,8 +1,8 @@
 # @ariadne-dev/sync-server
 
 Self-hosted cloud sync server for Ariadne. Lets multiple machines/users push
-and pull `tasks` and `checkpoints` to/from a shared Postgres database over a
-small REST API.
+and pull `tasks` and `checkpoints` to/from a shared Postgres database for the
+server's singleton team over a small REST API.
 
 See `docs/06-CLOUD-SYNC-DESIGN.md` for the product decisions and
 `docs/07-CLOUD-SYNC-API-CONTRACT.md` for the full schema + API contract this
@@ -87,12 +87,14 @@ container.
 Summary (full detail in `docs/07-CLOUD-SYNC-API-CONTRACT.md`):
 
 - `GET /healthz` — liveness check, no auth.
-- `POST /api/v1/auth/register` — create an account (`username`, `password`) and return the assigned singleton-team role.
+- `POST /api/v1/auth/register` — create an account (`username`, `password`) and return the assigned singleton-team role (`admin` for the first account, `member` thereafter).
 - `POST /api/v1/auth/login` — returns a JWT bearer token.
+- `GET /api/v1/admin/members` / `PATCH /api/v1/admin/members/:userId` — temporary bearer-authenticated singleton-admin member management. Only the active singleton admin can use these routes, and the admin role itself is immutable here.
 - `POST /api/v1/sync/tasks` — push (create/update) tasks. Requires auth.
 - `GET /api/v1/sync/tasks?since=<ISO8601>` — pull tasks updated after `since`. Requires auth.
 - `POST /api/v1/sync/checkpoints` — push checkpoints (insert-only/immutable). Requires auth.
 - `GET /api/v1/sync/checkpoints?taskRemoteId=<id>&since=<ISO8601>` — pull checkpoints for a task. Requires auth.
 
-Access is flat: any authenticated account can read/write any task or
-checkpoint (see the design doc's "Decisions" section for why).
+Access is shared within the singleton team: any active member can
+read/write any task or checkpoint in that team, while inaccessible task IDs
+are hidden with `404 Not Found` rather than exposed cross-team.

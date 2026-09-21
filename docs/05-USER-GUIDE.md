@@ -328,9 +328,10 @@ Cross-workspace discovery (§8) only works *on one machine*. If you need
 tasks/checkpoints to follow you across machines, or to be shared with
 teammates, Ariadne optionally supports syncing to a self-hosted
 `@ariadne-dev/sync-server` instance (Express + Postgres, built and run by
-you or your team — there's no Ariadne-hosted cloud). This is entirely
-opt-in: nothing leaves your machine unless you explicitly run `ariadne
-sync` commands.
+you or your team — there's no Ariadne-hosted cloud). Each deployment has
+one shared team: the first account becomes the admin, later accounts join as
+members, and access stays within that team. This is entirely opt-in: nothing
+leaves your machine unless you explicitly run `ariadne sync` commands.
 
 ```bash
 ariadne sync setup [username]                  # project-configured SSH tunnel + login
@@ -353,10 +354,13 @@ What to know:
   password, and stores the resulting profile. It never stores the SSH
   password. `push`, `pull`, and `list-remote` automatically restart a stopped
   tunnel and reject a local port occupied by an unrelated process.
-  Use `--register` only when creating the cloud account for the first time.
+  Use `--register` only when creating the cloud account for the first time;
+  that first account becomes the singleton admin and later registrations join
+  as members.
 - **Scope:** `tasks`, `checkpoints`, `todos`, `decisions`, `errors`, `open
-  questions`, and `commands` all sync. `files`/`commits` stay local-only —
-  they're git/workspace-derived, not curated text content.
+  questions`, and `commands` all sync inside the singleton team.
+  `files`/`commits` stay local-only — they're git/workspace-derived, not
+  curated text content.
 - **`push`** sends every task that's new or changed since it was last
   synced (or just `--task <id>`), then pushes any not-yet-synced
   checkpoints/todos/decisions/errors/open questions/commands for those
@@ -387,15 +391,18 @@ What to know:
   (owner + workspace label + status), including ones from workspaces
   you've never linked, without creating or changing anything locally. Use
   this to see what's out there *before* deciding whether to `pull
-  --import-new` it.
+  --import-new` it. In other words, it only browses the singleton team's
+  shared data; it never crosses into another team's space.
 - **`unlink <taskId>`** clears that task's `remote_id`/`synced_at` locally
   only — it never contacts the server, so the server-side row (if any) is
   left exactly as it was. Use it to undo an accidental `--import-new`, or
   to detach a task from sync entirely; a later `push` will treat the task
   as brand-new and create a fresh remote row.
-- **Access is flat:** any account on the server can read/write any synced
-  task — there's no per-task ACL. Treat the server as a shared, trusted
-  team space, not a permissions boundary.
+- **Access is shared within the team:** active members of the singleton
+  team can read/write any synced task — there's no per-task ACL or org
+  hierarchy. Treat the server as a shared, trusted team space, not a
+  permissions boundary. Inaccessible tasks are hidden with `404` rather
+  than exposed cross-team.
 - **Conflict handling is visible, with a flag to control it:** if a task
   or todo was edited both locally and on the server since the last sync,
   `sync pull` detects the differing field(s), prints a warning
@@ -424,6 +431,10 @@ What to know:
   existed (a bare `serverUrl`/`token`/`username` at the top level of
   `sync-config.json`) are read transparently as an implicit `"default"`
   profile — no manual migration needed.
+- **Admin member management is temporary bearer auth:** the
+  `/api/v1/admin/*` routes currently use the same bearer JWT as the sync
+  API. That surface is only for operator/admin member management and will
+  move to browser-session auth in the later dashboard rollout.
 - The JWT and profile metadata are stored locally at
   `~/.ariadne/sync-config.json` with owner-only (`0600`) permissions.
 
