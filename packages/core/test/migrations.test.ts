@@ -150,60 +150,104 @@ describe('MIGRATIONS (real app migrations)', () => {
     db.close();
   });
 
-  it('v5 adds immutable task file capture tables plus trigger-specific idempotency indexes without disturbing existing rows', () => {
+  it('v5/v6 preserve immutable task file captures and enforce same-task capture references in the database', () => {
     const db = freshDb();
-    runMigrations(db, MIGRATIONS.filter((m) => m.version <= 4));
+    runMigrations(db, MIGRATIONS.filter((m) => m.version <= 5));
 
     db.prepare(
       `INSERT INTO tasks (id, title, status, created_at, updated_at) VALUES ('t1', 'Task', 'active', '2020-01-01', '2020-01-01')`,
     ).run();
     db.prepare(
+      `INSERT INTO tasks (id, title, status, created_at, updated_at) VALUES ('t2', 'Other task', 'active', '2020-01-01', '2020-01-01')`,
+    ).run();
+    db.prepare(
       `INSERT INTO checkpoints (id, task_id, level, summary, created_at) VALUES ('cp1', 't1', 'micro', 'checkpoint', '2020-01-02')`,
     ).run();
     db.prepare(
+      `INSERT INTO checkpoints (id, task_id, level, summary, created_at) VALUES ('cp2', 't2', 'micro', 'other checkpoint', '2020-01-02')`,
+    ).run();
+    db.prepare(
+      `INSERT INTO commits (sha, task_id, message, created_at) VALUES ('commit-1', 't1', 'capture commit', '2020-01-02')`,
+    ).run();
+    db.prepare(
       `INSERT INTO decisions (id, task_id, text, created_at, updated_at) VALUES ('d1', 't1', 'Decide', '2020-01-03', '2020-01-03')`,
+    ).run();
+    db.prepare(
+      `INSERT INTO task_file_captures (id, task_id, trigger, git_commit_sha, checkpoint_id, created_at)
+       VALUES ('cap-existing', 't1', 'explicit', NULL, NULL, '2020-01-03')`,
+    ).run();
+    db.prepare(
+      `INSERT INTO task_file_capture_entries (capture_id, path, content, unified_diff, byte_length, content_sha256)
+       VALUES ('cap-existing', 'src/existing.ts', 'existing', '@@ -0,0 +1 @@', 8, 'sha-existing')`,
     ).run();
 
     runMigrations(db, MIGRATIONS);
 
     const version = db.prepare(`SELECT value FROM schema_meta WHERE key = 'schema_version'`).get() as { value: string };
-    expect(version.value).toBe('5');
-    expect((db.prepare(`SELECT COUNT(*) AS count FROM tasks`).get() as { count: number }).count).toBe(1);
-    expect((db.prepare(`SELECT COUNT(*) AS count FROM checkpoints`).get() as { count: number }).count).toBe(1);
+    expect(version.value).toBe('6');
+    expect((db.prepare(`SELECT COUNT(*) AS count FROM tasks`).get() as { count: number }).count).toBe(2);
+    expect((db.prepare(`SELECT COUNT(*) AS count FROM checkpoints`).get() as { count: number }).count).toBe(2);
     expect((db.prepare(`SELECT COUNT(*) AS count FROM decisions`).get() as { count: number }).count).toBe(1);
+    expect(
+      db.prepare(`SELECT path, content_sha256 FROM task_file_capture_entries WHERE capture_id = 'cap-existing'`).get(),
+    ).toEqual({ path: 'src/existing.ts', content_sha256: 'sha-existing' });
 
     db.prepare(
-      `INSERT INTO task_file_captures (id, task_id, trigger, git_commit_sha, checkpoint_id, created_at)
-       VALUES ('cap-g1', 't1', 'git_commit', 'abc123', NULL, '2020-01-04')`,
+      `INSERT INTO task_file_captures (id, task_id, trigger, git_commit_sha, checkpoint_id, created_at, synced_at)
+       VALUES ('cap-g1', 't1', 'git_commit', 'commit-1', NULL, '2020-01-04', NULL)`,
     ).run();
     expect(() =>
       db.prepare(
-        `INSERT INTO task_file_captures (id, task_id, trigger, git_commit_sha, checkpoint_id, created_at)
-         VALUES ('cap-g2', 't1', 'git_commit', 'abc123', NULL, '2020-01-05')`,
+        `INSERT INTO task_file_captures (id, task_id, trigger, git_commit_sha, checkpoint_id, created_at, synced_at)
+         VALUES ('cap-g2', 't1', 'git_commit', 'commit-1', NULL, '2020-01-05', NULL)`,
       ).run(),
     ).toThrow(/UNIQUE/);
+    expect(() =>
+      db.prepare(
+        `INSERT INTO task_file_captures (id, task_id, trigger, git_commit_sha, checkpoint_id, created_at, synced_at)
+         VALUES ('cap-g3', 't1', 'git_commit', 'missing-commit', NULL, '2020-01-05', NULL)`,
+      ).run(),
+    ).toThrow(/FOREIGN KEY/);
+    expect(() =>
+      db.prepare(
+        `INSERT INTO task_file_captures (id, task_id, trigger, git_commit_sha, checkpoint_id, created_at, synced_at)
+         VALUES ('cap-g4', 't2', 'git_commit', 'commit-1', NULL, '2020-01-05', NULL)`,
+      ).run(),
+    ).toThrow(/FOREIGN KEY/);
 
     db.prepare(
-      `INSERT INTO task_file_captures (id, task_id, trigger, git_commit_sha, checkpoint_id, created_at)
-       VALUES ('cap-c1', 't1', 'checkpoint', NULL, 'cp1', '2020-01-06')`,
+      `INSERT INTO task_file_captures (id, task_id, trigger, git_commit_sha, checkpoint_id, created_at, synced_at)
+       VALUES ('cap-c1', 't1', 'checkpoint', NULL, 'cp1', '2020-01-06', NULL)`,
     ).run();
     expect(() =>
       db.prepare(
-        `INSERT INTO task_file_captures (id, task_id, trigger, git_commit_sha, checkpoint_id, created_at)
-         VALUES ('cap-c2', 't1', 'checkpoint', NULL, 'cp1', '2020-01-07')`,
+        `INSERT INTO task_file_captures (id, task_id, trigger, git_commit_sha, checkpoint_id, created_at, synced_at)
+         VALUES ('cap-c2', 't1', 'checkpoint', NULL, 'cp1', '2020-01-07', NULL)`,
       ).run(),
     ).toThrow(/UNIQUE/);
+    expect(() =>
+      db.prepare(
+        `INSERT INTO task_file_captures (id, task_id, trigger, git_commit_sha, checkpoint_id, created_at, synced_at)
+         VALUES ('cap-c3', 't1', 'checkpoint', NULL, 'missing-checkpoint', '2020-01-07', NULL)`,
+      ).run(),
+    ).toThrow(/FOREIGN KEY/);
+    expect(() =>
+      db.prepare(
+        `INSERT INTO task_file_captures (id, task_id, trigger, git_commit_sha, checkpoint_id, created_at, synced_at)
+         VALUES ('cap-c4', 't2', 'checkpoint', NULL, 'cp1', '2020-01-07', NULL)`,
+      ).run(),
+    ).toThrow(/FOREIGN KEY/);
 
     expect(() =>
       db.prepare(
-        `INSERT INTO task_file_captures (id, task_id, trigger, git_commit_sha, checkpoint_id, created_at)
-         VALUES ('cap-e1', 't1', 'explicit', NULL, NULL, '2020-01-08')`,
+        `INSERT INTO task_file_captures (id, task_id, trigger, git_commit_sha, checkpoint_id, created_at, synced_at)
+         VALUES ('cap-e1', 't1', 'explicit', NULL, NULL, '2020-01-08', NULL)`,
       ).run(),
     ).not.toThrow();
     expect(() =>
       db.prepare(
-        `INSERT INTO task_file_captures (id, task_id, trigger, git_commit_sha, checkpoint_id, created_at)
-         VALUES ('cap-e2', 't1', 'explicit', NULL, NULL, '2020-01-09')`,
+        `INSERT INTO task_file_captures (id, task_id, trigger, git_commit_sha, checkpoint_id, created_at, synced_at)
+         VALUES ('cap-e2', 't1', 'explicit', NULL, NULL, '2020-01-09', NULL)`,
       ).run(),
     ).not.toThrow();
 

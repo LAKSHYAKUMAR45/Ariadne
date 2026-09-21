@@ -288,8 +288,13 @@ describe('TaskStore', () => {
       expect(store.listTasksNeedingPush().map((t) => t.id)).toContain(task.id);
     });
 
-    it('creates immutable explicit task file captures and marks them synced', () => {
+    it('creates immutable explicit task file captures and marks them synced', async () => {
       const task = store.createTask({ title: 'Capture task' });
+      store.setTaskRemoteSync(task.id, 'remote-capture-task', new Date().toISOString());
+      const beforeCapture = store.getTask(task.id)!;
+      expect(store.listTasksNeedingPush().map((candidate) => candidate.id)).not.toContain(task.id);
+
+      await new Promise((resolve) => setTimeout(resolve, 5));
       const input = {
         taskId: task.id,
         trigger: 'explicit' as const,
@@ -305,6 +310,8 @@ describe('TaskStore', () => {
       };
 
       const created = store.createTaskFileCapture(input);
+      expect(store.getTask(task.id)!.updatedAt).toBe(beforeCapture.updatedAt);
+      expect(store.listTasksNeedingPush().map((candidate) => candidate.id)).not.toContain(task.id);
       expect(store.getPendingTaskFileCaptures(task.id)).toEqual([created]);
 
       const captures = store.getTaskFileCaptures(task.id);
@@ -341,13 +348,17 @@ describe('TaskStore', () => {
         },
       ]);
 
+      await new Promise((resolve) => setTimeout(resolve, 5));
       store.markTaskFileCaptureSynced(created.id, '2026-09-21T00:00:00.000Z');
       expect(store.getPendingTaskFileCaptures(task.id)).toEqual([]);
       expect(store.getTaskFileCaptures(task.id)[0].syncedAt).toBe('2026-09-21T00:00:00.000Z');
+      expect(store.getTask(task.id)!.updatedAt).toBe(beforeCapture.updatedAt);
+      expect(store.listTasksNeedingPush().map((candidate) => candidate.id)).not.toContain(task.id);
     });
 
     it('treats duplicate git-commit and checkpoint capture events as idempotent while keeping explicit captures distinct', () => {
       const task = store.createTask({ title: 'Capture dedupe task' });
+      store.recordCommit({ taskId: task.id, sha: 'abc123', message: 'capture commit' });
       const checkpoint = store.createCheckpoint({ taskId: task.id, level: 'micro', summary: 'capture point' });
 
       const gitCommitCapture = store.createTaskFileCapture({
@@ -442,6 +453,115 @@ describe('TaskStore', () => {
 
       expect(explicitTwo.id).not.toBe(explicitOne.id);
       expect(store.getTaskFileCaptures(task.id)).toHaveLength(4);
+    });
+
+    it('enforces same-task git-commit and checkpoint capture references', () => {
+      const task = store.createTask({ title: 'Capture owner task' });
+      const otherTask = store.createTask({ title: 'Other task' });
+      const commit = store.recordCommit({ taskId: task.id, sha: 'capture-commit-sha', message: 'capture commit' });
+      const checkpoint = store.createCheckpoint({ taskId: task.id, level: 'micro', summary: 'owner checkpoint' });
+
+      expect(() =>
+        store.createTaskFileCapture({
+          taskId: task.id,
+          trigger: 'git_commit',
+          gitCommitSha: commit.sha,
+          entries: [
+            {
+              path: 'src/valid-commit.ts',
+              content: 'valid commit ref',
+              unifiedDiff: '@@ -0,0 +1 @@\n+valid commit ref',
+              byteLength: 16,
+              contentSha256: 'sha-valid-commit',
+            },
+          ],
+        }),
+      ).not.toThrow();
+
+      expect(() =>
+        store.createTaskFileCapture({
+          taskId: task.id,
+          trigger: 'git_commit',
+          gitCommitSha: 'missing-commit',
+          entries: [
+            {
+              path: 'src/missing-commit.ts',
+              content: 'missing commit ref',
+              unifiedDiff: '@@ -0,0 +1 @@\n+missing commit ref',
+              byteLength: 18,
+              contentSha256: 'sha-missing-commit',
+            },
+          ],
+        }),
+      ).toThrow(/FOREIGN KEY/);
+
+      expect(() =>
+        store.createTaskFileCapture({
+          taskId: otherTask.id,
+          trigger: 'git_commit',
+          gitCommitSha: commit.sha,
+          entries: [
+            {
+              path: 'src/cross-task-commit.ts',
+              content: 'cross task commit ref',
+              unifiedDiff: '@@ -0,0 +1 @@\n+cross task commit ref',
+              byteLength: 21,
+              contentSha256: 'sha-cross-task-commit',
+            },
+          ],
+        }),
+      ).toThrow(/FOREIGN KEY/);
+
+      expect(() =>
+        store.createTaskFileCapture({
+          taskId: task.id,
+          trigger: 'checkpoint',
+          checkpointId: checkpoint.id,
+          entries: [
+            {
+              path: 'src/valid-checkpoint.ts',
+              content: 'valid checkpoint ref',
+              unifiedDiff: '@@ -0,0 +1 @@\n+valid checkpoint ref',
+              byteLength: 20,
+              contentSha256: 'sha-valid-checkpoint',
+            },
+          ],
+        }),
+      ).not.toThrow();
+
+      expect(() =>
+        store.createTaskFileCapture({
+          taskId: task.id,
+          trigger: 'checkpoint',
+          checkpointId: 'missing-checkpoint',
+          entries: [
+            {
+              path: 'src/missing-checkpoint.ts',
+              content: 'missing checkpoint ref',
+              unifiedDiff: '@@ -0,0 +1 @@\n+missing checkpoint ref',
+              byteLength: 22,
+              contentSha256: 'sha-missing-checkpoint',
+            },
+          ],
+        }),
+      ).toThrow(/FOREIGN KEY/);
+
+      expect(() =>
+        store.createTaskFileCapture({
+          taskId: otherTask.id,
+          trigger: 'checkpoint',
+          checkpointId: checkpoint.id,
+          entries: [
+            {
+              path: 'src/cross-task-checkpoint.ts',
+              content: 'cross task checkpoint ref',
+              unifiedDiff: '@@ -0,0 +1 @@\n+cross task checkpoint ref',
+              byteLength: 25,
+              contentSha256: 'sha-cross-task-checkpoint',
+            },
+          ],
+        }),
+      ).toThrow(/FOREIGN KEY/);
     });
 
     it('getTaskByRemoteId finds a task by its cloud-sync-server id', () => {

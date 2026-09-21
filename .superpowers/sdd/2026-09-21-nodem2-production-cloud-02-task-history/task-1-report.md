@@ -53,3 +53,40 @@ Implemented local immutable task file capture storage in `@ariadne-dev/core` wit
   - `cd /home/lkumar/Ariadne/.worktrees/nodem2-cloud && pnpm --filter @ariadne-dev/core exec vitest run`
 
 Both passed.
+
+## 2026-09-21 review-fix follow-up
+
+Addressed the Task 1 review findings with a focused schema/store fix:
+
+- **Capture sync state is now independent of task sync state.**
+  - Removed the `createTaskFileCapture()` → `touchTask()` coupling in `packages/core/src/TaskStore.ts`.
+  - Added a regression showing a synced task stays out of `listTasksNeedingPush()` and keeps the same `updatedAt` before/after creating and acknowledging a file capture.
+
+- **Task-file-capture refs now have same-task DB integrity.**
+  - Bumped schema version to **6**.
+  - Added composite unique indexes on `commits(sha, task_id)` and `checkpoints(id, task_id)`.
+  - Rebuilt `task_file_captures` in migration v6 so SQLite enforces:
+    - `(git_commit_sha, task_id) -> commits(sha, task_id)`
+    - `(checkpoint_id, task_id) -> checkpoints(id, task_id)`
+  - Kept trigger-specific nullability rules with a table `CHECK`, and preserved the existing partial uniqueness for idempotent `git_commit` / `checkpoint` captures.
+
+### Review-fix evidence
+
+1. **RED**
+   - Added failing tests for:
+     - capture create/ack not mutating parent task `updatedAt` or push eligibility
+     - nonexistent git-commit/checkpoint refs
+     - cross-task git-commit/checkpoint refs
+     - valid same-task refs
+   - Verified failure with:
+     - `cd /home/lkumar/Ariadne/.worktrees/nodem2-cloud && pnpm --filter @ariadne-dev/core exec vitest run test/migrations.test.ts test/TaskStore.test.ts`
+
+2. **GREEN**
+   - Implemented migration v6 and removed the capture/task sync coupling.
+   - Re-ran targeted tests successfully with the same command above.
+
+3. **Validation**
+   - Full core suite passed:
+     - `cd /home/lkumar/Ariadne/.worktrees/nodem2-cloud && pnpm --filter @ariadne-dev/core exec vitest run`
+
+SQLite supported the requested composite-foreign-key design directly, so no fallback integrity design was needed.

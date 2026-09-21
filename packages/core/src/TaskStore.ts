@@ -783,7 +783,6 @@ export class TaskStore {
         });
       }
 
-      this.touchTask(input.taskId);
       return this.getTaskFileCapture(id)!;
     })();
 
