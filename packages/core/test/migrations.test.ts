@@ -150,9 +150,9 @@ describe('MIGRATIONS (real app migrations)', () => {
     db.close();
   });
 
-  it('v5/v6 preserve immutable task file captures and enforce same-task capture references in the database', () => {
+  it('v5 adds immutable task file captures with same-task reference integrity', () => {
     const db = freshDb();
-    runMigrations(db, MIGRATIONS.filter((m) => m.version <= 5));
+    runMigrations(db, MIGRATIONS.filter((m) => m.version <= 4));
 
     db.prepare(
       `INSERT INTO tasks (id, title, status, created_at, updated_at) VALUES ('t1', 'Task', 'active', '2020-01-01', '2020-01-01')`,
@@ -172,25 +172,13 @@ describe('MIGRATIONS (real app migrations)', () => {
     db.prepare(
       `INSERT INTO decisions (id, task_id, text, created_at, updated_at) VALUES ('d1', 't1', 'Decide', '2020-01-03', '2020-01-03')`,
     ).run();
-    db.prepare(
-      `INSERT INTO task_file_captures (id, task_id, trigger, git_commit_sha, checkpoint_id, created_at)
-       VALUES ('cap-existing', 't1', 'explicit', NULL, NULL, '2020-01-03')`,
-    ).run();
-    db.prepare(
-      `INSERT INTO task_file_capture_entries (capture_id, path, content, unified_diff, byte_length, content_sha256)
-       VALUES ('cap-existing', 'src/existing.ts', 'existing', '@@ -0,0 +1 @@', 8, 'sha-existing')`,
-    ).run();
-
     runMigrations(db, MIGRATIONS);
 
     const version = db.prepare(`SELECT value FROM schema_meta WHERE key = 'schema_version'`).get() as { value: string };
-    expect(version.value).toBe('6');
+    expect(version.value).toBe('5');
     expect((db.prepare(`SELECT COUNT(*) AS count FROM tasks`).get() as { count: number }).count).toBe(2);
     expect((db.prepare(`SELECT COUNT(*) AS count FROM checkpoints`).get() as { count: number }).count).toBe(2);
     expect((db.prepare(`SELECT COUNT(*) AS count FROM decisions`).get() as { count: number }).count).toBe(1);
-    expect(
-      db.prepare(`SELECT path, content_sha256 FROM task_file_capture_entries WHERE capture_id = 'cap-existing'`).get(),
-    ).toEqual({ path: 'src/existing.ts', content_sha256: 'sha-existing' });
 
     db.prepare(
       `INSERT INTO task_file_captures (id, task_id, trigger, git_commit_sha, checkpoint_id, created_at, synced_at)
@@ -257,6 +245,9 @@ describe('MIGRATIONS (real app migrations)', () => {
          VALUES ('cap-e1', 'src/index.ts', 'content', '@@ -0,0 +1 @@', 7, 'sha256')`,
       ).run(),
     ).not.toThrow();
+    expect(
+      db.prepare(`SELECT path, content_sha256 FROM task_file_capture_entries WHERE capture_id = 'cap-e1'`).get(),
+    ).toEqual({ path: 'src/index.ts', content_sha256: 'sha256' });
 
     db.close();
   });

@@ -90,3 +90,45 @@ Addressed the Task 1 review findings with a focused schema/store fix:
      - `cd /home/lkumar/Ariadne/.worktrees/nodem2-cloud && pnpm --filter @ariadne-dev/core exec vitest run`
 
 SQLite supported the requested composite-foreign-key design directly, so no fallback integrity design was needed.
+
+## 2026-09-21 review-fix round 2
+
+Addressed the follow-up migration finding by removing the artificial `v5 → v6`
+upgrade path and folding the same-task integrity rules into the first shipped
+capture migration.
+
+- **Schema version returned to `5`.**
+  - Removed migration `v6`.
+  - Set `packages/core/src/schema.ts` back to `SCHEMA_VERSION = 5`.
+
+- **Migration `v5` now ships the final integrity model directly.**
+  - Creates composite unique indexes on:
+    - `commits(sha, task_id)`
+    - `checkpoints(id, task_id)`
+  - Creates `task_file_captures` with:
+    - the trigger-shape `CHECK`
+    - composite foreign keys enforcing same-task refs
+    - the existing partial unique indexes for `git_commit` / `checkpoint`
+      idempotency
+  - Leaves capture/task sync-state decoupling unchanged.
+
+### Round-2 evidence
+
+1. **RED**
+   - Reworked migration coverage to assert the real shipped path:
+     - migrate `v4 -> v5`
+     - preserve existing v4 task/checkpoint/decision rows
+     - allow valid same-task commit/checkpoint refs
+     - reject missing and cross-task refs
+     - no `v6` expectations remain
+   - Verified failure before the code change with:
+     - `cd /home/lkumar/Ariadne/.worktrees/nodem2-cloud && pnpm --filter @ariadne-dev/core exec vitest run test/migrations.test.ts test/TaskStore.test.ts`
+
+2. **GREEN**
+   - Collapsed the integrity logic into migration `v5`.
+   - Removed the table-rebuild migration entirely.
+   - Re-ran the same targeted command successfully.
+
+3. **Validation**
+   - Full core suite passed:
+     - `cd /home/lkumar/Ariadne/.worktrees/nodem2-cloud && pnpm --filter @ariadne-dev/core exec vitest run`

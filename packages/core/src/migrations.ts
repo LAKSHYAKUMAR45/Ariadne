@@ -89,9 +89,14 @@ export const MIGRATIONS: Migration[] = [
   },
   {
     version: 5,
-    description: 'Add immutable task file capture tables with trigger-specific idempotency indexes',
+    description: 'Add immutable task file capture tables with same-task reference integrity',
     up: (db) => {
       db.exec(`
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_commits_sha_task_id
+          ON commits(sha, task_id);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_checkpoints_id_task_id
+          ON checkpoints(id, task_id);
+
         CREATE TABLE IF NOT EXISTS task_file_captures (
           id TEXT PRIMARY KEY,
           task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
@@ -99,7 +104,14 @@ export const MIGRATIONS: Migration[] = [
           git_commit_sha TEXT,
           checkpoint_id TEXT,
           created_at TEXT NOT NULL,
-          synced_at TEXT
+          synced_at TEXT,
+          CHECK (
+            (trigger = 'git_commit' AND git_commit_sha IS NOT NULL AND checkpoint_id IS NULL) OR
+            (trigger = 'checkpoint' AND checkpoint_id IS NOT NULL AND git_commit_sha IS NULL) OR
+            (trigger = 'explicit' AND git_commit_sha IS NULL AND checkpoint_id IS NULL)
+          ),
+          FOREIGN KEY (git_commit_sha, task_id) REFERENCES commits(sha, task_id),
+          FOREIGN KEY (checkpoint_id, task_id) REFERENCES checkpoints(id, task_id)
         );
         CREATE INDEX IF NOT EXISTS idx_task_file_captures_task_created
           ON task_file_captures(task_id, created_at);
@@ -122,72 +134,6 @@ export const MIGRATIONS: Migration[] = [
           PRIMARY KEY (capture_id, path)
         );
         CREATE INDEX IF NOT EXISTS idx_task_file_capture_entries_capture
-          ON task_file_capture_entries(capture_id);
-      `);
-    },
-  },
-  {
-    version: 6,
-    description: 'Enforce same-task task-file-capture references without coupling captures to task sync state',
-    up: (db) => {
-      db.exec(`
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_commits_sha_task_id
-          ON commits(sha, task_id);
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_checkpoints_id_task_id
-          ON checkpoints(id, task_id);
-
-        ALTER TABLE task_file_captures RENAME TO task_file_captures_old;
-        ALTER TABLE task_file_capture_entries RENAME TO task_file_capture_entries_old;
-
-        CREATE TABLE task_file_captures (
-          id TEXT PRIMARY KEY,
-          task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
-          trigger TEXT NOT NULL CHECK (trigger IN ('git_commit', 'checkpoint', 'explicit')),
-          git_commit_sha TEXT,
-          checkpoint_id TEXT,
-          created_at TEXT NOT NULL,
-          synced_at TEXT,
-          CHECK (
-            (trigger = 'git_commit' AND git_commit_sha IS NOT NULL AND checkpoint_id IS NULL) OR
-            (trigger = 'checkpoint' AND checkpoint_id IS NOT NULL AND git_commit_sha IS NULL) OR
-            (trigger = 'explicit' AND git_commit_sha IS NULL AND checkpoint_id IS NULL)
-          ),
-          FOREIGN KEY (git_commit_sha, task_id) REFERENCES commits(sha, task_id),
-          FOREIGN KEY (checkpoint_id, task_id) REFERENCES checkpoints(id, task_id)
-        );
-
-        CREATE TABLE task_file_capture_entries (
-          capture_id TEXT NOT NULL REFERENCES task_file_captures(id) ON DELETE CASCADE,
-          path TEXT NOT NULL,
-          content TEXT NOT NULL,
-          unified_diff TEXT NOT NULL,
-          byte_length INTEGER NOT NULL,
-          content_sha256 TEXT NOT NULL,
-          PRIMARY KEY (capture_id, path)
-        );
-
-        INSERT INTO task_file_captures (id, task_id, trigger, git_commit_sha, checkpoint_id, created_at, synced_at)
-        SELECT id, task_id, trigger, git_commit_sha, checkpoint_id, created_at, synced_at
-        FROM task_file_captures_old;
-
-        INSERT INTO task_file_capture_entries (capture_id, path, content, unified_diff, byte_length, content_sha256)
-        SELECT capture_id, path, content, unified_diff, byte_length, content_sha256
-        FROM task_file_capture_entries_old;
-
-        DROP TABLE task_file_capture_entries_old;
-        DROP TABLE task_file_captures_old;
-
-        CREATE INDEX idx_task_file_captures_task_created
-          ON task_file_captures(task_id, created_at);
-        CREATE INDEX idx_task_file_captures_task_pending
-          ON task_file_captures(task_id, synced_at, created_at);
-        CREATE UNIQUE INDEX idx_task_file_captures_git_commit_once
-          ON task_file_captures(task_id, git_commit_sha)
-          WHERE trigger = 'git_commit' AND git_commit_sha IS NOT NULL;
-        CREATE UNIQUE INDEX idx_task_file_captures_checkpoint_once
-          ON task_file_captures(task_id, checkpoint_id)
-          WHERE trigger = 'checkpoint' AND checkpoint_id IS NOT NULL;
-        CREATE INDEX idx_task_file_capture_entries_capture
           ON task_file_capture_entries(capture_id);
       `);
     },
