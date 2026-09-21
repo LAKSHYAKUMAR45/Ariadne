@@ -45,6 +45,10 @@ describe('runMigrations', () => {
         'task_file_captures',
         'task_file_capture_entries',
         'task_file_history_deletions',
+        'admin_operations',
+        'admin_operation_events',
+        'admin_audit_events',
+        'backup_records',
       ]),
     );
   });
@@ -58,7 +62,7 @@ describe('runMigrations', () => {
     const version = await pool.query<{ value: string }>(
       `SELECT value FROM schema_meta WHERE key = 'schema_version'`,
     );
-    expect(version.rows[0].value).toBe('7');
+    expect(version.rows[0].value).toBe('8');
 
     const dedupIndex = await pool.query<{ indexdef: string }>(
       `SELECT indexdef FROM pg_indexes
@@ -194,6 +198,7 @@ describe('runMigrations', () => {
       expect(upgraded).toEqual([
         '0006_single_team_authorization.sql',
         '0007_encrypted_task_history.sql',
+        '0008_admin_operations.sql',
       ]);
 
       const secondRun = await runMigrations(pool);
@@ -208,7 +213,7 @@ describe('runMigrations', () => {
         `SELECT value FROM schema_meta WHERE key = 'schema_version'`,
       );
       expect(schemaVersion.rows).toHaveLength(1);
-      expect(schemaVersion.rows[0].value).toBe('7');
+      expect(schemaVersion.rows[0].value).toBe('8');
 
       const memberships = await pool.query(
         `SELECT u.username, m.role, m.active
@@ -272,5 +277,77 @@ describe('runMigrations', () => {
     } finally {
       fs.rmSync(v5MigrationsDir, { recursive: true, force: true });
     }
+  });
+
+  it('creates admin operation and backup metadata tables without storing backup bytes', async () => {
+    if (!pool) {
+      pool = createPool(TEST_DATABASE_URL);
+    }
+    await pool.query('DROP SCHEMA public CASCADE; CREATE SCHEMA public;');
+    await runMigrations(pool);
+
+    const version = await pool.query<{ value: string }>(
+      `SELECT value FROM schema_meta WHERE key = 'schema_version'`,
+    );
+    expect(version.rows[0].value).toBe('8');
+
+    const operationChecks = await pool.query<{ definition: string }>(
+      `SELECT pg_get_constraintdef(oid) AS definition
+       FROM pg_constraint
+       WHERE conrelid = 'admin_operations'::regclass AND contype = 'c'
+       ORDER BY conname ASC`,
+    );
+    const operationDefinitions = operationChecks.rows.map((row) => row.definition).join(' | ');
+    expect(operationDefinitions).toContain("'service_restart'");
+    expect(operationDefinitions).toContain("'deployment_apply'");
+    expect(operationDefinitions).toContain("'backup_create'");
+    expect(operationDefinitions).toContain("'backup_verify'");
+    expect(operationDefinitions).toContain("'backup_restore'");
+    expect(operationDefinitions).toContain("'queued'");
+    expect(operationDefinitions).toContain("'running'");
+    expect(operationDefinitions).toContain("'succeeded'");
+    expect(operationDefinitions).toContain("'failed'");
+
+    const auditTrigger = await pool.query<{ tgname: string }>(
+      `SELECT tgname
+       FROM pg_trigger
+       WHERE tgrelid = 'admin_audit_events'::regclass AND NOT tgisinternal`,
+    );
+    expect(auditTrigger.rows.map((row) => row.tgname)).toContain(
+      'trg_admin_audit_events_append_only',
+    );
+
+    const backupColumns = await pool.query<{ column_name: string; data_type: string }>(
+      `SELECT column_name, data_type
+       FROM information_schema.columns
+       WHERE table_name = 'backup_records'
+       ORDER BY ordinal_position ASC`,
+    );
+    expect(backupColumns.rows).toEqual(
+      expect.arrayContaining([
+        { column_name: 'filename', data_type: 'text' },
+        { column_name: 'sha256', data_type: 'text' },
+        { column_name: 'size_bytes', data_type: 'bigint' },
+        { column_name: 'created_at', data_type: 'timestamp with time zone' },
+        { column_name: 'verified_at', data_type: 'timestamp with time zone' },
+        { column_name: 'status', data_type: 'text' },
+        { column_name: 'restore_verification_message', data_type: 'text' },
+      ]),
+    );
+    expect(
+      backupColumns.rows.filter((column) => column.data_type === 'bytea'),
+    ).toEqual([]);
+
+    const descendingIndexes = await pool.query<{ tablename: string; indexdef: string }>(
+      `SELECT tablename, indexdef
+       FROM pg_indexes
+       WHERE tablename IN (
+         'admin_operations',
+         'admin_operation_events',
+         'admin_audit_events',
+         'backup_records'
+       )`,
+    );
+    expect(descendingIndexes.rows.map((row) => row.indexdef).join(' | ')).toContain('DESC');
   });
 });
