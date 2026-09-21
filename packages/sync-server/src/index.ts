@@ -35,5 +35,5 @@ if (require.main === module) {
 export { createApp } from './app.js';
 export { loadConfig } from './config.js';
 export { createPool } from './db.js';
-export { loadEncryptionKeyring } from './encryption.js';
+export { createEncryptionKeyring, loadEncryptionKeyring } from './encryption.js';
 export { runMigrations } from './migrate.js';

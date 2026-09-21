@@ -34,4 +34,10 @@ describe('sync server configuration', () => {
       'ENCRYPTION_KEY_DIR environment variable is required',
     );
   });
+
+  it('requires ENCRYPTION_KEY_DIR to be absolute so key loading never depends on the working directory', () => {
+    expect(() => loadConfig({ ...required, ENCRYPTION_KEY_DIR: 'relative/keys' })).toThrow(
+      'ENCRYPTION_KEY_DIR must be an absolute path',
+    );
+  });
 });

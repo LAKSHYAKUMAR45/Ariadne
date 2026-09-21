@@ -20,7 +20,7 @@ Set via environment variables:
 | Variable                 | Required | Default | Description                                  |
 | ------------------------ | -------- | ------- | --------------------------------------------- |
 | `DATABASE_URL`            | yes      | —       | Postgres connection string                    |
-| `ENCRYPTION_KEY_DIR`      | yes      | —       | Owner-only directory containing `active-key-id` and AES-256-GCM key files |
+| `ENCRYPTION_KEY_DIR`      | yes      | —       | Absolute, owner-only directory containing `active-key-id` and AES-256-GCM key files |
 | `SYNC_SERVER_JWT_SECRET`  | yes      | —       | Secret used to sign/verify auth JWTs          |
 | `HOST`                    | no       | `127.0.0.1` | Bind address; use `0.0.0.0` only behind a secured reverse proxy or firewall |
 | `PORT`                    | no       | `4300`  | Port the HTTP server listens on               |
@@ -48,8 +48,8 @@ exposure is intentional and protected.
 on boot, so the explicit `migrate` step above is mainly useful for CI/ops
 scripts that want migrations applied as a separate, checkable step.
 
-`ENCRYPTION_KEY_DIR` must point at an owner-only directory (for example mode
-`0700`) containing:
+`ENCRYPTION_KEY_DIR` must be an **absolute** path to an owner-only directory
+(for example mode `0700`) containing:
 
 ```text
 /etc/ariadne/keys/
@@ -57,10 +57,31 @@ scripts that want migrations applied as a separate, checkable step.
   <key-id>.key
 ```
 
-`active-key-id` and every `<key-id>.key` file must be mode `0600`. Each key
-file must contain either exactly 32 raw bytes or exactly 64 lowercase hex
-characters. The active key encrypts new content; retained older key files stay
-available for historical decryption after rotation.
+`active-key-id` and every `<key-id>.key` file must be owner-readable only —
+mode `0400` or `0600`. Group/world bits, executable bits, and
+setuid/setgid/sticky bits are rejected. Each key file must contain either
+exactly 32 raw bytes or exactly 64 lowercase hex characters. The active key
+encrypts new content; retained older key files stay available for historical
+decryption after rotation.
+
+The keyring is deliberately strict about the filesystem it loads from:
+
+- the key directory and every key file must be owned by the effective uid of
+  the process loading them (the server loads canonical root-owned `0600` keys
+  before dropping privileges, so ownership is checked against the loading uid);
+- no component of the path may be a symbolic link, and key files must be
+  regular files;
+- ancestor directories must be owned by `root` or the effective user, and may
+  not be group- or world-writable unless they are sticky-bit protected (e.g.
+  `/tmp`, mode `1777`);
+- files are opened once with `O_NOFOLLOW`, validated via `fstat` on that same
+  descriptor, and read with a bounded read — so the inode that is validated is
+  always the inode that is read;
+- all filesystem failures surface as `EncryptionKeyringConfigError` carrying
+  only the path and errno code, never key material.
+
+The server refuses to start without a loaded keyring: `createApp` requires an
+`encryptionKeyring`, so there is no keyless production code path.
 
 ## Local Postgres via Docker
 

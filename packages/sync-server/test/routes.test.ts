@@ -7,6 +7,7 @@ import { signToken } from '../src/auth.js';
 import { createPool } from '../src/db.js';
 import { runMigrations } from '../src/migrate.js';
 import { TEST_DATABASE_URL, TEST_JWT_SECRET } from './testConfig.js';
+import { createTestEncryptionKeyring } from './testKeyring.js';
 import {
   relaxSingletonTeamConstraints,
   restoreSingletonTeamConstraints,
@@ -22,7 +23,7 @@ describe('sync-server: auth + sync routes', () => {
     // Task 3 needs cross-team fixtures even though registration still creates
     // a single default team in production today.
     await relaxSingletonTeamConstraints(pool);
-    app = createApp(pool, TEST_JWT_SECRET);
+    app = createApp(pool, TEST_JWT_SECRET, { encryptionKeyring: createTestEncryptionKeyring() });
   });
 
   afterAll(async () => {

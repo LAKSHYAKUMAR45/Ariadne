@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createApp } from '../src/app.js';
 import { signToken } from '../src/auth.js';
 import { TEST_JWT_SECRET } from './testConfig.js';
+import { createTestEncryptionKeyring } from './testKeyring.js';
 
 interface QueryResultShape<TRow> {
   rows: TRow[];
@@ -77,7 +78,9 @@ describe('sync-server: unexpected error handling', () => {
       vi.fn<Pool['query']>().mockResolvedValue(result([])),
       client,
     );
-    const app = createApp(pool, TEST_JWT_SECRET);
+    const app = createApp(pool, TEST_JWT_SECRET, {
+      encryptionKeyring: createTestEncryptionKeyring(),
+    });
 
     const response = await request(app).post('/api/v1/auth/register').send({
       username: 'alice',
@@ -118,7 +121,9 @@ describe('sync-server: unexpected error handling', () => {
       )
       .mockResolvedValueOnce(result([]));
     const pool = createPoolWithQuery(query);
-    const app = createApp(pool, TEST_JWT_SECRET);
+    const app = createApp(pool, TEST_JWT_SECRET, {
+      encryptionKeyring: createTestEncryptionKeyring(),
+    });
     const token = signToken({ sub: 'admin-1', username: 'admin' }, TEST_JWT_SECRET);
 
     const response = await request(app)
@@ -143,6 +148,7 @@ describe('sync-server: unexpected error handling', () => {
     const app = createApp(
       createPoolWithQuery(vi.fn<Pool['query']>().mockResolvedValue(result([]))),
       TEST_JWT_SECRET,
+      { encryptionKeyring: createTestEncryptionKeyring() },
     );
     const malformedBody = '{"password":s3cr3t}';
 

@@ -3,6 +3,8 @@
  * small module (rather than a config library) matching this monorepo's
  * general preference for minimal dependencies.
  */
+import path from 'node:path';
+
 export interface SyncServerConfig {
   databaseUrl: string;
   encryptionKeyDir: string;
@@ -29,6 +31,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): SyncServerConf
   const encryptionKeyDir = env.ENCRYPTION_KEY_DIR;
   if (!encryptionKeyDir) {
     throw new SyncServerConfigError('ENCRYPTION_KEY_DIR environment variable is required');
+  }
+  if (!path.isAbsolute(encryptionKeyDir)) {
+    throw new SyncServerConfigError(
+      'ENCRYPTION_KEY_DIR must be an absolute path (e.g. /etc/ariadne/keys)',
+    );
   }
 
   const jwtSecret = env.SYNC_SERVER_JWT_SECRET;

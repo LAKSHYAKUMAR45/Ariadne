@@ -88,3 +88,90 @@ pnpm --filter @ariadne-dev/sync-server exec vitest run
 ```
 
 All passed.
+
+---
+
+## Review-finding fixes (round 2)
+
+Binding ruling applied: the keyring validates that the key directory and every
+key file are owned by the **effective uid** loading the keys. Plan 03 loads
+canonical root-owned `0600` keys before dropping to a non-root user prior to
+`listen`, so the ownership contract stays consistent end to end.
+
+### 1. Ownership checks
+
+`packages/sync-server/src/encryption.ts` now checks `stats.uid` against
+`process.geteuid()` for the key directory, `active-key-id`, and every
+`<key-id>.key` file. Platforms without POSIX uids (Windows) skip the check
+instead of failing spuriously.
+
+### 2. Ancestor-chain validation (replacement defence)
+
+`assertSafeAncestors` walks root → parent of the key directory and rejects:
+
+- non-absolute or non-canonical input (path is resolved first),
+- symbolic-link components anywhere in the chain,
+- non-directory components,
+- ancestors not owned by `root` or the effective user,
+- group- or world-writable ancestors **unless** the sticky bit is set (so
+  `/tmp`-style `1777` shared roots remain usable while `0775` parents do not).
+
+### 3. `createApp` keyring is required
+
+`CreateAppOptions.encryptionKeyring` is now required and validated at runtime;
+a missing or malformed keyring throws `SyncServerConfigError`. Production has
+no keyless path. Tests inject a shared factory,
+`packages/sync-server/test/testKeyring.ts`, built on the newly exported
+in-memory `createEncryptionKeyring(activeKeyId, keys)`.
+
+### 4. Owner-only readable modes
+
+Key material may now be `0400` or `0600`. Group/world bits, executable bits,
+and setuid/setgid/sticky bits are rejected.
+
+### 5. Typed filesystem errors
+
+Every `open`/`fstat`/`read`/`readdir` failure is funnelled through
+`toConfigError`, producing `EncryptionKeyringConfigError` with only the path
+and errno code — never the raw message or any key bytes.
+
+### 6. TOCTOU elimination
+
+`lstat`-then-`read` was replaced by a single-descriptor flow: `openSync` with
+`O_RDONLY | O_NOFOLLOW` (plus `O_DIRECTORY` for the directory), `fstatSync` on
+that same fd, and a bounded `readSync` loop (128-byte cap) from that fd.
+Symlinks, non-regular files, and oversized files are rejected. `O_NOFOLLOW` /
+`O_DIRECTORY` fall back to `0` where a platform does not define them, and
+`ELOOP`/`EMLINK`/`EFTYPE` are all mapped to the symlink rejection so behaviour
+is portable across Linux and BSD/macOS.
+
+### 7. Absolute `ENCRYPTION_KEY_DIR`
+
+`loadConfig` rejects a relative `ENCRYPTION_KEY_DIR`, and
+`loadEncryptionKeyring` independently requires an absolute path.
+
+### 8. Buffer guards
+
+`encrypt` guards plaintext and AAD with `Buffer.isBuffer`; `decrypt` guards
+nonce, ciphertext, auth tag, and AAD, and enforces exact 12-byte nonce and
+16-byte tag lengths.
+
+### Tests added
+
+`test/encryption.test.ts` (28 tests) now covers foreign-uid directory and key
+files, relative paths, symlinked path components, symlinked `active-key-id`
+and key files, group-writable ancestors without/with the sticky bit, `0400`
+acceptance, executable-mode rejection, oversized files, non-regular `.key`
+entries, non-Buffer/incorrect-length crypto inputs, and typed wrapping of
+`EACCES`. `test/config.test.ts` covers the absolute-path requirement, and the
+new `test/app.test.ts` covers the fail-closed `createApp` contract.
+
+### Validation
+
+```bash
+pnpm --filter @ariadne-dev/sync-server exec vitest run test/encryption.test.ts test/config.test.ts test/app.test.ts
+pnpm --filter @ariadne-dev/sync-server run build
+pnpm --filter @ariadne-dev/sync-server exec vitest run
+```
+
+Focused: 36 passed. Full suite: 8 files / 94 tests passed. Build clean.
