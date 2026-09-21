@@ -164,6 +164,33 @@ describe('runMigrations', () => {
 
       const unscoped = await pool.query('SELECT count(*)::int AS count FROM tasks WHERE team_id IS NULL');
       expect(unscoped.rows[0].count).toBe(0);
+
+      // Reapplying the 0006 body (e.g. a manual re-run against an existing
+      // deployment) must never resurrect or re-role an existing membership.
+      await pool.query(
+        `UPDATE team_memberships SET active = false WHERE user_id = $1`,
+        [alice.id],
+      );
+      await pool.query(
+        `UPDATE team_memberships SET role = 'member' WHERE user_id = $1`,
+        [alice.id],
+      );
+
+      const migrationSql = fs.readFileSync(
+        path.join(process.cwd(), 'migrations', '0006_single_team_authorization.sql'),
+        'utf8',
+      );
+      await pool.query(migrationSql);
+
+      const afterReapply = await pool.query(
+        `SELECT u.username, m.role, m.active
+         FROM team_memberships m
+         JOIN users u ON u.id = m.user_id
+         WHERE u.username = 'alice'`,
+      );
+      expect(afterReapply.rows).toEqual([
+        { username: 'alice', role: 'member', active: false },
+      ]);
     } finally {
       fs.rmSync(v5MigrationsDir, { recursive: true, force: true });
     }

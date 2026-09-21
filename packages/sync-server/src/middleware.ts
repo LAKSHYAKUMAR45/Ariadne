@@ -78,6 +78,8 @@ export const handleUnexpectedError: ErrorRequestHandler = (error, req, res, next
 
   if (isJsonParseError(error)) {
     const authenticatedRequest = req as AuthenticatedRequest;
+    // V8's parse message can echo raw request fragments (including
+    // credentials), so only fixed, non-body-derived metadata is logged.
     console.error('Malformed JSON request', {
       method: req.method,
       path: req.originalUrl,
@@ -85,7 +87,7 @@ export const handleUnexpectedError: ErrorRequestHandler = (error, req, res, next
       error: {
         type: error.type,
         status: error.status,
-        message: error.message,
+        reason: 'request body could not be parsed',
       },
     });
     const err = new ApiError(400, 'invalid_request', 'Invalid request body');

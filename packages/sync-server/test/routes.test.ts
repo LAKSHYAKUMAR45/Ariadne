@@ -7,6 +7,10 @@ import { signToken } from '../src/auth.js';
 import { createPool } from '../src/db.js';
 import { runMigrations } from '../src/migrate.js';
 import { TEST_DATABASE_URL, TEST_JWT_SECRET } from './testConfig.js';
+import {
+  relaxSingletonTeamConstraints,
+  restoreSingletonTeamConstraints,
+} from './singletonConstraints.js';
 
 describe('sync-server: auth + sync routes', () => {
   let pool: Pool;
@@ -17,12 +21,12 @@ describe('sync-server: auth + sync routes', () => {
     await runMigrations(pool);
     // Task 3 needs cross-team fixtures even though registration still creates
     // a single default team in production today.
-    await pool.query('ALTER TABLE teams ALTER COLUMN singleton_key DROP NOT NULL');
-    await pool.query('ALTER TABLE teams DROP CONSTRAINT IF EXISTS teams_singleton_key_check');
+    await relaxSingletonTeamConstraints(pool);
     app = createApp(pool, TEST_JWT_SECRET);
   });
 
   afterAll(async () => {
+    await restoreSingletonTeamConstraints(pool);
     await pool.end();
   });
 
@@ -304,6 +308,84 @@ describe('sync-server: auth + sync routes', () => {
       const res = await request(app).get('/api/v1/sync/tasks').set('Authorization', 'Bearer not-a-real-token');
       expect(res.status).toBe(401);
       expect(res.body.error.code).toBe('invalid_token');
+    });
+  });
+
+  describe('deactivated membership revokes already-issued tokens', () => {
+    async function seedDeactivatedMember(): Promise<{
+      authHeader: { Authorization: string };
+      teamId: string;
+    }> {
+      const teamId = await createDirectTeam('Revocation Team');
+      const admin = await createDirectUser('revocation-admin');
+      const member = await createDirectUser('revocation-member');
+      await addMembership(teamId, admin.userId, 'admin');
+      await addMembership(teamId, member.userId, 'member');
+
+      // The member token is minted while the membership is still active, then
+      // the admin deactivates them: the already-issued JWT must stop working.
+      const deactivate = await request(app)
+        .patch(`/api/v1/admin/members/${member.userId}`)
+        .set(admin.authHeader)
+        .send({ active: false });
+      expect(deactivate.status).toBe(200);
+
+      return { authHeader: member.authHeader, teamId };
+    }
+
+    it('returns 403 inactive_membership on task reads and writes and creates no task', async () => {
+      const { authHeader } = await seedDeactivatedMember();
+
+      const readRes = await request(app).get('/api/v1/sync/tasks').set(authHeader);
+      expect(readRes.status).toBe(403);
+      expect(readRes.body.error.code).toBe('inactive_membership');
+
+      const writeRes = await request(app)
+        .post('/api/v1/sync/tasks')
+        .set(authHeader)
+        .send({
+          tasks: [
+            {
+              localId: 'revoked-task',
+              remoteId: null,
+              title: 'Should never persist',
+              status: 'active',
+              createdAt: '2026-09-21T00:00:00Z',
+              updatedAt: '2026-09-21T00:00:00Z',
+            },
+          ],
+        });
+      expect(writeRes.status).toBe(403);
+      expect(writeRes.body.error.code).toBe('inactive_membership');
+
+      const tasks = await pool.query<{ count: number }>(
+        'SELECT count(*)::int AS count FROM tasks',
+      );
+      expect(tasks.rows[0].count).toBe(0);
+    });
+
+    it('returns 403 inactive_membership before body validation on protected sync POSTs', async () => {
+      const { authHeader } = await seedDeactivatedMember();
+
+      const postPaths = [
+        '/api/v1/sync/tasks',
+        '/api/v1/sync/checkpoints',
+        '/api/v1/sync/todos',
+        '/api/v1/sync/decisions',
+        '/api/v1/sync/errors',
+        '/api/v1/sync/open-questions',
+        '/api/v1/sync/commands',
+      ];
+
+      for (const postPath of postPaths) {
+        const res = await request(app)
+          .post(postPath)
+          .set(authHeader)
+          .send({ totally: 'malformed', tasks: 'not-an-array' });
+        expect(res.status, `${postPath} status`).toBe(403);
+        expect(res.body.error.code, `${postPath} code`).toBe('inactive_membership');
+        expect(res.text, `${postPath} body`).not.toContain('invalid_request');
+      }
     });
   });
 

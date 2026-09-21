@@ -78,7 +78,7 @@ export function createMembersRouter(pool: Pool): Router {
     res.status(200).json({ members: rows.map(toTeamMemberView) });
   }));
 
-  router.patch('/members/:userId', asyncHandler(async (req: AuthenticatedRequest, res, next) => {
+  router.patch('/members/:userId', asyncHandler(async (req: AuthenticatedRequest, res) => {
     const adminMembership = await requireAdmin(req, res);
     if (!adminMembership) {
       return;
@@ -144,7 +144,14 @@ export function createMembersRouter(pool: Pool): Router {
 
     const updatedMember = updatedRows[0];
     if (!updatedMember) {
-      next(new Error(`Member update for ${req.params.userId} returned no row`));
+      // Lost race: the membership was deleted (or promoted to admin) between
+      // the read above and this update, so it is no longer an updatable member.
+      const err = new ApiError(
+        404,
+        'member_not_found',
+        `No team member with userId ${req.params.userId}`,
+      );
+      res.status(err.status).json(errorBody(err));
       return;
     }
 

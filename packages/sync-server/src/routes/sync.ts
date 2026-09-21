@@ -38,7 +38,9 @@ interface TaskRow {
  * endpoint). Access is scoped by the caller's active team membership:
  * every protected task read/write filters on `tasks.team_id`, while
  * sub-entity routes first verify that the referenced parent task is
- * visible to the caller.
+ * visible to the caller. Every protected POST checks active membership
+ * before validating the request body, so a deactivated caller always gets
+ * 403 `inactive_membership` rather than validation details.
  */
 export function createSyncRouter(pool: Pool): Router {
   const router = Router();
@@ -97,15 +99,15 @@ export function createSyncRouter(pool: Pool): Router {
   }
 
   router.post('/tasks', asyncHandler(async (req: AuthenticatedRequest, res) => {
+    const membership = await requireMembership(req, res);
+    if (!membership) {
+      return;
+    }
+
     const parsed = pushTasksSchema.safeParse(req.body);
     if (!parsed.success) {
       const err = new ApiError(400, 'invalid_request', parsed.error.message);
       res.status(err.status).json(errorBody(err));
-      return;
-    }
-
-    const membership = await requireMembership(req, res);
-    if (!membership) {
       return;
     }
 
@@ -277,15 +279,15 @@ export function createSyncRouter(pool: Pool): Router {
   }
 
   router.post('/checkpoints', asyncHandler(async (req: AuthenticatedRequest, res) => {
+    const membership = await requireMembership(req, res);
+    if (!membership) {
+      return;
+    }
+
     const parsed = pushCheckpointsSchema.safeParse(req.body);
     if (!parsed.success) {
       const err = new ApiError(400, 'invalid_request', parsed.error.message);
       res.status(err.status).json(errorBody(err));
-      return;
-    }
-
-    const membership = await requireMembership(req, res);
-    if (!membership) {
       return;
     }
 
@@ -379,15 +381,15 @@ export function createSyncRouter(pool: Pool): Router {
   }
 
   router.post('/todos', asyncHandler(async (req: AuthenticatedRequest, res) => {
+    const membership = await requireMembership(req, res);
+    if (!membership) {
+      return;
+    }
+
     const parsed = pushTodosSchema.safeParse(req.body);
     if (!parsed.success) {
       const err = new ApiError(400, 'invalid_request', parsed.error.message);
       res.status(err.status).json(errorBody(err));
-      return;
-    }
-
-    const membership = await requireMembership(req, res);
-    if (!membership) {
       return;
     }
 
@@ -497,15 +499,15 @@ export function createSyncRouter(pool: Pool): Router {
   }
 
   router.post('/decisions', asyncHandler(async (req: AuthenticatedRequest, res) => {
+    const membership = await requireMembership(req, res);
+    if (!membership) {
+      return;
+    }
+
     const parsed = pushDecisionsSchema.safeParse(req.body);
     if (!parsed.success) {
       const err = new ApiError(400, 'invalid_request', parsed.error.message);
       res.status(err.status).json(errorBody(err));
-      return;
-    }
-
-    const membership = await requireMembership(req, res);
-    if (!membership) {
       return;
     }
 
@@ -633,15 +635,15 @@ export function createSyncRouter(pool: Pool): Router {
   }
 
   router.post('/errors', asyncHandler(async (req: AuthenticatedRequest, res) => {
+    const membership = await requireMembership(req, res);
+    if (!membership) {
+      return;
+    }
+
     const parsed = pushErrorsSchema.safeParse(req.body);
     if (!parsed.success) {
       const err = new ApiError(400, 'invalid_request', parsed.error.message);
       res.status(err.status).json(errorBody(err));
-      return;
-    }
-
-    const membership = await requireMembership(req, res);
-    if (!membership) {
       return;
     }
 
@@ -762,15 +764,15 @@ export function createSyncRouter(pool: Pool): Router {
   }
 
   router.post('/open-questions', asyncHandler(async (req: AuthenticatedRequest, res) => {
+    const membership = await requireMembership(req, res);
+    if (!membership) {
+      return;
+    }
+
     const parsed = pushOpenQuestionsSchema.safeParse(req.body);
     if (!parsed.success) {
       const err = new ApiError(400, 'invalid_request', parsed.error.message);
       res.status(err.status).json(errorBody(err));
-      return;
-    }
-
-    const membership = await requireMembership(req, res);
-    if (!membership) {
       return;
     }
 
@@ -876,15 +878,15 @@ export function createSyncRouter(pool: Pool): Router {
   }
 
   router.post('/commands', asyncHandler(async (req: AuthenticatedRequest, res) => {
+    const membership = await requireMembership(req, res);
+    if (!membership) {
+      return;
+    }
+
     const parsed = pushCommandsSchema.safeParse(req.body);
     if (!parsed.success) {
       const err = new ApiError(400, 'invalid_request', parsed.error.message);
       res.status(err.status).json(errorBody(err));
-      return;
-    }
-
-    const membership = await requireMembership(req, res);
-    if (!membership) {
       return;
     }
 

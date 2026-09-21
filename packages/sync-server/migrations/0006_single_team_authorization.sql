@@ -45,9 +45,9 @@ BEGIN
       CASE WHEN user_row.rn = 1 THEN 'admin' ELSE 'member' END,
       true
     )
-    ON CONFLICT (team_id, user_id) DO UPDATE
-    SET role = EXCLUDED.role,
-        active = EXCLUDED.active;
+    -- Existing memberships are never overwritten: a re-run of this migration
+    -- must not reactivate a deactivated member or change an assigned role.
+    ON CONFLICT (team_id, user_id) DO NOTHING;
   END LOOP;
 
   UPDATE tasks

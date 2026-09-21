@@ -5,6 +5,10 @@ import { ApiError } from '../src/errors.js';
 import { runMigrations } from '../src/migrate.js';
 import { inaccessibleTaskError, requireTeamTask } from '../src/taskAccess.js';
 import { TEST_DATABASE_URL } from './testConfig.js';
+import {
+  relaxSingletonTeamConstraints,
+  restoreSingletonTeamConstraints,
+} from './singletonConstraints.js';
 
 describe('taskAccess', () => {
   let pool: Pool;
@@ -14,11 +18,11 @@ describe('taskAccess', () => {
     await runMigrations(pool);
     // Task 3 needs cross-team fixtures even though registration still creates
     // a single default team in production today.
-    await pool.query('ALTER TABLE teams ALTER COLUMN singleton_key DROP NOT NULL');
-    await pool.query('ALTER TABLE teams DROP CONSTRAINT IF EXISTS teams_singleton_key_check');
+    await relaxSingletonTeamConstraints(pool);
   });
 
   afterAll(async () => {
+    await restoreSingletonTeamConstraints(pool);
     await pool.end();
   });
 

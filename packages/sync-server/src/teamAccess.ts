@@ -71,9 +71,7 @@ export async function registerIntoSingletonTeam(
 
   try {
     await client.query('BEGIN');
-    await client.query(
-      `SELECT pg_advisory_xact_lock(hashtext('${SINGLETON_TEAM_LOCK}'))`,
-    );
+    await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [SINGLETON_TEAM_LOCK]);
     await client.query(
       `INSERT INTO teams (singleton_key, name)
        VALUES ($1, $2)

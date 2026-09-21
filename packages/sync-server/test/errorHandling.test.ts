@@ -100,7 +100,7 @@ describe('sync-server: unexpected error handling', () => {
     expect(logSpy.mock.calls[0][1]).not.toHaveProperty('body');
   });
 
-  it('returns a sanitized JSON 500 when member mutation produces no updated row', async () => {
+  it('returns 404 member_not_found when the member disappears mid-update', async () => {
     const logSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
     const query = vi
       .fn<Pool['query']>()
@@ -126,18 +126,16 @@ describe('sync-server: unexpected error handling', () => {
       .set('Authorization', `Bearer ${token}`)
       .send({ active: false });
 
-    expectInternalErrorResponse(response, [
-      'Member update for member-1 returned no row',
-      '/home/lkumar',
-      'member-1',
-    ]);
-    expect(logSpy).toHaveBeenCalledOnce();
-    expect(logSpy.mock.calls[0][1]).toMatchObject({
-      method: 'PATCH',
-      path: '/api/v1/admin/members/member-1',
-      userId: 'admin-1',
+    expect(response.status).toBe(404);
+    expect(response.body).toEqual({
+      error: {
+        code: 'member_not_found',
+        message: 'No team member with userId member-1',
+      },
     });
-    expect(logSpy.mock.calls[0][1]).not.toHaveProperty('body');
+    expect(response.text).not.toContain('returned no row');
+    expect(response.text).not.toContain('/home/lkumar');
+    expect(logSpy).not.toHaveBeenCalled();
   });
 
   it('returns a stable 400 invalid_request for malformed JSON and does not leak parser details', async () => {
@@ -146,7 +144,7 @@ describe('sync-server: unexpected error handling', () => {
       createPoolWithQuery(vi.fn<Pool['query']>().mockResolvedValue(result([]))),
       TEST_JWT_SECRET,
     );
-    const malformedBody = '{"username":"leak-me"';
+    const malformedBody = '{"password":s3cr3t}';
 
     const response = await request(app)
       .post('/api/v1/auth/register')
@@ -155,6 +153,7 @@ describe('sync-server: unexpected error handling', () => {
 
     expectInvalidRequestResponse(response);
     expect(response.text).not.toContain(malformedBody);
+    expect(response.text).not.toContain('s3cr3t');
     expect(response.text).not.toContain('Unexpected token');
     expect(response.text).not.toContain('SyntaxError');
     expect(response.text).not.toContain('stack');
@@ -166,6 +165,13 @@ describe('sync-server: unexpected error handling', () => {
       userId: null,
     });
     expect(logSpy.mock.calls[0][1]).not.toHaveProperty('body');
-    expect(JSON.stringify(logSpy.mock.calls[0][1])).not.toContain('leak-me');
+
+    // V8 parser messages can echo raw request fragments (including secrets),
+    // so the log payload must never carry the parser message or the body.
+    const loggedPayload = JSON.stringify(logSpy.mock.calls[0][1]);
+    expect(loggedPayload).not.toContain('s3cr3t');
+    expect(loggedPayload).not.toContain('password');
+    expect(loggedPayload).not.toContain(malformedBody);
+    expect(loggedPayload).not.toContain('Unexpected token');
   });
 });
