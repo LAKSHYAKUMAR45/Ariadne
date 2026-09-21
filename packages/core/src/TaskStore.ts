@@ -110,6 +110,8 @@ interface TaskFileCaptureRow {
   checkpoint_id: string | null;
   created_at: string;
   synced_at: string | null;
+  failed_at: string | null;
+  failure_code: string | null;
 }
 
 function rowToTaskFileCapture(row: TaskFileCaptureRow): TaskFileCapture {
@@ -121,6 +123,8 @@ function rowToTaskFileCapture(row: TaskFileCaptureRow): TaskFileCapture {
     checkpointId: row.checkpoint_id,
     createdAt: row.created_at,
     syncedAt: row.synced_at,
+    failedAt: row.failed_at,
+    failureCode: row.failure_code,
   };
 }
 
@@ -756,8 +760,11 @@ export class TaskStore {
 
       this.db
         .prepare(
-          `INSERT INTO task_file_captures (id, task_id, trigger, git_commit_sha, checkpoint_id, created_at, synced_at)
-           VALUES (@id, @taskId, @trigger, @gitCommitSha, @checkpointId, @createdAt, NULL)`,
+          `INSERT INTO task_file_captures (
+             id, task_id, trigger, git_commit_sha, checkpoint_id, created_at,
+             synced_at, failed_at, failure_code
+           )
+           VALUES (@id, @taskId, @trigger, @gitCommitSha, @checkpointId, @createdAt, NULL, NULL, NULL)`,
         )
         .run({
           id,
@@ -800,7 +807,11 @@ export class TaskStore {
   }
 
   getPendingTaskFileCaptures(taskId: string): TaskFileCaptureWithEntries[] {
-    return this.listTaskFileCaptures(`task_id = ? AND synced_at IS NULL`, [taskId], 'created_at ASC').map((capture) => ({
+    return this.listTaskFileCaptures(
+      `task_id = ? AND synced_at IS NULL AND failed_at IS NULL`,
+      [taskId],
+      'created_at ASC',
+    ).map((capture) => ({
       ...capture,
       entries: capture.entries.map((entry) => ({ ...entry })),
     }));
@@ -808,6 +819,20 @@ export class TaskStore {
 
   markTaskFileCaptureSynced(captureId: string, syncedAt: string = nowIso()): void {
     this.db.prepare(`UPDATE task_file_captures SET synced_at = ? WHERE id = ?`).run(syncedAt, captureId);
+  }
+
+  markTaskFileCaptureFailed(
+    captureId: string,
+    failureCode: string,
+    failedAt: string = nowIso(),
+  ): void {
+    this.db
+      .prepare(
+        `UPDATE task_file_captures
+         SET failed_at = ?, failure_code = ?
+         WHERE id = ? AND synced_at IS NULL`,
+      )
+      .run(failedAt, failureCode, captureId);
   }
 
   // ---------------------------------------------------------------------

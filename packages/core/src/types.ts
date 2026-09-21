@@ -67,6 +67,8 @@ export interface TaskFileCapture {
   checkpointId: string | null;
   createdAt: string;
   syncedAt: string | null;
+  failedAt: string | null;
+  failureCode: string | null;
 }
 
 export interface TaskFileCaptureEntry {

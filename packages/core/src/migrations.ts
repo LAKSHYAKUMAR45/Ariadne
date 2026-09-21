@@ -105,6 +105,12 @@ export const MIGRATIONS: Migration[] = [
           checkpoint_id TEXT,
           created_at TEXT NOT NULL,
           synced_at TEXT,
+          failed_at TEXT,
+          failure_code TEXT,
+          CHECK (
+            (failed_at IS NULL AND failure_code IS NULL) OR
+            (failed_at IS NOT NULL AND failure_code IS NOT NULL)
+          ),
           CHECK (
             (trigger = 'git_commit' AND git_commit_sha IS NOT NULL AND checkpoint_id IS NULL) OR
             (trigger = 'checkpoint' AND checkpoint_id IS NOT NULL AND git_commit_sha IS NULL) OR
@@ -116,7 +122,7 @@ export const MIGRATIONS: Migration[] = [
         CREATE INDEX IF NOT EXISTS idx_task_file_captures_task_created
           ON task_file_captures(task_id, created_at);
         CREATE INDEX IF NOT EXISTS idx_task_file_captures_task_pending
-          ON task_file_captures(task_id, synced_at, created_at);
+          ON task_file_captures(task_id, synced_at, failed_at, created_at);
         CREATE UNIQUE INDEX IF NOT EXISTS idx_task_file_captures_git_commit_once
           ON task_file_captures(task_id, git_commit_sha)
           WHERE trigger = 'git_commit' AND git_commit_sha IS NOT NULL;

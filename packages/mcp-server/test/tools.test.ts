@@ -134,6 +134,18 @@ describe('mcp-server tools', () => {
     expect(result.skipped).toEqual([]);
   });
 
+  it('creates checkpoints without capture errors in a non-Git workspace', () => {
+    const task = tools.taskNew(store, workspaceRoot, { title: 'Non-Git checkpoint task' });
+
+    const result = tools.checkpointAdd(store, workspaceRoot, { summary: 'saved without Git' });
+
+    expect(result.capture).toBeNull();
+    expect(result.skipped).toEqual([]);
+    expect(store.listCheckpoints(task.id)).toHaveLength(1);
+    expect(store.getTaskFileCaptures(task.id)).toEqual([]);
+    expect(store.listErrors(task.id)).toEqual([]);
+  });
+
   it('does not capture when checkpoint creation fails', () => {
     initRepo(workspaceRoot);
     const task = tools.taskNew(store, workspaceRoot, { title: 'Failing checkpoint task' });

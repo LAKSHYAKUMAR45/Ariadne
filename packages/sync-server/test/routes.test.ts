@@ -2063,20 +2063,36 @@ describe('sync-server: auth + sync routes', () => {
       const res = await request(app)
         .post(captureUrl(TASK_ID))
         .set(fixture.inactive.authHeader)
-        .send({ capture: { nonsense: true } });
+        .set('Content-Type', 'application/json')
+        .send('{"capture":');
       expect(res.status).toBe(403);
       expect(res.body.error.code).toBe('inactive_membership');
     });
 
-    it('denies capture upload for a task outside the caller team', async () => {
+    it('denies capture upload for a task outside the caller team before parsing the body', async () => {
       const fixture = await seedHistoryFixture();
 
       const res = await request(app)
         .post(captureUrl(OTHER_TASK_ID))
         .set(fixture.member.authHeader)
-        .send(captureBody());
+        .set('Content-Type', 'application/json')
+        .send('{"capture":');
       expect(res.status).toBe(404);
       expect(res.body.error.code).toBe('task_not_found');
+    });
+
+    it('does not echo attacker-controlled schema values in validation errors', async () => {
+      const fixture = await seedHistoryFixture();
+      const attackerValue = 'attacker-controlled-trigger-value';
+
+      const res = await request(app)
+        .post(captureUrl(TASK_ID))
+        .set(fixture.member.authHeader)
+        .send(captureBody({ trigger: attackerValue }));
+      expect(res.status).toBe(400);
+      expect(res.body.error.code).toBe('invalid_request');
+      expect(res.body.error.message).toBe('Capture upload body is invalid');
+      expect(res.text).not.toContain(attackerValue);
     });
 
     it('rejects a non-UUID task id in the upload path', async () => {

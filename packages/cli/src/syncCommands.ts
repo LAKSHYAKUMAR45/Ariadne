@@ -49,6 +49,27 @@ function describeCaptureFailure(error: unknown): string {
   return 'unexpected_error';
 }
 
+const PERMANENT_CAPTURE_FAILURE_CODES = new Set([
+  'capture_conflict',
+  'capture_event_conflict',
+  'capture_too_large',
+  'invalid_capture',
+  'invalid_capture_encoding',
+  'invalid_request',
+]);
+
+function permanentCaptureFailureCode(error: unknown): string | null {
+  const candidate = error as { name?: unknown; code?: unknown } | null;
+  if (
+    candidate?.name === 'SyncApiError' &&
+    typeof candidate.code === 'string' &&
+    PERMANENT_CAPTURE_FAILURE_CODES.has(candidate.code)
+  ) {
+    return candidate.code;
+  }
+  return null;
+}
+
 /** `ariadne sync register <username> <password>` — creates an account, then logs in immediately for convenience. */
 export async function runSyncRegister(username: string, password: string, serverUrl: string, profileName?: string): Promise<void> {
   await syncClient.register(serverUrl, username, password);
@@ -364,6 +385,7 @@ export async function runSyncPush(store: TaskStore, workspaceRoot: string, taskI
   // independently retryable unit under the 10 MiB per-capture cap.
   let capturesUploaded = 0;
   let captureFailures = 0;
+  let capturesRejected = 0;
   for (const id of taskIdsToCheck) {
     const task = store.getTask(id);
     const remoteTaskId = task?.remoteId ?? undefined;
@@ -396,6 +418,20 @@ export async function runSyncPush(store: TaskStore, workspaceRoot: string, taskI
           console.warn(`File capture ${capture.id} was not acknowledged by the server; it stays pending.`);
         }
       } catch (err) {
+        const permanentFailureCode = permanentCaptureFailureCode(err);
+        if (permanentFailureCode) {
+          capturesRejected += 1;
+          store.markTaskFileCaptureFailed(capture.id, permanentFailureCode);
+          store.recordError({
+            taskId: id,
+            message: `File capture upload permanently failed (${describeCaptureFailure(err)}).`,
+          });
+          console.warn(
+            `File capture ${capture.id} upload failed (${describeCaptureFailure(err)}) and will not be retried.`,
+          );
+          continue;
+        }
+
         captureFailures += 1;
         // Only the stable error code is reported: server messages can quote
         // capture paths, and capture content must never reach the terminal.
@@ -406,6 +442,9 @@ export async function runSyncPush(store: TaskStore, workspaceRoot: string, taskI
   if (capturesUploaded > 0) console.log(`Uploaded ${capturesUploaded} file capture(s).`);
   if (captureFailures > 0) {
     console.log(`${captureFailures} file capture(s) will be retried on the next push.`);
+  }
+  if (capturesRejected > 0) {
+    console.log(`${capturesRejected} file capture(s) were rejected permanently and recorded as task errors.`);
   }
 
   if (
@@ -418,6 +457,7 @@ export async function runSyncPush(store: TaskStore, workspaceRoot: string, taskI
     commandsPushed === 0 &&
     capturesUploaded === 0 &&
     captureFailures === 0 &&
+    capturesRejected === 0 &&
     !taskId
   ) {
     console.log('Nothing to push — everything is already synced.');

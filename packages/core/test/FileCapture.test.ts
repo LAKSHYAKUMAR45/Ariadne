@@ -374,12 +374,98 @@ describe('FileCapture', () => {
       expect(skipReason(result, 'c.txt')).toBe('capture_limit_exceeded');
     });
 
+    it('skips a file when its unified diff exceeds the per-file limit', () => {
+      write(repoRoot, 'rewritten.txt', `${'old line\n'.repeat(20)}`);
+      commitAll(repoRoot, 'add file before rewrite');
+      write(repoRoot, 'rewritten.txt', 'new\n');
+      touch('rewritten.txt');
+
+      const result = captureTaskFiles(
+        store,
+        { taskId, workspace: repoRoot, trigger: 'explicit' },
+        { maxFileBytes: 64, maxCaptureBytes: 1024 },
+      );
+
+      expect(entryPaths(result)).toEqual([]);
+      expect(skipReason(result, 'rewritten.txt')).toBe('diff_too_large');
+    });
+
+    it('tracks aggregate diff bytes independently from captured content bytes', () => {
+      for (const file of ['a.txt', 'b.txt']) {
+        write(repoRoot, file, `${'old line\n'.repeat(10)}`);
+      }
+      commitAll(repoRoot, 'add files before rewrite');
+      for (const file of ['a.txt', 'b.txt']) {
+        write(repoRoot, file, 'new\n');
+        touch(file);
+      }
+
+      const result = captureTaskFiles(
+        store,
+        { taskId, workspace: repoRoot, trigger: 'explicit' },
+        { maxFileBytes: 1024, maxCaptureBytes: 250 },
+      );
+
+      expect(entryPaths(result)).toEqual(['a.txt']);
+      expect(skipReason(result, 'b.txt')).toBe('diff_capture_limit_exceeded');
+    });
+
+    it('limits the number of entries to the server capture ceiling', () => {
+      write(repoRoot, 'a.txt', 'a\n');
+      write(repoRoot, 'b.txt', 'b\n');
+      commitAll(repoRoot, 'add entry limit files');
+      touch('a.txt');
+      touch('b.txt');
+
+      const result = captureTaskFiles(
+        store,
+        { taskId, workspace: repoRoot, trigger: 'explicit' },
+        {
+          maxFileBytes: DEFAULT_CAPTURE_LIMITS.maxFileBytes,
+          maxCaptureBytes: DEFAULT_CAPTURE_LIMITS.maxCaptureBytes,
+          maxEntries: 1,
+        },
+      );
+
+      expect(entryPaths(result)).toEqual(['a.txt']);
+      expect(skipReason(result, 'b.txt')).toBe('entry_limit_exceeded');
+    });
+
+    it('skips repository paths longer than the server accepts', () => {
+      const longPath = `${Array.from({ length: 6 }, () => 'a'.repeat(170)).join('/')}/file.txt`;
+      write(repoRoot, longPath, 'content\n');
+      commitAll(repoRoot, 'add long path');
+      touch(longPath);
+
+      const result = captureTaskFiles(store, {
+        taskId,
+        workspace: repoRoot,
+        trigger: 'explicit',
+      });
+
+      expect(entryPaths(result)).toEqual([]);
+      expect(skipReason(result, longPath)).toBe('path_too_long');
+    });
+
     it('defaults to 1 MiB per file and 10 MiB per capture', () => {
       expect(DEFAULT_CAPTURE_LIMITS).toEqual({
         maxFileBytes: 1024 * 1024,
         maxCaptureBytes: 10 * 1024 * 1024,
+        maxEntries: 2000,
       });
     });
+  });
+
+  it('treats a non-Git workspace as having no capturable file history', () => {
+    fs.rmSync(path.join(repoRoot, '.git'), { recursive: true, force: true });
+
+    const result = captureTaskFiles(store, {
+      taskId,
+      workspace: repoRoot,
+      trigger: 'explicit',
+    });
+
+    expect(result).toEqual({ capture: null, skipped: [] });
   });
 
   describe('commit captures', () => {
@@ -701,17 +787,6 @@ describe('FileCapture', () => {
   });
 
   describe('failures', () => {
-    it('throws when the workspace is not a Git repository', () => {
-      const notARepo = fs.mkdtempSync(path.join(os.tmpdir(), 'ariadne-not-a-repo-'));
-      try {
-        expect(() =>
-          captureTaskFiles(store, { taskId, workspace: notARepo, trigger: 'explicit' }),
-        ).toThrow(/git/i);
-      } finally {
-        fs.rmSync(notARepo, { recursive: true, force: true });
-      }
-    });
-
     it('rejects trigger/reference mismatches', () => {
       expect(() =>
         captureTaskFiles(store, { taskId, workspace: repoRoot, trigger: 'git_commit' }),

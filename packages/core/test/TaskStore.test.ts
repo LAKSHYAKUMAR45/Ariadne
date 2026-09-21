@@ -352,8 +352,40 @@ describe('TaskStore', () => {
       store.markTaskFileCaptureSynced(created.id, '2026-09-21T00:00:00.000Z');
       expect(store.getPendingTaskFileCaptures(task.id)).toEqual([]);
       expect(store.getTaskFileCaptures(task.id)[0].syncedAt).toBe('2026-09-21T00:00:00.000Z');
+      expect(store.getTaskFileCaptures(task.id)[0].failedAt).toBeNull();
+      expect(store.getTaskFileCaptures(task.id)[0].failureCode).toBeNull();
       expect(store.getTask(task.id)!.updatedAt).toBe(beforeCapture.updatedAt);
       expect(store.listTasksNeedingPush().map((candidate) => candidate.id)).not.toContain(task.id);
+    });
+
+    it('removes permanently failed captures from the pending upload queue', () => {
+      const task = store.createTask({ title: 'Failed capture task' });
+      const capture = store.createTaskFileCapture({
+        taskId: task.id,
+        trigger: 'explicit',
+        entries: [
+          {
+            path: 'src/index.ts',
+            content: 'invalid capture',
+            unifiedDiff: '+invalid capture',
+            byteLength: 15,
+            contentSha256: 'sha-invalid',
+          },
+        ],
+      });
+
+      store.markTaskFileCaptureFailed(
+        capture.id,
+        'invalid_capture',
+        '2026-09-21T00:00:00.000Z',
+      );
+
+      expect(store.getPendingTaskFileCaptures(task.id)).toEqual([]);
+      expect(store.getTaskFileCaptures(task.id)[0]).toMatchObject({
+        syncedAt: null,
+        failedAt: '2026-09-21T00:00:00.000Z',
+        failureCode: 'invalid_capture',
+      });
     });
 
     it('treats duplicate git-commit and checkpoint capture events as idempotent while keeping explicit captures distinct', () => {

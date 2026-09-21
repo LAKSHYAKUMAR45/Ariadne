@@ -969,6 +969,17 @@ describe('ariadne sync commands', () => {
       }
     }
 
+    function failureCodeFor(captureId: string): string | null {
+      const store = openWorkspaceStore(root);
+      try {
+        const [task] = store.listTasks();
+        const capture = store.getTaskFileCaptures(task.id).find((c) => c.id === captureId);
+        return capture?.failureCode ?? null;
+      } finally {
+        store.close();
+      }
+    }
+
     it('uploads pending captures one per request after sub-entity sync and marks them synced', async () => {
       writeSyncConfig();
       await program.parseAsync(['node', 'ariadne', 'task', 'new', 'Task with captures']);
@@ -1074,6 +1085,35 @@ describe('ariadne sync commands', () => {
         warnSpy.mockRestore();
       }
     });
+
+    it.each(['invalid_capture', 'invalid_request'])(
+      'dead-letters permanent %s rejections instead of uploading them forever',
+      async (errorCode) => {
+      writeSyncConfig();
+      await program.parseAsync(['node', 'ariadne', 'task', 'new', 'Task with captures']);
+      const { captureIds } = seedLinkedTaskWithCaptures(1);
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const failure = Object.assign(new Error('body reflected by hostile server'), {
+        name: 'SyncApiError',
+        status: 400,
+        code: errorCode,
+      });
+      vi.mocked(syncClient.pushFileCapture).mockRejectedValue(failure);
+
+      try {
+        await program.parseAsync(['node', 'ariadne', 'sync', 'push']);
+        await program.parseAsync(['node', 'ariadne', 'sync', 'push']);
+
+        expect(syncClient.pushFileCapture).toHaveBeenCalledTimes(1);
+        expect(syncedAtFor(captureIds[0])).toBeNull();
+        expect(failureCodeFor(captureIds[0])).toBe(errorCode);
+        expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('will not be retried'));
+        expect(loggedLines().join('\n')).not.toContain('body reflected by hostile server');
+      } finally {
+        warnSpy.mockRestore();
+      }
+      },
+    );
 
     it('never writes capture content to the console on success or failure', async () => {
       writeSyncConfig();

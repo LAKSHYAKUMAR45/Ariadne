@@ -143,6 +143,11 @@ export interface TaskHistoryRouterOptions {
   bodyLimit?: string;
 }
 
+interface CaptureAuthorization {
+  teamId: string;
+  taskId: string;
+}
+
 /**
  * Capture upload endpoint (`POST /tasks/:taskId/file-captures`). Uploading
  * requires an active team membership plus access to the referenced team task;
@@ -156,20 +161,32 @@ export function createTaskHistoryRouter(
 ): Router {
   const router = Router();
   const parseCaptureBody = createCaptureBodyParser(options.bodyLimit ?? CAPTURE_REQUEST_BODY_LIMIT);
-
-  router.post(
-    '/tasks/:taskId/file-captures',
-    parseCaptureBody,
-    asyncHandler(async (req: AuthenticatedRequest, res) => {
-      // Authorization first, so a deactivated or cross-team caller never learns
-      // anything from validation detail about a capture they cannot store.
+  const authorizeCaptureUpload = asyncHandler(
+    async (req: AuthenticatedRequest, res, next) => {
       const membership = await requireActiveMembership(pool, req.userId!);
       const taskId = requireUuidParam(req.params.taskId, 'taskId');
       await requireTeamTask(pool, membership.teamId, taskId);
+      res.locals.captureAuthorization = {
+        teamId: membership.teamId,
+        taskId,
+      } satisfies CaptureAuthorization;
+      next();
+    },
+  );
+
+  router.post(
+    '/tasks/:taskId/file-captures',
+    authorizeCaptureUpload,
+    parseCaptureBody,
+    asyncHandler(async (req: AuthenticatedRequest, res) => {
+      const authorization = res.locals.captureAuthorization as CaptureAuthorization | undefined;
+      if (!authorization) {
+        throw new Error('Capture upload authorization context is missing');
+      }
 
       const parsed = uploadCaptureSchema.safeParse(req.body);
       if (!parsed.success) {
-        throw new ApiError(400, 'invalid_request', parsed.error.message);
+        throw new ApiError(400, 'invalid_request', 'Capture upload body is invalid');
       }
       const capture = parsed.data.capture;
 
@@ -194,8 +211,8 @@ export function createTaskHistoryRouter(
 
       const result = await store.storeCapture({
         captureId: capture.captureId,
-        teamId: membership.teamId,
-        taskId,
+        teamId: authorization.teamId,
+        taskId: authorization.taskId,
         trigger: capture.trigger,
         gitCommitSha: capture.gitCommitSha ?? null,
         checkpointId: capture.checkpointId ?? null,

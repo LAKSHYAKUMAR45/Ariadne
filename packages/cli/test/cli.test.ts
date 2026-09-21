@@ -174,6 +174,19 @@ describe('ariadne capture + checkpoint commands', () => {
     expect(loggedLines()).toContainEqual(expect.stringContaining(`Capture ${capture.id}: 1 file(s),`));
   });
 
+  it('creates checkpoints without capture errors in a non-Git workspace', async () => {
+    const taskId = createCurrentTask('Non-Git checkpoint task');
+    fs.rmSync(path.join(root, '.git'), { recursive: true, force: true });
+
+    await program.parseAsync(['node', 'ariadne', 'checkpoint', 'Saved without Git', '--level', 'micro']);
+
+    const store = openWorkspaceStore(root);
+    expect(store.listCheckpoints(taskId)).toHaveLength(1);
+    expect(store.getTaskFileCaptures(taskId)).toEqual([]);
+    expect(store.listErrors(taskId)).toEqual([]);
+    store.close();
+  });
+
   it('does not capture when checkpoint creation fails', async () => {
     const taskId = createCurrentTask('Failing checkpoint task');
     vi.spyOn(TaskStore.prototype, 'createCheckpoint').mockImplementation(() => {

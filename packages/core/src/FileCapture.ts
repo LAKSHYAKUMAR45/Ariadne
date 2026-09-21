@@ -79,17 +79,22 @@ const GIT_REGULAR_BLOB_MODES = new Set(['100644', '100755']);
 
 /** Upper bound on `git` stderr echoed into an error message. */
 const GIT_DIAGNOSTIC_MAX_CHARS = 200;
+const MAX_CAPTURE_PATH_LENGTH = 1024;
+const DEFAULT_MAX_CAPTURE_ENTRIES = 2000;
 
 export interface CaptureLimits {
   /** Inclusive maximum UTF-8 byte length of a single captured file. */
   maxFileBytes: number;
   /** Inclusive maximum total UTF-8 byte length of one capture. */
   maxCaptureBytes: number;
+  /** Inclusive maximum number of files in one capture. */
+  maxEntries?: number;
 }
 
 export const DEFAULT_CAPTURE_LIMITS: CaptureLimits = {
   maxFileBytes: 1024 * 1024,
   maxCaptureBytes: 10 * 1024 * 1024,
+  maxEntries: DEFAULT_MAX_CAPTURE_ENTRIES,
 };
 
 export type CaptureSkipReason =
@@ -101,8 +106,12 @@ export type CaptureSkipReason =
   | 'outside_workspace'
   | 'always_excluded'
   | 'ariadneignore'
+  | 'path_too_long'
   | 'file_too_large'
+  | 'diff_too_large'
   | 'capture_limit_exceeded'
+  | 'diff_capture_limit_exceeded'
+  | 'entry_limit_exceeded'
   | 'deleted'
   | 'unreadable';
 
@@ -495,10 +504,10 @@ function validateRequest(request: CaptureRequest): void {
   }
 }
 
-function resolveWorkspaceRoot(workspace: string): string {
+function resolveWorkspaceRoot(workspace: string): string | null {
   const toplevel = gitTextOrNull(workspace, ['rev-parse', '--show-toplevel']);
   if (!toplevel || toplevel.trim().length === 0) {
-    throw new Error(`Cannot capture task files: "${workspace}" is not a git repository.`);
+    return null;
   }
   return fs.realpathSync(toplevel.trim());
 }
@@ -530,6 +539,7 @@ interface CaptureContext {
 function evaluateCandidatePath(candidate: Candidate, ctx: CaptureContext): CaptureSkipReason | null {
   const relPath = candidate.relPath;
 
+  if (relPath.length > MAX_CAPTURE_PATH_LENGTH) return 'path_too_long';
   if (!isLexicallySafeRepoPath(relPath)) return 'outside_workspace';
   if (isAlwaysExcludedCapturePath(relPath)) return 'always_excluded';
   if (ctx.ignorePatterns.some((pattern) => matchesIgnorePattern(pattern, relPath))) {
@@ -617,6 +627,9 @@ export function captureTaskFiles(
   validateRequest(request);
 
   const workspaceRoot = resolveWorkspaceRoot(request.workspace);
+  if (workspaceRoot === null) {
+    return { capture: null, skipped: [] };
+  }
   const ctx = buildCaptureContext(request, workspaceRoot);
   const scan = ctx.isCommitCapture
     ? scanCommitCandidates(workspaceRoot, ctx.commitSha!)
@@ -625,6 +638,8 @@ export function captureTaskFiles(
   const skipped: CaptureSkip[] = [...scan.skipped];
   const entries: NewTaskFileCaptureEntry[] = [];
   let totalBytes = 0;
+  let totalDiffBytes = 0;
+  const maxEntries = limits.maxEntries ?? DEFAULT_MAX_CAPTURE_ENTRIES;
 
   for (const candidate of [...scan.candidates].sort((a, b) => a.relPath.localeCompare(b.relPath))) {
     const relPath = candidate.relPath;
@@ -646,13 +661,29 @@ export function captureTaskFiles(
       skipped.push({ path: relPath, reason: 'file_too_large' });
       continue;
     }
+
+    const entry = buildEntry(candidate, read.content, ctx);
+    const diffByteLength = Buffer.byteLength(entry.unifiedDiff, 'utf8');
+    if (diffByteLength > limits.maxFileBytes) {
+      skipped.push({ path: relPath, reason: 'diff_too_large' });
+      continue;
+    }
     if (totalBytes + byteLength > limits.maxCaptureBytes) {
       skipped.push({ path: relPath, reason: 'capture_limit_exceeded' });
       continue;
     }
+    if (totalDiffBytes + diffByteLength > limits.maxCaptureBytes) {
+      skipped.push({ path: relPath, reason: 'diff_capture_limit_exceeded' });
+      continue;
+    }
+    if (entries.length >= maxEntries) {
+      skipped.push({ path: relPath, reason: 'entry_limit_exceeded' });
+      continue;
+    }
 
     totalBytes += byteLength;
-    entries.push(buildEntry(candidate, read.content, ctx));
+    totalDiffBytes += diffByteLength;
+    entries.push(entry);
   }
 
   if (entries.length === 0) {
