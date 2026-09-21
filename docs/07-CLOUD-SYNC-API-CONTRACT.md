@@ -44,14 +44,39 @@ CREATE TABLE users (
   created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- Singleton-team authorization: one team per server, with the oldest
+-- existing user (by created_at, id) backfilled as the initial admin and all
+-- other existing users backfilled as active members. The `singleton_key`
+-- column is the invariant: only the `default` row is permitted.
+CREATE TABLE teams (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  singleton_key TEXT NOT NULL UNIQUE CHECK (singleton_key = 'default'),
+  name TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE team_memberships (
+  team_id UUID NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+  user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  role TEXT NOT NULL CHECK (role IN ('admin', 'member')),
+  active BOOLEAN NOT NULL DEFAULT true,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (team_id, user_id)
+);
+CREATE UNIQUE INDEX idx_team_memberships_single_admin
+  ON team_memberships(team_id)
+  WHERE role = 'admin';
+CREATE INDEX idx_team_memberships_user_active ON team_memberships(user_id, active);
+
 -- Tasks: mirrors packages/core/src/schema.ts's `tasks` table, plus
--- server-only bookkeeping (owner, updated_at for conflict/sync-window
--- queries). No FK to a "team" — per design doc §6, access is flat: any
--- authenticated user can read/write any task once it's on the server.
+-- server-only bookkeeping (owner, team, updated_at for conflict/sync-window
+-- queries). Every task belongs to the singleton team; `owner_user_id`
+-- records who created/pushed it, not who can access it.
 CREATE TABLE tasks (
   id             UUID PRIMARY KEY DEFAULT gen_random_uuid(), -- becomes the local task's `remote_id`
   local_id       TEXT NOT NULL,      -- the originating workspace's local task id (ULID), for traceability
   owner_user_id  UUID NOT NULL REFERENCES users(id),
+  team_id        UUID NOT NULL REFERENCES teams(id),
   title          TEXT NOT NULL,
   goal           TEXT,
   status         TEXT NOT NULL DEFAULT 'active', -- active|paused|done|archived
@@ -61,6 +86,7 @@ CREATE TABLE tasks (
   updated_at     TIMESTAMPTZ NOT NULL             -- bumped on every field change; drives pull's "changed since" query
 );
 CREATE INDEX idx_tasks_updated_at ON tasks(updated_at);
+CREATE INDEX idx_tasks_team_updated ON tasks(team_id, updated_at);
 
 -- Checkpoints: mirrors packages/core/src/schema.ts's `checkpoints` table.
 CREATE TABLE checkpoints (
@@ -167,22 +193,25 @@ Notes:
   propagation was considered and explicitly deferred to keep sync
   additive-only/conflict-free; if this becomes a real need later, revisit
   as its own design doc rather than bolting deletes on ad hoc.
-- **No team/ACL table** — per design doc §6's flat-access decision, any row
-  is readable/writable by any authenticated user. `owner_user_id` on `tasks`
-  is bookkeeping (who created it), not an access-control gate.
-- `local_id` + `owner_user_id`/`task_id` let the server stay a plain mirror
-  of client data without needing to understand workspace-local ULIDs as
-  primary keys — the server mints its own UUIDs, which the client then
-  stores back into its local `remote_id` column (§4 below).
+- **Singleton-team authorization** — this release keeps one team per
+  server, not per-user ACLs or flat access. Protected queries must scope
+  through `tasks.team_id` / `team_memberships`; `owner_user_id` on `tasks`
+  is provenance only, not an authorization boundary.
+- `local_id` + `owner_user_id`/`task_id`/`team_id` let the server stay a
+  plain mirror of client data without needing to understand workspace-local
+  ULIDs as primary keys — the server mints its own UUIDs, which the client
+  then stores back into its local `remote_id` column (§4 below).
 
 ### 2.1 Workspace attribution (`workspace_label`)
 
 `owner_user_id` only identifies *who* pushed a task, not *which
 repo/workspace/machine* it came from — two tasks pushed by the same user
-from two different repos are otherwise indistinguishable server-side. Every
-push (`POST /api/v1/sync/tasks`) therefore includes a client-computed
-`workspaceLabel` string, stored verbatim in `tasks.workspace_label` and
-returned by both pull endpoints (§4.2, §4.4):
+from two different repos are otherwise indistinguishable server-side.
+`team_id` identifies which singleton team the task belongs to; every
+protected task query must scope through that column and verify the caller's
+membership. Every push (`POST /api/v1/sync/tasks`) therefore includes a
+client-computed `workspaceLabel` string, stored verbatim in
+`tasks.workspace_label` and returned by both pull endpoints (§4.2, §4.4):
 
 - Computed as `${hostname}:${repoShorthand}` (e.g. `laptop1:org/atom`),
   where `repoShorthand` is derived from `git remote get-url origin` when
