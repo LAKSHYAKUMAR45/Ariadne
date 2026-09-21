@@ -9,20 +9,37 @@ import {
 } from './executor.js';
 
 export const MAX_OPERATOR_REQUEST_BODY_BYTES = 8 * 1024;
+export const DEFAULT_TERMINAL_CACHE_TTL_MS = 15 * 60 * 1000;
+export const DEFAULT_TERMINAL_CACHE_MAX_ENTRIES = 512;
+export const DEFAULT_HEADERS_TIMEOUT_MS = 10 * 1000;
+export const DEFAULT_REQUEST_TIMEOUT_MS = 20 * 1000;
+export const SOCKET_CREATION_UMASK = 0o177;
+
 const OPERATOR_ROUTE_PATH = '/v1/operations';
 
 interface JsonErrorResponse {
   error: string;
 }
 
+export type OperatorExecuteFn = (
+  request: OperatorRequest,
+  reporter: OperatorEventSink,
+) => Promise<void>;
+
 export interface CreateOperatorServerOptions {
   socketPath: string;
-  executeOperation?: OperatorExecutor['execute'];
+  executeOperation?: OperatorExecuteFn;
   reporter?: OperatorEventSink;
   requestBodyLimitBytes?: number;
+  terminalCacheTtlMs?: number;
+  terminalCacheMaxEntries?: number;
+  headersTimeoutMs?: number;
+  requestTimeoutMs?: number;
 }
 
 export interface OperatorServer {
+  readonly headersTimeoutMs: number;
+  readonly requestTimeoutMs: number;
   start(): Promise<void>;
   close(): Promise<void>;
 }
@@ -34,14 +51,97 @@ class OperatorServerConfigError extends Error {
   }
 }
 
+interface TerminalCacheEntry {
+  accepted: OperatorAccepted;
+  expiresAt: number;
+}
+
+/** Bounded TTL + LRU cache of terminal acceptances, keyed by operation id. */
+class TerminalAcceptanceCache {
+  private readonly entries = new Map<string, TerminalCacheEntry>();
+
+  constructor(
+    private readonly ttlMs: number,
+    private readonly maxEntries: number,
+    private readonly now: () => number = Date.now,
+  ) {}
+
+  get(operationId: string): OperatorAccepted | undefined {
+    const entry = this.entries.get(operationId);
+    if (!entry) {
+      return undefined;
+    }
+    if (entry.expiresAt <= this.now()) {
+      this.entries.delete(operationId);
+      return undefined;
+    }
+
+    this.entries.delete(operationId);
+    this.entries.set(operationId, entry);
+    return entry.accepted;
+  }
+
+  set(operationId: string, accepted: OperatorAccepted): void {
+    this.entries.delete(operationId);
+    this.entries.set(operationId, { accepted, expiresAt: this.now() + this.ttlMs });
+    this.prune();
+  }
+
+  private prune(): void {
+    const currentTime = this.now();
+    for (const [key, entry] of this.entries) {
+      if (entry.expiresAt <= currentTime) {
+        this.entries.delete(key);
+      }
+    }
+
+    while (this.entries.size > this.maxEntries) {
+      const oldestKey = this.entries.keys().next().value;
+      if (oldestKey === undefined) {
+        return;
+      }
+      this.entries.delete(oldestKey);
+    }
+  }
+}
+
 function writeJson(
   response: ServerResponse,
   statusCode: number,
   payload: OperatorAccepted | JsonErrorResponse,
 ): void {
+  if (response.writableEnded || response.headersSent) {
+    return;
+  }
   response.statusCode = statusCode;
   response.setHeader('content-type', 'application/json; charset=utf-8');
   response.end(JSON.stringify(payload));
+}
+
+/**
+ * Terminates the inbound request immediately instead of draining an oversized
+ * or slow body, while still flushing the JSON error response.
+ */
+function rejectRequestBody(
+  request: IncomingMessage,
+  response: ServerResponse,
+  statusCode: number,
+  payload: JsonErrorResponse,
+): void {
+  request.pause();
+  request.removeAllListeners('data');
+
+  if (response.writableEnded || response.headersSent) {
+    request.destroy();
+    return;
+  }
+
+  response.statusCode = statusCode;
+  response.setHeader('content-type', 'application/json; charset=utf-8');
+  response.setHeader('connection', 'close');
+  response.end(JSON.stringify(payload), () => {
+    request.destroy();
+  });
 }
 
 async function safeRemoveOwnedSocket(socketPath: string): Promise<void> {
@@ -76,32 +176,72 @@ function isNodeError(error: unknown): error is NodeJS.ErrnoException {
   return error instanceof Error && 'code' in error;
 }
 
+/**
+ * Runs `operation` with a restrictive umask so files/sockets are never created
+ * with a permissive mode, restoring the previous umask in all outcomes.
+ */
+export async function withRestrictiveUmask<T>(operation: () => Promise<T>): Promise<T> {
+  if (typeof process.umask !== 'function') {
+    return await operation();
+  }
+
+  const previousUmask = process.umask(SOCKET_CREATION_UMASK);
+  try {
+    return await operation();
+  } finally {
+    process.umask(previousUmask);
+  }
+}
+
+type BodyOutcome = { kind: 'body'; value: string } | { kind: 'rejected' };
+
 function readJsonBody(
   request: IncomingMessage,
+  response: ServerResponse,
   maxBytes: number,
-): Promise<string | JsonErrorResponse> {
+): Promise<BodyOutcome> {
   return new Promise((resolve, reject) => {
+    const declaredLength = Number(request.headers['content-length']);
+    if (Number.isFinite(declaredLength) && declaredLength > maxBytes) {
+      rejectRequestBody(request, response, 413, { error: 'request_too_large' });
+      resolve({ kind: 'rejected' });
+      return;
+    }
+
     const chunks: Buffer[] = [];
     let totalBytes = 0;
-    let exceeded = false;
+    let settled = false;
 
-    request.on('data', (chunk) => {
+    const settle = (outcome: BodyOutcome): void => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      resolve(outcome);
+    };
+
+    request.on('data', (chunk: Buffer | string) => {
       const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
       totalBytes += buffer.length;
       if (totalBytes > maxBytes) {
-        exceeded = true;
+        rejectRequestBody(request, response, 413, { error: 'request_too_large' });
+        settle({ kind: 'rejected' });
         return;
       }
       chunks.push(buffer);
     });
-    request.on('error', reject);
-    request.on('end', () => {
-      if (exceeded) {
-        resolve({ error: 'request_too_large' });
+    request.on('aborted', () => {
+      settle({ kind: 'rejected' });
+    });
+    request.on('error', (error: Error) => {
+      if (settled) {
         return;
       }
-
-      resolve(Buffer.concat(chunks).toString('utf8'));
+      settled = true;
+      reject(error);
+    });
+    request.on('end', () => {
+      settle({ kind: 'body', value: Buffer.concat(chunks).toString('utf8') });
     });
   });
 }
@@ -119,13 +259,29 @@ export function getOperatorSocketPath(env: NodeJS.ProcessEnv = process.env): str
 
 export function createOperatorServer(options: CreateOperatorServerOptions): OperatorServer {
   const requestBodyLimitBytes = options.requestBodyLimitBytes ?? MAX_OPERATOR_REQUEST_BODY_BYTES;
-  const defaultExecutor = createOperatorExecutor({ reporter: options.reporter });
-  const executeOperation = options.executeOperation ?? defaultExecutor.execute.bind(defaultExecutor);
+  const headersTimeoutMs = options.headersTimeoutMs ?? DEFAULT_HEADERS_TIMEOUT_MS;
+  const requestTimeoutMs = options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+  const reporter: OperatorEventSink = options.reporter ?? {};
+  const defaultExecutor: OperatorExecutor = createOperatorExecutor({ reporter: options.reporter });
+  const executeOperation: OperatorExecuteFn =
+    options.executeOperation ??
+    ((request, eventSink) => defaultExecutor.execute(request, eventSink));
 
-  const acceptedById = new Map<string, OperatorAccepted>();
+  const terminalCache = new TerminalAcceptanceCache(
+    options.terminalCacheTtlMs ?? DEFAULT_TERMINAL_CACHE_TTL_MS,
+    options.terminalCacheMaxEntries ?? DEFAULT_TERMINAL_CACHE_MAX_ENTRIES,
+  );
+  const activeById = new Map<string, OperatorAccepted>();
   let activeOperationId: string | null = null;
 
-  const server = http.createServer(async (request, response) => {
+  const connectionsCheckingIntervalMs = Math.max(
+    250,
+    Math.floor(Math.min(headersTimeoutMs, requestTimeoutMs) / 2),
+  );
+
+  const server = http.createServer(
+    { connectionsCheckingInterval: connectionsCheckingIntervalMs },
+    async (request, response) => {
     if ((request.url ?? '') !== OPERATOR_ROUTE_PATH) {
       writeJson(response, 404, { error: 'not_found' });
       return;
@@ -137,25 +293,26 @@ export function createOperatorServer(options: CreateOperatorServerOptions): Oper
     }
 
     try {
-      const rawBody = await readJsonBody(request, requestBodyLimitBytes);
-      if (typeof rawBody !== 'string') {
-        writeJson(response, 413, rawBody);
+      const bodyOutcome = await readJsonBody(request, response, requestBodyLimitBytes);
+      if (bodyOutcome.kind === 'rejected') {
         return;
       }
 
       let parsedBody: unknown;
       try {
-        parsedBody = JSON.parse(rawBody);
+        parsedBody = JSON.parse(bodyOutcome.value);
       } catch {
         writeJson(response, 400, { error: 'invalid_json' });
         return;
       }
 
       const operatorRequest = parseOperatorRequest(parsedBody);
-      const accepted = acceptedById.get(operatorRequest.operationId);
+      const previousAcceptance =
+        activeById.get(operatorRequest.operationId) ??
+        terminalCache.get(operatorRequest.operationId);
 
-      if (accepted) {
-        writeJson(response, 202, accepted);
+      if (previousAcceptance) {
+        writeJson(response, 202, previousAcceptance);
         return;
       }
 
@@ -170,20 +327,16 @@ export function createOperatorServer(options: CreateOperatorServerOptions): Oper
       };
 
       activeOperationId = operatorRequest.operationId;
-      acceptedById.set(operatorRequest.operationId, acceptedResponse);
+      activeById.set(operatorRequest.operationId, acceptedResponse);
       writeJson(response, 202, acceptedResponse);
 
-      void runAcceptedOperation(
-        operatorRequest,
-        executeOperation,
-        acceptedById,
-        () => activeOperationId,
-        (operationId) => {
-          if (activeOperationId === operationId) {
-            activeOperationId = null;
-          }
-        },
-      );
+      void runAcceptedOperation(operatorRequest, executeOperation, reporter, () => {
+        activeById.delete(operatorRequest.operationId);
+        terminalCache.set(operatorRequest.operationId, acceptedResponse);
+        if (activeOperationId === operatorRequest.operationId) {
+          activeOperationId = null;
+        }
+      });
     } catch (error: unknown) {
       if (error instanceof Error && error.name === 'ZodError') {
         writeJson(response, 400, { error: 'invalid_request' });
@@ -191,17 +344,40 @@ export function createOperatorServer(options: CreateOperatorServerOptions): Oper
       }
       writeJson(response, 500, { error: 'internal_error' });
     }
+  },
+  );
+
+  server.headersTimeout = headersTimeoutMs;
+  server.requestTimeout = requestTimeoutMs;
+  server.on('clientError', (error: NodeJS.ErrnoException, socket) => {
+    const statusLine =
+      error.code === 'HPE_HEADERS_TIMEOUT' || error.code === 'ERR_HTTP_REQUEST_TIMEOUT'
+        ? 'HTTP/1.1 408 Request Timeout'
+        : 'HTTP/1.1 400 Bad Request';
+
+    if (!socket.writable) {
+      socket.destroy();
+      return;
+    }
+
+    socket.end(`${statusLine}\r\nConnection: close\r\n\r\n`, () => {
+      socket.destroy();
+    });
   });
 
   return {
+    headersTimeoutMs,
+    requestTimeoutMs,
     async start(): Promise<void> {
       await safeRemoveOwnedSocket(options.socketPath);
 
-      await new Promise<void>((resolve, reject) => {
-        server.once('error', reject);
-        server.listen(options.socketPath, () => {
-          server.off('error', reject);
-          resolve();
+      await withRestrictiveUmask(async () => {
+        await new Promise<void>((resolve, reject) => {
+          server.once('error', reject);
+          server.listen(options.socketPath, () => {
+            server.off('error', reject);
+            resolve();
+          });
         });
       });
 
@@ -225,18 +401,16 @@ export function createOperatorServer(options: CreateOperatorServerOptions): Oper
 
 async function runAcceptedOperation(
   request: OperatorRequest,
-  executeOperation: OperatorExecutor['execute'],
-  acceptedById: Map<string, OperatorAccepted>,
-  getActiveOperationId: () => string | null,
-  clearActiveOperationId: (operationId: string) => void,
+  executeOperation: OperatorExecuteFn,
+  reporter: OperatorEventSink,
+  markTerminal: () => void,
 ): Promise<void> {
   try {
-    await executeOperation(request);
+    await executeOperation(request, reporter);
   } catch {
+    // Terminal failures are reported through the event sink; the operation id
+    // still becomes terminal so retries with the same id are never re-executed.
   } finally {
-    if (getActiveOperationId() === request.operationId) {
-      clearActiveOperationId(request.operationId);
-    }
-    acceptedById.delete(request.operationId);
+    markTerminal();
   }
 }

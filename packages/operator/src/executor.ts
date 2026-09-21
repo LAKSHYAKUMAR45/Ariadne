@@ -1,13 +1,10 @@
-import {
-  execFile,
-  type ExecFileException,
-  type ExecFileOptionsWithStringEncoding,
-} from 'node:child_process';
+import { spawn } from 'node:child_process';
 import type { Readable } from 'node:stream';
 import type { OperatorRequest } from './protocol.js';
 
 export const DEFAULT_EXEC_TIMEOUT_MS = 15 * 60 * 1000;
-export const DEFAULT_EXEC_MAX_BUFFER_BYTES = 256 * 1024;
+export const DEFAULT_KILL_GRACE_MS = 10 * 1000;
+export const DEFAULT_OUTPUT_TAIL_BYTES = 256 * 1024;
 export const DEFAULT_EXEC_ENV = Object.freeze({
   PATH: '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
   LANG: 'C.UTF-8',
@@ -38,6 +35,7 @@ export interface OperatorResultEvent {
   output: string;
   exitCode: number | null;
   signal: NodeJS.Signals | null;
+  truncated: boolean;
 }
 
 export interface OperatorEventSink {
@@ -46,33 +44,92 @@ export interface OperatorEventSink {
 }
 
 export interface OperatorExecutor {
-  execute(request: OperatorRequest): Promise<void>;
+  execute(request: OperatorRequest, reporter?: OperatorEventSink): Promise<void>;
 }
 
-type ExecFileCallback = (
-  error: ExecFileException | null,
-  stdout: string,
-  stderr: string,
-) => void;
+export interface OperatorSpawnOptions {
+  env: NodeJS.ProcessEnv;
+  shell: false;
+  windowsHide: true;
+  stdio: ['ignore', 'pipe', 'pipe'];
+}
 
-type ExecFileReturn = {
-  stdout?: Readable | null;
-  stderr?: Readable | null;
-};
+export interface OperatorSpawnedProcess {
+  stdout: Readable | null;
+  stderr: Readable | null;
+  kill(signal?: NodeJS.Signals): boolean;
+  on(event: 'close', listener: (code: number | null, signal: NodeJS.Signals | null) => void): unknown;
+  on(event: 'error', listener: (error: Error) => void): unknown;
+}
 
-export type ExecFileImplementation = (
+export type SpawnImplementation = (
   file: string,
   args: readonly string[],
-  options: ExecFileOptionsWithStringEncoding,
-  callback: ExecFileCallback,
-) => ExecFileReturn;
+  options: OperatorSpawnOptions,
+) => OperatorSpawnedProcess;
 
 export interface CreateOperatorExecutorOptions {
-  execFileImpl?: ExecFileImplementation;
+  spawnImpl?: SpawnImplementation;
   reporter?: OperatorEventSink;
   timeoutMs?: number;
-  maxBufferBytes?: number;
+  killGraceMs?: number;
+  outputTailBytes?: number;
   env?: NodeJS.ProcessEnv;
+}
+
+class OperatorExecutionError extends Error {
+  readonly result: OperatorResultEvent;
+
+  constructor(message: string, result: OperatorResultEvent) {
+    super(message);
+    this.name = 'OperatorExecutionError';
+    this.result = result;
+  }
+}
+
+/**
+ * Keeps only the trailing bytes of a stream so chatty privileged commands are
+ * never aborted for exceeding a buffer ceiling.
+ */
+class BoundedOutputTail {
+  private readonly chunks: Buffer[] = [];
+  private bytes = 0;
+  private truncatedOutput = false;
+
+  constructor(private readonly maxBytes: number) {}
+
+  append(chunk: Buffer): void {
+    if (this.maxBytes <= 0) {
+      this.truncatedOutput = true;
+      return;
+    }
+
+    this.chunks.push(chunk);
+    this.bytes += chunk.length;
+
+    while (this.bytes > this.maxBytes && this.chunks.length > 0) {
+      const oldest = this.chunks[0];
+      const overflow = this.bytes - this.maxBytes;
+      this.truncatedOutput = true;
+
+      if (oldest.length <= overflow) {
+        this.chunks.shift();
+        this.bytes -= oldest.length;
+        continue;
+      }
+
+      this.chunks[0] = oldest.subarray(overflow);
+      this.bytes -= overflow;
+    }
+  }
+
+  get truncated(): boolean {
+    return this.truncatedOutput;
+  }
+
+  toString(): string {
+    return Buffer.concat(this.chunks, this.bytes).toString('utf8');
+  }
 }
 
 function appendArgument(command: readonly string[], argument?: string): [string, string[]] {
@@ -95,111 +152,146 @@ function resolveCommand(request: OperatorRequest): [string, string[]] {
   }
 }
 
-async function emitProgress(
-  reporter: OperatorEventSink | undefined,
-  operationId: string,
-  stream: 'stdout' | 'stderr',
-  chunk: Buffer | string,
-): Promise<void> {
-  if (!reporter?.onProgress) {
-    return;
-  }
-
-  await reporter.onProgress({
-    operationId,
-    stream,
-    chunk: typeof chunk === 'string' ? chunk : chunk.toString('utf8'),
-  });
-}
-
-function attachProgressListeners(
-  child: ExecFileReturn,
-  request: OperatorRequest,
-  reporter: OperatorEventSink | undefined,
-): void {
-  child.stdout?.on('data', (chunk) => {
-    void emitProgress(reporter, request.operationId, 'stdout', chunk);
-  });
-  child.stderr?.on('data', (chunk) => {
-    void emitProgress(reporter, request.operationId, 'stderr', chunk);
-  });
-}
-
-function createFailure(error: ExecFileException, output: string): OperatorResultEvent {
-  return {
-    operationId: '',
-    success: false,
-    output,
-    exitCode: typeof error.code === 'number' ? error.code : null,
-    signal: error.signal ?? null,
-  };
+function defaultSpawn(
+  file: string,
+  args: readonly string[],
+  options: OperatorSpawnOptions,
+): OperatorSpawnedProcess {
+  return spawn(file, [...args], options);
 }
 
 export function createOperatorExecutor(
   options: CreateOperatorExecutorOptions = {},
 ): OperatorExecutor {
-  const execFileImpl = options.execFileImpl ?? execFile;
-  const reporter = options.reporter;
+  const spawnImpl = options.spawnImpl ?? defaultSpawn;
+  const defaultReporter = options.reporter;
   const timeoutMs = options.timeoutMs ?? DEFAULT_EXEC_TIMEOUT_MS;
-  const maxBufferBytes = options.maxBufferBytes ?? DEFAULT_EXEC_MAX_BUFFER_BYTES;
+  const killGraceMs = options.killGraceMs ?? DEFAULT_KILL_GRACE_MS;
+  const outputTailBytes = options.outputTailBytes ?? DEFAULT_OUTPUT_TAIL_BYTES;
   const env = options.env ?? DEFAULT_EXEC_ENV;
 
   return {
-    async execute(request: OperatorRequest): Promise<void> {
+    async execute(request: OperatorRequest, reporter?: OperatorEventSink): Promise<void> {
+      const sink = reporter ?? defaultReporter;
       const [file, args] = resolveCommand(request);
+      const tail = new BoundedOutputTail(outputTailBytes);
 
-      const result = await new Promise<OperatorResultEvent>((resolve, reject) => {
-        const child = execFileImpl(
-          file,
-          args,
-          {
-            encoding: 'utf8',
-            env,
-            maxBuffer: maxBufferBytes,
-            shell: false,
-            timeout: timeoutMs,
-            windowsHide: true,
-          },
-          (error, stdout, stderr) => {
-            const output = `${stdout}${stderr}`;
-            if (error) {
-              const failure = createFailure(error, output);
-              failure.operationId = request.operationId;
-              reject(Object.assign(error, { operatorResult: failure }));
-              return;
-            }
-
-            resolve({
-              operationId: request.operationId,
-              success: true,
-              output,
-              exitCode: 0,
-              signal: null,
-            });
-          },
-        );
-        attachProgressListeners(child, request, reporter);
-      }).catch(async (error: unknown) => {
-        const operatorResult =
-          error instanceof Error && 'operatorResult' in error
-            ? (error.operatorResult as OperatorResultEvent)
-            : {
-                operationId: request.operationId,
-                success: false,
-                output: '',
-                exitCode: null,
-                signal: null,
-              };
-
-        if (reporter?.onResult) {
-          await reporter.onResult(operatorResult);
+      let pendingProgress: Promise<void> = Promise.resolve();
+      const forwardChunk = (stream: 'stdout' | 'stderr', chunk: Buffer): void => {
+        tail.append(chunk);
+        if (!sink?.onProgress) {
+          return;
         }
-        throw error;
+
+        const text = chunk.toString('utf8');
+        pendingProgress = pendingProgress
+          .then(async () => {
+            await sink.onProgress?.({ operationId: request.operationId, stream, chunk: text });
+          })
+          .catch(() => undefined);
+      };
+
+      const outcome = await new Promise<{
+        exitCode: number | null;
+        signal: NodeJS.Signals | null;
+        spawnError: Error | null;
+        timedOut: boolean;
+      }>((resolve) => {
+        const child = spawnImpl(file, args, {
+          env,
+          shell: false,
+          windowsHide: true,
+          stdio: ['ignore', 'pipe', 'pipe'],
+        });
+
+        let settled = false;
+        let timedOut = false;
+        let killTimer: NodeJS.Timeout | undefined;
+
+        const timeoutTimer = setTimeout(() => {
+          timedOut = true;
+          child.kill('SIGTERM');
+          killTimer = setTimeout(() => {
+            child.kill('SIGKILL');
+          }, killGraceMs);
+          killTimer.unref?.();
+        }, timeoutMs);
+        timeoutTimer.unref?.();
+
+        const settle = (outcomeValue: {
+          exitCode: number | null;
+          signal: NodeJS.Signals | null;
+          spawnError: Error | null;
+        }): void => {
+          if (settled) {
+            return;
+          }
+          settled = true;
+          clearTimeout(timeoutTimer);
+          if (killTimer) {
+            clearTimeout(killTimer);
+          }
+          resolve({ ...outcomeValue, timedOut });
+        };
+
+        child.stdout?.on('data', (chunk: Buffer | string) => {
+          forwardChunk('stdout', Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+        });
+        child.stderr?.on('data', (chunk: Buffer | string) => {
+          forwardChunk('stderr', Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+        });
+        child.stdout?.on('error', () => undefined);
+        child.stderr?.on('error', () => undefined);
+
+        child.on('error', (error: Error) => {
+          settle({ exitCode: null, signal: null, spawnError: error });
+        });
+        child.on('close', (code: number | null, signal: NodeJS.Signals | null) => {
+          settle({ exitCode: code, signal, spawnError: null });
+        });
       });
 
-      if (reporter?.onResult) {
-        await reporter.onResult(result);
+      await pendingProgress;
+
+      const success =
+        outcome.spawnError === null && !outcome.timedOut && outcome.exitCode === 0;
+      const result: OperatorResultEvent = {
+        operationId: request.operationId,
+        success,
+        output: tail.toString(),
+        exitCode: outcome.exitCode,
+        signal: outcome.signal,
+        truncated: tail.truncated,
+      };
+
+      if (sink?.onResult) {
+        await sink.onResult(result);
       }
+
+      if (success) {
+        return;
+      }
+
+      if (outcome.timedOut) {
+        throw new OperatorExecutionError(
+          `Operator command timed out after ${timeoutMs}ms: ${file}`,
+          result,
+        );
+      }
+
+      if (outcome.spawnError) {
+        throw new OperatorExecutionError(
+          `Operator command failed to start: ${outcome.spawnError.message}`,
+          result,
+        );
+      }
+
+      throw new OperatorExecutionError(
+        `Operator command exited with code ${String(outcome.exitCode)}: ${file}`,
+        result,
+      );
     },
   };
 }
+
+export { OperatorExecutionError };

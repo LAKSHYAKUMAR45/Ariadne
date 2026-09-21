@@ -4,7 +4,12 @@ import os from 'node:os';
 import path from 'node:path';
 import { access, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { afterEach, describe, expect, it } from 'vitest';
-import { createOperatorServer, getOperatorSocketPath, MAX_OPERATOR_REQUEST_BODY_BYTES } from '../src/server.js';
+import {
+  createOperatorServer,
+  getOperatorSocketPath,
+  withRestrictiveUmask,
+  MAX_OPERATOR_REQUEST_BODY_BYTES,
+} from '../src/server.js';
 
 interface HttpResponse {
   statusCode: number;
@@ -278,6 +283,292 @@ describe('createOperatorServer', () => {
       operationId: 'op-4',
       success: true,
     });
+
+    await server.close();
+  });
+
+  it('never re-executes a completed operation id while it is cached as terminal', async () => {
+    const directory = await createTempDirectory();
+    const socketPath = path.join(directory, 'operator.sock');
+    const executed: string[] = [];
+
+    const server = createOperatorServer({
+      socketPath,
+      executeOperation: async (operatorRequest) => {
+        executed.push(operatorRequest.operationId);
+      },
+    });
+
+    await server.start();
+
+    const body = JSON.stringify({ operationId: 'op-terminal-1', type: 'backup_create' });
+    expect((await request(socketPath, { body })).statusCode).toBe(202);
+
+    for (let attempt = 0; attempt < 50 && executed.length === 0; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    expect(executed).toEqual(['op-terminal-1']);
+
+    const replay = await request(socketPath, { body });
+    expect(replay.statusCode).toBe(202);
+    expect(JSON.parse(replay.body)).toEqual({ operationId: 'op-terminal-1', accepted: true });
+
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(executed).toEqual(['op-terminal-1']);
+
+    const nextOperation = await request(socketPath, {
+      body: JSON.stringify({ operationId: 'op-terminal-2', type: 'backup_create' }),
+    });
+    expect(nextOperation.statusCode).toBe(202);
+
+    for (let attempt = 0; attempt < 50 && executed.length < 2; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    expect(executed).toEqual(['op-terminal-1', 'op-terminal-2']);
+
+    await server.close();
+  });
+
+  it('bounds the terminal cache by entry count and ttl', async () => {
+    const directory = await createTempDirectory();
+    const socketPath = path.join(directory, 'operator.sock');
+    const executed: string[] = [];
+
+    const server = createOperatorServer({
+      socketPath,
+      terminalCacheMaxEntries: 1,
+      terminalCacheTtlMs: 40,
+      executeOperation: async (operatorRequest) => {
+        executed.push(operatorRequest.operationId);
+      },
+    });
+
+    await server.start();
+
+    const first = JSON.stringify({ operationId: 'op-ttl-1', type: 'backup_create' });
+    const second = JSON.stringify({ operationId: 'op-ttl-2', type: 'backup_create' });
+
+    await request(socketPath, { body: first });
+    for (let attempt = 0; attempt < 50 && executed.length < 1; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+
+    await waitForAccepted(socketPath, second);
+    for (let attempt = 0; attempt < 50 && executed.length < 2; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    expect(executed).toEqual(['op-ttl-1', 'op-ttl-2']);
+
+    await new Promise((resolve) => setTimeout(resolve, 60));
+
+    await waitForAccepted(socketPath, first);
+    for (let attempt = 0; attempt < 50 && executed.length < 3; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    expect(executed).toEqual(['op-ttl-1', 'op-ttl-2', 'op-ttl-1']);
+
+    await server.close();
+  });
+
+  it('rejects an oversized declared body immediately without draining it', async () => {
+    const directory = await createTempDirectory();
+    const socketPath = path.join(directory, 'operator.sock');
+    const unhandled: unknown[] = [];
+    const onUnhandled = (error: unknown): void => {
+      unhandled.push(error);
+    };
+    process.on('unhandledRejection', onUnhandled);
+
+    const server = createOperatorServer({
+      socketPath,
+      executeOperation: async () => undefined,
+    });
+
+    await server.start();
+
+    const declaredBytes = MAX_OPERATOR_REQUEST_BODY_BYTES * 64;
+    let sentBytes = 0;
+
+    const response = await new Promise<HttpResponse>((resolve, reject) => {
+      const req = http.request(
+        {
+          socketPath,
+          method: 'POST',
+          path: '/v1/operations',
+          headers: {
+            'content-type': 'application/json',
+            'content-length': declaredBytes,
+          },
+        },
+        (res) => {
+          const chunks: Buffer[] = [];
+          res.on('data', (chunk) => chunks.push(Buffer.from(chunk)));
+          res.on('end', () => {
+            resolve({
+              statusCode: res.statusCode ?? 0,
+              body: Buffer.concat(chunks).toString('utf8'),
+            });
+          });
+        },
+      );
+
+      req.on('error', (error: NodeJS.ErrnoException) => {
+        if (error.code === 'ECONNRESET' || error.code === 'EPIPE') {
+          return;
+        }
+        reject(error);
+      });
+
+      const chunk = 'x'.repeat(1024);
+      const timer = setInterval(() => {
+        if (sentBytes >= declaredBytes || req.destroyed || req.writableEnded) {
+          clearInterval(timer);
+          return;
+        }
+        sentBytes += chunk.length;
+        req.write(chunk, () => undefined);
+      }, 5);
+      timer.unref?.();
+    });
+
+    expect(response.statusCode).toBe(413);
+    expect(JSON.parse(response.body)).toEqual({ error: 'request_too_large' });
+    expect(sentBytes).toBeLessThan(declaredBytes);
+
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    process.off('unhandledRejection', onUnhandled);
+    expect(unhandled).toEqual([]);
+
+    await server.close();
+  });
+
+  it('configures explicit header and request timeouts', async () => {
+    const directory = await createTempDirectory();
+    const socketPath = path.join(directory, 'operator.sock');
+    const server = createOperatorServer({
+      socketPath,
+      headersTimeoutMs: 150,
+      requestTimeoutMs: 300,
+      executeOperation: async () => undefined,
+    });
+
+    await server.start();
+
+    expect(server.headersTimeoutMs).toBe(150);
+    expect(server.requestTimeoutMs).toBe(300);
+
+    const closedBeforeCompletion = await new Promise<boolean>((resolve, reject) => {
+      const socket = net.createConnection({ path: socketPath });
+      const timer = setTimeout(() => {
+        socket.destroy();
+        resolve(false);
+      }, 3000);
+
+      const received: Buffer[] = [];
+      socket.on('connect', () => {
+        socket.write('POST /v1/operations HTTP/1.1\r\nHost: operator\r\n');
+      });
+      socket.on('data', (chunk) => {
+        received.push(Buffer.from(chunk));
+      });
+      socket.on('close', () => {
+        clearTimeout(timer);
+        resolve(Buffer.concat(received).toString('utf8').startsWith('HTTP/1.1 408'));
+      });
+      socket.on('error', (error: NodeJS.ErrnoException) => {
+        if (error.code === 'ECONNRESET' || error.code === 'EPIPE') {
+          return;
+        }
+        clearTimeout(timer);
+        reject(error);
+      });
+    });
+
+    expect(closedBeforeCompletion).toBe(true);
+
+    await server.close();
+  });
+
+  it('creates the socket under a restrictive umask that is always restored', async () => {
+    const directory = await createTempDirectory();
+    const probePath = path.join(directory, 'probe');
+
+    const before = process.umask();
+    const observed = await withRestrictiveUmask(async () => {
+      await writeFile(probePath, 'probe', 'utf8');
+      return process.umask();
+    });
+    expect(process.umask()).toBe(before);
+    expect(observed).toBe(0o177);
+    expect((await stat(probePath)).mode & 0o777).toBe(0o600);
+
+    await expect(
+      withRestrictiveUmask(async () => {
+        throw new Error('umask-failure');
+      }),
+    ).rejects.toThrowError('umask-failure');
+    expect(process.umask()).toBe(before);
+
+    const socketPath = path.join(directory, 'operator.sock');
+    const server = createOperatorServer({
+      socketPath,
+      executeOperation: async () => undefined,
+    });
+
+    await server.start();
+    expect(process.umask()).toBe(before);
+    expect((await stat(socketPath)).mode & 0o777).toBe(0o660);
+
+    await server.close();
+  });
+
+  it('gives an injected executor the configured event sink so it can report', async () => {
+    const directory = await createTempDirectory();
+    const socketPath = path.join(directory, 'operator.sock');
+    const reported: string[] = [];
+
+    const server = createOperatorServer({
+      socketPath,
+      reporter: {
+        onProgress: (event) => {
+          reported.push(`progress:${event.operationId}:${event.chunk.trim()}`);
+        },
+        onResult: (event) => {
+          reported.push(`result:${event.operationId}:${String(event.success)}`);
+        },
+      },
+      executeOperation: async (operatorRequest, sink) => {
+        await sink.onProgress?.({
+          operationId: operatorRequest.operationId,
+          stream: 'stdout',
+          chunk: 'injected\n',
+        });
+        await sink.onResult?.({
+          operationId: operatorRequest.operationId,
+          success: true,
+          output: 'injected\n',
+          exitCode: 0,
+          signal: null,
+          truncated: false,
+        });
+      },
+    });
+
+    await server.start();
+
+    const accepted = await request(socketPath, {
+      body: JSON.stringify({ operationId: 'op-injected', type: 'backup_create' }),
+    });
+    expect(accepted.statusCode).toBe(202);
+
+    for (let attempt = 0; attempt < 50 && reported.length < 2; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+
+    expect(reported).toEqual([
+      'progress:op-injected:injected',
+      'result:op-injected:true',
+    ]);
 
     await server.close();
   });

@@ -1,6 +1,6 @@
 import { createOperatorServer, getOperatorSocketPath } from './server.js';
 
-export { createOperatorExecutor } from './executor.js';
+export { createOperatorExecutor, DEFAULT_OUTPUT_TAIL_BYTES } from './executor.js';
 export type {
   OperatorEventSink,
   OperatorExecutor,
@@ -12,7 +12,9 @@ export {
   MAX_OPERATOR_REQUEST_BODY_BYTES,
   createOperatorServer,
   getOperatorSocketPath,
+  withRestrictiveUmask,
 } from './server.js';
+export type { OperatorExecuteFn, OperatorServer } from './server.js';
 
 if (require.main === module) {
   const socketPath = getOperatorSocketPath();
