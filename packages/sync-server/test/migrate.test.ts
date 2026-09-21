@@ -62,11 +62,38 @@ describe('runMigrations', () => {
 
     const dedupIndex = await pool.query<{ indexdef: string }>(
       `SELECT indexdef FROM pg_indexes
-       WHERE tablename = 'encrypted_blobs' AND indexdef LIKE '%UNIQUE%plaintext_sha256%'`,
+       WHERE tablename = 'encrypted_blobs' AND indexname = 'encrypted_blobs_team_content_key'`,
     );
     expect(dedupIndex.rows).toHaveLength(1);
     expect(dedupIndex.rows[0].indexdef).toContain('team_id');
     expect(dedupIndex.rows[0].indexdef).toContain('blob_type');
+    expect(dedupIndex.rows[0].indexdef).toContain('plaintext_sha256');
+
+    const capturePrimaryKey = await pool.query<{ definition: string }>(
+      `SELECT pg_get_constraintdef(oid) AS definition FROM pg_constraint
+       WHERE conrelid = 'task_file_captures'::regclass AND contype = 'p'`,
+    );
+    expect(capturePrimaryKey.rows[0].definition).toBe('PRIMARY KEY (team_id, id)');
+
+    const entryConstraints = await pool.query<{ conname: string; definition: string }>(
+      `SELECT conname, pg_get_constraintdef(oid) AS definition FROM pg_constraint
+       WHERE conrelid = 'task_file_capture_entries'::regclass AND contype IN ('p', 'f')`,
+    );
+    const entryDefinitions = Object.fromEntries(
+      entryConstraints.rows.map((row) => [row.conname, row.definition]),
+    );
+    expect(entryDefinitions.task_file_capture_entries_pkey).toBe(
+      'PRIMARY KEY (team_id, capture_id, path)',
+    );
+    expect(entryDefinitions.task_file_capture_entries_snapshot_fk).toContain(
+      '(snapshot_blob_id, team_id, snapshot_blob_type, snapshot_sha256)',
+    );
+    expect(entryDefinitions.task_file_capture_entries_snapshot_fk).toContain(
+      'encrypted_blobs(id, team_id, blob_type, plaintext_sha256)',
+    );
+    expect(entryDefinitions.task_file_capture_entries_diff_fk).toContain(
+      '(diff_blob_id, team_id, diff_blob_type, diff_sha256)',
+    );
 
     const checks = await pool.query<{ conname: string; definition: string }>(
       `SELECT conname, pg_get_constraintdef(oid) AS definition

@@ -1,350 +1,45 @@
-import { createHash } from 'node:crypto';
 import { gunzipSync, gzipSync } from 'node:zlib';
 import type { Pool, PoolClient } from 'pg';
+import {
+  MAX_CAPTURE_ID_LENGTH,
+  MAX_REASON_LENGTH,
+  normalizeCapture,
+  requireBuffer,
+  requireSafeId,
+  requireUuid,
+  sha256Hex,
+  type BlobRow,
+  type NormalizedCapture,
+} from './captureValidation.js';
 import type { EncryptedBlob, EncryptionKeyring } from './encryption.js';
-import { ApiError } from './errors.js';
 import { inaccessibleTaskError } from './taskAccess.js';
+import {
+  CaptureEventConflictError,
+  CaptureIntegrityError,
+  CaptureNotFoundError,
+  CaptureStorageConflictError,
+  ForbiddenActorError,
+  TaskHistoryConflictError,
+  TaskHistoryValidationError,
+} from './taskHistoryErrors.js';
+import {
+  DEFAULT_SERVER_CAPTURE_LIMITS,
+  type BlobType,
+  type CaptureRecord,
+  type DeleteCaptureInput,
+  type DeleteCaptureResult,
+  type FileCaptureTrigger,
+  type ServerCaptureLimits,
+  type StoreCaptureInput,
+  type StoreCaptureResult,
+  type TaskHistoryStore,
+} from './taskHistoryTypes.js';
 
-/** Mirrors `FileCaptureTrigger` in @ariadne-dev/core without a package dependency. */
-export type FileCaptureTrigger = 'git_commit' | 'checkpoint' | 'explicit';
-
-export type BlobType = 'snapshot' | 'diff';
-
-export interface StoreCaptureEntryInput {
-  path: string;
-  content: Buffer;
-  unifiedDiff: Buffer;
-  contentSha256: string;
-}
-
-export interface StoreCaptureInput {
-  captureId: string;
-  teamId: string;
-  taskId: string;
-  trigger: FileCaptureTrigger;
-  gitCommitSha: string | null;
-  checkpointId: string | null;
-  createdAt: string;
-  entries: StoreCaptureEntryInput[];
-}
-
-export interface StoreCaptureResult {
-  captureId: string;
-  status: 'stored' | 'duplicate';
-  entryCount: number;
-}
-
-export interface CaptureEntry {
-  path: string;
-  content: Buffer;
-  unifiedDiff: Buffer;
-  contentSha256: string;
-}
-
-export interface CaptureRecord {
-  captureId: string;
-  teamId: string;
-  taskId: string;
-  trigger: FileCaptureTrigger;
-  gitCommitSha: string | null;
-  checkpointId: string | null;
-  createdAt: string;
-  entries: CaptureEntry[];
-}
-
-export interface DeleteCaptureInput {
-  teamId: string;
-  taskId: string;
-  captureId: string;
-  actorUserId: string;
-  reason: string;
-}
-
-export interface DeleteCaptureResult {
-  deletionId: string;
-  captureId: string;
-  deletedPaths: string[];
-  deletedEntryCount: number;
-  deletedBlobCount: number;
-}
-
-export interface TaskHistoryStore {
-  storeCapture(input: StoreCaptureInput): Promise<StoreCaptureResult>;
-  readCapture(teamId: string, taskId: string, captureId: string): Promise<CaptureRecord>;
-  deleteCapture(input: DeleteCaptureInput): Promise<DeleteCaptureResult>;
-}
-
-export interface ServerCaptureLimits {
-  /** Inclusive maximum byte length of a single snapshot or diff payload. */
-  maxFileBytes: number;
-  /** Inclusive maximum total snapshot (and, separately, diff) bytes per capture. */
-  maxCaptureBytes: number;
-  /** Inclusive maximum number of entries in one capture. */
-  maxEntries: number;
-}
-
-/** Server-side mirror of the client guardrails in docs §7.2. */
-export const DEFAULT_SERVER_CAPTURE_LIMITS: ServerCaptureLimits = {
-  maxFileBytes: 1024 * 1024,
-  maxCaptureBytes: 10 * 1024 * 1024,
-  maxEntries: 2000,
-};
-
-export class TaskHistoryValidationError extends ApiError {
-  constructor(message: string) {
-    super(400, 'invalid_capture', message);
-    this.name = 'TaskHistoryValidationError';
-  }
-}
-
-export class TaskHistoryLimitError extends ApiError {
-  constructor(message: string) {
-    super(413, 'capture_too_large', message);
-    this.name = 'TaskHistoryLimitError';
-  }
-}
-
-export class TaskHistoryConflictError extends ApiError {
-  constructor(captureId: string) {
-    super(409, 'capture_conflict', `Capture ${captureId} already exists with different contents`);
-    this.name = 'TaskHistoryConflictError';
-  }
-}
-
-export class CaptureNotFoundError extends ApiError {
-  constructor(captureId: string) {
-    super(404, 'capture_not_found', `No capture with id ${captureId}`);
-    this.name = 'CaptureNotFoundError';
-  }
-}
-
-export class ForbiddenActorError extends ApiError {
-  constructor() {
-    super(403, 'forbidden_actor', 'Actor is not an active member of the team');
-    this.name = 'ForbiddenActorError';
-  }
-}
-
-export class CaptureIntegrityError extends ApiError {
-  constructor(message: string) {
-    super(500, 'capture_integrity_error', message);
-    this.name = 'CaptureIntegrityError';
-  }
-}
+export * from './taskHistoryTypes.js';
+export * from './taskHistoryErrors.js';
 
 const BLOB_AAD_VERSION = 1;
 const COMPRESSION = 'gzip';
-const MAX_CAPTURE_ID_LENGTH = 200;
-const MAX_CHECKPOINT_ID_LENGTH = 200;
-const MAX_PATH_LENGTH = 1024;
-const MAX_REASON_LENGTH = 500;
-
-const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const SHA256_PATTERN = /^[0-9a-f]{64}$/;
-const GIT_SHA_PATTERN = /^[0-9a-f]{7,64}$/;
-const SAFE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/;
-const TRIGGERS: readonly FileCaptureTrigger[] = ['git_commit', 'checkpoint', 'explicit'];
-
-interface NormalizedEntry {
-  path: string;
-  content: Buffer;
-  unifiedDiff: Buffer;
-  contentSha256: string;
-  diffSha256: string;
-}
-
-interface NormalizedCapture {
-  captureId: string;
-  teamId: string;
-  taskId: string;
-  trigger: FileCaptureTrigger;
-  gitCommitSha: string | null;
-  checkpointId: string | null;
-  createdAt: string;
-  entries: NormalizedEntry[];
-}
-
-interface BlobRow {
-  id: string;
-  team_id: string;
-  plaintext_sha256: string;
-  blob_type: BlobType;
-  key_id: string;
-  aad_version: number;
-  compression: string;
-  nonce: Buffer;
-  ciphertext: Buffer;
-  auth_tag: Buffer;
-  plaintext_bytes: number;
-}
-
-function sha256Hex(buffer: Buffer): string {
-  return createHash('sha256').update(buffer).digest('hex');
-}
-
-function requireUuid(value: unknown, field: string): string {
-  if (typeof value !== 'string' || !UUID_PATTERN.test(value)) {
-    throw new TaskHistoryValidationError(`${field} must be a UUID`);
-  }
-  return value.toLowerCase();
-}
-
-function requireSafeId(value: unknown, field: string, maxLength: number): string {
-  if (typeof value !== 'string' || value.length === 0 || value.length > maxLength) {
-    throw new TaskHistoryValidationError(`${field} must be 1-${maxLength} characters`);
-  }
-  if (!SAFE_ID_PATTERN.test(value)) {
-    throw new TaskHistoryValidationError(`${field} contains unsupported characters`);
-  }
-  return value;
-}
-
-function requireIsoTimestamp(value: unknown, field: string): string {
-  if (typeof value !== 'string' || value.length === 0 || value.length > 64) {
-    throw new TaskHistoryValidationError(`${field} must be an ISO-8601 timestamp`);
-  }
-  const parsed = new Date(value);
-  if (Number.isNaN(parsed.getTime())) {
-    throw new TaskHistoryValidationError(`${field} must be an ISO-8601 timestamp`);
-  }
-  return parsed.toISOString();
-}
-
-/**
- * Accepts only workspace-relative, normalized POSIX paths. Absolute paths,
- * traversal segments, backslashes, and control characters are rejected before
- * any ciphertext is produced.
- */
-function requireCapturePath(value: unknown): string {
-  if (typeof value !== 'string' || value.length === 0 || value.length > MAX_PATH_LENGTH) {
-    throw new TaskHistoryValidationError(`Capture entry path must be 1-${MAX_PATH_LENGTH} characters`);
-  }
-  if (/[\u0000-\u001f\\]/.test(value)) {
-    throw new TaskHistoryValidationError('Capture entry path contains unsupported characters');
-  }
-  if (value.startsWith('/') || /^[A-Za-z]:/.test(value)) {
-    throw new TaskHistoryValidationError('Capture entry path must be workspace-relative');
-  }
-  const segments = value.split('/');
-  if (segments.some((segment) => segment === '' || segment === '.' || segment === '..')) {
-    throw new TaskHistoryValidationError('Capture entry path must be a normalized relative path');
-  }
-  return value;
-}
-
-function requireBuffer(value: unknown, field: string): Buffer {
-  if (!Buffer.isBuffer(value)) {
-    throw new TaskHistoryValidationError(`${field} must be a Buffer`);
-  }
-  return value;
-}
-
-function normalizeEntries(
-  entries: unknown,
-  limits: ServerCaptureLimits,
-): NormalizedEntry[] {
-  if (!Array.isArray(entries) || entries.length === 0) {
-    throw new TaskHistoryValidationError('Capture must contain at least one entry');
-  }
-  if (entries.length > limits.maxEntries) {
-    throw new TaskHistoryLimitError(`Capture exceeds the ${limits.maxEntries}-entry limit`);
-  }
-
-  const seen = new Set<string>();
-  const normalized: NormalizedEntry[] = [];
-  for (const raw of entries as StoreCaptureEntryInput[]) {
-    const path = requireCapturePath(raw?.path);
-    if (seen.has(path)) {
-      throw new TaskHistoryValidationError('Capture contains duplicate entry paths');
-    }
-    seen.add(path);
-
-    const content = requireBuffer(raw?.content, 'Capture entry content');
-    const unifiedDiff = requireBuffer(raw?.unifiedDiff, 'Capture entry diff');
-    if (typeof raw?.contentSha256 !== 'string' || !SHA256_PATTERN.test(raw.contentSha256)) {
-      throw new TaskHistoryValidationError('Capture entry contentSha256 must be lowercase hex');
-    }
-
-    const actual = sha256Hex(content);
-    if (actual !== raw.contentSha256) {
-      throw new TaskHistoryValidationError(`Capture entry content hash mismatch for ${path}`);
-    }
-
-    normalized.push({
-      path,
-      content,
-      unifiedDiff,
-      contentSha256: actual,
-      diffSha256: sha256Hex(unifiedDiff),
-    });
-  }
-
-  normalized.sort((left, right) => (left.path < right.path ? -1 : left.path > right.path ? 1 : 0));
-  assertWithinLimits(normalized, limits);
-  return normalized;
-}
-
-function assertWithinLimits(entries: NormalizedEntry[], limits: ServerCaptureLimits): void {
-  let totalContent = 0;
-  let totalDiff = 0;
-
-  for (const entry of entries) {
-    if (entry.content.length > limits.maxFileBytes) {
-      throw new TaskHistoryLimitError(`Capture entry ${entry.path} exceeds the per-file size limit`);
-    }
-    if (entry.unifiedDiff.length > limits.maxFileBytes) {
-      throw new TaskHistoryLimitError(`Capture diff for ${entry.path} exceeds the per-file size limit`);
-    }
-    totalContent += entry.content.length;
-    totalDiff += entry.unifiedDiff.length;
-  }
-
-  if (totalContent > limits.maxCaptureBytes || totalDiff > limits.maxCaptureBytes) {
-    throw new TaskHistoryLimitError('Capture exceeds the total capture size limit');
-  }
-}
-
-function normalizeCapture(input: StoreCaptureInput, limits: ServerCaptureLimits): NormalizedCapture {
-  if (!input || typeof input !== 'object') {
-    throw new TaskHistoryValidationError('Capture input must be an object');
-  }
-
-  const trigger = input.trigger;
-  if (!TRIGGERS.includes(trigger)) {
-    throw new TaskHistoryValidationError('Capture trigger is not supported');
-  }
-
-  let gitCommitSha: string | null = null;
-  if (input.gitCommitSha !== null && input.gitCommitSha !== undefined) {
-    if (typeof input.gitCommitSha !== 'string' || !GIT_SHA_PATTERN.test(input.gitCommitSha)) {
-      throw new TaskHistoryValidationError('Capture gitCommitSha must be a lowercase hex Git SHA');
-    }
-    gitCommitSha = input.gitCommitSha;
-  }
-
-  let checkpointId: string | null = null;
-  if (input.checkpointId !== null && input.checkpointId !== undefined) {
-    checkpointId = requireSafeId(input.checkpointId, 'Capture checkpointId', MAX_CHECKPOINT_ID_LENGTH);
-  }
-
-  if (trigger === 'git_commit' && gitCommitSha === null) {
-    throw new TaskHistoryValidationError('Commit captures require a gitCommitSha');
-  }
-  if (trigger === 'checkpoint' && checkpointId === null) {
-    throw new TaskHistoryValidationError('Checkpoint captures require a checkpointId');
-  }
-
-  return {
-    captureId: requireSafeId(input.captureId, 'Capture id', MAX_CAPTURE_ID_LENGTH),
-    teamId: requireUuid(input.teamId, 'Capture teamId'),
-    taskId: requireUuid(input.taskId, 'Capture taskId'),
-    trigger,
-    gitCommitSha,
-    checkpointId,
-    createdAt: requireIsoTimestamp(input.createdAt, 'Capture createdAt'),
-    entries: normalizeEntries(input.entries, limits),
-  };
-}
 
 /**
  * Stable additional authenticated data for one blob. It deliberately excludes
@@ -385,15 +80,56 @@ function isUniqueViolation(error: unknown, constraint?: string): boolean {
   return constraint === undefined || candidate.constraint === constraint;
 }
 
+function pgConstraint(error: unknown): { code?: string; constraint?: string } {
+  if (!error || typeof error !== 'object') {
+    return {};
+  }
+  return error as { code?: string; constraint?: string };
+}
+
+const BLOB_REFERENCE_CONSTRAINTS = new Set([
+  'task_file_capture_entries_snapshot_fk',
+  'task_file_capture_entries_diff_fk',
+]);
+
+/** Transient Postgres states that a single retry can legitimately resolve. */
+function isTransientConflict(error: unknown): boolean {
+  const { code, constraint } = pgConstraint(error);
+  if (code === '40001' || code === '40P01') {
+    return true;
+  }
+  return code === '23503' && constraint !== undefined && BLOB_REFERENCE_CONSTRAINTS.has(constraint);
+}
+
+function blobKey(blobType: BlobType, sha256: string): string {
+  return `${blobType}:${sha256}`;
+}
+
+interface BlobRequest {
+  blobType: BlobType;
+  sha256: string;
+  plaintext: Buffer;
+}
+
 export function createTaskHistoryStore(
   pool: Pool,
   keyring: EncryptionKeyring,
   limits: ServerCaptureLimits = DEFAULT_SERVER_CAPTURE_LIMITS,
 ): TaskHistoryStore {
-  async function withTransaction<T>(run: (client: PoolClient) => Promise<T>): Promise<T> {
+  async function withTransaction<T>(
+    run: (client: PoolClient) => Promise<T>,
+    options: { isolation?: 'REPEATABLE READ'; readOnly?: boolean } = {},
+  ): Promise<T> {
     const client = await pool.connect();
+    const begin = [
+      'BEGIN',
+      options.isolation ? `ISOLATION LEVEL ${options.isolation}` : '',
+      options.readOnly ? 'READ ONLY' : '',
+    ]
+      .filter((part) => part.length > 0)
+      .join(' ');
     try {
-      await client.query('BEGIN');
+      await client.query(begin);
       const result = await run(client);
       await client.query('COMMIT');
       return result;
@@ -405,81 +141,136 @@ export function createTaskHistoryStore(
     }
   }
 
-  /** Inserts (or reuses) the team-scoped content-addressed blob for `plaintext`. */
-  async function upsertBlob(
+  /**
+   * Resolves every requested blob to a stored id in a bounded number of round
+   * trips: one locking read of existing blobs, one multi-row insert of the
+   * missing ones, and (only when another writer raced us) one more locking
+   * read. Existing rows are locked `FOR SHARE` so concurrent garbage
+   * collection cannot remove a blob this capture is about to reference.
+   */
+  async function resolveBlobIds(
     client: PoolClient,
     teamId: string,
-    blobType: BlobType,
-    plaintext: Buffer,
-    plaintextSha256: string,
-  ): Promise<string> {
-    const existing = await client.query<{ id: string }>(
-      `SELECT id FROM encrypted_blobs
-       WHERE team_id = $1 AND plaintext_sha256 = $2 AND blob_type = $3
-       FOR SHARE`,
-      [teamId, plaintextSha256, blobType],
+    requests: BlobRequest[],
+  ): Promise<Map<string, string>> {
+    const unique = new Map<string, BlobRequest>();
+    for (const request of requests) {
+      const key = blobKey(request.blobType, request.sha256);
+      if (!unique.has(key)) {
+        unique.set(key, request);
+      }
+    }
+    // Stable lock ordering keeps concurrent uploads from deadlocking.
+    const pending = Array.from(unique.entries()).sort(([left], [right]) =>
+      left < right ? -1 : left > right ? 1 : 0,
     );
-    if (existing.rows.length > 0) {
-      return existing.rows[0].id;
+
+    const resolved = new Map<string, string>();
+    const selectExisting = async (batch: Array<[string, BlobRequest]>): Promise<void> => {
+      if (batch.length === 0) {
+        return;
+      }
+      const { rows } = await client.query<{ id: string; plaintext_sha256: string; blob_type: BlobType }>(
+        `SELECT b.id, b.plaintext_sha256, b.blob_type
+         FROM encrypted_blobs b
+         JOIN unnest($2::text[], $3::text[]) AS k(sha, blob_type)
+           ON b.plaintext_sha256 = k.sha AND b.blob_type = k.blob_type
+         WHERE b.team_id = $1
+         ORDER BY b.id
+         FOR SHARE OF b`,
+        [
+          teamId,
+          batch.map(([, request]) => request.sha256),
+          batch.map(([, request]) => request.blobType),
+        ],
+      );
+      for (const row of rows) {
+        resolved.set(blobKey(row.blob_type, row.plaintext_sha256), row.id);
+      }
+    };
+
+    await selectExisting(pending);
+
+    const missing = pending.filter(([key]) => !resolved.has(key));
+    if (missing.length > 0) {
+      const keyId = keyring.activeKeyId;
+      const encryptedRows = missing.map(([, request]) => {
+        const compressed = gzipSync(request.plaintext);
+        const encrypted: EncryptedBlob = keyring.encrypt(
+          compressed,
+          buildBlobAad({
+            aadVersion: BLOB_AAD_VERSION,
+            teamId,
+            plaintextSha256: request.sha256,
+            blobType: request.blobType,
+            keyId,
+            compression: COMPRESSION,
+          }),
+        );
+        return {
+          request,
+          encrypted,
+          plaintextBytes: request.plaintext.length,
+          compressedBytes: compressed.length,
+        };
+      });
+
+      const inserted = await client.query<{
+        id: string;
+        plaintext_sha256: string;
+        blob_type: BlobType;
+      }>(
+        `INSERT INTO encrypted_blobs (
+           team_id, plaintext_sha256, blob_type, key_id, aad_version, compression,
+           nonce, ciphertext, auth_tag, plaintext_bytes, compressed_bytes, created_at
+         )
+         SELECT $1, k.sha, k.blob_type, k.key_id, $2, $3,
+                k.nonce, k.ciphertext, k.auth_tag, k.plaintext_bytes, k.compressed_bytes, now()
+         FROM unnest(
+                $4::text[], $5::text[], $6::text[], $7::bytea[], $8::bytea[], $9::bytea[],
+                $10::int[], $11::int[]
+              ) AS k(sha, blob_type, key_id, nonce, ciphertext, auth_tag, plaintext_bytes, compressed_bytes)
+         ON CONFLICT (team_id, plaintext_sha256, blob_type) DO NOTHING
+         RETURNING id, plaintext_sha256, blob_type`,
+        [
+          teamId,
+          BLOB_AAD_VERSION,
+          COMPRESSION,
+          encryptedRows.map((row) => row.request.sha256),
+          encryptedRows.map((row) => row.request.blobType),
+          encryptedRows.map((row) => row.encrypted.keyId),
+          encryptedRows.map((row) => row.encrypted.nonce),
+          encryptedRows.map((row) => row.encrypted.ciphertext),
+          encryptedRows.map((row) => row.encrypted.authTag),
+          encryptedRows.map((row) => row.plaintextBytes),
+          encryptedRows.map((row) => row.compressedBytes),
+        ],
+      );
+      for (const row of inserted.rows) {
+        resolved.set(blobKey(row.blob_type, row.plaintext_sha256), row.id);
+      }
+
+      const raced = missing.filter(([key]) => !resolved.has(key));
+      await selectExisting(raced);
+      if (raced.some(([key]) => !resolved.has(key))) {
+        throw new CaptureStorageConflictError();
+      }
     }
 
-    const compressed = gzipSync(plaintext);
-    const keyId = keyring.activeKeyId;
-    const aad = buildBlobAad({
-      aadVersion: BLOB_AAD_VERSION,
-      teamId,
-      plaintextSha256,
-      blobType,
-      keyId,
-      compression: COMPRESSION,
-    });
-    const encrypted: EncryptedBlob = keyring.encrypt(compressed, aad);
-
-    const inserted = await client.query<{ id: string }>(
-      `INSERT INTO encrypted_blobs (
-         team_id, plaintext_sha256, blob_type, key_id, aad_version, compression,
-         nonce, ciphertext, auth_tag, plaintext_bytes, compressed_bytes, created_at
-       )
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, now())
-       ON CONFLICT (team_id, plaintext_sha256, blob_type) DO NOTHING
-       RETURNING id`,
-      [
-        teamId,
-        plaintextSha256,
-        blobType,
-        encrypted.keyId,
-        BLOB_AAD_VERSION,
-        COMPRESSION,
-        encrypted.nonce,
-        encrypted.ciphertext,
-        encrypted.authTag,
-        plaintext.length,
-        compressed.length,
-      ],
-    );
-    if (inserted.rows.length > 0) {
-      return inserted.rows[0].id;
-    }
-
-    const raced = await client.query<{ id: string }>(
-      `SELECT id FROM encrypted_blobs
-       WHERE team_id = $1 AND plaintext_sha256 = $2 AND blob_type = $3
-       FOR SHARE`,
-      [teamId, plaintextSha256, blobType],
-    );
-    if (raced.rows.length === 0) {
-      throw new CaptureIntegrityError('Encrypted blob could not be stored');
-    }
-    return raced.rows[0].id;
+    return resolved;
   }
 
-  async function loadBlobs(teamId: string, blobIds: string[]): Promise<Map<string, BlobRow>> {
+  async function loadBlobs(
+    client: PoolClient,
+    teamId: string,
+    blobIds: string[],
+  ): Promise<Map<string, BlobRow>> {
     const unique = Array.from(new Set(blobIds));
     if (unique.length === 0) {
       return new Map();
     }
 
-    const { rows } = await pool.query<BlobRow>(
+    const { rows } = await client.query<BlobRow>(
       `SELECT id, team_id, plaintext_sha256, blob_type, key_id, aad_version, compression,
               nonce, ciphertext, auth_tag, plaintext_bytes
        FROM encrypted_blobs
@@ -489,7 +280,8 @@ export function createTaskHistoryStore(
     return new Map(rows.map((row) => [row.id, row]));
   }
 
-  function decryptBlob(row: BlobRow): Buffer {    const aad = buildBlobAad({
+  function decryptBlob(row: BlobRow): Buffer {
+    const aad = buildBlobAad({
       aadVersion: row.aad_version,
       teamId: row.team_id,
       plaintextSha256: row.plaintext_sha256,
@@ -525,6 +317,7 @@ export function createTaskHistoryStore(
 
   async function readExistingFingerprint(
     client: PoolClient,
+    teamId: string,
     captureId: string,
   ): Promise<{
     teamId: string;
@@ -544,8 +337,8 @@ export function createTaskHistoryStore(
       created_at: Date;
     }>(
       `SELECT team_id, task_id, "trigger", git_commit_sha, checkpoint_id, created_at
-       FROM task_file_captures WHERE id = $1 FOR UPDATE`,
-      [captureId],
+       FROM task_file_captures WHERE team_id = $1 AND id = $2 FOR UPDATE`,
+      [teamId, captureId],
     );
     if (capture.rows.length === 0) {
       return null;
@@ -556,12 +349,11 @@ export function createTaskHistoryStore(
       content_sha256: string;
       diff_sha256: string;
     }>(
-      `SELECT e.path, e.content_sha256, d.plaintext_sha256 AS diff_sha256
-       FROM task_file_capture_entries e
-       JOIN encrypted_blobs d ON d.id = e.diff_blob_id
-       WHERE e.capture_id = $1
-       ORDER BY e.path ASC`,
-      [captureId],
+      `SELECT path, snapshot_sha256 AS content_sha256, diff_sha256
+       FROM task_file_capture_entries
+       WHERE team_id = $1 AND capture_id = $2
+       ORDER BY path ASC`,
+      [teamId, captureId],
     );
 
     const row = capture.rows[0];
@@ -633,37 +425,41 @@ export function createTaskHistoryStore(
       ],
     );
 
-    for (const entry of capture.entries) {
-      const snapshotBlobId = await upsertBlob(
-        client,
-        capture.teamId,
-        'snapshot',
-        entry.content,
-        entry.contentSha256,
-      );
-      const diffBlobId = await upsertBlob(
-        client,
-        capture.teamId,
-        'diff',
-        entry.unifiedDiff,
-        entry.diffSha256,
-      );
+    const blobIds = await resolveBlobIds(
+      client,
+      capture.teamId,
+      capture.entries.flatMap((entry) => [
+        { blobType: 'snapshot' as const, sha256: entry.contentSha256, plaintext: entry.content },
+        { blobType: 'diff' as const, sha256: entry.diffSha256, plaintext: entry.unifiedDiff },
+      ]),
+    );
 
-      await client.query(
-        `INSERT INTO task_file_capture_entries (
-           capture_id, team_id, task_id, path, content_sha256, snapshot_blob_id, diff_blob_id
-         ) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-        [
-          capture.captureId,
-          capture.teamId,
-          capture.taskId,
-          entry.path,
-          entry.contentSha256,
-          snapshotBlobId,
-          diffBlobId,
-        ],
-      );
-    }
+    const snapshotBlobIds = capture.entries.map((entry) =>
+      requireResolvedBlob(blobIds, 'snapshot', entry.contentSha256),
+    );
+    const diffBlobIds = capture.entries.map((entry) =>
+      requireResolvedBlob(blobIds, 'diff', entry.diffSha256),
+    );
+
+    await client.query(
+      `INSERT INTO task_file_capture_entries (
+         capture_id, team_id, task_id, path, snapshot_sha256, diff_sha256,
+         snapshot_blob_id, diff_blob_id
+       )
+       SELECT $1, $2, $3, e.path, e.snapshot_sha256, e.diff_sha256, e.snapshot_blob_id, e.diff_blob_id
+       FROM unnest($4::text[], $5::text[], $6::text[], $7::uuid[], $8::uuid[])
+         AS e(path, snapshot_sha256, diff_sha256, snapshot_blob_id, diff_blob_id)`,
+      [
+        capture.captureId,
+        capture.teamId,
+        capture.taskId,
+        capture.entries.map((entry) => entry.path),
+        capture.entries.map((entry) => entry.contentSha256),
+        capture.entries.map((entry) => entry.diffSha256),
+        snapshotBlobIds,
+        diffBlobIds,
+      ],
+    );
 
     return { captureId: capture.captureId, status: 'stored', entryCount: capture.entries.length };
   }
@@ -674,7 +470,7 @@ export function createTaskHistoryStore(
   ): Promise<StoreCaptureResult> {
     try {
       return await withTransaction(async (client) => {
-        const existing = await readExistingFingerprint(client, capture.captureId);
+        const existing = await readExistingFingerprint(client, capture.teamId, capture.captureId);
         if (existing) {
           if (!isIdenticalReplay(existing, capture)) {
             throw new TaskHistoryConflictError(capture.captureId);
@@ -688,16 +484,44 @@ export function createTaskHistoryStore(
         return await insertCapture(client, capture);
       });
     } catch (error: unknown) {
-      if (isUniqueViolation(error, 'task_file_captures_pkey') && allowRetry) {
-        // A concurrent writer committed the same capture id first; re-read it
-        // and decide duplicate-vs-conflict from the committed row.
+      if (allowRetry && (isUniqueViolation(error, 'task_file_captures_pkey') || isTransientConflict(error))) {
+        // Either a concurrent writer committed the same capture id first (re-read
+        // it and decide duplicate-vs-conflict from the committed row), or a
+        // concurrent deletion moved a blob out from under this upload.
         return await storeNormalizedCapture(capture, false);
+      }
+
+      const { constraint } = pgConstraint(error);
+      if (constraint === 'idx_task_file_captures_commit_idempotency') {
+        throw new CaptureEventConflictError('git_commit');
+      }
+      if (constraint === 'idx_task_file_captures_checkpoint_idempotency') {
+        throw new CaptureEventConflictError('checkpoint');
       }
       if (isUniqueViolation(error)) {
         throw new TaskHistoryConflictError(capture.captureId);
       }
+      if (isTransientConflict(error)) {
+        throw new CaptureStorageConflictError();
+      }
+      if (pgConstraint(error).constraint === 'task_file_captures_task_team_fk') {
+        throw inaccessibleTaskError(capture.taskId);
+      }
       throw error;
     }
+  }
+
+    /** Every entry blob must have been resolved before entries are inserted. */
+  function requireResolvedBlob(
+    blobIds: Map<string, string>,
+    blobType: BlobType,
+    sha256: string,
+  ): string {
+    const id = blobIds.get(blobKey(blobType, sha256));
+    if (!id) {
+      throw new CaptureStorageConflictError();
+    }
+    return id;
   }
 
   return {
@@ -710,55 +534,79 @@ export function createTaskHistoryStore(
       const scopedTaskId = requireUuid(taskId, 'taskId');
       const scopedCaptureId = requireSafeId(captureId, 'Capture id', MAX_CAPTURE_ID_LENGTH);
 
-      const capture = await pool.query<{
-        trigger: FileCaptureTrigger;
-        git_commit_sha: string | null;
-        checkpoint_id: string | null;
-        created_at: Date;
-      }>(
-        `SELECT "trigger", git_commit_sha, checkpoint_id, created_at
-         FROM task_file_captures
-         WHERE id = $1 AND team_id = $2 AND task_id = $3`,
-        [scopedCaptureId, scopedTeamId, scopedTaskId],
-      );
-      if (capture.rows.length === 0) {
-        throw new CaptureNotFoundError(scopedCaptureId);
-      }
+      // One client, one repeatable-read snapshot: capture, entries, and blobs
+      // are read as they existed at a single instant, so a concurrent deletion
+      // yields either the whole capture or a deterministic 404 — never a
+      // half-deleted read that looks like a storage integrity failure.
+      return await withTransaction(
+        async (client) => {
+          const capture = await client.query<{
+            trigger: FileCaptureTrigger;
+            git_commit_sha: string | null;
+            checkpoint_id: string | null;
+            created_at: Date;
+          }>(
+            `SELECT "trigger", git_commit_sha, checkpoint_id, created_at
+             FROM task_file_captures
+             WHERE team_id = $1 AND id = $2 AND task_id = $3`,
+            [scopedTeamId, scopedCaptureId, scopedTaskId],
+          );
+          if (capture.rows.length === 0) {
+            throw new CaptureNotFoundError(scopedCaptureId);
+          }
 
-      const entries = await pool.query<{
-        path: string;
-        content_sha256: string;
-        snapshot_blob_id: string;
-        diff_blob_id: string;
-      }>(
-        `SELECT e.path, e.content_sha256, e.snapshot_blob_id, e.diff_blob_id
-         FROM task_file_capture_entries e
-         WHERE e.capture_id = $1 AND e.team_id = $2 AND e.task_id = $3
-         ORDER BY e.path ASC`,
-        [scopedCaptureId, scopedTeamId, scopedTaskId],
-      );
+          const entries = await client.query<{
+            path: string;
+            snapshot_sha256: string;
+            diff_sha256: string;
+            snapshot_blob_id: string;
+            diff_blob_id: string;
+          }>(
+            `SELECT path, snapshot_sha256, diff_sha256, snapshot_blob_id, diff_blob_id
+             FROM task_file_capture_entries
+             WHERE team_id = $1 AND capture_id = $2 AND task_id = $3
+             ORDER BY path ASC`,
+            [scopedTeamId, scopedCaptureId, scopedTaskId],
+          );
 
-      const blobs = await loadBlobs(
-        scopedTeamId,
-        entries.rows.flatMap((entry) => [entry.snapshot_blob_id, entry.diff_blob_id]),
-      );
+          const blobs = await loadBlobs(
+            client,
+            scopedTeamId,
+            entries.rows.flatMap((entry) => [entry.snapshot_blob_id, entry.diff_blob_id]),
+          );
 
-      const row = capture.rows[0];
-      return {
-        captureId: scopedCaptureId,
-        teamId: scopedTeamId,
-        taskId: scopedTaskId,
-        trigger: row.trigger,
-        gitCommitSha: row.git_commit_sha,
-        checkpointId: row.checkpoint_id,
-        createdAt: row.created_at.toISOString(),
-        entries: entries.rows.map((entry) => ({
-          path: entry.path,
-          contentSha256: entry.content_sha256,
-          content: decryptBlob(requireBlob(blobs, entry.snapshot_blob_id)),
-          unifiedDiff: decryptBlob(requireBlob(blobs, entry.diff_blob_id)),
-        })),
-      };
+          const row = capture.rows[0];
+          return {
+            captureId: scopedCaptureId,
+            teamId: scopedTeamId,
+            taskId: scopedTaskId,
+            trigger: row.trigger,
+            gitCommitSha: row.git_commit_sha,
+            checkpointId: row.checkpoint_id,
+            createdAt: row.created_at.toISOString(),
+            entries: entries.rows.map((entry) => {
+              // Both hashes are verified against the plaintext the reference
+              // promised, so a returned hash always describes returned bytes.
+              const content = verifiedPlaintext(
+                decryptBlob(requireBlob(blobs, entry.snapshot_blob_id)),
+                entry.snapshot_sha256,
+              );
+              const unifiedDiff = verifiedPlaintext(
+                decryptBlob(requireBlob(blobs, entry.diff_blob_id)),
+                entry.diff_sha256,
+              );
+              return {
+                path: entry.path,
+                content,
+                unifiedDiff,
+                contentSha256: entry.snapshot_sha256,
+                diffSha256: entry.diff_sha256,
+              };
+            }),
+          };
+        },
+        { isolation: 'REPEATABLE READ', readOnly: true },
+      );
     },
 
     async deleteCapture(input: DeleteCaptureInput): Promise<DeleteCaptureResult> {
@@ -773,17 +621,23 @@ export function createTaskHistoryStore(
         );
       }
 
-      return await withTransaction(async (client) => {
-        const capture = await client.query(
-          `SELECT 1 FROM task_file_captures
-           WHERE id = $1 AND team_id = $2 AND task_id = $3
-           FOR UPDATE`,
-          [captureId, teamId, taskId],
-        );
-        if (capture.rows.length === 0) {
-          throw new CaptureNotFoundError(captureId);
-        }
+      return await deleteWithRetry(
+        { teamId, taskId, captureId, actorUserId, reason },
+        true,
+      );
+    },
+  };
 
+  async function deleteWithRetry(
+    scoped: Required<DeleteCaptureInput>,
+    allowRetry: boolean,
+  ): Promise<DeleteCaptureResult> {
+    const { teamId, taskId, captureId, actorUserId, reason } = scoped;
+    try {
+      return await withTransaction(async (client) => {
+        // Authorization is decided before capture existence, so a caller who is
+        // not an active member always sees the same 403 and can never use the
+        // 403-vs-404 difference to probe for capture ids.
         const membership = await client.query(
           `SELECT 1 FROM team_memberships
            WHERE team_id = $1 AND user_id = $2 AND active = true`,
@@ -791,6 +645,16 @@ export function createTaskHistoryStore(
         );
         if (membership.rows.length === 0) {
           throw new ForbiddenActorError();
+        }
+
+        const capture = await client.query(
+          `SELECT 1 FROM task_file_captures
+           WHERE team_id = $1 AND id = $2 AND task_id = $3
+           FOR UPDATE`,
+          [teamId, captureId, taskId],
+        );
+        if (capture.rows.length === 0) {
+          throw new CaptureNotFoundError(captureId);
         }
 
         const entries = await client.query<{
@@ -812,12 +676,24 @@ export function createTaskHistoryStore(
 
         // References first, then the capture event, then unreferenced blobs.
         await client.query(
-          'DELETE FROM task_file_capture_entries WHERE capture_id = $1 AND team_id = $2',
-          [captureId, teamId],
+          'DELETE FROM task_file_capture_entries WHERE team_id = $1 AND capture_id = $2',
+          [teamId, captureId],
         );
         await client.query(
-          'DELETE FROM task_file_captures WHERE id = $1 AND team_id = $2 AND task_id = $3',
-          [captureId, teamId, taskId],
+          'DELETE FROM task_file_captures WHERE team_id = $1 AND id = $2 AND task_id = $3',
+          [teamId, captureId, taskId],
+        );
+
+        // Lock the candidate blobs before testing for remaining references: an
+        // upload that already shares one of them holds a FOR SHARE lock, so the
+        // reference test below runs only once that upload has committed (and
+        // the blob is then kept) or rolled back.
+        const locked = await client.query<{ id: string }>(
+          `SELECT id FROM encrypted_blobs
+           WHERE id = ANY($1::uuid[]) AND team_id = $2
+           ORDER BY id
+           FOR UPDATE`,
+          [candidateBlobIds, teamId],
         );
 
         const collected = await client.query<{ id: string }>(
@@ -829,7 +705,7 @@ export function createTaskHistoryStore(
                WHERE e.snapshot_blob_id = b.id OR e.diff_blob_id = b.id
              )
            RETURNING b.id`,
-          [candidateBlobIds, teamId],
+          [locked.rows.map((row) => row.id), teamId],
         );
 
         const audit = await client.query<{ id: string }>(
@@ -858,11 +734,30 @@ export function createTaskHistoryStore(
           deletedBlobCount: collected.rowCount ?? 0,
         };
       });
-    },
-  };
+    } catch (error: unknown) {
+      if (allowRetry && isTransientConflict(error)) {
+        return await deleteWithRetry(scoped, false);
+      }
+      if (isTransientConflict(error)) {
+        throw new CaptureStorageConflictError();
+      }
+      throw error;
+    }
+  }
 }
 
-/** Fetches every referenced blob for a team in one query, keyed by blob id. */
+/**
+ * Confirms decrypted plaintext matches the hash the capture entry references,
+ * so a reference, its stored blob, and the bytes returned to callers agree.
+ */
+function verifiedPlaintext(plaintext: Buffer, expectedSha256: string): Buffer {
+  if (sha256Hex(plaintext) !== expectedSha256) {
+    throw new CaptureIntegrityError('Stored capture content failed integrity verification');
+  }
+  return plaintext;
+}
+
+/** Looks up a referenced blob loaded for the capture's team. */
 function requireBlob(blobs: Map<string, BlobRow>, blobId: string): BlobRow {
   const blob = blobs.get(blobId);
   if (!blob) {

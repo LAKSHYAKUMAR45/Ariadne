@@ -4,6 +4,7 @@ import type { Pool } from 'pg';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createPool } from '../src/db.js';
 import { createEncryptionKeyring, type EncryptionKeyring } from '../src/encryption.js';
+import { ApiError } from '../src/errors.js';
 import { runMigrations } from '../src/migrate.js';
 import {
   createTaskHistoryStore,
@@ -32,6 +33,34 @@ function keyringWith(activeKeyId: string, keyIds: string[]): EncryptionKeyring {
     keys.set(keyId, Buffer.alloc(32, 0x11 + index));
   }
   return createEncryptionKeyring(activeKeyId, keys);
+}
+
+/** Wraps a pool so every statement issued on a checked-out client is counted. */
+function countingPool(pool: Pool, counter: { count: number }): Pool {
+  return {
+    ...pool,
+    connect: async () => {
+      const client = await pool.connect();
+      // A Proxy (rather than patching `client.query`) keeps the count accurate
+      // when the pool hands back a client that was already checked out before.
+      return new Proxy(client, {
+        get(target, property, receiver) {
+          if (property === 'query') {
+            return (...args: unknown[]) => {
+              counter.count += 1;
+              return (target.query as (...inner: unknown[]) => unknown).apply(target, args);
+            };
+          }
+          const value = Reflect.get(target, property, receiver);
+          return typeof value === 'function' ? value.bind(target) : value;
+        },
+      });
+    },
+    query: ((...args: unknown[]) => {
+      counter.count += 1;
+      return (pool.query.bind(pool) as (...inner: unknown[]) => unknown)(...args);
+    }) as Pool['query'],
+  } as unknown as Pool;
 }
 
 describe('taskHistoryStore', () => {
@@ -215,6 +244,56 @@ describe('taskHistoryStore', () => {
     expect(only.content.equals(input.entries[0].content)).toBe(true);
     expect(only.unifiedDiff.equals(input.entries[0].unifiedDiff)).toBe(true);
     expect(only.contentSha256).toBe(input.entries[0].contentSha256);
+    expect(only.diffSha256).toBe(sha256(input.entries[0].unifiedDiff));
+  });
+
+  it('binds every entry reference to the exact snapshot and diff hash', async () => {
+    await store.storeCapture(
+      captureInput({ entries: [entry('src/app.ts', 'body one\n', '+body one\n')] }),
+    );
+    await store.storeCapture(
+      captureInput({
+        captureId: 'capture-0002',
+        taskId: taskA2Id,
+        gitCommitSha: 'b'.repeat(40),
+        entries: [entry('src/other.ts', 'body two\n', '+body two\n')],
+      }),
+    );
+
+    const stored = await pool.query<{
+      snapshot_sha256: string;
+      diff_sha256: string;
+      snapshot_blob_id: string;
+      diff_blob_id: string;
+    }>(
+      `SELECT snapshot_sha256, diff_sha256, snapshot_blob_id, diff_blob_id
+       FROM task_file_capture_entries WHERE capture_id = 'capture-0001'`,
+    );
+    expect(stored.rows[0].snapshot_sha256).toBe(sha256(Buffer.from('body one\n', 'utf8')));
+    expect(stored.rows[0].diff_sha256).toBe(sha256(Buffer.from('+body one\n', 'utf8')));
+
+    const otherSnapshot = await pool.query<{ id: string }>(
+      `SELECT b.id FROM encrypted_blobs b
+       JOIN task_file_capture_entries e ON e.snapshot_blob_id = b.id
+       WHERE e.capture_id = 'capture-0002'`,
+    );
+
+    // Swapping in another same-team snapshot blob breaks the hash-bound
+    // foreign key, so a blob substitution cannot silently change history.
+    await expect(
+      pool.query(
+        `UPDATE task_file_capture_entries SET snapshot_blob_id = $1 WHERE capture_id = 'capture-0001'`,
+        [otherSnapshot.rows[0].id],
+      ),
+    ).rejects.toMatchObject({ code: '23503' });
+
+    // Rewriting a referenced blob's authenticated hash is equally rejected.
+    await expect(
+      pool.query(
+        `UPDATE encrypted_blobs SET plaintext_sha256 = repeat('a', 64) WHERE id = $1`,
+        [stored.rows[0].snapshot_blob_id],
+      ),
+    ).rejects.toMatchObject({ code: '23503' });
   });
 
   it('deduplicates identical plaintext within a team and never across teams', async () => {
@@ -315,14 +394,60 @@ describe('taskHistoryStore', () => {
       store.storeCapture(captureInput({ entries: [entry('src/app.ts', 'changed\n', '+changed\n')] })),
     ).rejects.toMatchObject({ status: 409, code: 'capture_conflict' });
 
-    await expect(
-      store.storeCapture(
-        captureInput({ teamId: teamBId, taskId: taskBId }),
-      ),
-    ).rejects.toMatchObject({ status: 409, code: 'capture_conflict' });
-
     expect(await countRows('task_file_captures')).toBe(1);
     expect(await countRows('task_file_capture_entries')).toBe(1);
+  });
+
+  it('scopes capture identity to the team so the same id can exist in two teams', async () => {
+    await store.storeCapture(captureInput());
+
+    const foreign = await store.storeCapture(
+      captureInput({ teamId: teamBId, taskId: taskBId, entries: [entry('src/b.ts', 'beta\n', '+beta\n')] }),
+    );
+    expect(foreign).toEqual({ captureId: 'capture-0001', status: 'stored', entryCount: 1 });
+
+    const alpha = await store.readCapture(teamAId, taskAId, 'capture-0001');
+    const beta = await store.readCapture(teamBId, taskBId, 'capture-0001');
+    expect(alpha.entries[0].path).toBe('src/app.ts');
+    expect(beta.entries[0].path).toBe('src/b.ts');
+
+    // Squatting an id in one team must not probe or block the other team.
+    await expect(store.readCapture(teamBId, taskAId, 'capture-0001')).rejects.toMatchObject({
+      status: 404,
+      code: 'capture_not_found',
+    });
+    expect(await countRows('task_file_captures')).toBe(2);
+  });
+
+  it('separates event idempotency conflicts from capture id content conflicts', async () => {
+    await store.storeCapture(captureInput());
+
+    await expect(
+      store.storeCapture(captureInput({ captureId: 'capture-other' })),
+    ).rejects.toMatchObject({ status: 409, code: 'capture_event_conflict' });
+
+    await store.storeCapture(
+      captureInput({
+        captureId: 'checkpoint-capture',
+        trigger: 'checkpoint',
+        gitCommitSha: null,
+        checkpointId: 'ckpt-1',
+        entries: [entry('src/ckpt.ts', 'ckpt\n', '+ckpt\n')],
+      }),
+    );
+    await expect(
+      store.storeCapture(
+        captureInput({
+          captureId: 'checkpoint-capture-2',
+          trigger: 'checkpoint',
+          gitCommitSha: null,
+          checkpointId: 'ckpt-1',
+          entries: [entry('src/ckpt.ts', 'ckpt\n', '+ckpt\n')],
+        }),
+      ),
+    ).rejects.toMatchObject({ status: 409, code: 'capture_event_conflict' });
+
+    expect(await countRows('task_file_captures')).toBe(2);
   });
 
   it('refuses to store a capture for a task in another team', async () => {
@@ -396,9 +521,9 @@ describe('taskHistoryStore', () => {
       code: 'capture_integrity_error',
     });
 
-    // Rewriting authenticated metadata (the key id) must also fail closed.
+    // Rewriting authenticated metadata (the AAD version) must also fail closed.
     await pool.query(
-      `UPDATE encrypted_blobs SET plaintext_sha256 = repeat('0', 64)
+      `UPDATE encrypted_blobs SET aad_version = 2
        WHERE id = (SELECT diff_blob_id FROM task_file_capture_entries WHERE capture_id = 'capture-0002')`,
     );
     await expect(store.readCapture(teamAId, taskA2Id, 'capture-0002')).rejects.toMatchObject({
@@ -563,17 +688,27 @@ describe('taskHistoryStore', () => {
       reason: 'cleanup',
     };
 
+    // Membership is checked before capture existence, so a non-member always
+    // sees 403 and can never use 403-vs-404 as a capture existence oracle.
     await expect(store.deleteCapture({ ...base, teamId: teamBId })).rejects.toMatchObject({
-      status: 404,
-    });
-    await expect(store.deleteCapture({ ...base, taskId: taskA2Id })).rejects.toMatchObject({
-      status: 404,
-      code: 'capture_not_found',
+      status: 403,
+      code: 'forbidden_actor',
     });
     await expect(store.deleteCapture({ ...base, actorUserId: adminBId })).rejects.toMatchObject({
       status: 403,
       code: 'forbidden_actor',
     });
+    await expect(
+      store.deleteCapture({ ...base, actorUserId: adminBId, captureId: 'no-such-capture' }),
+    ).rejects.toMatchObject({ status: 403, code: 'forbidden_actor' });
+
+    await expect(store.deleteCapture({ ...base, taskId: taskA2Id })).rejects.toMatchObject({
+      status: 404,
+      code: 'capture_not_found',
+    });
+    await expect(
+      store.deleteCapture({ ...base, captureId: 'no-such-capture' }),
+    ).rejects.toMatchObject({ status: 404, code: 'capture_not_found' });
     await expect(store.deleteCapture({ ...base, reason: '   ' })).rejects.toMatchObject({
       status: 400,
       code: 'invalid_capture',
@@ -581,5 +716,113 @@ describe('taskHistoryStore', () => {
 
     expect(await countRows('task_file_captures')).toBe(1);
     expect(await countRows('task_file_history_deletions')).toBe(0);
+  });
+
+  it('reads a capture from one consistent snapshot while it is being deleted', async () => {
+    for (let round = 0; round < 5; round += 1) {
+      const captureId = `race-${round}`;
+      const body = `race body ${round}\n`;
+      await store.storeCapture(
+        captureInput({
+          captureId,
+          gitCommitSha: round.toString(16).padStart(40, '0'),
+          entries: [entry('src/race.ts', body, `+${body}`), entry('src/race-2.ts', body, `+${body}`)],
+        }),
+      );
+
+      const [read, deleted] = await Promise.allSettled([
+        store.readCapture(teamAId, taskAId, captureId),
+        store.deleteCapture({
+          teamId: teamAId,
+          taskId: taskAId,
+          captureId,
+          actorUserId: adminAId,
+          reason: 'race',
+        }),
+      ]);
+
+      expect(deleted.status).toBe('fulfilled');
+      if (read.status === 'rejected') {
+        expect(read.reason).toMatchObject({ status: 404, code: 'capture_not_found' });
+      } else {
+        expect(read.value.entries).toHaveLength(2);
+        expect(read.value.entries[0].content.toString('utf8')).toBe(body);
+        expect(read.value.entries[1].unifiedDiff.toString('utf8')).toBe(`+${body}`);
+      }
+    }
+  });
+
+  it('keeps concurrent uploads and blob garbage collection consistent', async () => {
+    const shared = 'concurrently shared body\n';
+    const sharedDiff = '+concurrently shared body\n';
+
+    for (let round = 0; round < 5; round += 1) {
+      await pool.query('TRUNCATE TABLE task_file_capture_entries, task_file_captures CASCADE');
+      await pool.query('DELETE FROM encrypted_blobs');
+
+      await store.storeCapture(
+        captureInput({
+          captureId: `gc-drop-${round}`,
+          gitCommitSha: `a${round.toString(16)}`.padStart(40, '0'),
+          entries: [entry('src/shared.ts', shared, sharedDiff)],
+        }),
+      );
+
+      const [deleted, uploaded] = await Promise.allSettled([
+        store.deleteCapture({
+          teamId: teamAId,
+          taskId: taskAId,
+          captureId: `gc-drop-${round}`,
+          actorUserId: adminAId,
+          reason: 'gc race',
+        }),
+        store.storeCapture(
+          captureInput({
+            captureId: `gc-new-${round}`,
+            taskId: taskA2Id,
+            gitCommitSha: `b${round.toString(16)}`.padStart(40, '0'),
+            entries: [entry('src/shared.ts', shared, sharedDiff)],
+          }),
+        ),
+      ]);
+
+      // Neither side may surface a raw Postgres failure.
+      for (const settled of [deleted, uploaded]) {
+        if (settled.status === 'rejected') {
+          expect(settled.reason).toBeInstanceOf(ApiError);
+          throw settled.reason;
+        }
+      }
+
+      const survivor = await store.readCapture(teamAId, taskA2Id, `gc-new-${round}`);
+      expect(survivor.entries[0].content.toString('utf8')).toBe(shared);
+      expect(survivor.entries[0].unifiedDiff.toString('utf8')).toBe(sharedDiff);
+    }
+  });
+
+  it('uses a bounded number of round trips regardless of entry count', async () => {
+    const counter = { count: 0 };
+    const countingStore = createTaskHistoryStore(countingPool(pool, counter), keyring);
+
+    const build = (captureId: string, size: number, sha: string): StoreCaptureInput =>
+      captureInput({
+        captureId,
+        gitCommitSha: sha,
+        entries: Array.from({ length: size }, (_, index) =>
+          entry(`src/${captureId}-${index}.ts`, `body ${captureId} ${index}\n`, `+body ${index}\n`),
+        ),
+      });
+
+    counter.count = 0;
+    await countingStore.storeCapture(build('small', 10, '1'.repeat(40)));
+    const smallQueries = counter.count;
+
+    counter.count = 0;
+    await countingStore.storeCapture(build('large', 40, '2'.repeat(40)));
+    const largeQueries = counter.count;
+
+    expect(smallQueries).toBeLessThanOrEqual(12);
+    expect(largeQueries).toBe(smallQueries);
+    expect(await countRows('task_file_capture_entries')).toBe(50);
   });
 });

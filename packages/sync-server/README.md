@@ -93,26 +93,46 @@ history as ciphertext only, via `src/taskHistoryStore.ts`:
   bytes. Deduplication is `UNIQUE (team_id, plaintext_sha256, blob_type)`, so
   identical plaintext is stored once per team and never shared across teams.
 - `task_file_captures` / `task_file_capture_entries` — capture events and their
-  per-path snapshot/diff references. Composite foreign keys prove the task, the
-  capture, and both blobs belong to the same team, and pin each reference to the
-  correct blob type.
+  per-path snapshot/diff references. Capture identity is team-scoped
+  (`PRIMARY KEY (team_id, id)`), so two teams may mint the same local capture id
+  and neither can probe for or squat the other's ids. Composite foreign keys
+  prove the task, the capture, and both blobs belong to the same team, and pin
+  each reference to the correct blob type *and* to the exact expected plaintext
+  SHA-256 (`snapshot_sha256` / `diff_sha256`). Swapping in another same-team
+  blob, or rewriting a referenced blob's hash, is rejected by the database.
 - `task_file_history_deletions` — append-only deletion audit (actor, task,
   capture, deleted paths/counts, reason); `UPDATE`/`DELETE` are blocked by a
-  trigger.
+  trigger. A table owner can still `TRUNCATE` it; revoking that requires a
+  dedicated least-privilege application database role, deferred to plan 03.
 
 Blob AAD is deliberately stable — schema/AAD version, team id, plaintext
 SHA-256, blob type, key id, and compression — so one deduplicated ciphertext can
 be referenced by many capture entries. Capture/task/path integrity is enforced
 by the transactional foreign keys above rather than by per-path AAD. Reads
-decrypt, decompress, then re-verify plaintext length and SHA-256, and fail
-closed with `capture_integrity_error` when anything has been tampered with.
+decrypt, decompress, then re-verify plaintext length and SHA-256 against both
+the stored blob and the referencing entry, and fail closed with
+`capture_integrity_error` when anything has been tampered with. `readCapture`
+runs on a single client inside a `REPEATABLE READ` read-only transaction, so a
+capture being deleted concurrently reads as either the whole capture or a
+deterministic `capture_not_found`.
 
 `storeCapture` re-validates the client guardrails server side (1 MiB per file,
 10 MiB per capture, normalized relative paths, content hash match) before
-anything is encrypted, is idempotent on exact capture replays, and returns
-`capture_conflict` when a capture id is reused with different metadata or
-entries. `deleteCapture` removes references first, writes the immutable audit
-row, and garbage-collects only blobs with no remaining references.
+anything is encrypted, and is idempotent on exact capture replays. Conflicts are
+distinguished: `capture_conflict` means the same capture id already exists with
+different metadata or entries, while `capture_event_conflict` means a *different*
+capture id already records the same commit or checkpoint. Blob work is batched —
+one locking read, one multi-row insert, one batched entry insert — so round
+trips stay constant as entry count grows.
+
+`deleteCapture` checks the actor's active team membership before capture
+existence (so a non-member cannot use 403-vs-404 as an existence oracle), then
+deletes entries, deletes the capture event, locks the candidate blobs
+`FOR UPDATE` and garbage-collects only those with no remaining references, and
+finally writes the immutable audit row. Uploads take `FOR SHARE` locks on the
+blobs they reuse, so a concurrent upload and collection either serialize or
+retry, and never surface a raw Postgres error (`capture_storage_conflict` is
+returned if a lost race survives one retry).
 
 ## Local Postgres via Docker
 
