@@ -362,3 +362,58 @@ export function pullCommands(serverUrl: string, token: string, taskRemoteId: str
     { method: 'GET', headers: authHeaders(token) },
   );
 }
+
+// ---------------------------------------------------------------------
+// Task file captures — encrypted-at-rest file history (docs §4.7).
+// ---------------------------------------------------------------------
+
+export type FileCaptureTrigger = 'git_commit' | 'checkpoint' | 'explicit';
+
+export interface PushFileCaptureEntryInput {
+  path: string;
+  content: string;
+  unifiedDiff: string;
+  contentSha256: string;
+  byteLength: number;
+}
+
+export interface PushFileCaptureInput {
+  captureId: string;
+  trigger: FileCaptureTrigger;
+  gitCommitSha: string | null;
+  checkpointId: string | null;
+  createdAt: string;
+  entries: PushFileCaptureEntryInput[];
+}
+
+export interface FileCaptureAck {
+  captureId: string;
+  status: 'stored' | 'duplicate';
+  entryCount: number;
+}
+
+/**
+ * Uploads exactly one capture per request. Batching several captures into one
+ * body would multiply the server's 10 MiB per-capture ceiling and make a
+ * partial failure ambiguous, so each capture is its own retryable unit. The
+ * body is plain UTF-8 JSON — never multipart, and never staged through a
+ * temporary plaintext file on disk.
+ */
+export function pushFileCapture(
+  serverUrl: string,
+  token: string,
+  remoteTaskId: string,
+  capture: PushFileCaptureInput,
+) {
+  return request<FileCaptureAck>(
+    `${serverUrl}/api/v1/sync/tasks/${encodeURIComponent(remoteTaskId)}/file-captures`,
+    {
+      method: 'POST',
+      headers: {
+        ...authHeaders(token),
+        'Content-Type': 'application/json; charset=utf-8',
+      },
+      body: JSON.stringify({ capture }),
+    },
+  );
+}

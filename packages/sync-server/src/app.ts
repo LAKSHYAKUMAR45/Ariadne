@@ -4,8 +4,11 @@ import { SyncServerConfigError } from './config.js';
 import type { EncryptionKeyring } from './encryption.js';
 import { createMembersRouter } from './routes/members.js';
 import { handleUnexpectedError, requireAuth } from './middleware.js';
+import { createAdminTasksRouter } from './routes/adminTasks.js';
 import { createAuthRouter } from './routes/auth.js';
 import { createSyncRouter } from './routes/sync.js';
+import { createTaskHistoryRouter } from './routes/taskHistory.js';
+import { createTaskHistoryStore } from './taskHistoryStore.js';
 
 export interface CreateAppOptions {
   /** Required: the server must never run without a loaded keyring. */
@@ -34,12 +37,21 @@ export function createApp(pool: Pool, jwtSecret: string, options: CreateAppOptio
 
   const app = express();
   app.locals.encryptionKeyring = encryptionKeyring;
-  app.use(express.json());
+  const taskHistoryStore = createTaskHistoryStore(pool, encryptionKeyring);
 
   app.get('/healthz', (_req, res) => res.status(200).json({ ok: true }));
 
+  // Capture uploads are mounted ahead of the global JSON parser so they can use
+  // their own larger, route-scoped body limit (see CAPTURE_REQUEST_BODY_LIMIT)
+  // without raising the 100 KB default for any other route. Requests that this
+  // router does not match fall through to the parser and routers below.
+  app.use('/api/v1/sync', requireAuth(jwtSecret), createTaskHistoryRouter(pool, taskHistoryStore));
+
+  app.use(express.json());
+
   app.use('/api/v1/auth', createAuthRouter(pool, jwtSecret));
   app.use('/api/v1/admin', requireAuth(jwtSecret), createMembersRouter(pool));
+  app.use('/api/v1/admin', requireAuth(jwtSecret), createAdminTasksRouter(pool, taskHistoryStore));
   app.use('/api/v1/sync', requireAuth(jwtSecret), createSyncRouter(pool));
   app.use(handleUnexpectedError);
 

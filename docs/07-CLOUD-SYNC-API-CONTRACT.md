@@ -648,6 +648,139 @@ All five push endpoints follow checkpoints' attribution model (§2.1):
 `owner_user_id` is the pushing account, `workspace_label` is the pushing
 workspace, independent of the parent task's own attribution.
 
+### 4.7 Sync — task file captures (encrypted history)
+
+**`POST /api/v1/sync/tasks/:taskId/file-captures`** — upload one capture
+
+`:taskId` is the task's **remote** id (a UUID). Exactly one capture is
+uploaded per request: batching would multiply the 10 MiB per-capture cap and
+make partial failures ambiguous, so each capture is its own retryable unit.
+The body is plain UTF-8 JSON — never multipart, and the CLI never stages
+plaintext through a temporary file.
+
+```json
+// Request
+{
+  "capture": {
+    "captureId": "01J...",            // the local capture id; also the idempotency key
+    "trigger": "git_commit",           // git_commit | checkpoint | explicit
+    "gitCommitSha": "abcdef1234567",  // required for git_commit, else null
+    "checkpointId": null,              // required for checkpoint, else null
+    "createdAt": "2026-09-21T04:00:00.000Z",
+    "entries": [
+      {
+        "path": "src/a.ts",           // normalized, workspace-relative POSIX path
+        "content": "export const a = 1;\n",
+        "unifiedDiff": "@@ -0,0 +1 @@\n+export const a = 1;\n",
+        "contentSha256": "<64 lowercase hex>",
+        "byteLength": 20               // UTF-8 byte length of `content`
+      }
+    ]
+  }
+}
+// Response 200
+{ "captureId": "01J...", "status": "stored", "entryCount": 1 }
+```
+
+- `status` is `"stored"` on first write and `"duplicate"` when an identical
+  capture is replayed, so a client retry after a lost response is safe.
+- Authorization: an **active team membership** plus access to the referenced
+  team task. A deactivated caller gets `403 inactive_membership` *before* any
+  body validation; a task outside the caller's team is `404 task_not_found`.
+- Every guard is re-checked server-side, never trusted from the client:
+  - `400 invalid_capture_encoding` — request bytes are not valid UTF-8, or a
+    decoded string contains lone surrogates.
+  - `400 invalid_request` — `:taskId` is not a UUID, or the body shape is wrong.
+  - `400 invalid_capture` — non-normalized/absolute/traversal path, duplicate
+    path, `contentSha256` mismatch, or `byteLength` mismatch.
+  - `413 capture_too_large` — an entry over 1 MiB, a capture over 10 MiB of
+    snapshot (or diff) text, or a request body over the route's own 32 MiB
+    limit. That limit is scoped to this route only: it is mounted ahead of the
+    global `express.json()` parser so no other endpoint's 100 KB default is
+    weakened.
+  - `409 capture_conflict` / `409 capture_event_conflict` — the same capture id
+    with different contents, or another capture already recording that commit
+    or checkpoint.
+- The server content-addresses, gzip-compresses, and AES-256-GCM encrypts every
+  snapshot and diff before storage. Postgres holds no plaintext (§2).
+
+`ariadne sync push` uploads pending captures **after** the task and all of its
+sub-entities are on the server (the task must already exist remotely), marks
+only the capture ids the server acknowledged as synced, and leaves any failed
+capture pending so the next push retries it. Upload failures are reported with
+the stable error code only — capture content is never logged.
+
+### 4.8 Admin — task audit (temporary bearer-admin gate)
+
+These reads require the **singleton admin** (`403 admin_required` otherwise)
+and are bearer-token gated only as an interim measure; plan 04 replaces this
+with browser sessions. All three responses are `Cache-Control: no-store`.
+
+**`GET /api/v1/admin/tasks?limit=&offset=`** — every task in the admin's team
+```json
+{
+  "tasks": [
+    {
+      "taskId": "9a3f...", "localId": "01J...", "title": "...", "goal": null,
+      "status": "active", "branch": null, "workspaceLabel": "laptop1:org/atom",
+      "owner": "alice", "captureCount": 3,
+      "createdAt": "...", "updatedAt": "..."
+    }
+  ],
+  "hasMore": false,
+  "nextOffset": null
+}
+```
+
+**`GET /api/v1/admin/tasks/:taskId/timeline`** — one merged audit timeline
+```json
+{
+  "taskId": "9a3f...",
+  "events": [
+    { "kind": "task", "id": "9a3f...", "occurredAt": "...", "summary": "...", "metadata": { } },
+    { "kind": "capture", "id": "01J...", "occurredAt": "...", "summary": "git_commit capture of 1 file(s)",
+      "metadata": { "trigger": "git_commit", "gitCommitSha": "abc...", "checkpointId": null,
+                    "entryCount": 1,
+                    "files": [ { "path": "src/a.ts", "contentSha256": "...", "byteLength": 20 } ] } }
+  ]
+}
+```
+
+- `kind` is one of `task`, `commit`, `checkpoint`, `capture`, `command`,
+  `decision`, `todo`, `error`, `question`.
+- `commit` events are derived from commit-triggered captures (the server stores
+  no separate commits table), deduplicated by SHA and dated at the earliest
+  capture recording them.
+- Ordering is deterministic: `occurredAt` ascending, then the fixed `kind`
+  order listed above, then `id` ascending. The same task always renders
+  identically.
+- The timeline is **metadata only**. Capture entries expose path, snapshot
+  hash, and plaintext byte length (read from the blob's authenticated
+  metadata, without decrypting); file text is never included here.
+
+**`GET /api/v1/admin/tasks/:taskId/file-captures/:captureId/files/:path`** —
+the single endpoint that decrypts captured file content
+```json
+{
+  "path": "src/a.ts",
+  "content": "export const a = 1;\n",
+  "unifiedDiff": "@@ -0,0 +1 @@\n+export const a = 1;\n",
+  "contentSha256": "<64 lowercase hex>",
+  "byteLength": 20
+}
+```
+
+- `:path` is the URL-encoded captured path. It is percent-decoded exactly once
+  (by the router) and then validated, never decoded again: absolute paths,
+  `..` segments, backslashes, and control characters are rejected with
+  `400 invalid_request`, so `%2e%2e%2f...` cannot escape the capture.
+- `404 task_not_found` for a task outside the admin's team,
+  `404 capture_not_found` for an unknown capture, and
+  `404 capture_file_not_found` when the capture holds no such path.
+- Responses carry `Cache-Control: no-store` and `X-Content-Type-Options:
+  nosniff`; decrypted text is returned as JSON data and is never interpreted
+  as HTML.
+
 ## 5. Error format
 
 All error responses share one shape:

@@ -27,6 +27,28 @@ function diffFields(local: Record<string, unknown>, remote: Record<string, unkno
   return diffs;
 }
 
+/**
+ * Renders an upload failure as a stable, non-sensitive token. Only a
+ * whitelisted-shape error code from the server is echoed: server messages may
+ * quote capture paths, and a hostile or buggy server must not be able to push
+ * arbitrary text through the CLI's output.
+ */
+const SAFE_ERROR_CODE_PATTERN = /^[a-z0-9_]{1,64}$/;
+
+function describeCaptureFailure(error: unknown): string {
+  const candidate = error as { name?: unknown; status?: unknown; code?: unknown } | null;
+  if (
+    candidate &&
+    candidate.name === 'SyncApiError' &&
+    typeof candidate.code === 'string' &&
+    SAFE_ERROR_CODE_PATTERN.test(candidate.code)
+  ) {
+    const status = typeof candidate.status === 'number' ? candidate.status : 0;
+    return `HTTP ${status} ${candidate.code}`;
+  }
+  return 'unexpected_error';
+}
+
 /** `ariadne sync register <username> <password>` — creates an account, then logs in immediately for convenience. */
 export async function runSyncRegister(username: string, password: string, serverUrl: string, profileName?: string): Promise<void> {
   await syncClient.register(serverUrl, username, password);
@@ -337,6 +359,55 @@ export async function runSyncPush(store: TaskStore, workspaceRoot: string, taskI
   }
   if (commandsPushed > 0) console.log(`Pushed ${commandsPushed} command(s).`);
 
+  // File captures upload last: the server rejects a capture whose task is not
+  // already present, and one capture per request keeps each upload an
+  // independently retryable unit under the 10 MiB per-capture cap.
+  let capturesUploaded = 0;
+  let captureFailures = 0;
+  for (const id of taskIdsToCheck) {
+    const task = store.getTask(id);
+    const remoteTaskId = task?.remoteId ?? undefined;
+    if (!remoteTaskId) continue;
+
+    for (const capture of store.getPendingTaskFileCaptures(id)) {
+      try {
+        const ack = await syncClient.pushFileCapture(config.serverUrl, config.token, remoteTaskId, {
+          captureId: capture.id,
+          trigger: capture.trigger,
+          gitCommitSha: capture.gitCommitSha,
+          checkpointId: capture.checkpointId,
+          createdAt: capture.createdAt,
+          entries: capture.entries.map((entry) => ({
+            path: entry.path,
+            content: entry.content,
+            unifiedDiff: entry.unifiedDiff,
+            contentSha256: entry.contentSha256,
+            byteLength: entry.byteLength,
+          })),
+        });
+
+        // Only an acknowledgement naming this exact capture proves the server
+        // stored it; anything else leaves the capture pending for a later push.
+        if (ack?.captureId === capture.id) {
+          store.markTaskFileCaptureSynced(capture.id);
+          capturesUploaded += 1;
+        } else {
+          captureFailures += 1;
+          console.warn(`File capture ${capture.id} was not acknowledged by the server; it stays pending.`);
+        }
+      } catch (err) {
+        captureFailures += 1;
+        // Only the stable error code is reported: server messages can quote
+        // capture paths, and capture content must never reach the terminal.
+        console.warn(`File capture ${capture.id} upload failed (${describeCaptureFailure(err)}); it stays pending.`);
+      }
+    }
+  }
+  if (capturesUploaded > 0) console.log(`Uploaded ${capturesUploaded} file capture(s).`);
+  if (captureFailures > 0) {
+    console.log(`${captureFailures} file capture(s) will be retried on the next push.`);
+  }
+
   if (
     tasksToPush.length === 0 &&
     checkpointsPushed === 0 &&
@@ -345,6 +416,8 @@ export async function runSyncPush(store: TaskStore, workspaceRoot: string, taskI
     errorsPushed === 0 &&
     openQuestionsPushed === 0 &&
     commandsPushed === 0 &&
+    capturesUploaded === 0 &&
+    captureFailures === 0 &&
     !taskId
   ) {
     console.log('Nothing to push — everything is already synced.');

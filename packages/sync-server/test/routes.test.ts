@@ -1,8 +1,14 @@
-import type { Express } from 'express';
+import { createHash } from 'node:crypto';
+import { request as httpRequest } from 'node:http';
+import type { AddressInfo } from 'node:net';
+import express, { type Express } from 'express';
 import type { Pool } from 'pg';
 import request from 'supertest';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../src/app.js';
+import { handleUnexpectedError, requireAuth } from '../src/middleware.js';
+import { createTaskHistoryRouter } from '../src/routes/taskHistory.js';
+import { createTaskHistoryStore } from '../src/taskHistoryStore.js';
 import { signToken } from '../src/auth.js';
 import { createPool } from '../src/db.js';
 import { runMigrations } from '../src/migrate.js';
@@ -34,7 +40,7 @@ describe('sync-server: auth + sync routes', () => {
   beforeEach(async () => {
     // Isolate each test: wipe all sync-relevant tables (CASCADE handles FKs).
     await pool.query(
-      'TRUNCATE TABLE todos, decisions, errors, open_questions, commands, checkpoints, tasks, team_memberships, teams, users CASCADE',
+      'TRUNCATE TABLE task_file_capture_entries, task_file_captures, task_file_history_deletions, encrypted_blobs, todos, decisions, errors, open_questions, commands, checkpoints, tasks, team_memberships, teams, users CASCADE',
     );
   });
 
@@ -1739,6 +1745,561 @@ describe('sync-server: auth + sync routes', () => {
         .set(fixture.teamBUser.authHeader);
       expect(deniedList.status).toBe(404);
       expect(deniedList.body.error.code).toBe('task_not_found');
+    });
+  });
+
+  // -------------------------------------------------------------------
+  // Task 6 — encrypted capture upload + admin audit APIs.
+  // -------------------------------------------------------------------
+  describe('task file captures and admin audit', () => {
+    const TASK_ID = '00000000-0000-0000-0000-000000000401';
+    const OTHER_TASK_ID = '00000000-0000-0000-0000-000000000402';
+
+    interface HistoryFixture {
+      teamId: string;
+      otherTeamId: string;
+      admin: { userId: string; authHeader: { Authorization: string } };
+      member: { userId: string; authHeader: { Authorization: string } };
+      inactive: { userId: string; authHeader: { Authorization: string } };
+      outsider: { userId: string; authHeader: { Authorization: string } };
+    }
+
+    async function seedHistoryFixture(): Promise<HistoryFixture> {
+      const teamId = await createDirectTeam('History team');
+      const otherTeamId = await createDirectTeam('Other team');
+      const admin = await createDirectUser('history-admin');
+      const member = await createDirectUser('history-member');
+      const inactive = await createDirectUser('history-inactive');
+      const outsider = await createDirectUser('history-outsider');
+
+      await addMembership(teamId, admin.userId, 'admin');
+      await addMembership(teamId, member.userId, 'member');
+      await pool.query(
+        `INSERT INTO team_memberships (team_id, user_id, role, active) VALUES ($1, $2, 'member', false)`,
+        [teamId, inactive.userId],
+      );
+      await addMembership(otherTeamId, outsider.userId, 'admin');
+
+      await createDirectTask({
+        taskId: TASK_ID,
+        teamId,
+        ownerUserId: admin.userId,
+        localId: 'history-task',
+        title: 'History task',
+      });
+      await createDirectTask({
+        taskId: OTHER_TASK_ID,
+        teamId: otherTeamId,
+        ownerUserId: outsider.userId,
+        localId: 'other-task',
+        title: 'Other team task',
+      });
+
+      return { teamId, otherTeamId, admin, member, inactive, outsider };
+    }
+
+    function sha256(text: string): string {
+      return createHash('sha256').update(Buffer.from(text, 'utf8')).digest('hex');
+    }
+
+    function captureEntry(path: string, content: string, unifiedDiff: string) {
+      return {
+        path,
+        content,
+        unifiedDiff,
+        contentSha256: sha256(content),
+        byteLength: Buffer.byteLength(content, 'utf8'),
+      };
+    }
+
+    function captureBody(
+      overrides: Partial<{
+        captureId: string;
+        trigger: string;
+        gitCommitSha: string | null;
+        checkpointId: string | null;
+        createdAt: string;
+        entries: unknown[];
+      }> = {},
+    ) {
+      return {
+        capture: {
+          captureId: 'capture-1',
+          trigger: 'explicit',
+          gitCommitSha: null,
+          checkpointId: null,
+          createdAt: '2026-09-21T04:00:00.000Z',
+          entries: [captureEntry('src/a.ts', 'export const a = 1;\n', '@@ -0,0 +1 @@\n+export const a = 1;\n')],
+          ...overrides,
+        },
+      };
+    }
+
+    function captureUrl(taskId: string): string {
+      return `/api/v1/sync/tasks/${taskId}/file-captures`;
+    }
+
+    /**
+     * POSTs exact bytes to the real app over a loopback listener. supertest
+     * re-serializes Buffer bodies as JSON, which would defeat any test that
+     * depends on the precise request encoding.
+     */
+    async function postRawBytes(
+      url: string,
+      headers: Record<string, string>,
+      body: Buffer,
+    ): Promise<{ status: number; body: { error: { code: string; message: string } } }> {
+      const server = app.listen(0);
+      try {
+        const { port } = server.address() as AddressInfo;
+        return await new Promise((resolve, reject) => {
+          const req = httpRequest(
+            {
+              host: '127.0.0.1',
+              port,
+              path: url,
+              method: 'POST',
+              headers: {
+                ...headers,
+                'Content-Type': 'application/json',
+                'Content-Length': String(body.length),
+              },
+            },
+            (response) => {
+              const chunks: Buffer[] = [];
+              response.on('data', (chunk: Buffer) => chunks.push(chunk));
+              response.on('end', () => {
+                const text = Buffer.concat(chunks).toString('utf8');
+                resolve({ status: response.statusCode ?? 0, body: text ? JSON.parse(text) : undefined });
+              });
+            },
+          );
+          req.on('error', reject);
+          req.end(body);
+        });
+      } finally {
+        server.close();
+      }
+    }
+
+    it('stores an uploaded capture for an active member and is idempotent on retry', async () => {
+      const fixture = await seedHistoryFixture();
+
+      const first = await request(app)
+        .post(captureUrl(TASK_ID))
+        .set(fixture.member.authHeader)
+        .send(captureBody());
+      expect(first.status).toBe(200);
+      expect(first.body).toEqual({ captureId: 'capture-1', status: 'stored', entryCount: 1 });
+
+      const retry = await request(app)
+        .post(captureUrl(TASK_ID))
+        .set(fixture.member.authHeader)
+        .send(captureBody());
+      expect(retry.status).toBe(200);
+      expect(retry.body).toEqual({ captureId: 'capture-1', status: 'duplicate', entryCount: 1 });
+
+      const { rows } = await pool.query<{ count: string }>(
+        'SELECT count(*)::text AS count FROM task_file_captures WHERE team_id = $1',
+        [fixture.teamId],
+      );
+      expect(rows[0].count).toBe('1');
+    });
+
+    it('never stores capture plaintext in Postgres', async () => {
+      const fixture = await seedHistoryFixture();
+      const secret = 'plaintext-marker-should-never-be-stored';
+
+      await request(app)
+        .post(captureUrl(TASK_ID))
+        .set(fixture.member.authHeader)
+        .send(captureBody({ entries: [captureEntry('src/secret.ts', secret, `+${secret}`)] }))
+        .expect(200);
+
+      const { rows } = await pool.query<{ found: string }>(
+        `SELECT count(*)::text AS found FROM encrypted_blobs
+         WHERE position($1::bytea in ciphertext) > 0`,
+        [Buffer.from(secret, 'utf8')],
+      );
+      expect(rows[0].found).toBe('0');
+    });
+
+    it('accepts a capture at the 10 MiB total-content limit', async () => {
+      const fixture = await seedHistoryFixture();
+      // Ten 1 MiB entries is exactly the documented per-capture ceiling, so the
+      // route's body limit must admit a body of that size (plus JSON escaping).
+      const entries = Array.from({ length: 10 }, (_unused, index) => {
+        const content = `${'a'.repeat(1024 * 1024 - 8)}${String(index).padStart(8, '0')}`;
+        return captureEntry(`src/big-${index}.txt`, content, `+big-${index}\n`);
+      });
+
+      const res = await request(app)
+        .post(captureUrl(TASK_ID))
+        .set(fixture.member.authHeader)
+        .send(captureBody({ entries }));
+      expect(res.status).toBe(200);
+      expect(res.body).toMatchObject({ status: 'stored', entryCount: 10 });
+    });
+
+    it('rejects a capture entry over the per-file limit', async () => {
+      const fixture = await seedHistoryFixture();
+      const oversized = 'x'.repeat(1024 * 1024 + 1);
+
+      const res = await request(app)
+        .post(captureUrl(TASK_ID))
+        .set(fixture.member.authHeader)
+        .send(captureBody({ entries: [captureEntry('src/huge.txt', oversized, '+huge\n')] }));
+      expect(res.status).toBe(413);
+      expect(res.body.error.code).toBe('capture_too_large');
+    });
+
+    it('rejects request bodies over the route body limit as capture_too_large', async () => {
+      const fixture = await seedHistoryFixture();
+      const store = createTaskHistoryStore(pool, createTestEncryptionKeyring());
+      const tinyApp = express();
+      tinyApp.use(
+        '/api/v1/sync',
+        requireAuth(TEST_JWT_SECRET),
+        createTaskHistoryRouter(pool, store, { bodyLimit: '1kb' }),
+      );
+      tinyApp.use(handleUnexpectedError);
+
+      const res = await request(tinyApp)
+        .post(captureUrl(TASK_ID))
+        .set(fixture.member.authHeader)
+        .send(captureBody({ entries: [captureEntry('src/a.ts', 'y'.repeat(4096), '+y\n')] }));
+      expect(res.status).toBe(413);
+      expect(res.body.error.code).toBe('capture_too_large');
+    });
+
+    it('rejects malformed UTF-8 request bytes', async () => {
+      const fixture = await seedHistoryFixture();
+      const valid = Buffer.from(JSON.stringify(captureBody()), 'utf8');
+      // Splice an invalid continuation byte into the JSON payload.
+      const malformed = Buffer.concat([valid.subarray(0, 10), Buffer.from([0xc3, 0x28]), valid.subarray(10)]);
+
+      // supertest JSON-serializes Buffer bodies, so this one case talks to a
+      // real listener to guarantee the exact bytes reach the server.
+      const res = await postRawBytes(captureUrl(TASK_ID), fixture.member.authHeader, malformed);
+      expect(res.status).toBe(400);
+      expect(res.body.error.code).toBe('invalid_capture_encoding');
+    });
+
+    it('rejects capture text containing lone surrogates', async () => {
+      const fixture = await seedHistoryFixture();
+      const loneSurrogate = '\ud800';
+      const body = {
+        capture: {
+          captureId: 'capture-surrogate',
+          trigger: 'explicit',
+          gitCommitSha: null,
+          checkpointId: null,
+          createdAt: '2026-09-21T04:00:00.000Z',
+          entries: [
+            {
+              path: 'src/a.ts',
+              content: loneSurrogate,
+              unifiedDiff: '+bad\n',
+              contentSha256: sha256(loneSurrogate),
+              byteLength: Buffer.byteLength(loneSurrogate, 'utf8'),
+            },
+          ],
+        },
+      };
+
+      const res = await request(app)
+        .post(captureUrl(TASK_ID))
+        .set(fixture.member.authHeader)
+        .set('Content-Type', 'application/json')
+        // JSON.stringify emits lone surrogates as `\ud800` escapes, so the
+        // request bytes stay valid UTF-8 and only the decoded string is ill-formed.
+        .send(JSON.stringify(body));
+      expect(res.status).toBe(400);
+      expect(res.body.error.code).toBe('invalid_capture_encoding');
+    });
+
+    it('rejects a capture entry whose content hash does not match', async () => {
+      const fixture = await seedHistoryFixture();
+      const entries = [captureEntry('src/a.ts', 'const a = 1;\n', '+const a = 1;\n')];
+      entries[0].contentSha256 = sha256('something else');
+
+      const res = await request(app)
+        .post(captureUrl(TASK_ID))
+        .set(fixture.member.authHeader)
+        .send(captureBody({ entries }));
+      expect(res.status).toBe(400);
+      expect(res.body.error.code).toBe('invalid_capture');
+    });
+
+    it('rejects a capture entry whose byteLength does not match its content', async () => {
+      const fixture = await seedHistoryFixture();
+      const entries = [captureEntry('src/a.ts', 'const a = 1;\n', '+const a = 1;\n')];
+      entries[0].byteLength = 4;
+
+      const res = await request(app)
+        .post(captureUrl(TASK_ID))
+        .set(fixture.member.authHeader)
+        .send(captureBody({ entries }));
+      expect(res.status).toBe(400);
+      expect(res.body.error.code).toBe('invalid_capture');
+    });
+
+    it('rejects traversal and absolute capture entry paths', async () => {
+      const fixture = await seedHistoryFixture();
+
+      for (const path of ['../outside.txt', '/etc/passwd', 'src/../../escape.txt']) {
+        const res = await request(app)
+          .post(captureUrl(TASK_ID))
+          .set(fixture.member.authHeader)
+          .send(captureBody({ entries: [captureEntry(path, 'nope\n', '+nope\n')] }));
+        expect(res.status).toBe(400);
+        expect(res.body.error.code).toBe('invalid_capture');
+      }
+    });
+
+    it('denies capture upload from an inactive member before validating the body', async () => {
+      const fixture = await seedHistoryFixture();
+
+      const res = await request(app)
+        .post(captureUrl(TASK_ID))
+        .set(fixture.inactive.authHeader)
+        .send({ capture: { nonsense: true } });
+      expect(res.status).toBe(403);
+      expect(res.body.error.code).toBe('inactive_membership');
+    });
+
+    it('denies capture upload for a task outside the caller team', async () => {
+      const fixture = await seedHistoryFixture();
+
+      const res = await request(app)
+        .post(captureUrl(OTHER_TASK_ID))
+        .set(fixture.member.authHeader)
+        .send(captureBody());
+      expect(res.status).toBe(404);
+      expect(res.body.error.code).toBe('task_not_found');
+    });
+
+    it('rejects a non-UUID task id in the upload path', async () => {
+      const fixture = await seedHistoryFixture();
+
+      const res = await request(app)
+        .post(captureUrl('not-a-uuid'))
+        .set(fixture.member.authHeader)
+        .send(captureBody());
+      expect(res.status).toBe(400);
+      expect(res.body.error.code).toBe('invalid_request');
+    });
+
+    it('restricts every admin audit route to the singleton admin', async () => {
+      const fixture = await seedHistoryFixture();
+      await request(app).post(captureUrl(TASK_ID)).set(fixture.member.authHeader).send(captureBody()).expect(200);
+
+      for (const url of [
+        '/api/v1/admin/tasks',
+        `/api/v1/admin/tasks/${TASK_ID}/timeline`,
+        `/api/v1/admin/tasks/${TASK_ID}/file-captures/capture-1/files/src/a.ts`,
+      ]) {
+        const res = await request(app).get(url).set(fixture.member.authHeader);
+        expect(res.status).toBe(403);
+        expect(res.body.error.code).toBe('admin_required');
+      }
+    });
+
+    it('lists only the admin team tasks with capture counts', async () => {
+      const fixture = await seedHistoryFixture();
+      await request(app).post(captureUrl(TASK_ID)).set(fixture.member.authHeader).send(captureBody()).expect(200);
+
+      const res = await request(app).get('/api/v1/admin/tasks').set(fixture.admin.authHeader).expect(200);
+      expect(res.body.tasks).toHaveLength(1);
+      expect(res.body.tasks[0]).toMatchObject({
+        taskId: TASK_ID,
+        title: 'History task',
+        owner: 'history-admin',
+        captureCount: 1,
+      });
+      expect(res.body.hasMore).toBe(false);
+      expect(res.headers['cache-control']).toBe('no-store');
+    });
+
+    it('denies an admin timeline for a task outside the admin team', async () => {
+      const fixture = await seedHistoryFixture();
+
+      const res = await request(app)
+        .get(`/api/v1/admin/tasks/${OTHER_TASK_ID}/timeline`)
+        .set(fixture.admin.authHeader);
+      expect(res.status).toBe(404);
+      expect(res.body.error.code).toBe('task_not_found');
+    });
+
+    it('returns a deterministic metadata-only timeline across every event kind', async () => {
+      const fixture = await seedHistoryFixture();
+      const at = (seconds: number) => `2026-09-21T05:00:${String(seconds).padStart(2, '0')}.000Z`;
+
+      await pool.query(
+        `INSERT INTO checkpoints (local_id, task_id, level, summary, owner_user_id, workspace_label, created_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+        ['ckpt-1', TASK_ID, 'session', 'Checkpoint summary', fixture.admin.userId, 'laptop', at(2)],
+      );
+      await pool.query(
+        `INSERT INTO commands (local_id, task_id, cmd_redacted, exit_code, summary, owner_user_id, workspace_label, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8)`,
+        ['cmd-1', TASK_ID, 'pnpm test', 0, 'passed', fixture.admin.userId, 'laptop', at(3)],
+      );
+      await pool.query(
+        `INSERT INTO decisions (local_id, task_id, text, rationale, supersedes_id, owner_user_id, workspace_label, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8)`,
+        ['dec-1', TASK_ID, 'Use Postgres', 'Because', null, fixture.admin.userId, 'laptop', at(4)],
+      );
+      await pool.query(
+        `INSERT INTO todos (local_id, task_id, text, status, owner_user_id, workspace_label, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $7)`,
+        ['todo-1', TASK_ID, 'Write tests', 'done', fixture.admin.userId, 'laptop', at(5)],
+      );
+      await pool.query(
+        `INSERT INTO errors (local_id, task_id, message, resolved, resolution, owner_user_id, workspace_label, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8)`,
+        ['err-1', TASK_ID, 'TypeError', true, 'fixed', fixture.admin.userId, 'laptop', at(6)],
+      );
+      await pool.query(
+        `INSERT INTO open_questions (local_id, task_id, text, resolved, owner_user_id, workspace_label, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $7)`,
+        ['q-1', TASK_ID, 'Which DB?', false, fixture.admin.userId, 'laptop', at(7)],
+      );
+
+      // A commit capture and an explicit capture share one timestamp so the
+      // tie-break by kind (and then id) is exercised, not just the clock.
+      await request(app)
+        .post(captureUrl(TASK_ID))
+        .set(fixture.member.authHeader)
+        .send(
+          captureBody({
+            captureId: 'capture-commit',
+            trigger: 'git_commit',
+            gitCommitSha: 'abcdef1234567890abcdef1234567890abcdef12',
+            createdAt: at(8),
+            entries: [captureEntry('src/a.ts', 'const a = 1;\n', '+const a = 1;\n')],
+          }),
+        )
+        .expect(200);
+      await request(app)
+        .post(captureUrl(TASK_ID))
+        .set(fixture.member.authHeader)
+        .send(
+          captureBody({
+            captureId: 'capture-explicit',
+            trigger: 'explicit',
+            createdAt: at(8),
+            entries: [captureEntry('src/b.ts', 'const b = 2;\n', '+const b = 2;\n')],
+          }),
+        )
+        .expect(200);
+
+      const res = await request(app)
+        .get(`/api/v1/admin/tasks/${TASK_ID}/timeline`)
+        .set(fixture.admin.authHeader)
+        .expect(200);
+      expect(res.headers['cache-control']).toBe('no-store');
+      expect(res.body.taskId).toBe(TASK_ID);
+      expect(res.body.events.map((event: { kind: string; id: string }) => [event.kind, event.id])).toEqual([
+        ['task', TASK_ID],
+        ['checkpoint', expect.any(String)],
+        ['command', expect.any(String)],
+        ['decision', expect.any(String)],
+        ['todo', expect.any(String)],
+        ['error', expect.any(String)],
+        ['question', expect.any(String)],
+        ['commit', 'abcdef1234567890abcdef1234567890abcdef12'],
+        ['capture', 'capture-commit'],
+        ['capture', 'capture-explicit'],
+      ]);
+
+      const captureEvent = res.body.events.find(
+        (event: { kind: string; id: string }) => event.id === 'capture-commit',
+      );
+      expect(captureEvent.metadata).toMatchObject({
+        trigger: 'git_commit',
+        gitCommitSha: 'abcdef1234567890abcdef1234567890abcdef12',
+        checkpointId: null,
+        entryCount: 1,
+      });
+      expect(captureEvent.metadata.files).toEqual([
+        {
+          path: 'src/a.ts',
+          contentSha256: sha256('const a = 1;\n'),
+          byteLength: Buffer.byteLength('const a = 1;\n', 'utf8'),
+        },
+      ]);
+      // Metadata only — decrypted file content is served by its own endpoint.
+      expect(JSON.stringify(res.body)).not.toContain('const a = 1;');
+    });
+
+    it('serves decrypted capture file content only from the dedicated endpoint', async () => {
+      const fixture = await seedHistoryFixture();
+      const content = 'export const answer = 42;\n';
+      const diff = '@@ -0,0 +1 @@\n+export const answer = 42;\n';
+      await request(app)
+        .post(captureUrl(TASK_ID))
+        .set(fixture.member.authHeader)
+        .send(captureBody({ entries: [captureEntry('src/nested/answer.ts', content, diff)] }))
+        .expect(200);
+
+      const res = await request(app)
+        .get(`/api/v1/admin/tasks/${TASK_ID}/file-captures/capture-1/files/src/nested/answer.ts`)
+        .set(fixture.admin.authHeader)
+        .expect(200);
+      expect(res.headers['cache-control']).toBe('no-store');
+      expect(res.body).toEqual({
+        path: 'src/nested/answer.ts',
+        content,
+        unifiedDiff: diff,
+        contentSha256: sha256(content),
+        byteLength: Buffer.byteLength(content, 'utf8'),
+      });
+    });
+
+    it('rejects URL-encoded traversal in the audit file path', async () => {
+      const fixture = await seedHistoryFixture();
+      await request(app).post(captureUrl(TASK_ID)).set(fixture.member.authHeader).send(captureBody()).expect(200);
+
+      for (const encodedPath of ['%2e%2e%2fsecret.txt', '..%2fsecret.txt', '%2Fetc%2Fpasswd', 'src%2f..%2f..%2fx.txt']) {
+        const res = await request(app)
+          .get(`/api/v1/admin/tasks/${TASK_ID}/file-captures/capture-1/files/${encodedPath}`)
+          .set(fixture.admin.authHeader);
+        expect(res.status).toBe(400);
+        expect(res.body.error.code).toBe('invalid_request');
+      }
+    });
+
+    it('returns 404 for an unknown capture or an unknown path inside a capture', async () => {
+      const fixture = await seedHistoryFixture();
+      await request(app).post(captureUrl(TASK_ID)).set(fixture.member.authHeader).send(captureBody()).expect(200);
+
+      const unknownCapture = await request(app)
+        .get(`/api/v1/admin/tasks/${TASK_ID}/file-captures/capture-missing/files/src/a.ts`)
+        .set(fixture.admin.authHeader);
+      expect(unknownCapture.status).toBe(404);
+      expect(unknownCapture.body.error.code).toBe('capture_not_found');
+
+      const unknownPath = await request(app)
+        .get(`/api/v1/admin/tasks/${TASK_ID}/file-captures/capture-1/files/src/missing.ts`)
+        .set(fixture.admin.authHeader);
+      expect(unknownPath.status).toBe(404);
+      expect(unknownPath.body.error.code).toBe('capture_file_not_found');
+    });
+
+    it('denies audit file reads for a capture on a task outside the admin team', async () => {
+      const fixture = await seedHistoryFixture();
+      await request(app)
+        .post(captureUrl(OTHER_TASK_ID))
+        .set(fixture.outsider.authHeader)
+        .send(captureBody())
+        .expect(200);
+
+      const res = await request(app)
+        .get(`/api/v1/admin/tasks/${OTHER_TASK_ID}/file-captures/capture-1/files/src/a.ts`)
+        .set(fixture.admin.authHeader);
+      expect(res.status).toBe(404);
+      expect(res.body.error.code).toBe('task_not_found');
     });
   });
 });

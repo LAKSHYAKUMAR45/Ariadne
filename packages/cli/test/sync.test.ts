@@ -30,6 +30,7 @@ vi.mock('../src/syncClient.js', () => ({
   pullOpenQuestions: vi.fn().mockResolvedValue({ openQuestions: [], serverTime: new Date().toISOString() }),
   pushCommands: vi.fn().mockResolvedValue({ results: [] }),
   pullCommands: vi.fn().mockResolvedValue({ commands: [], serverTime: new Date().toISOString() }),
+  pushFileCapture: vi.fn().mockResolvedValue({ captureId: '', status: 'stored', entryCount: 0 }),
 }));
 
 vi.mock('../src/syncTunnel.js', async (importOriginal) => {
@@ -924,5 +925,216 @@ describe('ariadne sync commands', () => {
     await program.parseAsync(['node', 'ariadne', 'sync', 'unlink', task.id]);
 
     expect(loggedLines().some((l) => l.includes('not linked') && l.includes('nothing to do'))).toBe(true);
+  });
+
+  // -------------------------------------------------------------------
+  // Task 6 — pending file-capture upload during `sync push`.
+  // -------------------------------------------------------------------
+  describe('file capture upload', () => {
+    const SECRET_CONTENT = 'super-secret-capture-content-marker\n';
+
+    function seedLinkedTaskWithCaptures(count: number): { taskId: string; captureIds: string[] } {
+      const store = openWorkspaceStore(root);
+      const [task] = store.listTasks();
+      store.setTaskRemoteSync(task.id, 'remote-task-1', '2026-01-01T00:00:00.000Z');
+      const captureIds: string[] = [];
+      for (let index = 0; index < count; index += 1) {
+        const capture = store.createTaskFileCapture({
+          taskId: task.id,
+          trigger: 'explicit',
+          entries: [
+            {
+              path: `src/file-${index}.ts`,
+              content: SECRET_CONTENT,
+              unifiedDiff: `+${SECRET_CONTENT}`,
+              byteLength: Buffer.byteLength(SECRET_CONTENT, 'utf8'),
+              contentSha256: 'a'.repeat(64),
+            },
+          ],
+        });
+        captureIds.push(capture.id);
+      }
+      store.close();
+      return { taskId: task.id, captureIds };
+    }
+
+    function syncedAtFor(captureId: string): string | null {
+      const store = openWorkspaceStore(root);
+      try {
+        const [task] = store.listTasks();
+        const capture = store.getTaskFileCaptures(task.id).find((c) => c.id === captureId);
+        return capture?.syncedAt ?? null;
+      } finally {
+        store.close();
+      }
+    }
+
+    it('uploads pending captures one per request after sub-entity sync and marks them synced', async () => {
+      writeSyncConfig();
+      await program.parseAsync(['node', 'ariadne', 'task', 'new', 'Task with captures']);
+      const { captureIds } = seedLinkedTaskWithCaptures(2);
+
+      const storeForTodo = openWorkspaceStore(root);
+      const [taskRow] = storeForTodo.listTasks();
+      const todo = storeForTodo.createTodo({ taskId: taskRow.id, text: 'Write tests' });
+      storeForTodo.close();
+      vi.mocked(syncClient.pushTodos).mockResolvedValue({
+        results: [{ localId: todo.id, remoteId: 'remote-todo-1', updatedAt: '2026-01-01T00:00:01.000Z' }],
+      });
+      vi.mocked(syncClient.pushFileCapture).mockImplementation(async (_url, _token, _taskId, capture) => ({
+        captureId: capture.captureId,
+        status: 'stored' as const,
+        entryCount: capture.entries.length,
+      }));
+
+      await program.parseAsync(['node', 'ariadne', 'sync', 'push']);
+
+      expect(syncClient.pushFileCapture).toHaveBeenCalledTimes(2);
+      for (const captureId of captureIds) {
+        expect(syncClient.pushFileCapture).toHaveBeenCalledWith(
+          'http://fake-sync-server.test',
+          'fake-token',
+          'remote-task-1',
+          expect.objectContaining({
+            captureId,
+            trigger: 'explicit',
+            gitCommitSha: null,
+            checkpointId: null,
+            entries: [
+              expect.objectContaining({
+                content: SECRET_CONTENT,
+                contentSha256: 'a'.repeat(64),
+                byteLength: Buffer.byteLength(SECRET_CONTENT, 'utf8'),
+              }),
+            ],
+          }),
+        );
+        expect(syncedAtFor(captureId)).not.toBeNull();
+      }
+
+      // Captures upload only after the task and its sub-entities are on the server.
+      const lastTodoCall = vi.mocked(syncClient.pushTodos).mock.invocationCallOrder.at(-1)!;
+      const firstCaptureCall = vi.mocked(syncClient.pushFileCapture).mock.invocationCallOrder[0];
+      expect(firstCaptureCall).toBeGreaterThan(lastTodoCall);
+      expect(loggedLines().some((l) => l.includes('Uploaded 2 file capture'))).toBe(true);
+    });
+
+    it('marks only server-acknowledged capture ids as synced', async () => {
+      writeSyncConfig();
+      await program.parseAsync(['node', 'ariadne', 'task', 'new', 'Task with captures']);
+      const { captureIds } = seedLinkedTaskWithCaptures(2);
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+      try {
+        vi.mocked(syncClient.pushFileCapture).mockImplementation(async (_url, _token, _taskId, capture) => ({
+          // The second capture comes back acknowledging a different id.
+          captureId: capture.captureId === captureIds[0] ? capture.captureId : 'some-other-capture',
+          status: 'stored' as const,
+          entryCount: capture.entries.length,
+        }));
+
+        await program.parseAsync(['node', 'ariadne', 'sync', 'push']);
+
+        expect(syncedAtFor(captureIds[0])).not.toBeNull();
+        expect(syncedAtFor(captureIds[1])).toBeNull();
+        expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('not acknowledged'));
+      } finally {
+        warnSpy.mockRestore();
+      }
+    });
+
+    it('retries a failed capture upload on the next push', async () => {
+      writeSyncConfig();
+      await program.parseAsync(['node', 'ariadne', 'task', 'new', 'Task with captures']);
+      const { captureIds } = seedLinkedTaskWithCaptures(1);
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+      try {
+        const failure = Object.assign(new Error('boom'), {
+          name: 'SyncApiError',
+          status: 503,
+          code: 'capture_storage_conflict',
+        });
+        vi.mocked(syncClient.pushFileCapture).mockRejectedValueOnce(failure);
+
+        await program.parseAsync(['node', 'ariadne', 'sync', 'push']);
+        expect(syncedAtFor(captureIds[0])).toBeNull();
+        expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('capture_storage_conflict'));
+
+        vi.mocked(syncClient.pushFileCapture).mockResolvedValue({
+          captureId: captureIds[0],
+          status: 'stored',
+          entryCount: 1,
+        });
+        await program.parseAsync(['node', 'ariadne', 'sync', 'push']);
+
+        expect(syncClient.pushFileCapture).toHaveBeenCalledTimes(2);
+        expect(syncedAtFor(captureIds[0])).not.toBeNull();
+      } finally {
+        warnSpy.mockRestore();
+      }
+    });
+
+    it('never writes capture content to the console on success or failure', async () => {
+      writeSyncConfig();
+      await program.parseAsync(['node', 'ariadne', 'task', 'new', 'Task with captures']);
+      seedLinkedTaskWithCaptures(2);
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+      try {
+        vi.mocked(syncClient.pushFileCapture)
+          .mockRejectedValueOnce(
+            Object.assign(new Error(`rejected entry containing ${SECRET_CONTENT}`), {
+              name: 'SyncApiError',
+              status: 400,
+              code: 'invalid_capture',
+            }),
+          )
+          .mockImplementation(async (_url, _token, _taskId, capture) => ({
+            captureId: capture.captureId,
+            status: 'stored' as const,
+            entryCount: capture.entries.length,
+          }));
+
+        await program.parseAsync(['node', 'ariadne', 'sync', 'push']);
+
+        const written = [
+          ...logSpy.mock.calls,
+          ...warnSpy.mock.calls,
+          ...errorSpy.mock.calls,
+        ].map((args) => args.map((arg) => String(arg)).join(' '));
+        expect(written.join('\n')).not.toContain('super-secret-capture-content-marker');
+      } finally {
+        warnSpy.mockRestore();
+        errorSpy.mockRestore();
+      }
+    });
+
+    it('skips captures for tasks that have no remote id yet', async () => {
+      writeSyncConfig();
+      await program.parseAsync(['node', 'ariadne', 'task', 'new', 'Unlinked task']);
+      const store = openWorkspaceStore(root);
+      const [task] = store.listTasks();
+      store.createTaskFileCapture({
+        taskId: task.id,
+        trigger: 'explicit',
+        entries: [
+          {
+            path: 'src/a.ts',
+            content: SECRET_CONTENT,
+            unifiedDiff: `+${SECRET_CONTENT}`,
+            byteLength: Buffer.byteLength(SECRET_CONTENT, 'utf8'),
+            contentSha256: 'b'.repeat(64),
+          },
+        ],
+      });
+      store.close();
+      vi.mocked(syncClient.pushTasks).mockResolvedValue({ results: [] });
+
+      await program.parseAsync(['node', 'ariadne', 'sync', 'push']);
+
+      expect(syncClient.pushFileCapture).not.toHaveBeenCalled();
+    });
   });
 });
