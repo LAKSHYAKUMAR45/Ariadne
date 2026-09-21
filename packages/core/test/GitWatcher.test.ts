@@ -191,6 +191,21 @@ describe('GitWatcher', () => {
     expect(errors[0].message).toContain('disk exploded');
   });
 
+  it('syncTaskGit records a capture failure when a committed blob is unreadable', () => {
+    const task = store.createTask({ title: 'A' });
+    const sha = commit(repoRoot, 'a.txt', 'First commit');
+    const blob = git(['rev-parse', `${sha}:a.txt`], repoRoot);
+    fs.rmSync(path.join(repoRoot, '.git', 'objects', blob.slice(0, 2), blob.slice(2)));
+
+    const result = syncTaskGit(store, task.id, repoRoot);
+
+    expect(result.captures).toEqual([]);
+    expect(result.captureFailures).toHaveLength(1);
+    expect(result.captureFailures[0].sha).toBe(sha);
+    expect(store.getTaskFileCaptures(task.id)).toEqual([]);
+    expect(store.listErrors(task.id)).toHaveLength(1);
+  });
+
   it('isGitCommitCommand recognizes git commit invocations but not lookalikes', () => {
     expect(isGitCommitCommand('git commit -m "fix bug"')).toBe(true);
     expect(isGitCommitCommand('cd repo && git commit -m "fix"')).toBe(true);

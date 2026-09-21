@@ -172,8 +172,30 @@ describe('FileCapture', () => {
       '.env',
       '.env.local',
       'config/.env',
+      'config/production.env',
+      '.envrc',
       'certs/server.pem',
       'deploy/id_rsa.key',
+      'deploy/id_rsa',
+      'deploy/id_rsa.pub',
+      'deploy/id_ed25519',
+      'deploy/id_ecdsa',
+      'deploy/id_dsa',
+      'deploy/id_ed25519_sk',
+      'deploy/id_rsa_backup',
+      'certs/bundle.p12',
+      'certs/bundle.pfx',
+      'certs/store.jks',
+      'certs/release.keystore',
+      'certs/putty.ppk',
+      '.npmrc',
+      'home/.netrc',
+      'home/_netrc',
+      'home/.pgpass',
+      'kubeconfig',
+      'clusters/prod.kubeconfig',
+      '.kube/config',
+      '.ssh/known_hosts',
       'src/credentials.ts',
       'src/token-store.ts',
       'app/secret.json',
@@ -186,12 +208,17 @@ describe('FileCapture', () => {
       expect(isAlwaysExcludedCapturePath(candidate)).toBe(true);
     });
 
-    it.each(['src/app.ts', 'README.md', 'packages/core/src/index.ts', 'environment.ts'])(
-      'does not exclude %s',
-      (candidate) => {
-        expect(isAlwaysExcludedCapturePath(candidate)).toBe(false);
-      },
-    );
+    it.each([
+      'src/app.ts',
+      'README.md',
+      'packages/core/src/index.ts',
+      'environment.ts',
+      'src/identity.ts',
+      'src/kubernetes-client.ts',
+      'scripts/keystore-docs.md',
+    ])('does not exclude %s', (candidate) => {
+      expect(isAlwaysExcludedCapturePath(candidate)).toBe(false);
+    });
 
     it('skips tracked sensitive files during capture', () => {
       write(repoRoot, 'keep.ts', 'export const keep = 1;\n');
@@ -242,6 +269,55 @@ describe('FileCapture', () => {
       expect(entryPaths(result)).toEqual(['keep.ts']);
       expect(skipReason(result, 'private/notes.md')).toBe('ariadneignore');
       expect(skipReason(result, 'generated/schema.ts')).toBe('ariadneignore');
+    });
+
+    it('never re-includes built-in exclusions through .ariadneignore', () => {
+      write(repoRoot, 'keep.ts', 'export const keep = 1;\n');
+      write(repoRoot, '.env', 'API_KEY=abc\n');
+      write(repoRoot, 'deploy/id_ed25519', 'PRIVATE KEY\n');
+      write(repoRoot, '.ariadneignore', '!.env\n!deploy/id_ed25519\n!node_modules/\n');
+      commitAll(repoRoot, 'add negations', true);
+      touch('keep.ts');
+      touch('.env');
+      touch('deploy/id_ed25519');
+
+      const result = captureTaskFiles(store, { taskId, workspace: repoRoot, trigger: 'explicit' });
+
+      expect(entryPaths(result)).toEqual(['keep.ts']);
+      expect(skipReason(result, '.env')).toBe('always_excluded');
+      expect(skipReason(result, 'deploy/id_ed25519')).toBe('always_excluded');
+    });
+
+    it('skips newly covered credential files during capture', () => {
+      write(repoRoot, 'keep.ts', 'export const keep = 1;\n');
+      const credentialPaths = [
+        'config/production.env',
+        '.envrc',
+        'deploy/id_rsa',
+        'deploy/id_ed25519',
+        'certs/bundle.p12',
+        'certs/release.keystore',
+        '.npmrc',
+        'home/.netrc',
+        'home/.pgpass',
+        'clusters/prod.kubeconfig',
+        '.kube/config',
+      ];
+      for (const credentialPath of credentialPaths) {
+        write(repoRoot, credentialPath, 'SECRET\n');
+      }
+      commitAll(repoRoot, 'add credentials', true);
+      touch('keep.ts');
+      for (const credentialPath of credentialPaths) {
+        touch(credentialPath);
+      }
+
+      const result = captureTaskFiles(store, { taskId, workspace: repoRoot, trigger: 'explicit' });
+
+      expect(entryPaths(result)).toEqual(['keep.ts']);
+      for (const credentialPath of credentialPaths) {
+        expect(skipReason(result, credentialPath)).toBe('always_excluded');
+      }
     });
   });
 
@@ -401,6 +477,71 @@ describe('FileCapture', () => {
       expect(second.capture!.id).toBe(first.capture!.id);
       expect(store.getTaskFileCaptures(taskId)).toHaveLength(1);
     });
+
+    it('captures a historical commit whose directory no longer exists', () => {
+      write(repoRoot, 'gone/app.ts', 'v1\n');
+      write(repoRoot, 'keep.ts', 'keep\n');
+      const sha = commitAll(repoRoot, 'add gone');
+      store.recordCommit({ sha, taskId, message: 'add gone' });
+      fs.rmSync(path.join(repoRoot, 'gone'), { recursive: true, force: true });
+      commitAll(repoRoot, 'remove gone');
+
+      const result = captureTaskFiles(store, {
+        taskId,
+        workspace: repoRoot,
+        trigger: 'git_commit',
+        gitCommitSha: sha,
+      });
+
+      expect(entryPaths(result)).toEqual(['gone/app.ts', 'keep.ts']);
+      expect(result.capture!.entries[0].content).toBe('v1\n');
+    });
+
+    it('skips symlinks recorded in the commit tree even when absent from the worktree', () => {
+      write(repoRoot, 'real.ts', 'export const r = 1;\n');
+      fs.symlinkSync('real.ts', path.join(repoRoot, 'link.ts'));
+      const sha = commitAll(repoRoot, 'add link');
+      store.recordCommit({ sha, taskId, message: 'add link' });
+      // Removing the worktree symlink forces the decision through the
+      // ls-tree 120000 mode instead of a filesystem lstat.
+      fs.rmSync(path.join(repoRoot, 'link.ts'));
+
+      const result = captureTaskFiles(store, {
+        taskId,
+        workspace: repoRoot,
+        trigger: 'git_commit',
+        gitCommitSha: sha,
+      });
+
+      expect(entryPaths(result)).toEqual(['real.ts']);
+      expect(skipReason(result, 'link.ts')).toBe('symlink');
+    });
+
+    it('throws with bounded diagnostics when a committed blob cannot be read', () => {
+      write(repoRoot, 'src/app.ts', 'v1\n');
+      const sha = commitAll(repoRoot, 'root commit');
+      store.recordCommit({ sha, taskId, message: 'root commit' });
+      const blob = git(['rev-parse', `${sha}:src/app.ts`], repoRoot);
+      fs.rmSync(path.join(repoRoot, '.git', 'objects', blob.slice(0, 2), blob.slice(2)));
+
+      let thrown: unknown;
+      try {
+        captureTaskFiles(store, {
+          taskId,
+          workspace: repoRoot,
+          trigger: 'git_commit',
+          gitCommitSha: sha,
+        });
+      } catch (error) {
+        thrown = error;
+      }
+
+      expect(thrown).toBeInstanceOf(Error);
+      const message = (thrown as Error).message;
+      expect(message).toContain('src/app.ts');
+      expect(message.length).toBeLessThanOrEqual(600);
+      expect(store.getTaskFileCaptures(taskId)).toEqual([]);
+    });
   });
 
   describe('checkpoint captures', () => {
@@ -434,6 +575,89 @@ describe('FileCapture', () => {
       const result = captureTaskFiles(store, { taskId, workspace: repoRoot, trigger: 'explicit' });
 
       expect(entryPaths(result)).toEqual(['src/nested/app.ts']);
+    });
+  });
+
+  describe('worktree containment', () => {
+    it('skips tracked worktree paths whose parent resolves outside the root', () => {
+      const outsideDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'ariadne-outside-')));
+      try {
+        write(repoRoot, 'pkg/app.ts', 'inside\n');
+        write(repoRoot, 'keep.ts', 'keep\n');
+        commitAll(repoRoot, 'add pkg');
+        // Swap the tracked directory for a symlink to an external directory:
+        // the index still lists pkg/app.ts, but its real parent escapes.
+        fs.rmSync(path.join(repoRoot, 'pkg'), { recursive: true, force: true });
+        fs.writeFileSync(path.join(outsideDir, 'app.ts'), 'leaked\n');
+        fs.symlinkSync(outsideDir, path.join(repoRoot, 'pkg'));
+        touch('pkg/app.ts');
+        touch('keep.ts');
+
+        const result = captureTaskFiles(store, { taskId, workspace: repoRoot, trigger: 'explicit' });
+
+        expect(entryPaths(result)).toEqual(['keep.ts']);
+        expect(skipReason(result, 'pkg/app.ts')).toBe('outside_workspace');
+      } finally {
+        fs.rmSync(outsideDir, { recursive: true, force: true });
+      }
+    });
+  });
+
+  describe('git pathspec safety', () => {
+    const metacharacterNames = ['bracket[a].ts', 'star*.ts', 'question?.ts', ':leading.ts'];
+
+    function filesystemSupportsMetacharacterNames(): boolean {
+      try {
+        for (const name of metacharacterNames) {
+          write(repoRoot, name, 'v1\n');
+        }
+        return true;
+      } catch {
+        return false;
+      }
+    }
+
+    it('diffs tracked paths containing Git pathspec metacharacters literally', () => {
+      if (!filesystemSupportsMetacharacterNames()) return;
+      write(repoRoot, 'bracketa.ts', 'decoy\n');
+      commitAll(repoRoot, 'add metacharacter files');
+      for (const name of metacharacterNames) {
+        write(repoRoot, name, 'v2\n');
+        touch(name);
+      }
+
+      const result = captureTaskFiles(store, { taskId, workspace: repoRoot, trigger: 'explicit' });
+
+      expect(entryPaths(result).sort()).toEqual([...metacharacterNames].sort());
+      for (const entry of result.capture!.entries) {
+        expect(entry.content).toBe('v2\n');
+        expect(entry.unifiedDiff).toContain('-v1');
+        expect(entry.unifiedDiff).toContain('+v2');
+        expect(entry.unifiedDiff).not.toContain('decoy');
+      }
+    });
+
+    it('diffs committed paths containing Git pathspec metacharacters literally', () => {
+      if (!filesystemSupportsMetacharacterNames()) return;
+      commitAll(repoRoot, 'add metacharacter files');
+      for (const name of metacharacterNames) {
+        write(repoRoot, name, 'v2\n');
+      }
+      const sha = commitAll(repoRoot, 'update metacharacter files');
+      store.recordCommit({ sha, taskId, message: 'update metacharacter files' });
+
+      const result = captureTaskFiles(store, {
+        taskId,
+        workspace: repoRoot,
+        trigger: 'git_commit',
+        gitCommitSha: sha,
+      });
+
+      expect(entryPaths(result).sort()).toEqual([...metacharacterNames].sort());
+      for (const entry of result.capture!.entries) {
+        expect(entry.unifiedDiff).toContain('-v1');
+        expect(entry.unifiedDiff).toContain('+v2');
+      }
     });
   });
 

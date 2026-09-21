@@ -27,13 +27,56 @@ const GIT_MAX_BUFFER_BYTES = 64 * 1024 * 1024;
 
 const ARIADNE_IGNORE_FILE = '.ariadneignore';
 
-const ALWAYS_EXCLUDED_SEGMENTS = new Set(['.git', 'node_modules', 'dist', 'build', '.ariadne']);
+const ALWAYS_EXCLUDED_SEGMENTS = new Set([
+  '.git',
+  'node_modules',
+  'dist',
+  'build',
+  '.ariadne',
+  '.ssh',
+  '.gnupg',
+  '.kube',
+  '.aws',
+]);
 
-const ALWAYS_EXCLUDED_EXTENSIONS = new Set(['.pem', '.key']);
+const ALWAYS_EXCLUDED_EXTENSIONS = new Set([
+  '.pem',
+  '.key',
+  '.env',
+  '.p12',
+  '.pfx',
+  '.jks',
+  '.keystore',
+  '.ppk',
+  '.kubeconfig',
+]);
+
+/** Exact file names that are credential stores on essentially every system. */
+const ALWAYS_EXCLUDED_NAMES = new Set([
+  '.envrc',
+  '.npmrc',
+  '.netrc',
+  '_netrc',
+  '.pgpass',
+  '.htpasswd',
+  'kubeconfig',
+]);
+
+/**
+ * Conservative match for OpenSSH private-key file names (`id_rsa`,
+ * `id_ed25519`, `id_ecdsa_sk`, and suffixed variants such as
+ * `id_rsa_backup`). The matching `.pub` names are excluded too: they are
+ * cheap to lose and expensive to misclassify.
+ */
+const PRIVATE_KEY_NAME_PATTERN =
+  /^id_(?:rsa|dsa|ecdsa|ecdsa_sk|ed25519|ed25519_sk)(?:[-_][A-Za-z0-9._-]+)?(?:\.pub)?$/i;
 
 const SENSITIVE_NAME_PATTERN = /(credential|token|secret|password|passwd|api[-_]?key)/i;
 
 const GIT_SYMLINK_MODE = '120000';
+
+/** Upper bound on `git` stderr echoed into an error message. */
+const GIT_DIAGNOSTIC_MAX_CHARS = 200;
 
 export interface CaptureLimits {
   /** Inclusive maximum UTF-8 byte length of a single captured file. */
@@ -82,28 +125,56 @@ export interface CaptureResult {
 // git helpers (fixed argument arrays only — never a shell string)
 // -----------------------------------------------------------------------
 
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function truncate(value: string, maxChars: number): string {
+  const collapsed = value.replace(/\s+/g, ' ').trim();
+  return collapsed.length > maxChars ? `${collapsed.slice(0, maxChars)}…` : collapsed;
+}
+
+/** A `git` invocation that failed, with bounded, content-free diagnostics. */
+export class GitCaptureCommandError extends Error {
+  constructor(args: readonly string[], cause: unknown) {
+    const stderr = (cause as { stderr?: Buffer | string } | undefined)?.stderr;
+    const detail = truncate(
+      typeof stderr === 'string' ? stderr : stderr instanceof Buffer ? stderr.toString('utf8') : '',
+      GIT_DIAGNOSTIC_MAX_CHARS,
+    );
+    const command = truncate(args.join(' '), GIT_DIAGNOSTIC_MAX_CHARS);
+    super(`git ${command} failed${detail.length > 0 ? `: ${detail}` : ''}`);
+    this.name = 'GitCaptureCommandError';
+  }
+}
+
+/**
+ * Runs `git` with literal pathspec semantics so tracked names containing
+ * `*`, `?`, `[`, or a leading `:` are never reinterpreted as glob or magic
+ * pathspecs. Throws `GitCaptureCommandError` on any non-zero exit.
+ */
 function gitBuffer(workspace: string, args: readonly string[]): Buffer {
-  return execFileSync('git', ['-C', workspace, ...args], {
-    maxBuffer: GIT_MAX_BUFFER_BYTES,
-    stdio: ['ignore', 'pipe', 'ignore'],
-  });
+  try {
+    return execFileSync('git', ['-C', workspace, '--literal-pathspecs', ...args], {
+      maxBuffer: GIT_MAX_BUFFER_BYTES,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+  } catch (error: unknown) {
+    throw new GitCaptureCommandError(args, error);
+  }
 }
 
 function gitText(workspace: string, args: readonly string[]): string {
   return gitBuffer(workspace, args).toString('utf8');
 }
 
+/**
+ * Only for `git` commands whose non-zero exit is an expected answer (a missing
+ * revision), never for reads whose failure would silently lose history.
+ */
 function gitTextOrNull(workspace: string, args: readonly string[]): string | null {
   try {
     return gitText(workspace, args);
-  } catch {
-    return null;
-  }
-}
-
-function gitBufferOrNull(workspace: string, args: readonly string[]): Buffer | null {
-  try {
-    return gitBuffer(workspace, args);
   } catch {
     return null;
   }
@@ -150,11 +221,14 @@ export function isAlwaysExcludedCapturePath(relPath: string): boolean {
 
   for (const segment of segments) {
     if (ALWAYS_EXCLUDED_SEGMENTS.has(segment)) return true;
+    if (ALWAYS_EXCLUDED_NAMES.has(segment.toLowerCase())) return true;
+    if (PRIVATE_KEY_NAME_PATTERN.test(segment)) return true;
     if (segment === '.env' || segment.startsWith('.env.')) return true;
     if (SENSITIVE_NAME_PATTERN.test(segment)) return true;
   }
 
-  return ALWAYS_EXCLUDED_EXTENSIONS.has(path.posix.extname(segments[segments.length - 1]));
+  const extension = path.posix.extname(segments[segments.length - 1]).toLowerCase();
+  return ALWAYS_EXCLUDED_EXTENSIONS.has(extension);
 }
 
 function readAriadneIgnorePatterns(workspaceRoot: string): string[] {
@@ -169,6 +243,11 @@ function readAriadneIgnorePatterns(workspaceRoot: string): string[] {
   }
 }
 
+/**
+ * Matches one `.ariadneignore` pattern. Negation (`!pattern`) is deliberately
+ * unsupported: built-in exclusions are a security floor and must never be
+ * re-included by workspace configuration.
+ */
 function matchesIgnorePattern(pattern: string, relPath: string): boolean {
   const normalized = pattern.replace(/^\/+/, '');
   const directoryOnly = normalized.endsWith('/');
@@ -205,8 +284,29 @@ function toRepoRelativePath(rawPath: string, workspaceRoot: string): string | nu
   return normalized;
 }
 
-/** Verifies the resolved path (including symlinked parents) stays beneath the root. */
-function staysInsideWorkspace(relPath: string, workspaceRoot: string): boolean {
+/**
+ * True when a Git-reported repository-relative path is structurally safe to
+ * use as a capture path: relative, non-empty, and free of traversal or
+ * NUL segments. This is a purely lexical check — it makes no filesystem call,
+ * so it stays correct for historical commits whose directories no longer
+ * exist in the current worktree.
+ */
+function isLexicallySafeRepoPath(relPath: string): boolean {
+  if (relPath.length === 0 || relPath.includes('\0')) return false;
+  if (relPath.startsWith('/') || /^[A-Za-z]:[\\/]/.test(relPath)) return false;
+  if (relPath.includes('\\')) return false;
+
+  return relPath
+    .split('/')
+    .every((segment) => segment.length > 0 && segment !== '.' && segment !== '..');
+}
+
+/**
+ * Verifies a live worktree path (including symlinked parents) resolves beneath
+ * the root. Only valid for worktree captures: commit captures read Git objects
+ * and must not depend on the current filesystem layout.
+ */
+function worktreePathStaysInsideRoot(relPath: string, workspaceRoot: string): boolean {
   const resolved = path.resolve(workspaceRoot, relPath);
   const prefix = `${workspaceRoot}${path.sep}`;
   if (!resolved.startsWith(prefix)) return false;
@@ -248,6 +348,8 @@ interface Candidate {
   relPath: string;
   /** Git file mode for commit captures, when known. */
   mode?: string;
+  /** Git blob object id for commit captures, read by object id, never by path. */
+  oid?: string;
 }
 
 interface CandidateScan {
@@ -259,22 +361,26 @@ function scanCommitCandidates(workspace: string, sha: string): CandidateScan {
   const names = splitNulList(
     gitText(workspace, ['diff-tree', '--no-commit-id', '--name-only', '-r', '-z', '--root', sha]),
   );
-  const modes = new Map<string, string>();
+  const tree = new Map<string, { mode: string; oid: string }>();
   for (const line of splitNulList(gitText(workspace, ['ls-tree', '-r', '-z', sha]))) {
     const tabIndex = line.indexOf('\t');
     if (tabIndex === -1) continue;
-    modes.set(line.slice(tabIndex + 1), line.slice(0, line.indexOf(' ')));
+    const [mode, , oid] = line.slice(0, tabIndex).split(' ');
+    if (!mode || !oid) continue;
+    tree.set(line.slice(tabIndex + 1), { mode, oid });
   }
 
   const candidates: Candidate[] = [];
   const skipped: CaptureSkip[] = [];
   for (const name of names) {
-    const mode = modes.get(name);
-    if (!mode) {
+    const entry = tree.get(name);
+    // Absent from the commit tree means the commit deleted the path; it is a
+    // fact of the tree listing, never an inferred command failure.
+    if (!entry) {
       skipped.push({ path: name, reason: 'deleted' });
       continue;
     }
-    candidates.push({ relPath: name, mode });
+    candidates.push({ relPath: name, mode: entry.mode, oid: entry.oid });
   }
 
   return { candidates, skipped };
@@ -309,22 +415,50 @@ function scanWorktreeCandidates(store: TaskStore, taskId: string, workspaceRoot:
 // Content + diff readers
 // -----------------------------------------------------------------------
 
-function readCommitContent(workspace: string, sha: string, relPath: string): Buffer | null {
-  return gitBufferOrNull(workspace, ['show', `${sha}:${relPath}`]);
+/**
+ * Reads a committed blob by object id. Failure means the repository could not
+ * answer for content it just listed, so it throws rather than degrading into a
+ * "deleted" or empty-diff capture.
+ */
+function readCommitContent(workspace: string, relPath: string, oid: string): Buffer {
+  try {
+    return gitBuffer(workspace, ['cat-file', 'blob', oid]);
+  } catch (error: unknown) {
+    throw new Error(`Cannot read committed blob for "${relPath}": ${errorMessage(error)}`);
+  }
 }
 
-function commitDiff(workspace: string, sha: string, relPath: string): string {
+/** Resolves the diff base of a commit once per capture, not once per file. */
+function resolveCommitDiffBase(workspace: string, sha: string): string {
   const parent = gitTextOrNull(workspace, ['rev-parse', '--verify', '--quiet', `${sha}^1`]);
-  const base = parent ? parent.trim() : EMPTY_TREE_SHA;
-  return gitTextOrNull(workspace, ['diff', '--no-color', '--no-ext-diff', base, sha, '--', relPath]) ?? '';
+  const trimmed = parent?.trim() ?? '';
+  return trimmed.length > 0 ? trimmed : EMPTY_TREE_SHA;
 }
 
-function worktreeDiff(workspace: string, relPath: string): string {
+/** Resolves `HEAD` once per worktree capture; null for a repository with no commits. */
+function resolveWorktreeDiffBase(workspace: string): string | null {
   const head = gitTextOrNull(workspace, ['rev-parse', '--verify', '--quiet', 'HEAD']);
-  const args = head
-    ? ['diff', '--no-color', '--no-ext-diff', 'HEAD', '--', relPath]
+  const trimmed = head?.trim() ?? '';
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+function commitDiff(workspace: string, base: string, sha: string, relPath: string): string {
+  try {
+    return gitText(workspace, ['diff', '--no-color', '--no-ext-diff', base, sha, '--', relPath]);
+  } catch (error: unknown) {
+    throw new Error(`Cannot diff committed file "${relPath}": ${errorMessage(error)}`);
+  }
+}
+
+function worktreeDiff(workspace: string, base: string | null, relPath: string): string {
+  const args = base
+    ? ['diff', '--no-color', '--no-ext-diff', base, '--', relPath]
     : ['diff', '--no-color', '--no-ext-diff', '--', relPath];
-  return gitTextOrNull(workspace, args) ?? '';
+  try {
+    return gitText(workspace, args);
+  } catch (error: unknown) {
+    throw new Error(`Cannot diff worktree file "${relPath}": ${errorMessage(error)}`);
+  }
 }
 
 function readWorktreeContent(workspaceRoot: string, relPath: string): Buffer | null {
@@ -364,6 +498,93 @@ function resolveWorkspaceRoot(workspace: string): string {
   return fs.realpathSync(toplevel.trim());
 }
 
+// -----------------------------------------------------------------------
+// Candidate evaluation
+// -----------------------------------------------------------------------
+
+interface CaptureContext {
+  workspaceRoot: string;
+  isCommitCapture: boolean;
+  /** Present exactly when `isCommitCapture` is true. */
+  commitSha: string | null;
+  /** Commit first-parent (or empty-tree) base, resolved once per capture. */
+  commitDiffBase: string | null;
+  /** Worktree `HEAD` base, resolved once per capture; null before any commit. */
+  worktreeDiffBase: string | null;
+  ignorePatterns: string[];
+}
+
+/**
+ * Applies every path-level policy that does not need file content. Returns the
+ * skip reason, or null when the candidate remains eligible.
+ *
+ * Commit captures are validated lexically only: their content comes from Git
+ * objects, so a historical path whose directories no longer exist on disk must
+ * still be capturable.
+ */
+function evaluateCandidatePath(candidate: Candidate, ctx: CaptureContext): CaptureSkipReason | null {
+  const relPath = candidate.relPath;
+
+  if (!isLexicallySafeRepoPath(relPath)) return 'outside_workspace';
+  if (isAlwaysExcludedCapturePath(relPath)) return 'always_excluded';
+  if (ctx.ignorePatterns.some((pattern) => matchesIgnorePattern(pattern, relPath))) {
+    return 'ariadneignore';
+  }
+  if (!ctx.isCommitCapture && !worktreePathStaysInsideRoot(relPath, ctx.workspaceRoot)) {
+    return 'outside_workspace';
+  }
+
+  const isSymlink = ctx.isCommitCapture
+    ? candidate.mode === GIT_SYMLINK_MODE
+    : isWorktreeSymlink(ctx.workspaceRoot, relPath);
+
+  return isSymlink ? 'symlink' : null;
+}
+
+/**
+ * Reads and decodes eligible content. Throws for Git-side read failures (which
+ * would otherwise be indistinguishable from a legitimately empty capture) and
+ * skips only for locally observable conditions.
+ */
+function readCandidateText(
+  candidate: Candidate,
+  ctx: CaptureContext,
+): { content: string } | { skip: CaptureSkipReason } {
+  const raw = ctx.isCommitCapture
+    ? readCommitContent(ctx.workspaceRoot, candidate.relPath, candidate.oid!)
+    : readWorktreeContent(ctx.workspaceRoot, candidate.relPath);
+  if (raw === null) return { skip: 'unreadable' };
+
+  const content = decodeTextOrNull(raw);
+  return content === null ? { skip: 'binary' } : { content };
+}
+
+function buildEntry(candidate: Candidate, content: string, ctx: CaptureContext): NewTaskFileCaptureEntry {
+  return {
+    path: candidate.relPath,
+    content,
+    unifiedDiff: ctx.isCommitCapture
+      ? commitDiff(ctx.workspaceRoot, ctx.commitDiffBase!, ctx.commitSha!, candidate.relPath)
+      : worktreeDiff(ctx.workspaceRoot, ctx.worktreeDiffBase, candidate.relPath),
+    byteLength: Buffer.byteLength(content, 'utf8'),
+    contentSha256: sha256Hex(content),
+  };
+}
+
+function buildCaptureContext(request: CaptureRequest, workspaceRoot: string): CaptureContext {
+  const isCommitCapture = request.trigger === 'git_commit';
+  const commitSha = isCommitCapture ? request.gitCommitSha! : null;
+
+  return {
+    workspaceRoot,
+    isCommitCapture,
+    commitSha,
+    commitDiffBase: commitSha ? resolveCommitDiffBase(workspaceRoot, commitSha) : null,
+    worktreeDiffBase: isCommitCapture ? null : resolveWorktreeDiffBase(workspaceRoot),
+    ignorePatterns: readAriadneIgnorePatterns(workspaceRoot),
+  };
+}
+
 /**
  * Captures the eligible task files for one trigger and stores them as a single
  * immutable capture. Commit captures read the exact committed blob and diff
@@ -371,9 +592,10 @@ function resolveWorkspaceRoot(workspace: string): string {
  * checkpoint and explicit captures read the current worktree and diff against
  * `HEAD`.
  *
- * Throws when the workspace is not a git repository or the trigger is missing
- * its required reference — callers must surface/record that failure rather
- * than treating the trigger as captured.
+ * Throws when the workspace is not a git repository, the trigger is missing
+ * its required reference, or Git cannot read content it has already listed —
+ * callers must surface/record that failure rather than treating the trigger as
+ * captured.
  */
 export function captureTaskFiles(
   store: TaskStore,
@@ -383,12 +605,11 @@ export function captureTaskFiles(
   validateRequest(request);
 
   const workspaceRoot = resolveWorkspaceRoot(request.workspace);
-  const isCommitCapture = request.trigger === 'git_commit';
-  const scan = isCommitCapture
-    ? scanCommitCandidates(workspaceRoot, request.gitCommitSha!)
+  const ctx = buildCaptureContext(request, workspaceRoot);
+  const scan = ctx.isCommitCapture
+    ? scanCommitCandidates(workspaceRoot, ctx.commitSha!)
     : scanWorktreeCandidates(store, request.taskId, workspaceRoot);
 
-  const ignorePatterns = readAriadneIgnorePatterns(workspaceRoot);
   const skipped: CaptureSkip[] = [...scan.skipped];
   const entries: NewTaskFileCaptureEntry[] = [];
   let totalBytes = 0;
@@ -396,41 +617,19 @@ export function captureTaskFiles(
   for (const candidate of [...scan.candidates].sort((a, b) => a.relPath.localeCompare(b.relPath))) {
     const relPath = candidate.relPath;
 
-    if (isAlwaysExcludedCapturePath(relPath)) {
-      skipped.push({ path: relPath, reason: 'always_excluded' });
-      continue;
-    }
-    if (ignorePatterns.some((pattern) => matchesIgnorePattern(pattern, relPath))) {
-      skipped.push({ path: relPath, reason: 'ariadneignore' });
-      continue;
-    }
-    if (!staysInsideWorkspace(relPath, workspaceRoot)) {
-      skipped.push({ path: relPath, reason: 'outside_workspace' });
-      continue;
-    }
-    const isSymlink = isCommitCapture
-      ? candidate.mode === GIT_SYMLINK_MODE
-      : isWorktreeSymlink(workspaceRoot, relPath);
-    if (isSymlink) {
-      skipped.push({ path: relPath, reason: 'symlink' });
+    const pathSkip = evaluateCandidatePath(candidate, ctx);
+    if (pathSkip !== null) {
+      skipped.push({ path: relPath, reason: pathSkip });
       continue;
     }
 
-    const raw = isCommitCapture
-      ? readCommitContent(workspaceRoot, request.gitCommitSha!, relPath)
-      : readWorktreeContent(workspaceRoot, relPath);
-    if (raw === null) {
-      skipped.push({ path: relPath, reason: isCommitCapture ? 'deleted' : 'unreadable' });
+    const read = readCandidateText(candidate, ctx);
+    if ('skip' in read) {
+      skipped.push({ path: relPath, reason: read.skip });
       continue;
     }
 
-    const content = decodeTextOrNull(raw);
-    if (content === null) {
-      skipped.push({ path: relPath, reason: 'binary' });
-      continue;
-    }
-
-    const byteLength = Buffer.byteLength(content, 'utf8');
+    const byteLength = Buffer.byteLength(read.content, 'utf8');
     if (byteLength > limits.maxFileBytes) {
       skipped.push({ path: relPath, reason: 'file_too_large' });
       continue;
@@ -441,15 +640,7 @@ export function captureTaskFiles(
     }
 
     totalBytes += byteLength;
-    entries.push({
-      path: relPath,
-      content,
-      unifiedDiff: isCommitCapture
-        ? commitDiff(workspaceRoot, request.gitCommitSha!, relPath)
-        : worktreeDiff(workspaceRoot, relPath),
-      byteLength,
-      contentSha256: sha256Hex(content),
-    });
+    entries.push(buildEntry(candidate, read.content, ctx));
   }
 
   if (entries.length === 0) {

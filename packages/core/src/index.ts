@@ -49,7 +49,12 @@ export {
   syncTaskGit,
 } from './GitWatcher.js';
 export type { GitLogEntry, GitCommitFileEntry, SyncGitResult, GitCaptureFailure } from './GitWatcher.js';
-export { captureTaskFiles, isAlwaysExcludedCapturePath, DEFAULT_CAPTURE_LIMITS } from './FileCapture.js';
+export {
+  captureTaskFiles,
+  isAlwaysExcludedCapturePath,
+  DEFAULT_CAPTURE_LIMITS,
+  GitCaptureCommandError,
+} from './FileCapture.js';
 export type {
   CaptureLimits,
   CaptureRequest,
