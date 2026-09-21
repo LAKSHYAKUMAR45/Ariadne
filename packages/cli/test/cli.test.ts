@@ -3,6 +3,7 @@ import { execFileSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import * as core from '@ariadne-dev/core';
 import { TaskStore, closeRegistry, openWorkspaceStore, setCurrentTaskId } from '@ariadne-dev/core';
 import { program } from '../src/index.js';
 
@@ -187,6 +188,40 @@ describe('ariadne capture + checkpoint commands', () => {
     store.close();
   });
 
+  it('surfaces checkpoint capture and failure-recording errors together without a success-shaped result', async () => {
+    const taskId = createCurrentTask('Checkpoint capture failure task');
+    const captureFailure = new Error('capture exploded with secret contents');
+    const recordFailure = new Error('recordError write failed');
+    vi.spyOn(core, 'captureTaskFiles').mockImplementation(() => {
+      throw captureFailure;
+    });
+    vi.spyOn(TaskStore.prototype, 'recordError').mockImplementation(() => {
+      throw recordFailure;
+    });
+
+    await expect(program.parseAsync(['node', 'ariadne', 'checkpoint', 'Will fail', '--level', 'micro'])).rejects.toSatisfy(
+      (error: unknown) => {
+        expect(error).toBeInstanceOf(AggregateError);
+        expect(error).toMatchObject({
+          message: expect.stringContaining('Task file capture failed after checkpoint'),
+        });
+        expect((error as Error).message).toContain('failed to record the capture failure');
+        expect((error as AggregateError).errors).toEqual([captureFailure, recordFailure]);
+        expect((error as Error).message).not.toContain('secret contents');
+        expect((error as Error).message).not.toContain('recordError write failed');
+        return true;
+      },
+    );
+
+    const store = openWorkspaceStore(root);
+    expect(store.listCheckpoints(taskId)).toHaveLength(1);
+    expect(store.getTaskFileCaptures(taskId)).toEqual([]);
+    expect(store.listErrors(taskId)).toEqual([]);
+    store.close();
+    expect(loggedLines().some((line) => line.startsWith('Capture '))).toBe(false);
+    expect(loggedLines()).not.toContain('No eligible task files captured (0 file(s), 0 byte(s)).');
+  });
+
   it('captures the active task with the explicit capture command', async () => {
     const taskId = createCurrentTask('Explicit capture task');
     write('notes.md', 'first version\n');
@@ -205,6 +240,35 @@ describe('ariadne capture + checkpoint commands', () => {
     expect(capture.trigger).toBe('explicit');
     expect(capture.entries.map((entry) => entry.path)).toEqual(['notes.md']);
     expect(loggedLines()).toContainEqual(expect.stringContaining(`Capture ${capture.id}: 1 file(s),`));
+  });
+
+  it('surfaces explicit capture and failure-recording errors together without a success-shaped result', async () => {
+    const taskId = createCurrentTask('Explicit capture failure task');
+    const captureFailure = new Error('explicit capture exploded with secret payload');
+    const recordFailure = new Error('recordError insert failed');
+    vi.spyOn(core, 'captureTaskFiles').mockImplementation(() => {
+      throw captureFailure;
+    });
+    vi.spyOn(TaskStore.prototype, 'recordError').mockImplementation(() => {
+      throw recordFailure;
+    });
+
+    await expect(program.parseAsync(['node', 'ariadne', 'capture'])).rejects.toSatisfy((error: unknown) => {
+      expect(error).toBeInstanceOf(AggregateError);
+      expect((error as Error).message).toContain('Task file capture failed after explicit capture');
+      expect((error as Error).message).toContain('failed to record the capture failure');
+      expect((error as AggregateError).errors).toEqual([captureFailure, recordFailure]);
+      expect((error as Error).message).not.toContain('secret payload');
+      expect((error as Error).message).not.toContain('recordError insert failed');
+      return true;
+    });
+
+    const store = openWorkspaceStore(root);
+    expect(store.getTaskFileCaptures(taskId)).toEqual([]);
+    expect(store.listErrors(taskId)).toEqual([]);
+    store.close();
+    expect(loggedLines().some((line) => line.startsWith('Capture '))).toBe(false);
+    expect(loggedLines()).not.toContain('No eligible task files captured (0 file(s), 0 byte(s)).');
   });
 
   it('prints skipped path reasons without leaking file contents', async () => {

@@ -202,14 +202,26 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+function toError(error: unknown, fallbackMessage: string): Error {
+  if (error instanceof Error) {
+    return error;
+  }
+
+  return new Error(error === undefined ? fallbackMessage : String(error));
+}
+
 function recordCaptureFailure(store: TaskStore, taskId: string, context: string, error: unknown): never {
-  const message = `Task file capture failed after ${context}: ${errorMessage(error)}`;
+  const captureError = toError(error, `Task file capture failed after ${context}.`);
+  const message = `Task file capture failed after ${context}: ${errorMessage(captureError)}`;
   try {
     store.recordError({ taskId, message });
-  } catch {
-    // Recording the failure must never mask the original capture error.
+  } catch (recordError: unknown) {
+    throw new AggregateError(
+      [captureError, toError(recordError, 'Failed to record task file capture failure.')],
+      `Task file capture failed after ${context}; Ariadne also failed to record the capture failure as a task error.`,
+    );
   }
-  throw new Error(message);
+  throw new Error(message, { cause: captureError });
 }
 
 export function checkpointAdd(store: TaskStore, workspaceRoot: string, args: CheckpointAddArgs): CheckpointAddResult {
