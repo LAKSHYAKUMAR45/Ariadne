@@ -2354,6 +2354,7 @@ describe('sync-server: admin operator operations', () => {
     | { kind: 'accept' }
     | { kind: 'busy' }
     | { kind: 'malformed' }
+    | { kind: 'reset' }
     | { kind: 'hang' };
 
   async function startFakeOperator(): Promise<FakeOperator> {
@@ -2386,6 +2387,10 @@ describe('sync-server: admin operator operations', () => {
         if (operatorBehaviour.kind === 'malformed') {
           res.statusCode = 202;
           res.end('definitely not json');
+          return;
+        }
+        if (operatorBehaviour.kind === 'reset') {
+          res.socket?.destroy();
           return;
         }
         const operationId = (parsed as { operationId?: string }).operationId ?? '';
@@ -2689,7 +2694,7 @@ describe('sync-server: admin operator operations', () => {
     expect(restore.body.operation.type).toBe('backup_restore');
   });
 
-  it('keeps the operation queued when operator availability is uncertain and later success arrives', async () => {
+  it('fails the operation when the operator socket is absent before any acceptance is possible', async () => {
     const unavailableApp = buildReauthenticatedApp({
       operatorClient: createOperatorClient({
         socketPath: path.join(operator.dir, 'absent.sock'),
@@ -2703,9 +2708,59 @@ describe('sync-server: admin operator operations', () => {
       .send({ service: 'sync-server' });
 
     expect(res.status).toBe(503);
-    expect(res.body.error.code).toBe('operator_unavailable');
+    expect(res.body.error.code).toBe('operator_connect_failed');
     expect(res.body.error.message).not.toContain('absent.sock');
     expect(res.body.error.message).not.toContain(operator.dir);
+
+    const operations = await store.listOperations();
+    expect(operations).toHaveLength(1);
+    expect(operations[0].state).toBe('failed');
+    const audit = await store.listAuditEvents();
+    expect(
+      audit.some(
+        (event) =>
+          event.action === 'admin_operation.state_changed' &&
+          event.outcome === 'failed' &&
+          event.metadata.operationId === operations[0].id &&
+          event.metadata.toState === 'failed' &&
+          event.metadata.reason === 'operator_connect_failed',
+      ),
+    ).toBe(true);
+  });
+
+  it('fails the operation when the operator socket path refuses the connection', async () => {
+    const closedOperator = await startFakeOperator();
+    await closedOperator.close();
+    const refusedApp = buildReauthenticatedApp({
+      operatorClient: createOperatorClient({
+        socketPath: closedOperator.socketPath,
+        requestTimeoutMs: 400,
+      }),
+    });
+
+    const res = await request(refusedApp)
+      .post('/api/v1/admin/operations/service-restart')
+      .set(adminAuth())
+      .send({ service: 'sync-server' });
+
+    expect(res.status).toBe(503);
+    expect(res.body.error.code).toBe('operator_connect_failed');
+
+    const operations = await store.listOperations();
+    expect(operations).toHaveLength(1);
+    expect(operations[0].state).toBe('failed');
+  });
+
+  it('keeps the operation queued when transport loss is ambiguous and later success arrives', async () => {
+    operatorBehaviour = { kind: 'reset' };
+
+    const res = await request(adminApp)
+      .post('/api/v1/admin/operations/service-restart')
+      .set(adminAuth())
+      .send({ service: 'sync-server' });
+
+    expect(res.status).toBe(503);
+    expect(res.body.error.code).toBe('operator_unavailable');
 
     const operations = await store.listOperations();
     expect(operations).toHaveLength(1);

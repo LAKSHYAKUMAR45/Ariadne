@@ -27,6 +27,7 @@ export interface OperatorAcceptance {
 }
 
 export type OperatorClientErrorCode =
+  | 'operator_connect_failed'
   | 'operator_unavailable'
   | 'operator_timeout'
   | 'operator_busy'
@@ -60,6 +61,7 @@ export interface CreateOperatorClientOptions {
 }
 
 const ERROR_MESSAGES: Record<OperatorClientErrorCode, string> = {
+  operator_connect_failed: 'The operator service is not reachable',
   operator_unavailable: 'The operator service is not reachable',
   operator_timeout: 'The operator service did not respond in time',
   operator_busy: 'Another operator operation is already running',
@@ -67,8 +69,21 @@ const ERROR_MESSAGES: Record<OperatorClientErrorCode, string> = {
   operator_rejected: 'The operator service rejected the request',
 };
 
+const DEFINITE_CONNECT_FAILURE_CODES = new Set(['ENOENT', 'ECONNREFUSED', 'ENOTSOCK', 'EACCES']);
+
 function operatorError(code: OperatorClientErrorCode, status: number): OperatorClientError {
   return new OperatorClientError(code, status, ERROR_MESSAGES[code]);
+}
+
+export function classifyOperatorTransportError(error: NodeJS.ErrnoException): OperatorClientError {
+  if (
+    typeof error.code === 'string' &&
+    DEFINITE_CONNECT_FAILURE_CODES.has(error.code.toUpperCase())
+  ) {
+    return operatorError('operator_connect_failed', 503);
+  }
+
+  return operatorError('operator_unavailable', 503);
 }
 
 function isAcceptance(value: unknown, operationId: string): value is OperatorAcceptance {
@@ -162,8 +177,8 @@ export function createOperatorClient(options: CreateOperatorClientOptions): Oper
         settle({ err: operatorError('operator_timeout', 504) });
       });
 
-      request.on('error', () => {
-        settle({ err: operatorError('operator_unavailable', 503) });
+      request.on('error', (error: NodeJS.ErrnoException) => {
+        settle({ err: classifyOperatorTransportError(error) });
       });
 
       request.end(payload);

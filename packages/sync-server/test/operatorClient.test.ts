@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import {
   OPERATOR_REQUEST_PATH,
   OperatorClientError,
+  classifyOperatorTransportError,
   createOperatorClient,
   type OperatorSubmitRequest,
 } from '../src/operatorClient.js';
@@ -165,7 +166,24 @@ describe('operatorClient', () => {
     expect(operator.requests).toHaveLength(2);
   });
 
-  it('maps a missing socket to operator_unavailable without leaking the OS path', async () => {
+  it('classifies pre-accept connection setup failures as operator_connect_failed', () => {
+    for (const code of ['ENOENT', 'ECONNREFUSED', 'ENOTSOCK', 'EACCES'] as const) {
+      const error = classifyOperatorTransportError({ code } as NodeJS.ErrnoException);
+      expect(error.code).toBe('operator_connect_failed');
+      expect(error.status).toBe(503);
+      expect(error.message).toBe('The operator service is not reachable');
+    }
+  });
+
+  it('keeps ambiguous transport loss path-free as operator_unavailable', () => {
+    const error = classifyOperatorTransportError({ code: 'ECONNRESET' } as NodeJS.ErrnoException);
+
+    expect(error.code).toBe('operator_unavailable');
+    expect(error.status).toBe(503);
+    expect(error.message).toBe('The operator service is not reachable');
+  });
+
+  it('maps a missing socket to operator_connect_failed without leaking the OS path', async () => {
     const dir = await makeSocketDir();
     const socketPath = path.join(dir, 'absent-operator.sock');
     const client = createOperatorClient({ socketPath });
@@ -174,20 +192,37 @@ describe('operatorClient', () => {
 
     expect(error).toBeInstanceOf(OperatorClientError);
     const clientError = error as OperatorClientError;
-    expect(clientError.code).toBe('operator_unavailable');
+    expect(clientError.code).toBe('operator_connect_failed');
     expect(clientError.status).toBe(503);
     expect(clientError.message).not.toContain(socketPath);
     expect(clientError.message).not.toContain(dir);
     expect(clientError.message).not.toContain('.sock');
   });
 
-  it('maps a refused connection to operator_unavailable', async () => {
+  it('maps a refused connection to operator_connect_failed', async () => {
     const operator = await startFakeOperator((_recorded, res) => {
       jsonResponse(res, 202, { operationId: 'unused', accepted: true });
     });
     await operator.close();
 
     const client = createOperatorClient({ socketPath: operator.socketPath });
+    const error = (await client
+      .submit(restartRequest)
+      .catch((err: unknown) => err)) as OperatorClientError;
+
+    expect(error).toBeInstanceOf(OperatorClientError);
+    expect(error.code).toBe('operator_connect_failed');
+    expect(error.status).toBe(503);
+  });
+
+  it('treats a post-request connection reset as operator_unavailable', async () => {
+    const operator = await startFakeOperator((_recorded, _res) => {
+      // Ambiguous loss after the request reached the operator: the operator may
+      // already have accepted or started the work before the transport died.
+      _res.socket?.destroy();
+    });
+    const client = createOperatorClient({ socketPath: operator.socketPath });
+
     const error = (await client
       .submit(restartRequest)
       .catch((err: unknown) => err)) as OperatorClientError;
