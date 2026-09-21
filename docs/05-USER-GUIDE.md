@@ -333,6 +333,8 @@ opt-in: nothing leaves your machine unless you explicitly run `ariadne
 sync` commands.
 
 ```bash
+ariadne sync setup [username]                  # project-configured SSH tunnel + login
+ariadne sync setup [username] --register       # first account creation only
 ariadne sync register <username> <password> --server https://your-sync-server   # first time only
 ariadne sync login <username> <password> --server https://your-sync-server     # subsequent machines/logins
 ariadne sync push                       # push local task/checkpoint changes
@@ -343,6 +345,15 @@ ariadne sync logout                     # forget the locally-stored token
 ```
 
 What to know:
+- **Project-configured secure setup:** `ariadne init` creates
+  `.github/ariadne-sync.json`. On each machine, `ariadne sync setup
+  [username]` reads it, verifies/installs a key for the configured SSH host,
+  checks the scanned host key against its pinned fingerprint, opens an owned
+  loopback-only SSH ControlMaster tunnel, securely prompts for the Ariadne
+  password, and stores the resulting profile. It never stores the SSH
+  password. `push`, `pull`, and `list-remote` automatically restart a stopped
+  tunnel and reject a local port occupied by an unrelated process.
+  Use `--register` only when creating the cloud account for the first time.
 - **Scope:** `tasks`, `checkpoints`, `todos`, `decisions`, `errors`, `open
   questions`, and `commands` all sync. `files`/`commits` stay local-only —
   they're git/workspace-derived, not curated text content.
@@ -356,15 +367,9 @@ What to know:
   just which user account pushed it — every sub-entity records its own
   `owner`/`workspaceLabel` independent of its parent task's, since a
   teammate can add content to a task they didn't originate.
-- **Todos sync bidirectionally**, just like tasks: editing a todo's text or
-  marking it done/blocked *after* it was first pushed is detected and
-  re-pushed on the next `sync push`.
-- **Decisions, errors, open questions, and commands sync create-once**
-  (like checkpoints): the first push of each is what reaches the server.
-  **Known limitation:** editing a decision's rationale, resolving an error
-  or open question, or editing a command's summary *after* its first push
-  does **not** automatically propagate to the server in this phase — only
-  the state at first push is captured remotely.
+- **Todos, decisions, errors, open questions, and commands sync
+  bidirectionally**, just like tasks: edits or state changes made after the
+  first push are detected and re-pushed on the next `sync push`.
 - **`pull`** applies remote changes to tasks *already linked* to this
   workspace (i.e., ones pushed from here before) and downloads any new
   checkpoints for them. By default it does not fabricate brand-new local
@@ -398,8 +403,8 @@ What to know:
   resolves it — `remote-wins` by default (the server's value is kept
   locally), or `local-wins` if you pass `--on-conflict local-wins` (your
   local value is kept and will be re-pushed on the next `sync push`).
-  This only applies to tasks and todos, the two entity types with
-  bidirectional sync; see the create-once note above for the rest.
+  The same whole-row conflict policy applies to every mutable,
+  bidirectionally synced entity.
 - **No delete propagation (by design):** archiving a task *does* sync
   normally (`status` is just a synced field), but hard-deleting anything
   locally — a task, or a decision/error/open question via the curation
@@ -419,7 +424,8 @@ What to know:
   existed (a bare `serverUrl`/`token`/`username` at the top level of
   `sync-config.json`) are read transparently as an implicit `"default"`
   profile — no manual migration needed.
-- Credentials/token are stored locally at `~/.ariadne/sync-config.json`.
+- The JWT and profile metadata are stored locally at
+  `~/.ariadne/sync-config.json` with owner-only (`0600`) permissions.
 
 See [`docs/06-CLOUD-SYNC-DESIGN.md`](06-CLOUD-SYNC-DESIGN.md) for the
 product decisions behind this, [`docs/07-CLOUD-SYNC-API-CONTRACT.md`](07-CLOUD-SYNC-API-CONTRACT.md)

@@ -21,6 +21,7 @@ Set via environment variables:
 | ------------------------ | -------- | ------- | --------------------------------------------- |
 | `DATABASE_URL`            | yes      | —       | Postgres connection string                    |
 | `SYNC_SERVER_JWT_SECRET`  | yes      | —       | Secret used to sign/verify auth JWTs          |
+| `HOST`                    | no       | `127.0.0.1` | Bind address; use `0.0.0.0` only behind a secured reverse proxy or firewall |
 | `PORT`                    | no       | `4300`  | Port the HTTP server listens on               |
 
 ## Running locally
@@ -35,6 +36,11 @@ export SYNC_SERVER_JWT_SECRET="change-me"
 pnpm --filter @ariadne-dev/sync-server run migrate   # applies migrations/*.sql
 pnpm --filter @ariadne-dev/sync-server run start      # starts the HTTP server
 ```
+
+The secure default binds only to loopback. Remote clients should connect
+through an SSH tunnel (the project-level `ariadne sync setup` command
+automates this) or a TLS reverse proxy. Set `HOST=0.0.0.0` only when network
+exposure is intentional and protected.
 
 `pnpm start` (via `src/index.ts`) also runs pending migrations automatically
 on boot, so the explicit `migrate` step above is mainly useful for CI/ops

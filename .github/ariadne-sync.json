@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "profile": "nodem2",
+  "sshHost": "nodem2",
+  "sshUser": "root",
+  "sshHostKey": "SHA256:5EwJ7UMeWUqsBH7Ws3AoCXT9GAvHw+cI4jbx/hxX6qY",
+  "remotePort": 4300,
+  "localPort": 14300
+}

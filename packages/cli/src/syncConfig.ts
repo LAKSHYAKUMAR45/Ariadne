@@ -1,6 +1,7 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import type { SyncTunnelConfig } from './syncTunnel.js';
 
 /**
  * Local credentials/config for `ariadne sync`, stored at
@@ -22,6 +23,8 @@ export interface SyncConfig {
   serverUrl: string;
   token: string;
   username: string;
+  /** Optional SSH tunnel used to reach a sync server bound to a remote loopback interface. */
+  tunnel?: SyncTunnelConfig;
   /** `serverTime` from the last successful tasks pull response; used as the next pull's `since`. Omitted before the first pull (a first pull fetches everything). */
   lastTasksPullAt?: string;
   /** Per-remote-task-id `serverTime` from the last successful checkpoints pull for that task. */
@@ -79,7 +82,8 @@ function readFile(): SyncConfigFile {
 function writeFile(file: SyncConfigFile): void {
   const configPath = getSyncConfigPath();
   fs.mkdirSync(path.dirname(configPath), { recursive: true });
-  fs.writeFileSync(configPath, JSON.stringify(file, null, 2), 'utf8');
+  fs.writeFileSync(configPath, JSON.stringify(file, null, 2), { encoding: 'utf8', mode: 0o600 });
+  fs.chmodSync(configPath, 0o600);
 }
 
 /** Reads a profile's config (defaults to whichever profile is current). */

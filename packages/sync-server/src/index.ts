@@ -18,8 +18,8 @@ async function main(): Promise<void> {
   }
 
   const app = createApp(pool, config.jwtSecret);
-  app.listen(config.port, () => {
-    console.log(`ariadne-sync-server listening on port ${config.port}`);
+  app.listen(config.port, config.host, () => {
+    console.log(`ariadne-sync-server listening on ${config.host}:${config.port}`);
   });
 }
 

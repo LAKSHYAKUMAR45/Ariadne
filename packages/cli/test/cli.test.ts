@@ -22,6 +22,7 @@ describe('ariadne CLI surface', () => {
         'workspace',
         'backup',
         'restore',
+        'init',
       ]),
     );
   });

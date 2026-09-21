@@ -8,3 +8,5 @@ out/
 *.tsbuildinfo
 coverage/
 *.vsix
+.superpowers/
+.worktrees/

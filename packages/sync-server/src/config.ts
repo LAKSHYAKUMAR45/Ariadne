@@ -6,6 +6,7 @@
 export interface SyncServerConfig {
   databaseUrl: string;
   jwtSecret: string;
+  host: string;
   port: number;
 }
 
@@ -18,6 +19,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): SyncServerConf
   if (!jwtSecret) {
     throw new Error('SYNC_SERVER_JWT_SECRET environment variable is required');
   }
-  const port = env.PORT ? parseInt(env.PORT, 10) : 4300;
-  return { databaseUrl, jwtSecret, port };
+  const host = env.HOST ?? '127.0.0.1';
+  const port = env.PORT ? Number(env.PORT) : 4300;
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new Error('PORT must be an integer from 1 to 65535');
+  }
+  return { databaseUrl, jwtSecret, host, port };
 }
