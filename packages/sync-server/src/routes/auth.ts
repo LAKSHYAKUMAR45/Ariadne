@@ -1,8 +1,9 @@
-import { Router } from 'express';
+import { Router, type NextFunction } from 'express';
 import type { Pool } from 'pg';
 import { z } from 'zod';
 import { hashPassword, signToken, verifyPassword } from '../auth.js';
 import { ApiError, errorBody } from '../errors.js';
+import { registerIntoSingletonTeam } from '../teamAccess.js';
 
 const credentialsSchema = z.object({
   username: z.string().min(1).max(64),
@@ -12,7 +13,7 @@ const credentialsSchema = z.object({
 export function createAuthRouter(pool: Pool, jwtSecret: string): Router {
   const router = Router();
 
-  router.post('/register', async (req, res) => {
+  router.post('/register', async (req, res, next: NextFunction) => {
     const parsed = credentialsSchema.safeParse(req.body);
     if (!parsed.success) {
       const err = new ApiError(400, 'invalid_request', parsed.error.message);
@@ -28,12 +29,17 @@ export function createAuthRouter(pool: Pool, jwtSecret: string): Router {
       return;
     }
 
-    const passwordHash = await hashPassword(password);
-    const { rows } = await pool.query<{ id: string }>(
-      'INSERT INTO users (username, password_hash) VALUES ($1, $2) RETURNING id',
-      [username, passwordHash]
-    );
-    res.status(201).json({ userId: rows[0].id, username });
+    try {
+      const passwordHash = await hashPassword(password);
+      const registration = await registerIntoSingletonTeam(pool, username, passwordHash);
+      res.status(201).json({ userId: registration.userId, username, role: registration.role });
+    } catch (error: unknown) {
+      if (error instanceof ApiError) {
+        res.status(error.status).json(errorBody(error));
+        return;
+      }
+      next(error);
+    }
   });
 
   router.post('/login', async (req, res) => {

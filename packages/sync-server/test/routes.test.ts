@@ -23,7 +23,9 @@ describe('sync-server: auth + sync routes', () => {
 
   beforeEach(async () => {
     // Isolate each test: wipe all sync-relevant tables (CASCADE handles FKs).
-    await pool.query('TRUNCATE TABLE todos, decisions, errors, open_questions, commands, checkpoints, tasks, users CASCADE');
+    await pool.query(
+      'TRUNCATE TABLE todos, decisions, errors, open_questions, commands, checkpoints, tasks, team_memberships, teams, users CASCADE',
+    );
   });
 
   async function registerAndLogin(username = 'alice', password = 'hunter2') {
@@ -33,11 +35,24 @@ describe('sync-server: auth + sync routes', () => {
   }
 
   describe('auth', () => {
-    it('registers a new user', async () => {
-      const res = await request(app).post('/api/v1/auth/register').send({ username: 'bob', password: 'pw123456' });
-      expect(res.status).toBe(201);
-      expect(res.body.username).toBe('bob');
-      expect(res.body.userId).toBeTruthy();
+    it('registers users with singleton-team roles', async () => {
+      const first = await request(app)
+        .post('/api/v1/auth/register')
+        .send({ username: 'bob', password: 'pw123456' });
+      expect(first.status).toBe(201);
+      expect(first.body.username).toBe('bob');
+      expect(first.body.userId).toBeTruthy();
+      expect(first.body.role).toBe('admin');
+      expect(first.body.teamId).toBeUndefined();
+
+      const second = await request(app)
+        .post('/api/v1/auth/register')
+        .send({ username: 'carol', password: 'pw123456' });
+      expect(second.status).toBe(201);
+      expect(second.body.username).toBe('carol');
+      expect(second.body.userId).toBeTruthy();
+      expect(second.body.role).toBe('member');
+      expect(second.body.teamId).toBeUndefined();
     });
 
     it('rejects registering a username that already exists', async () => {

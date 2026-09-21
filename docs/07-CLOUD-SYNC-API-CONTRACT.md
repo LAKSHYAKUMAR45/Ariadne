@@ -262,11 +262,13 @@ except `/auth/register` and `/auth/login` require `Authorization: Bearer
 // Request
 { "username": "alice", "password": "hunter2" }
 // Response 201
-{ "userId": "1f9c...", "username": "alice" }
+{ "userId": "1f9c...", "username": "alice", "role": "admin" }
 ```
 - `409 Conflict` if the username is already taken.
 - Password is hashed with bcrypt (cost factor 12) before storage; never
   logged or returned.
+- The first successful registration becomes the singleton team's `admin`;
+  later registrations join the same team as `member`.
 
 **`POST /api/v1/auth/login`**
 ```json

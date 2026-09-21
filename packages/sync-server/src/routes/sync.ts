@@ -40,6 +40,18 @@ interface TaskRow {
 export function createSyncRouter(pool: Pool): Router {
   const router = Router();
 
+  async function getSingletonTeamId(): Promise<string> {
+    const { rows } = await pool.query<{ id: string }>(
+      'SELECT id FROM teams WHERE singleton_key = $1',
+      ['default'],
+    );
+    const teamId = rows[0]?.id;
+    if (!teamId) {
+      throw new Error('Singleton team is missing; run the authorization migration before syncing tasks');
+    }
+    return teamId;
+  }
+
   async function ensureDecisionSupersedesSameTask(supersedesId: string | null | undefined, taskRemoteId: string): Promise<ApiError | null> {
     if (!supersedesId) return null;
     const { rows } = await pool.query('SELECT 1 FROM decisions WHERE id = $1 AND task_id = $2', [supersedesId, taskRemoteId]);
@@ -55,6 +67,7 @@ export function createSyncRouter(pool: Pool): Router {
     }
 
     const results: { localId: string; remoteId: string; updatedAt: string }[] = [];
+    const teamId = await getSingletonTeamId();
     for (const task of parsed.data.tasks) {
       let row: TaskRow;
       if (task.remoteId) {
@@ -74,10 +87,20 @@ export function createSyncRouter(pool: Pool): Router {
         row = rows[0];
       } else {
         const { rows } = await pool.query<TaskRow>(
-          `INSERT INTO tasks (local_id, owner_user_id, title, goal, status, branch, workspace_label, created_at, updated_at)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8)
+          `INSERT INTO tasks (local_id, owner_user_id, title, goal, status, branch, workspace_label, created_at, updated_at, team_id)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8, $9)
            RETURNING id, local_id, title, goal, status, branch, workspace_label, created_at, updated_at`,
-          [task.localId, req.userId, task.title, task.goal ?? null, task.status, task.branch ?? null, task.workspaceLabel ?? null, task.createdAt]
+          [
+            task.localId,
+            req.userId,
+            task.title,
+            task.goal ?? null,
+            task.status,
+            task.branch ?? null,
+            task.workspaceLabel ?? null,
+            task.createdAt,
+            teamId,
+          ],
         );
         row = rows[0];
       }

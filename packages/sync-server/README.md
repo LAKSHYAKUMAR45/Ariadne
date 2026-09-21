@@ -87,7 +87,7 @@ container.
 Summary (full detail in `docs/07-CLOUD-SYNC-API-CONTRACT.md`):
 
 - `GET /healthz` — liveness check, no auth.
-- `POST /api/v1/auth/register` — create an account (`username`, `password`).
+- `POST /api/v1/auth/register` — create an account (`username`, `password`) and return the assigned singleton-team role.
 - `POST /api/v1/auth/login` — returns a JWT bearer token.
 - `POST /api/v1/sync/tasks` — push (create/update) tasks. Requires auth.
 - `GET /api/v1/sync/tasks?since=<ISO8601>` — pull tasks updated after `since`. Requires auth.
