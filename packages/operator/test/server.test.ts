@@ -1,0 +1,284 @@
+import http from 'node:http';
+import net from 'node:net';
+import os from 'node:os';
+import path from 'node:path';
+import { access, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { afterEach, describe, expect, it } from 'vitest';
+import { createOperatorServer, getOperatorSocketPath, MAX_OPERATOR_REQUEST_BODY_BYTES } from '../src/server.js';
+
+interface HttpResponse {
+  statusCode: number;
+  body: string;
+}
+
+describe('createOperatorServer', () => {
+  const tempDirectories: string[] = [];
+
+  afterEach(async () => {
+    await Promise.all(
+      tempDirectories.map(async (directory) => {
+        await rm(directory, { recursive: true, force: true });
+      }),
+    );
+    tempDirectories.length = 0;
+  });
+
+  async function createTempDirectory(): Promise<string> {
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'ariadne-operator-test-'));
+    tempDirectories.push(directory);
+    return directory;
+  }
+
+  async function request(socketPath: string, options: {
+    method?: string;
+    path?: string;
+    body?: string;
+  } = {}): Promise<HttpResponse> {
+    const method = options.method ?? 'POST';
+    const requestPath = options.path ?? '/v1/operations';
+    const body = options.body ?? '';
+
+    return await new Promise<HttpResponse>((resolve, reject) => {
+      const req = http.request(
+        {
+          socketPath,
+          method,
+          path: requestPath,
+          headers: {
+            'content-type': 'application/json',
+            'content-length': Buffer.byteLength(body),
+          },
+        },
+        (res) => {
+          const chunks: Buffer[] = [];
+          res.on('data', (chunk) => chunks.push(Buffer.from(chunk)));
+          res.on('end', () => {
+            resolve({
+              statusCode: res.statusCode ?? 0,
+              body: Buffer.concat(chunks).toString('utf8'),
+            });
+          });
+        },
+      );
+
+      req.on('error', reject);
+      req.end(body);
+    });
+  }
+
+  async function waitForFile(filePath: string): Promise<void> {
+    for (let attempt = 0; attempt < 50; attempt += 1) {
+      try {
+        await access(filePath);
+        return;
+      } catch {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+    }
+
+    throw new Error(`Timed out waiting for ${filePath}`);
+  }
+
+  async function waitForAccepted(socketPath: string, body: string): Promise<HttpResponse> {
+    let lastResponse: HttpResponse | undefined;
+    for (let attempt = 0; attempt < 50; attempt += 1) {
+      lastResponse = await request(socketPath, { body });
+      if (lastResponse.statusCode === 202) {
+        return lastResponse;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+
+    throw new Error(`Timed out waiting for acceptance, last status was ${lastResponse?.statusCode}`);
+  }
+
+  it('requires OPERATOR_SOCKET_PATH to be an absolute path', () => {
+    expect(() => getOperatorSocketPath({})).toThrowError(
+      'OPERATOR_SOCKET_PATH environment variable is required',
+    );
+
+    expect(() => getOperatorSocketPath({ OPERATOR_SOCKET_PATH: 'relative.sock' })).toThrowError(
+      'OPERATOR_SOCKET_PATH must be an absolute path',
+    );
+  });
+
+  it('removes only a stale owned socket and chmods the replacement to 0660', async () => {
+    const directory = await createTempDirectory();
+    const socketPath = path.join(directory, 'operator.sock');
+
+    await new Promise<void>((resolve, reject) => {
+      const staleServer = net.createServer();
+      staleServer.once('error', reject);
+      staleServer.listen(socketPath, () => {
+        staleServer.close((error) => {
+          if (error) {
+            reject(error);
+            return;
+          }
+          resolve();
+        });
+      });
+    });
+
+    const server = createOperatorServer({
+      socketPath,
+      executeOperation: async () => undefined,
+    });
+
+    await server.start();
+    const socketStats = await stat(socketPath);
+
+    expect(socketStats.isSocket()).toBe(true);
+    expect(socketStats.mode & 0o777).toBe(0o660);
+
+    await server.close();
+  });
+
+  it('fails closed when the target path is not a Unix socket', async () => {
+    const directory = await createTempDirectory();
+    const socketPath = path.join(directory, 'operator.sock');
+    await writeFile(socketPath, 'not-a-socket', 'utf8');
+
+    const server = createOperatorServer({
+      socketPath,
+      executeOperation: async () => undefined,
+    });
+
+    await expect(server.start()).rejects.toThrowError(
+      'Refusing to replace existing non-socket path',
+    );
+  });
+
+  it('rejects non-POST methods and oversized bodies', async () => {
+    const directory = await createTempDirectory();
+    const socketPath = path.join(directory, 'operator.sock');
+    const server = createOperatorServer({
+      socketPath,
+      executeOperation: async () => undefined,
+    });
+
+    await server.start();
+
+    const methodResponse = await request(socketPath, {
+      method: 'GET',
+      path: '/v1/operations',
+    });
+    expect(methodResponse.statusCode).toBe(405);
+    expect(JSON.parse(methodResponse.body)).toEqual({ error: 'method_not_allowed' });
+
+    const oversizedPayload = 'x'.repeat(MAX_OPERATOR_REQUEST_BODY_BYTES + 1);
+    const bodyResponse = await request(socketPath, {
+      body: oversizedPayload,
+    });
+    expect(bodyResponse.statusCode).toBe(413);
+    expect(JSON.parse(bodyResponse.body)).toEqual({ error: 'request_too_large' });
+
+    await server.close();
+  });
+
+  it('accepts one operation, returns prior acceptance for duplicates, and rejects concurrent different ids', async () => {
+    const directory = await createTempDirectory();
+    const socketPath = path.join(directory, 'operator.sock');
+    let releaseCurrentOperation: (() => void) | undefined;
+
+    const server = createOperatorServer({
+      socketPath,
+      executeOperation: async () =>
+        await new Promise<void>((resolve) => {
+          releaseCurrentOperation = resolve;
+        }),
+    });
+
+    await server.start();
+
+    const body = JSON.stringify({
+      operationId: 'op-1',
+      type: 'backup_create',
+    });
+
+    const firstResponse = await request(socketPath, { body });
+    expect(firstResponse.statusCode).toBe(202);
+    expect(JSON.parse(firstResponse.body)).toEqual({
+      operationId: 'op-1',
+      accepted: true,
+    });
+
+    const duplicateResponse = await request(socketPath, { body });
+    expect(duplicateResponse.statusCode).toBe(202);
+    expect(JSON.parse(duplicateResponse.body)).toEqual({
+      operationId: 'op-1',
+      accepted: true,
+    });
+
+    const busyResponse = await request(socketPath, {
+      body: JSON.stringify({
+        operationId: 'op-2',
+        type: 'backup_create',
+      }),
+    });
+    expect(busyResponse.statusCode).toBe(409);
+    expect(JSON.parse(busyResponse.body)).toEqual({ error: 'operator_busy' });
+
+    releaseCurrentOperation?.();
+    await server.close();
+  });
+
+  it('passes validated requests to the executor and clears the active operation after completion', async () => {
+    const directory = await createTempDirectory();
+    const socketPath = path.join(directory, 'operator.sock');
+    const requests: unknown[] = [];
+    const eventsFile = path.join(directory, 'events.log');
+
+    const server = createOperatorServer({
+      socketPath,
+      executeOperation: async (requestBody) => {
+        requests.push(requestBody);
+        await writeFile(
+          eventsFile,
+          JSON.stringify({
+            operationId: (requestBody as { operationId: string }).operationId,
+            success: true,
+          }),
+          'utf8',
+        );
+      },
+    });
+
+    await server.start();
+
+    const accepted = await request(socketPath, {
+      body: JSON.stringify({
+        operationId: 'op-3',
+        type: 'deployment_apply',
+        revision: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      }),
+    });
+
+    expect(accepted.statusCode).toBe(202);
+    expect(requests).toEqual([
+      {
+        operationId: 'op-3',
+        type: 'deployment_apply',
+        revision: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      },
+    ]);
+
+    await waitForFile(eventsFile);
+
+    const secondAccepted = await waitForAccepted(
+      socketPath,
+      JSON.stringify({
+        operationId: 'op-4',
+        type: 'backup_create',
+      }),
+    );
+    expect(secondAccepted.statusCode).toBe(202);
+
+    expect(JSON.parse(await readFile(eventsFile, 'utf8'))).toMatchObject({
+      operationId: 'op-4',
+      success: true,
+    });
+
+    await server.close();
+  });
+});
