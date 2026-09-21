@@ -4,6 +4,7 @@ import { loadConfig } from './config.js';
 import { createPool } from './db.js';
 import { loadEncryptionKeyring } from './encryption.js';
 import { runMigrations } from './migrate.js';
+import { createOperatorClient } from './operatorClient.js';
 
 /**
  * Entry point for `ariadne-sync-server`: runs any pending migrations, then
@@ -19,7 +20,11 @@ async function main(): Promise<void> {
     console.log(`Applied ${applied.length} migration(s): ${applied.join(', ')}`);
   }
 
-  const app = createApp(pool, config.jwtSecret, { encryptionKeyring });
+  const operatorClient = config.operatorSocketPath
+    ? createOperatorClient({ socketPath: config.operatorSocketPath })
+    : null;
+
+  const app = createApp(pool, config.jwtSecret, { encryptionKeyring, operatorClient });
   app.listen(config.port, config.host, () => {
     console.log(`ariadne-sync-server listening on ${config.host}:${config.port}`);
   });
@@ -39,5 +44,6 @@ export { createPool } from './db.js';
 // load key material from a validated key directory, and tests import the raw
 // module directly.
 export { loadEncryptionKeyring } from './encryption.js';
+export { createOperatorClient } from './operatorClient.js';
 export { runMigrations } from './migrate.js';
 export { createTaskHistoryStore, DEFAULT_SERVER_CAPTURE_LIMITS } from './taskHistoryStore.js';

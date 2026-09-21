@@ -4,6 +4,9 @@ import { SyncServerConfigError } from './config.js';
 import type { EncryptionKeyring } from './encryption.js';
 import { createMembersRouter } from './routes/members.js';
 import { handleUnexpectedError, requireAuth } from './middleware.js';
+import { createOperationsStore } from './operationsStore.js';
+import type { OperatorClient } from './operatorClient.js';
+import { createAdminOperationsRouter } from './routes/adminOperations.js';
 import { createAdminTasksRouter } from './routes/adminTasks.js';
 import { createAuthRouter } from './routes/auth.js';
 import { createSyncRouter } from './routes/sync.js';
@@ -13,6 +16,8 @@ import { createTaskHistoryStore } from './taskHistoryStore.js';
 export interface CreateAppOptions {
   /** Required: the server must never run without a loaded keyring. */
   encryptionKeyring: EncryptionKeyring;
+  /** Omitted or `null` when no privileged operator socket is configured. */
+  operatorClient?: OperatorClient | null;
 }
 
 function assertKeyring(keyring: EncryptionKeyring | undefined): EncryptionKeyring {
@@ -52,6 +57,14 @@ export function createApp(pool: Pool, jwtSecret: string, options: CreateAppOptio
   app.use('/api/v1/auth', createAuthRouter(pool, jwtSecret));
   app.use('/api/v1/admin', requireAuth(jwtSecret), createMembersRouter(pool));
   app.use('/api/v1/admin', requireAuth(jwtSecret), createAdminTasksRouter(pool, taskHistoryStore));
+  app.use(
+    '/api/v1/admin',
+    requireAuth(jwtSecret),
+    createAdminOperationsRouter(pool, {
+      operationsStore: createOperationsStore(pool),
+      operatorClient: options?.operatorClient ?? null,
+    }),
+  );
   app.use('/api/v1/sync', requireAuth(jwtSecret), createSyncRouter(pool));
   app.use(handleUnexpectedError);
 

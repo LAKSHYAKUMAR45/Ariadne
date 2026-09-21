@@ -1,12 +1,22 @@
 import { createHash } from 'node:crypto';
-import { request as httpRequest } from 'node:http';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { createServer as createHttpServer, request as httpRequest } from 'node:http';
 import type { AddressInfo } from 'node:net';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import express, { type Express } from 'express';
 import type { Pool } from 'pg';
 import request from 'supertest';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../src/app.js';
-import { handleUnexpectedError, requireAuth } from '../src/middleware.js';
+import {
+  handleUnexpectedError,
+  requireAuth,
+  type AuthenticatedRequest,
+} from '../src/middleware.js';
+import { createOperatorClient, type OperatorClient } from '../src/operatorClient.js';
+import { createOperationsStore, type OperationsStore } from '../src/operationsStore.js';
+import { createAdminOperationsRouter } from '../src/routes/adminOperations.js';
 import { createTaskHistoryRouter } from '../src/routes/taskHistory.js';
 import { createTaskHistoryStore } from '../src/taskHistoryStore.js';
 import { signToken } from '../src/auth.js';
@@ -2316,5 +2326,574 @@ describe('sync-server: auth + sync routes', () => {
       expect(res.status).toBe(404);
       expect(res.body.error.code).toBe('task_not_found');
     });
+  });
+});
+
+describe('sync-server: admin operator operations', () => {
+  let pool: Pool;
+  let store: OperationsStore;
+  let adminApp: Express;
+  let failClosedApp: Express;
+  let operator: FakeOperator;
+  let operatorBehaviour: FakeOperatorBehaviour;
+
+  interface RecordedOperatorRequest {
+    url: string;
+    method: string;
+    body: unknown;
+  }
+
+  interface FakeOperator {
+    socketPath: string;
+    dir: string;
+    requests: RecordedOperatorRequest[];
+    close(): Promise<void>;
+  }
+
+  type FakeOperatorBehaviour =
+    | { kind: 'accept' }
+    | { kind: 'busy' }
+    | { kind: 'malformed' }
+    | { kind: 'hang' };
+
+  async function startFakeOperator(): Promise<FakeOperator> {
+    const dir = await mkdtemp(path.join(tmpdir(), 'ariadne-admin-ops-'));
+    const socketPath = path.join(dir, 'operator.sock');
+    const requests: RecordedOperatorRequest[] = [];
+
+    const server = createHttpServer((req, res) => {
+      const chunks: Buffer[] = [];
+      req.on('data', (chunk: Buffer) => chunks.push(chunk));
+      req.on('end', () => {
+        const text = Buffer.concat(chunks).toString('utf8');
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(text);
+        } catch {
+          parsed = text;
+        }
+        requests.push({ url: req.url ?? '', method: req.method ?? '', body: parsed });
+
+        if (operatorBehaviour.kind === 'hang') {
+          return;
+        }
+        if (operatorBehaviour.kind === 'busy') {
+          res.statusCode = 409;
+          res.setHeader('content-type', 'application/json');
+          res.end(JSON.stringify({ error: 'operator_busy' }));
+          return;
+        }
+        if (operatorBehaviour.kind === 'malformed') {
+          res.statusCode = 202;
+          res.end('definitely not json');
+          return;
+        }
+        const operationId = (parsed as { operationId?: string }).operationId ?? '';
+        res.statusCode = 202;
+        res.setHeader('content-type', 'application/json');
+        res.end(JSON.stringify({ operationId, accepted: true }));
+      });
+    });
+
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(socketPath, () => {
+        server.off('error', reject);
+        resolve();
+      });
+    });
+
+    return {
+      socketPath,
+      dir,
+      requests,
+      close: () =>
+        new Promise<void>((resolve) => {
+          server.closeAllConnections?.();
+          server.close(() => resolve());
+        }),
+    };
+  }
+
+  function buildReauthenticatedApp(options: {
+    operatorClient: OperatorClient | null;
+    heartbeatIntervalMs?: number;
+    pollIntervalMs?: number;
+  }): Express {
+    const testApp = express();
+    testApp.use(express.json());
+    testApp.use(
+      '/api/v1/admin',
+      requireAuth(TEST_JWT_SECRET),
+      // Plan 04 supplies the real dashboard reauthentication middleware; the
+      // marker is injected here so Plan 03 never ships an HTTP bypass.
+      (req, _res, next) => {
+        (req as AuthenticatedRequest & { adminReauthenticated?: boolean }).adminReauthenticated =
+          true;
+        next();
+      },
+      createAdminOperationsRouter(pool, {
+        operationsStore: store,
+        operatorClient: options.operatorClient,
+        heartbeatIntervalMs: options.heartbeatIntervalMs,
+        pollIntervalMs: options.pollIntervalMs,
+      }),
+    );
+    testApp.use(handleUnexpectedError);
+    return testApp;
+  }
+
+  beforeAll(async () => {
+    pool = createPool(TEST_DATABASE_URL);
+    await runMigrations(pool);
+    store = createOperationsStore(pool);
+    operator = await startFakeOperator();
+    operatorBehaviour = { kind: 'accept' };
+    adminApp = buildReauthenticatedApp({
+      operatorClient: createOperatorClient({
+        socketPath: operator.socketPath,
+        requestTimeoutMs: 400,
+      }),
+    });
+    failClosedApp = createApp(pool, TEST_JWT_SECRET, {
+      encryptionKeyring: createTestEncryptionKeyring(),
+      operatorClient: createOperatorClient({ socketPath: operator.socketPath }),
+    });
+  });
+
+  afterAll(async () => {
+    await operator.close();
+    await rm(operator.dir, { recursive: true, force: true });
+    await pool.end();
+  });
+
+  let adminToken: string;
+  let adminUserId: string;
+  let memberToken: string;
+
+  beforeEach(async () => {
+    await truncateFixtureTables(pool, TASK_HISTORY_FIXTURE_TABLES);
+    operator.requests.length = 0;
+    operatorBehaviour = { kind: 'accept' };
+
+    await request(failClosedApp)
+      .post('/api/v1/auth/register')
+      .send({ username: 'ops-admin', password: 'hunter2hunter2' })
+      .expect(201);
+    const adminLogin = await request(failClosedApp)
+      .post('/api/v1/auth/login')
+      .send({ username: 'ops-admin', password: 'hunter2hunter2' })
+      .expect(200);
+    adminToken = adminLogin.body.token as string;
+    const adminRow = await pool.query<{ id: string }>('SELECT id FROM users WHERE username = $1', [
+      'ops-admin',
+    ]);
+    adminUserId = adminRow.rows[0].id;
+
+    await request(failClosedApp)
+      .post('/api/v1/auth/register')
+      .send({ username: 'ops-member', password: 'hunter2hunter2' })
+      .expect(201);
+    const memberLogin = await request(failClosedApp)
+      .post('/api/v1/auth/login')
+      .send({ username: 'ops-member', password: 'hunter2hunter2' })
+      .expect(200);
+    memberToken = memberLogin.body.token as string;
+  });
+
+  function adminAuth(): { Authorization: string } {
+    return { Authorization: `Bearer ${adminToken}` };
+  }
+
+  it('accepts a service restart, persisting the queued record before submission', async () => {
+    const res = await request(adminApp)
+      .post('/api/v1/admin/operations/service-restart')
+      .set(adminAuth())
+      .send({ service: 'sync-server' });
+
+    expect(res.status).toBe(202);
+    expect(res.body.accepted).toBe(true);
+    expect(res.body.operation).toMatchObject({
+      type: 'service_restart',
+      state: 'queued',
+      requestedBy: adminUserId,
+    });
+
+    const operationId = res.body.operation.id as string;
+    expect(operator.requests).toEqual([
+      {
+        url: '/v1/operations',
+        method: 'POST',
+        body: { operationId, type: 'service_restart', service: 'sync-server' },
+      },
+    ]);
+
+    const persisted = await store.getOperation(operationId);
+    expect(persisted).toMatchObject({ state: 'queued', type: 'service_restart' });
+
+    const events = await store.listOperationEvents(operationId);
+    expect(events.map((event) => event.state)).toEqual(['queued']);
+
+    const audit = await store.listAuditEvents();
+    expect(audit.some((event) => event.action === 'admin_operation.created')).toBe(true);
+  });
+
+  it('lists and fetches persisted operations for the admin', async () => {
+    const created = await request(adminApp)
+      .post('/api/v1/admin/operations/backups')
+      .set(adminAuth())
+      .send({})
+      .expect(202);
+    const operationId = created.body.operation.id as string;
+
+    const list = await request(adminApp)
+      .get('/api/v1/admin/operations')
+      .set(adminAuth())
+      .expect(200);
+    expect(list.headers['cache-control']).toBe('no-store');
+    expect(list.body.operations.map((operation: { id: string }) => operation.id)).toContain(
+      operationId,
+    );
+
+    const single = await request(adminApp)
+      .get(`/api/v1/admin/operations/${operationId}`)
+      .set(adminAuth())
+      .expect(200);
+    expect(single.body.operation).toMatchObject({ id: operationId, type: 'backup_create' });
+
+    const missing = await request(adminApp)
+      .get('/api/v1/admin/operations/does-not-exist')
+      .set(adminAuth());
+    expect(missing.status).toBe(404);
+    expect(missing.body.error.code).toBe('operation_not_found');
+  });
+
+  it('creates a distinct operation id per request instead of reusing one', async () => {
+    const first = await request(adminApp)
+      .post('/api/v1/admin/operations/service-restart')
+      .set(adminAuth())
+      .send({ service: 'postgres' })
+      .expect(202);
+    const second = await request(adminApp)
+      .post('/api/v1/admin/operations/service-restart')
+      .set(adminAuth())
+      .send({ service: 'postgres' })
+      .expect(202);
+
+    expect(second.body.operation.id).not.toBe(first.body.operation.id);
+    expect(operator.requests).toHaveLength(2);
+  });
+
+  it('fails closed without the dashboard reauthentication marker', async () => {
+    const res = await request(failClosedApp)
+      .post('/api/v1/admin/operations/service-restart')
+      .set(adminAuth())
+      .send({ service: 'sync-server' });
+
+    expect(res.status).toBe(403);
+    expect(res.body.error.code).toBe('reauthentication_required');
+    expect(operator.requests).toHaveLength(0);
+    expect(await store.listOperations()).toEqual([]);
+  });
+
+  it('denies non-admin members even when reauthenticated', async () => {
+    const res = await request(adminApp)
+      .post('/api/v1/admin/operations/service-restart')
+      .set({ Authorization: `Bearer ${memberToken}` })
+      .send({ service: 'sync-server' });
+
+    expect(res.status).toBe(403);
+    expect(res.body.error.code).toBe('admin_required');
+    expect(operator.requests).toHaveLength(0);
+    expect(await store.listOperations()).toEqual([]);
+  });
+
+  it('requires authentication', async () => {
+    const res = await request(adminApp)
+      .post('/api/v1/admin/operations/service-restart')
+      .send({ service: 'sync-server' });
+    expect(res.status).toBe(401);
+  });
+
+  it('rejects invalid operation parameters before creating a record', async () => {
+    const badService = await request(adminApp)
+      .post('/api/v1/admin/operations/service-restart')
+      .set(adminAuth())
+      .send({ service: 'rm -rf' });
+    expect(badService.status).toBe(400);
+    expect(badService.body.error.code).toBe('invalid_request');
+
+    const badRevision = await request(adminApp)
+      .post('/api/v1/admin/operations/deploy')
+      .set(adminAuth())
+      .send({ revision: 'HEAD' });
+    expect(badRevision.status).toBe(400);
+    expect(badRevision.body.error.code).toBe('invalid_request');
+
+    // Already percent-encoded: a literal `..` segment is normalised away before
+    // routing, so the encoded forms are what actually reach the handler.
+    for (const encodedName of ['%2e%2e%2fetc%2fpasswd', 'nested%2Fbackup.dump', '.hidden']) {
+      const badBackup = await request(adminApp)
+        .post(`/api/v1/admin/operations/backups/${encodedName}/verify`)
+        .set(adminAuth())
+        .send({});
+      expect(badBackup.status).toBe(400);
+      expect(badBackup.body.error.code).toBe('invalid_request');
+    }
+
+    // A bare `..` segment is normalised away by the client/router and never
+    // reaches the handler at all.
+    const dotSegment = await request(adminApp)
+      .post('/api/v1/admin/operations/backups/%2e%2e/verify')
+      .set(adminAuth())
+      .send({});
+    expect(dotSegment.status).toBe(404);
+
+    expect(operator.requests).toHaveLength(0);
+    expect(await store.listOperations()).toEqual([]);
+  });
+
+  it('submits deploy and backup verify/restore with the operator wire shape', async () => {
+    const revision = 'b'.repeat(40);
+    const deploy = await request(adminApp)
+      .post('/api/v1/admin/operations/deploy')
+      .set(adminAuth())
+      .send({ revision })
+      .expect(202);
+    const verify = await request(adminApp)
+      .post('/api/v1/admin/operations/backups/ariadne-2026-09-21.dump/verify')
+      .set(adminAuth())
+      .send({})
+      .expect(202);
+    const restore = await request(adminApp)
+      .post('/api/v1/admin/operations/backups/ariadne-2026-09-21.dump/restore')
+      .set(adminAuth())
+      .send({})
+      .expect(202);
+
+    expect(operator.requests.map((recorded) => recorded.body)).toEqual([
+      { operationId: deploy.body.operation.id, type: 'deployment_apply', revision },
+      {
+        operationId: verify.body.operation.id,
+        type: 'backup_verify',
+        backupName: 'ariadne-2026-09-21.dump',
+      },
+      {
+        operationId: restore.body.operation.id,
+        type: 'backup_restore',
+        backupName: 'ariadne-2026-09-21.dump',
+      },
+    ]);
+    expect(deploy.body.operation.type).toBe('deployment_apply');
+    expect(verify.body.operation.type).toBe('backup_verify');
+    expect(restore.body.operation.type).toBe('backup_restore');
+  });
+
+  it('marks the operation failed when the operator socket is unavailable', async () => {
+    const unavailableApp = buildReauthenticatedApp({
+      operatorClient: createOperatorClient({
+        socketPath: path.join(operator.dir, 'absent.sock'),
+        requestTimeoutMs: 400,
+      }),
+    });
+
+    const res = await request(unavailableApp)
+      .post('/api/v1/admin/operations/service-restart')
+      .set(adminAuth())
+      .send({ service: 'sync-server' });
+
+    expect(res.status).toBe(503);
+    expect(res.body.error.code).toBe('operator_unavailable');
+    expect(res.body.error.message).not.toContain('absent.sock');
+    expect(res.body.error.message).not.toContain(operator.dir);
+
+    const operations = await store.listOperations();
+    expect(operations).toHaveLength(1);
+    expect(operations[0].state).toBe('failed');
+    const events = await store.listOperationEvents(operations[0].id);
+    expect(events.map((event) => event.state)).toEqual(['queued', 'failed']);
+  });
+
+  it('returns 503 and records a failure when no operator socket is configured', async () => {
+    const unconfiguredApp = buildReauthenticatedApp({ operatorClient: null });
+
+    const res = await request(unconfiguredApp)
+      .post('/api/v1/admin/operations/backups')
+      .set(adminAuth())
+      .send({});
+
+    expect(res.status).toBe(503);
+    expect(res.body.error.code).toBe('operator_unavailable');
+    const operations = await store.listOperations();
+    expect(operations).toHaveLength(1);
+    expect(operations[0].state).toBe('failed');
+  });
+
+  it('maps an operator timeout to 504 and fails the operation', async () => {
+    operatorBehaviour = { kind: 'hang' };
+
+    const res = await request(adminApp)
+      .post('/api/v1/admin/operations/service-restart')
+      .set(adminAuth())
+      .send({ service: 'sync-server' });
+
+    expect(res.status).toBe(504);
+    expect(res.body.error.code).toBe('operator_timeout');
+    const operations = await store.listOperations();
+    expect(operations[0].state).toBe('failed');
+  });
+
+  it('maps a malformed operator response to 502 and fails the operation', async () => {
+    operatorBehaviour = { kind: 'malformed' };
+
+    const res = await request(adminApp)
+      .post('/api/v1/admin/operations/service-restart')
+      .set(adminAuth())
+      .send({ service: 'sync-server' });
+
+    expect(res.status).toBe(502);
+    expect(res.body.error.code).toBe('operator_invalid_response');
+    const operations = await store.listOperations();
+    expect(operations[0].state).toBe('failed');
+  });
+
+  it('maps a busy operator to 409 so the dashboard can reattach instead of retrying', async () => {
+    operatorBehaviour = { kind: 'busy' };
+
+    const res = await request(adminApp)
+      .post('/api/v1/admin/operations/deploy')
+      .set(adminAuth())
+      .send({ revision: 'c'.repeat(40) });
+
+    expect(res.status).toBe(409);
+    expect(res.body.error.code).toBe('operator_busy');
+    const operations = await store.listOperations();
+    expect(operations[0].state).toBe('failed');
+  });
+
+  it('streams persisted events plus a heartbeat and closes on a terminal state', async () => {
+    const created = await request(adminApp)
+      .post('/api/v1/admin/operations/service-restart')
+      .set(adminAuth())
+      .send({ service: 'sync-server' })
+      .expect(202);
+    const operationId = created.body.operation.id as string;
+
+    const streamingApp = buildReauthenticatedApp({
+      operatorClient: null,
+      heartbeatIntervalMs: 40,
+      pollIntervalMs: 25,
+    });
+    const server = streamingApp.listen(0);
+    try {
+      const { port } = server.address() as AddressInfo;
+      const stream = await new Promise<{ status: number; headers: Record<string, unknown>; text: string }>(
+        (resolve, reject) => {
+          const chunks: string[] = [];
+          const req = httpRequest(
+            {
+              host: '127.0.0.1',
+              port,
+              path: `/api/v1/admin/operations/${operationId}/events`,
+              method: 'GET',
+              headers: { Authorization: `Bearer ${adminToken}`, Accept: 'text/event-stream' },
+            },
+            (response) => {
+              response.setEncoding('utf8');
+              response.on('data', (chunk: string) => {
+                chunks.push(chunk);
+                if (chunks.join('').includes(': heartbeat')) {
+                  void store
+                    .transitionOperation({
+                      id: operationId,
+                      nextState: 'running',
+                      source: 'test',
+                      message: 'Operation running',
+                    })
+                    .then(() =>
+                      store.transitionOperation({
+                        id: operationId,
+                        nextState: 'succeeded',
+                        source: 'test',
+                        message: 'Operation succeeded',
+                      }),
+                    )
+                    .catch(() => undefined);
+                }
+              });
+              response.on('end', () =>
+                resolve({
+                  status: response.statusCode ?? 0,
+                  headers: response.headers as Record<string, unknown>,
+                  text: chunks.join(''),
+                }),
+              );
+            },
+          );
+          req.on('error', reject);
+          req.end();
+        },
+      );
+
+      expect(stream.status).toBe(200);
+      expect(String(stream.headers['content-type'])).toContain('text/event-stream');
+      expect(stream.headers['cache-control']).toBe('no-store');
+      expect(stream.text).toContain(': heartbeat');
+      expect(stream.text).toContain('event: operation_event');
+      expect(stream.text).toContain('"state":"queued"');
+      expect(stream.text).toContain('"state":"running"');
+      expect(stream.text).toContain('"state":"succeeded"');
+      expect(stream.text).toContain('event: complete');
+    } finally {
+      server.close();
+    }
+  });
+
+  it('refuses event streams for unknown operations and unauthenticated callers', async () => {
+    const missing = await request(adminApp)
+      .get('/api/v1/admin/operations/nope/events')
+      .set(adminAuth());
+    expect(missing.status).toBe(404);
+    expect(missing.body.error.code).toBe('operation_not_found');
+
+    const created = await request(adminApp)
+      .post('/api/v1/admin/operations/backups')
+      .set(adminAuth())
+      .send({})
+      .expect(202);
+
+    const withoutReauth = await request(failClosedApp)
+      .get(`/api/v1/admin/operations/${created.body.operation.id}/events`)
+      .set(adminAuth());
+    expect(withoutReauth.status).toBe(403);
+    expect(withoutReauth.body.error.code).toBe('reauthentication_required');
+
+    const asMember = await request(adminApp)
+      .get(`/api/v1/admin/operations/${created.body.operation.id}/events`)
+      .set({ Authorization: `Bearer ${memberToken}` });
+    expect(asMember.status).toBe(403);
+    expect(asMember.body.error.code).toBe('admin_required');
+  });
+
+  it('never persists request secrets or OS paths in operation metadata', async () => {
+    const unavailableApp = buildReauthenticatedApp({
+      operatorClient: createOperatorClient({
+        socketPath: path.join(operator.dir, 'absent.sock'),
+        requestTimeoutMs: 400,
+      }),
+    });
+    await request(unavailableApp)
+      .post('/api/v1/admin/operations/service-restart')
+      .set(adminAuth())
+      .send({ service: 'sync-server', password: 'super-secret-value' })
+      .expect(503);
+
+    const operations = await store.listOperations();
+    const events = await store.listOperationEvents(operations[0].id);
+    const audit = await store.listAuditEvents();
+    const serialized = JSON.stringify({ operations, events, audit });
+    expect(serialized).not.toContain('super-secret-value');
+    expect(serialized).not.toContain(operator.dir);
+    expect(serialized).not.toContain('.sock');
   });
 });

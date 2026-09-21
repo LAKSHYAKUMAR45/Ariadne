@@ -11,6 +11,8 @@ export interface SyncServerConfig {
   jwtSecret: string;
   host: string;
   port: number;
+  /** Absolute Unix socket path of the privileged operator service, when deployed. */
+  operatorSocketPath: string | null;
 }
 
 export class SyncServerConfigError extends Error {
@@ -49,5 +51,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): SyncServerConf
     throw new SyncServerConfigError('PORT must be an integer from 1 to 65535');
   }
 
-  return { databaseUrl, encryptionKeyDir, jwtSecret, host, port };
+  const operatorSocketPath = env.OPERATOR_SOCKET_PATH ?? null;
+  if (operatorSocketPath !== null && !path.isAbsolute(operatorSocketPath)) {
+    throw new SyncServerConfigError(
+      'OPERATOR_SOCKET_PATH must be an absolute path (e.g. /run/ariadne/operator.sock)',
+    );
+  }
+
+  return { databaseUrl, encryptionKeyDir, jwtSecret, host, port, operatorSocketPath };
 }
