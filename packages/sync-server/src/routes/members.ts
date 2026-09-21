@@ -6,9 +6,11 @@ import { ApiError, errorBody } from '../errors.js';
 import type { AuthenticatedRequest } from '../middleware.js';
 import type { ActiveMembership } from '../teamAccess.js';
 
-const patchMemberSchema = z.object({
-  active: z.boolean(),
-});
+const patchMemberSchema = z
+  .object({
+    active: z.boolean(),
+  })
+  .strict();
 
 export interface TeamMemberView {
   userId: string;
@@ -77,15 +79,15 @@ export function createMembersRouter(pool: Pool): Router {
   });
 
   router.patch('/members/:userId', async (req: AuthenticatedRequest, res) => {
+    const adminMembership = await requireAdmin(req, res);
+    if (!adminMembership) {
+      return;
+    }
+
     const parsed = patchMemberSchema.safeParse(req.body);
     if (!parsed.success) {
       const err = new ApiError(400, 'invalid_request', parsed.error.message);
       res.status(err.status).json(errorBody(err));
-      return;
-    }
-
-    const adminMembership = await requireAdmin(req, res);
-    if (!adminMembership) {
       return;
     }
 

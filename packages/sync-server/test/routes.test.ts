@@ -233,6 +233,18 @@ describe('sync-server: auth + sync routes', () => {
       expect(patchRes.status).toBe(403);
     });
 
+    it('returns 403 for a non-admin member even when the patch body is malformed', async () => {
+      const { member } = await createAdminFixture();
+
+      const res = await request(app)
+        .patch(`/api/v1/admin/members/${member.userId}`)
+        .set(member.authHeader)
+        .send({ active: 'nope', role: 'admin' });
+
+      expect(res.status).toBe(403);
+      expect(res.body.error.code).toBe('admin_required');
+    });
+
     it('returns 404 when the singleton admin targets an unknown user', async () => {
       const { admin } = await createAdminFixture();
 
@@ -258,6 +270,24 @@ describe('sync-server: auth + sync routes', () => {
       const membership = await pool.query<{ active: boolean }>(
         'SELECT active FROM team_memberships WHERE user_id = $1',
         [admin.userId],
+      );
+      expect(membership.rows[0].active).toBe(true);
+    });
+
+    it('returns 400 invalid_request for extra keys and does not mutate the member', async () => {
+      const { admin, member } = await createAdminFixture();
+
+      const res = await request(app)
+        .patch(`/api/v1/admin/members/${member.userId}`)
+        .set(admin.authHeader)
+        .send({ active: false, role: 'admin' });
+
+      expect(res.status).toBe(400);
+      expect(res.body.error.code).toBe('invalid_request');
+
+      const membership = await pool.query<{ active: boolean }>(
+        'SELECT active FROM team_memberships WHERE user_id = $1',
+        [member.userId],
       );
       expect(membership.rows[0].active).toBe(true);
     });
