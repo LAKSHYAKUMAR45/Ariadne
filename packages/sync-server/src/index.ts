@@ -35,5 +35,9 @@ if (require.main === module) {
 export { createApp } from './app.js';
 export { loadConfig } from './config.js';
 export { createPool } from './db.js';
-export { createEncryptionKeyring, loadEncryptionKeyring } from './encryption.js';
+// `createEncryptionKeyring` is intentionally not re-exported: production must
+// load key material from a validated key directory, and tests import the raw
+// module directly.
+export { loadEncryptionKeyring } from './encryption.js';
 export { runMigrations } from './migrate.js';
+export { createTaskHistoryStore, DEFAULT_SERVER_CAPTURE_LIMITS } from './taskHistoryStore.js';

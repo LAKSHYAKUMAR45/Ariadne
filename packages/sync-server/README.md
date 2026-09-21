@@ -83,6 +83,37 @@ The keyring is deliberately strict about the filesystem it loads from:
 The server refuses to start without a loaded keyring: `createApp` requires an
 `encryptionKeyring`, so there is no keyless production code path.
 
+## Encrypted task file history
+
+Schema v7 (`migrations/0007_encrypted_task_history.sql`) stores task file
+history as ciphertext only, via `src/taskHistoryStore.ts`:
+
+- `encrypted_blobs` — gzip-compressed, AES-256-GCM ciphertext plus nonce, auth
+  tag, key id, compression, plaintext SHA-256, plaintext bytes, and compressed
+  bytes. Deduplication is `UNIQUE (team_id, plaintext_sha256, blob_type)`, so
+  identical plaintext is stored once per team and never shared across teams.
+- `task_file_captures` / `task_file_capture_entries` — capture events and their
+  per-path snapshot/diff references. Composite foreign keys prove the task, the
+  capture, and both blobs belong to the same team, and pin each reference to the
+  correct blob type.
+- `task_file_history_deletions` — append-only deletion audit (actor, task,
+  capture, deleted paths/counts, reason); `UPDATE`/`DELETE` are blocked by a
+  trigger.
+
+Blob AAD is deliberately stable — schema/AAD version, team id, plaintext
+SHA-256, blob type, key id, and compression — so one deduplicated ciphertext can
+be referenced by many capture entries. Capture/task/path integrity is enforced
+by the transactional foreign keys above rather than by per-path AAD. Reads
+decrypt, decompress, then re-verify plaintext length and SHA-256, and fail
+closed with `capture_integrity_error` when anything has been tampered with.
+
+`storeCapture` re-validates the client guardrails server side (1 MiB per file,
+10 MiB per capture, normalized relative paths, content hash match) before
+anything is encrypted, is idempotent on exact capture replays, and returns
+`capture_conflict` when a capture id is reused with different metadata or
+entries. `deleteCapture` removes references first, writes the immutable audit
+row, and garbage-collects only blobs with no remaining references.
+
 ## Local Postgres via Docker
 
 No local Postgres install needed — for local dev/testing, run one in Docker:

@@ -34,7 +34,55 @@ describe('runMigrations', () => {
       `SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'`
     );
     const tableNames = rows.map((r) => r.table_name);
-    expect(tableNames).toEqual(expect.arrayContaining(['users', 'tasks', 'checkpoints', 'schema_meta', 'migrations_applied']));
+    expect(tableNames).toEqual(
+      expect.arrayContaining([
+        'users',
+        'tasks',
+        'checkpoints',
+        'schema_meta',
+        'migrations_applied',
+        'encrypted_blobs',
+        'task_file_captures',
+        'task_file_capture_entries',
+        'task_file_history_deletions',
+      ]),
+    );
+  });
+
+  it('constrains encrypted history storage to authenticated, team-scoped blobs', async () => {
+    if (!pool) {
+      pool = createPool(TEST_DATABASE_URL);
+      await runMigrations(pool);
+    }
+
+    const version = await pool.query<{ value: string }>(
+      `SELECT value FROM schema_meta WHERE key = 'schema_version'`,
+    );
+    expect(version.rows[0].value).toBe('7');
+
+    const dedupIndex = await pool.query<{ indexdef: string }>(
+      `SELECT indexdef FROM pg_indexes
+       WHERE tablename = 'encrypted_blobs' AND indexdef LIKE '%UNIQUE%plaintext_sha256%'`,
+    );
+    expect(dedupIndex.rows).toHaveLength(1);
+    expect(dedupIndex.rows[0].indexdef).toContain('team_id');
+    expect(dedupIndex.rows[0].indexdef).toContain('blob_type');
+
+    const checks = await pool.query<{ conname: string; definition: string }>(
+      `SELECT conname, pg_get_constraintdef(oid) AS definition
+       FROM pg_constraint
+       WHERE conrelid = 'encrypted_blobs'::regclass AND contype = 'c'`,
+    );
+    const definitions = checks.rows.map((row) => row.definition).join(' | ');
+    expect(definitions).toContain("'snapshot'");
+    expect(definitions).toContain("'diff'");
+    expect(definitions).toContain("'gzip'");
+
+    const noPlaintextColumns = await pool.query<{ column_name: string }>(
+      `SELECT column_name FROM information_schema.columns
+       WHERE table_name = 'encrypted_blobs' AND column_name IN ('plaintext', 'content', 'unified_diff')`,
+    );
+    expect(noPlaintextColumns.rows).toEqual([]);
   });
 
   it('backfills a singleton team and scopes existing tasks to it', async () => {
@@ -116,7 +164,10 @@ describe('runMigrations', () => {
       );
 
       const upgraded = await runMigrations(pool);
-      expect(upgraded).toEqual(['0006_single_team_authorization.sql']);
+      expect(upgraded).toEqual([
+        '0006_single_team_authorization.sql',
+        '0007_encrypted_task_history.sql',
+      ]);
 
       const secondRun = await runMigrations(pool);
       expect(secondRun).toEqual([]);
@@ -130,7 +181,7 @@ describe('runMigrations', () => {
         `SELECT value FROM schema_meta WHERE key = 'schema_version'`,
       );
       expect(schemaVersion.rows).toHaveLength(1);
-      expect(schemaVersion.rows[0].value).toBe('6');
+      expect(schemaVersion.rows[0].value).toBe('7');
 
       const memberships = await pool.query(
         `SELECT u.username, m.role, m.active
