@@ -9,6 +9,10 @@ import type {
   Checkpoint,
   NewCheckpoint,
   TaskFile,
+  TaskFileCapture,
+  TaskFileCaptureEntry,
+  TaskFileCaptureWithEntries,
+  CreateTaskFileCaptureInput,
   FileRole,
   Commit,
   NewCommit,
@@ -95,6 +99,48 @@ function rowToFile(row: FileRow): TaskFile {
     path: row.path,
     role: row.role,
     lastTouched: row.last_touched,
+  };
+}
+
+interface TaskFileCaptureRow {
+  id: string;
+  task_id: string;
+  trigger: TaskFileCapture['trigger'];
+  git_commit_sha: string | null;
+  checkpoint_id: string | null;
+  created_at: string;
+  synced_at: string | null;
+}
+
+function rowToTaskFileCapture(row: TaskFileCaptureRow): TaskFileCapture {
+  return {
+    id: row.id,
+    taskId: row.task_id,
+    trigger: row.trigger,
+    gitCommitSha: row.git_commit_sha,
+    checkpointId: row.checkpoint_id,
+    createdAt: row.created_at,
+    syncedAt: row.synced_at,
+  };
+}
+
+interface TaskFileCaptureEntryRow {
+  capture_id: string;
+  path: string;
+  content: string;
+  unified_diff: string;
+  byte_length: number;
+  content_sha256: string;
+}
+
+function rowToTaskFileCaptureEntry(row: TaskFileCaptureEntryRow): TaskFileCaptureEntry {
+  return {
+    captureId: row.capture_id,
+    path: row.path,
+    content: row.content,
+    unifiedDiff: row.unified_diff,
+    byteLength: row.byte_length,
+    contentSha256: row.content_sha256,
   };
 }
 
@@ -622,6 +668,147 @@ export class TaskStore {
       limit ? this.db.prepare(sql).all(taskId, limit) : this.db.prepare(sql).all(taskId)
     ) as FileRow[];
     return rows.map(rowToFile);
+  }
+
+  // ---------------------------------------------------------------------
+  // Immutable task file captures
+  // ---------------------------------------------------------------------
+
+  private getTaskFileCapture(id: string): TaskFileCaptureWithEntries | undefined {
+    return this.listTaskFileCaptures(`id = ?`, [id], 'created_at DESC')[0];
+  }
+
+  private listTaskFileCaptures(
+    whereClause: string,
+    params: readonly (string | null)[],
+    orderBy: 'created_at ASC' | 'created_at DESC',
+  ): TaskFileCaptureWithEntries[] {
+    const captures = this.db
+      .prepare(`SELECT * FROM task_file_captures WHERE ${whereClause} ORDER BY ${orderBy}, id ${orderBy.endsWith('ASC') ? 'ASC' : 'DESC'}`)
+      .all(...params) as TaskFileCaptureRow[];
+    if (captures.length === 0) {
+      return [];
+    }
+
+    const entries = this.db
+      .prepare(
+        `SELECT * FROM task_file_capture_entries
+         WHERE capture_id IN (${captures.map(() => '?').join(', ')})
+         ORDER BY capture_id ASC, path ASC`,
+      )
+      .all(...captures.map((capture) => capture.id)) as TaskFileCaptureEntryRow[];
+
+    const entriesByCaptureId = new Map<string, TaskFileCaptureEntry[]>();
+    for (const entry of entries) {
+      const existing = entriesByCaptureId.get(entry.capture_id) ?? [];
+      existing.push(rowToTaskFileCaptureEntry(entry));
+      entriesByCaptureId.set(entry.capture_id, existing);
+    }
+
+    return captures.map((capture) => ({
+      ...rowToTaskFileCapture(capture),
+      entries: [...(entriesByCaptureId.get(capture.id) ?? [])],
+    }));
+  }
+
+  private getIdempotentTaskFileCapture(input: CreateTaskFileCaptureInput): TaskFileCaptureWithEntries | undefined {
+    if (input.trigger === 'git_commit' && input.gitCommitSha) {
+      return this.listTaskFileCaptures(
+        `task_id = ? AND trigger = 'git_commit' AND git_commit_sha = ?`,
+        [input.taskId, input.gitCommitSha],
+        'created_at DESC',
+      )[0];
+    }
+
+    if (input.trigger === 'checkpoint' && input.checkpointId) {
+      return this.listTaskFileCaptures(
+        `task_id = ? AND trigger = 'checkpoint' AND checkpoint_id = ?`,
+        [input.taskId, input.checkpointId],
+        'created_at DESC',
+      )[0];
+    }
+
+    return undefined;
+  }
+
+  private validateTaskFileCaptureInput(input: CreateTaskFileCaptureInput): void {
+    if (input.trigger === 'git_commit' && !input.gitCommitSha) {
+      throw new Error('git_commit task file captures require gitCommitSha');
+    }
+
+    if (input.trigger === 'checkpoint' && !input.checkpointId) {
+      throw new Error('checkpoint task file captures require checkpointId');
+    }
+  }
+
+  createTaskFileCapture(input: CreateTaskFileCaptureInput): TaskFileCaptureWithEntries {
+    this.validateTaskFileCaptureInput(input);
+
+    const capture = this.db.transaction(() => {
+      const existing = this.getIdempotentTaskFileCapture(input);
+      if (existing) {
+        return existing;
+      }
+
+      const id = ulid();
+      const createdAt = nowIso();
+      const entries = input.entries.map((entry) => ({ ...entry }));
+
+      this.db
+        .prepare(
+          `INSERT INTO task_file_captures (id, task_id, trigger, git_commit_sha, checkpoint_id, created_at, synced_at)
+           VALUES (@id, @taskId, @trigger, @gitCommitSha, @checkpointId, @createdAt, NULL)`,
+        )
+        .run({
+          id,
+          taskId: input.taskId,
+          trigger: input.trigger,
+          gitCommitSha: input.gitCommitSha ?? null,
+          checkpointId: input.checkpointId ?? null,
+          createdAt,
+        });
+
+      const insertEntry = this.db.prepare(
+        `INSERT INTO task_file_capture_entries (capture_id, path, content, unified_diff, byte_length, content_sha256)
+         VALUES (@captureId, @path, @content, @unifiedDiff, @byteLength, @contentSha256)`,
+      );
+      for (const entry of entries) {
+        insertEntry.run({
+          captureId: id,
+          path: entry.path,
+          content: entry.content,
+          unifiedDiff: entry.unifiedDiff,
+          byteLength: entry.byteLength,
+          contentSha256: entry.contentSha256,
+        });
+      }
+
+      this.touchTask(input.taskId);
+      return this.getTaskFileCapture(id)!;
+    })();
+
+    return {
+      ...capture,
+      entries: capture.entries.map((entry) => ({ ...entry })),
+    };
+  }
+
+  getTaskFileCaptures(taskId: string): TaskFileCaptureWithEntries[] {
+    return this.listTaskFileCaptures(`task_id = ?`, [taskId], 'created_at DESC').map((capture) => ({
+      ...capture,
+      entries: capture.entries.map((entry) => ({ ...entry })),
+    }));
+  }
+
+  getPendingTaskFileCaptures(taskId: string): TaskFileCaptureWithEntries[] {
+    return this.listTaskFileCaptures(`task_id = ? AND synced_at IS NULL`, [taskId], 'created_at ASC').map((capture) => ({
+      ...capture,
+      entries: capture.entries.map((entry) => ({ ...entry })),
+    }));
+  }
+
+  markTaskFileCaptureSynced(captureId: string, syncedAt: string = nowIso()): void {
+    this.db.prepare(`UPDATE task_file_captures SET synced_at = ? WHERE id = ?`).run(syncedAt, captureId);
   }
 
   // ---------------------------------------------------------------------

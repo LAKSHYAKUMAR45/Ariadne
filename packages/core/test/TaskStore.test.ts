@@ -288,6 +288,162 @@ describe('TaskStore', () => {
       expect(store.listTasksNeedingPush().map((t) => t.id)).toContain(task.id);
     });
 
+    it('creates immutable explicit task file captures and marks them synced', () => {
+      const task = store.createTask({ title: 'Capture task' });
+      const input = {
+        taskId: task.id,
+        trigger: 'explicit' as const,
+        entries: [
+          {
+            path: 'src/index.ts',
+            content: 'export const value = 1;\n',
+            unifiedDiff: '@@ -0,0 +1 @@\n+export const value = 1;',
+            byteLength: 24,
+            contentSha256: 'sha-explicit-1',
+          },
+        ],
+      };
+
+      const created = store.createTaskFileCapture(input);
+      expect(store.getPendingTaskFileCaptures(task.id)).toEqual([created]);
+
+      const captures = store.getTaskFileCaptures(task.id);
+      expect(captures).toHaveLength(1);
+      expect(captures[0].entries).toEqual([
+        {
+          captureId: captures[0].id,
+          path: 'src/index.ts',
+          content: 'export const value = 1;\n',
+          unifiedDiff: '@@ -0,0 +1 @@\n+export const value = 1;',
+          byteLength: 24,
+          contentSha256: 'sha-explicit-1',
+        },
+      ]);
+
+      input.entries[0].content = 'mutated';
+      captures[0].entries[0].content = 'mutated again';
+      captures[0].entries.push({
+        captureId: captures[0].id,
+        path: 'src/extra.ts',
+        content: 'unexpected',
+        unifiedDiff: '@@',
+        byteLength: 10,
+        contentSha256: 'sha-explicit-2',
+      });
+      expect(store.getTaskFileCaptures(task.id)[0].entries).toEqual([
+        {
+          captureId: captures[0].id,
+          path: 'src/index.ts',
+          content: 'export const value = 1;\n',
+          unifiedDiff: '@@ -0,0 +1 @@\n+export const value = 1;',
+          byteLength: 24,
+          contentSha256: 'sha-explicit-1',
+        },
+      ]);
+
+      store.markTaskFileCaptureSynced(created.id, '2026-09-21T00:00:00.000Z');
+      expect(store.getPendingTaskFileCaptures(task.id)).toEqual([]);
+      expect(store.getTaskFileCaptures(task.id)[0].syncedAt).toBe('2026-09-21T00:00:00.000Z');
+    });
+
+    it('treats duplicate git-commit and checkpoint capture events as idempotent while keeping explicit captures distinct', () => {
+      const task = store.createTask({ title: 'Capture dedupe task' });
+      const checkpoint = store.createCheckpoint({ taskId: task.id, level: 'micro', summary: 'capture point' });
+
+      const gitCommitCapture = store.createTaskFileCapture({
+        taskId: task.id,
+        trigger: 'git_commit',
+        gitCommitSha: 'abc123',
+        entries: [
+          {
+            path: 'src/git.ts',
+            content: 'first version',
+            unifiedDiff: '@@ -0,0 +1 @@\n+first version',
+            byteLength: 13,
+            contentSha256: 'sha-git-1',
+          },
+        ],
+      });
+      const gitCommitCaptureDuplicate = store.createTaskFileCapture({
+        taskId: task.id,
+        trigger: 'git_commit',
+        gitCommitSha: 'abc123',
+        entries: [
+          {
+            path: 'src/git.ts',
+            content: 'second version should be ignored',
+            unifiedDiff: '@@ -1 +1 @@\n-second\n+ignored',
+            byteLength: 32,
+            contentSha256: 'sha-git-2',
+          },
+        ],
+      });
+      expect(gitCommitCaptureDuplicate).toEqual(gitCommitCapture);
+      expect(store.getTaskFileCaptures(task.id).filter((capture) => capture.trigger === 'git_commit')).toEqual([
+        gitCommitCapture,
+      ]);
+
+      const checkpointCapture = store.createTaskFileCapture({
+        taskId: task.id,
+        trigger: 'checkpoint',
+        checkpointId: checkpoint.id,
+        entries: [
+          {
+            path: 'src/checkpoint.ts',
+            content: 'checkpoint version',
+            unifiedDiff: '@@ -0,0 +1 @@\n+checkpoint version',
+            byteLength: 18,
+            contentSha256: 'sha-checkpoint-1',
+          },
+        ],
+      });
+      const checkpointCaptureDuplicate = store.createTaskFileCapture({
+        taskId: task.id,
+        trigger: 'checkpoint',
+        checkpointId: checkpoint.id,
+        entries: [
+          {
+            path: 'src/checkpoint.ts',
+            content: 'mutated checkpoint version',
+            unifiedDiff: '@@ -1 +1 @@\n-old\n+new',
+            byteLength: 26,
+            contentSha256: 'sha-checkpoint-2',
+          },
+        ],
+      });
+      expect(checkpointCaptureDuplicate).toEqual(checkpointCapture);
+
+      const explicitOne = store.createTaskFileCapture({
+        taskId: task.id,
+        trigger: 'explicit',
+        entries: [
+          {
+            path: 'src/manual.ts',
+            content: 'manual one',
+            unifiedDiff: '@@ -0,0 +1 @@\n+manual one',
+            byteLength: 10,
+            contentSha256: 'sha-manual-1',
+          },
+        ],
+      });
+      const explicitTwo = store.createTaskFileCapture({
+        taskId: task.id,
+        trigger: 'explicit',
+        entries: [
+          {
+            path: 'src/manual.ts',
+            content: 'manual one',
+            unifiedDiff: '@@ -0,0 +1 @@\n+manual one',
+            byteLength: 10,
+            contentSha256: 'sha-manual-1',
+          },
+        ],
+      });
+
+      expect(explicitTwo.id).not.toBe(explicitOne.id);
+      expect(store.getTaskFileCaptures(task.id)).toHaveLength(4);
+    });
+
     it('getTaskByRemoteId finds a task by its cloud-sync-server id', () => {
       const task = store.createTask({ title: 'A' });
       store.setTaskRemoteSync(task.id, 'remote-abc', new Date().toISOString());

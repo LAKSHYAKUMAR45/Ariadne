@@ -133,7 +133,7 @@ describe('MIGRATIONS (real app migrations)', () => {
     db.prepare(`INSERT INTO open_questions (id, task_id, text, resolved, created_at) VALUES ('q1', 't1', 'Why?', 0, '2020-01-04')`).run();
     db.prepare(`INSERT INTO commands (id, task_id, cmd_redacted, created_at) VALUES ('c1', 't1', 'npm test', '2020-01-05')`).run();
 
-    runMigrations(db, MIGRATIONS);
+    runMigrations(db, MIGRATIONS.filter((m) => m.version <= 4));
 
     const version = db.prepare(`SELECT value FROM schema_meta WHERE key = 'schema_version'`).get() as { value: string };
     expect(version.value).toBe('4');
@@ -146,6 +146,73 @@ describe('MIGRATIONS (real app migrations)', () => {
     expect((db.prepare(`SELECT created_at, updated_at FROM errors WHERE id = 'e1'`).get() as { created_at: string; updated_at: string }).updated_at).toBe('2020-01-03');
     expect((db.prepare(`SELECT created_at, updated_at FROM open_questions WHERE id = 'q1'`).get() as { created_at: string; updated_at: string }).updated_at).toBe('2020-01-04');
     expect((db.prepare(`SELECT created_at, updated_at FROM commands WHERE id = 'c1'`).get() as { created_at: string; updated_at: string }).updated_at).toBe('2020-01-05');
+
+    db.close();
+  });
+
+  it('v5 adds immutable task file capture tables plus trigger-specific idempotency indexes without disturbing existing rows', () => {
+    const db = freshDb();
+    runMigrations(db, MIGRATIONS.filter((m) => m.version <= 4));
+
+    db.prepare(
+      `INSERT INTO tasks (id, title, status, created_at, updated_at) VALUES ('t1', 'Task', 'active', '2020-01-01', '2020-01-01')`,
+    ).run();
+    db.prepare(
+      `INSERT INTO checkpoints (id, task_id, level, summary, created_at) VALUES ('cp1', 't1', 'micro', 'checkpoint', '2020-01-02')`,
+    ).run();
+    db.prepare(
+      `INSERT INTO decisions (id, task_id, text, created_at, updated_at) VALUES ('d1', 't1', 'Decide', '2020-01-03', '2020-01-03')`,
+    ).run();
+
+    runMigrations(db, MIGRATIONS);
+
+    const version = db.prepare(`SELECT value FROM schema_meta WHERE key = 'schema_version'`).get() as { value: string };
+    expect(version.value).toBe('5');
+    expect((db.prepare(`SELECT COUNT(*) AS count FROM tasks`).get() as { count: number }).count).toBe(1);
+    expect((db.prepare(`SELECT COUNT(*) AS count FROM checkpoints`).get() as { count: number }).count).toBe(1);
+    expect((db.prepare(`SELECT COUNT(*) AS count FROM decisions`).get() as { count: number }).count).toBe(1);
+
+    db.prepare(
+      `INSERT INTO task_file_captures (id, task_id, trigger, git_commit_sha, checkpoint_id, created_at)
+       VALUES ('cap-g1', 't1', 'git_commit', 'abc123', NULL, '2020-01-04')`,
+    ).run();
+    expect(() =>
+      db.prepare(
+        `INSERT INTO task_file_captures (id, task_id, trigger, git_commit_sha, checkpoint_id, created_at)
+         VALUES ('cap-g2', 't1', 'git_commit', 'abc123', NULL, '2020-01-05')`,
+      ).run(),
+    ).toThrow(/UNIQUE/);
+
+    db.prepare(
+      `INSERT INTO task_file_captures (id, task_id, trigger, git_commit_sha, checkpoint_id, created_at)
+       VALUES ('cap-c1', 't1', 'checkpoint', NULL, 'cp1', '2020-01-06')`,
+    ).run();
+    expect(() =>
+      db.prepare(
+        `INSERT INTO task_file_captures (id, task_id, trigger, git_commit_sha, checkpoint_id, created_at)
+         VALUES ('cap-c2', 't1', 'checkpoint', NULL, 'cp1', '2020-01-07')`,
+      ).run(),
+    ).toThrow(/UNIQUE/);
+
+    expect(() =>
+      db.prepare(
+        `INSERT INTO task_file_captures (id, task_id, trigger, git_commit_sha, checkpoint_id, created_at)
+         VALUES ('cap-e1', 't1', 'explicit', NULL, NULL, '2020-01-08')`,
+      ).run(),
+    ).not.toThrow();
+    expect(() =>
+      db.prepare(
+        `INSERT INTO task_file_captures (id, task_id, trigger, git_commit_sha, checkpoint_id, created_at)
+         VALUES ('cap-e2', 't1', 'explicit', NULL, NULL, '2020-01-09')`,
+      ).run(),
+    ).not.toThrow();
+
+    expect(() =>
+      db.prepare(
+        `INSERT INTO task_file_capture_entries (capture_id, path, content, unified_diff, byte_length, content_sha256)
+         VALUES ('cap-e1', 'src/index.ts', 'content', '@@ -0,0 +1 @@', 7, 'sha256')`,
+      ).run(),
+    ).not.toThrow();
 
     db.close();
   });

@@ -7,6 +7,7 @@ export type TaskStatus = 'active' | 'paused' | 'done' | 'archived';
 export type CheckpointLevel = 'micro' | 'session' | 'milestone';
 export type FileRole = 'edited' | 'read' | 'created' | 'deleted';
 export type TodoStatus = 'pending' | 'done' | 'blocked';
+export type FileCaptureTrigger = 'git_commit' | 'checkpoint' | 'explicit';
 
 export interface Task {
   id: string;
@@ -56,6 +57,45 @@ export interface TaskFile {
   path: string;
   role: FileRole;
   lastTouched: string;
+}
+
+export interface TaskFileCapture {
+  id: string;
+  taskId: string;
+  trigger: FileCaptureTrigger;
+  gitCommitSha: string | null;
+  checkpointId: string | null;
+  createdAt: string;
+  syncedAt: string | null;
+}
+
+export interface TaskFileCaptureEntry {
+  captureId: string;
+  path: string;
+  content: string;
+  unifiedDiff: string;
+  byteLength: number;
+  contentSha256: string;
+}
+
+export interface NewTaskFileCaptureEntry {
+  path: string;
+  content: string;
+  unifiedDiff: string;
+  byteLength: number;
+  contentSha256: string;
+}
+
+export interface TaskFileCaptureWithEntries extends TaskFileCapture {
+  entries: TaskFileCaptureEntry[];
+}
+
+export interface CreateTaskFileCaptureInput {
+  taskId: string;
+  trigger: FileCaptureTrigger;
+  gitCommitSha?: string | null;
+  checkpointId?: string | null;
+  entries: NewTaskFileCaptureEntry[];
 }
 
 export interface Commit {

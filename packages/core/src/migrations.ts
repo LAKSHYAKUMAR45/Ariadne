@@ -87,6 +87,45 @@ export const MIGRATIONS: Migration[] = [
       `);
     },
   },
+  {
+    version: 5,
+    description: 'Add immutable task file capture tables with trigger-specific idempotency indexes',
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS task_file_captures (
+          id TEXT PRIMARY KEY,
+          task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+          trigger TEXT NOT NULL CHECK (trigger IN ('git_commit', 'checkpoint', 'explicit')),
+          git_commit_sha TEXT,
+          checkpoint_id TEXT,
+          created_at TEXT NOT NULL,
+          synced_at TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_task_file_captures_task_created
+          ON task_file_captures(task_id, created_at);
+        CREATE INDEX IF NOT EXISTS idx_task_file_captures_task_pending
+          ON task_file_captures(task_id, synced_at, created_at);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_task_file_captures_git_commit_once
+          ON task_file_captures(task_id, git_commit_sha)
+          WHERE trigger = 'git_commit' AND git_commit_sha IS NOT NULL;
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_task_file_captures_checkpoint_once
+          ON task_file_captures(task_id, checkpoint_id)
+          WHERE trigger = 'checkpoint' AND checkpoint_id IS NOT NULL;
+
+        CREATE TABLE IF NOT EXISTS task_file_capture_entries (
+          capture_id TEXT NOT NULL REFERENCES task_file_captures(id) ON DELETE CASCADE,
+          path TEXT NOT NULL,
+          content TEXT NOT NULL,
+          unified_diff TEXT NOT NULL,
+          byte_length INTEGER NOT NULL,
+          content_sha256 TEXT NOT NULL,
+          PRIMARY KEY (capture_id, path)
+        );
+        CREATE INDEX IF NOT EXISTS idx_task_file_capture_entries_capture
+          ON task_file_capture_entries(capture_id);
+      `);
+    },
+  },
 ];
 
 function getSchemaVersion(db: Database.Database): number {
