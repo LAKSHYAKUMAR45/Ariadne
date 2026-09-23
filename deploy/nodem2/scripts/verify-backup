@@ -63,10 +63,9 @@ VERIFY_RECORD_FAILURE_ENABLED=1
 ariadne_write_backup_result "$ARIADNE_BACKUP_BASE"
 
 log "verifying $TARGET"
+trap on_exit EXIT INT TERM
 ariadne_checksum_matches "$ARIADNE_BACKUP_BASE" ||
     fail "checksum mismatch for $TARGET; the backup was not restored anywhere"
-
-trap on_exit EXIT INT TERM
 
 ariadne_dump_is_readable "$DUMP" || fail "$TARGET could not be listed by pg_restore"
 

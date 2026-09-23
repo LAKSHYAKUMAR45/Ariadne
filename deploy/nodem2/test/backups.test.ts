@@ -957,6 +957,15 @@ describe('verify-backup script', () => {
     expect(result.status).not.toBe(0);
     expect(readLog(harness.dockerLog).join('\n')).not.toContain('CREATE DATABASE');
     expect(fs.existsSync(path.join(harness.backupDir, `${base}.dump`))).toBe(true);
+    expect(readBackupRecordWrites(harness)).toContainEqual({
+      filename: `${base}.dump`,
+      sha256: '0'.repeat(64),
+      sizeBytes: fs.statSync(path.join(harness.backupDir, `${base}.dump`)).size,
+      status: 'verify_failed',
+      createdAt: '2026-03-01T02:15:00Z',
+      verifiedAt: null,
+      message: '',
+    });
   });
 
   it('always drops the verification database and keeps the backup when a check fails', () => {
