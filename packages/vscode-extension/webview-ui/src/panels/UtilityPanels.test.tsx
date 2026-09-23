@@ -143,7 +143,7 @@ function createBridge(overrides: Partial<BridgeHarness> = {}): BridgeHarness {
   });
 
   return {
-    request,
+    request: request as BridgeHarness['request'],
     subscribe: vi.fn(() => () => undefined),
     ...overrides,
   };

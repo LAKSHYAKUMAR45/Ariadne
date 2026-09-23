@@ -1,12 +1,17 @@
 import type {
   HostToWebviewMessage,
-  WebviewRequest,
   WebviewRequestType,
   WebviewState,
 } from '@host/messages';
 
+interface OutboundWebviewRequest {
+  id: string;
+  type: AriadneRequestType;
+  payload?: unknown;
+}
+
 export interface VsCodeApi {
-  postMessage(message: WebviewRequest): void;
+  postMessage(message: OutboundWebviewRequest): void;
   getState(): unknown;
   setState(state: unknown): void;
 }
@@ -89,13 +94,13 @@ export function createVsCodeBridge(vscodeApi: VsCodeApi): AriadneBridge {
   return {
     request<T>(type: AriadneRequestType, payload?: unknown): Promise<T> {
       const id = createRequestId();
-      const request: WebviewRequest = {
+      const request: OutboundWebviewRequest = {
         id,
-        type: type as WebviewRequestType,
+        type,
         ...(payload === undefined ? {} : { payload }),
       };
       return new Promise<T>((resolve, reject) => {
-        pending.set(id, { resolve, reject });
+        pending.set(id, { resolve: (value: unknown) => resolve(value as T), reject });
         try {
           vscodeApi.postMessage(request);
         } catch (error) {

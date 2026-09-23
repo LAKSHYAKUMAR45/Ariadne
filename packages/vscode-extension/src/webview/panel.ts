@@ -5,6 +5,7 @@ import { buildWebviewState, handleWebviewMessage } from './handleWebviewMessage.
 import { WebviewRequestTypes, type WebviewRequest, type WebviewResponse, type WebviewState } from './messages.js';
 import type { TaskStore } from '@ariadne-dev/core';
 import { syncPush, syncPull, syncListRemote } from '../syncCommands.js';
+import { getOrOpenStore } from '../storeCache.js';
 
 export interface AriadnePanelDeps {
   openStoreForCurrentWorkspace: () => TaskStore | undefined;
@@ -20,6 +21,7 @@ export interface AriadnePanelDeps {
 
 let panel: vscode.WebviewPanel | undefined;
 let panelDeps: AriadnePanelDeps | undefined;
+let selectedWorkspaceRoot: string | undefined;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -114,12 +116,13 @@ function writeExportMarkdown(taskId: string, markdown: string): string {
 
 function currentState(): WebviewState | undefined {
   if (!panelDeps) return undefined;
-  const store = panelDeps.openStoreForCurrentWorkspace();
+  const workspaceRoot = selectedWorkspaceRoot ?? panelDeps.resolveWorkspaceRoot();
+  const store = selectedWorkspaceRoot ? getOrOpenStore(selectedWorkspaceRoot) : panelDeps.openStoreForCurrentWorkspace();
   if (!store) return undefined;
   return buildWebviewState({
     store,
-    currentTaskId: panelDeps.getCurrentTaskId(),
-    workspaceRoot: panelDeps.resolveWorkspaceRoot(),
+    currentTaskId: selectedWorkspaceRoot ? store.getCurrentTaskId() : panelDeps.getCurrentTaskId(),
+    workspaceRoot,
   });
 }
 
@@ -137,7 +140,8 @@ async function handleWebviewRequest(message: unknown): Promise<void> {
       return;
     }
 
-    const store = panelDeps.openStoreForCurrentWorkspace();
+    const workspaceRoot = selectedWorkspaceRoot ?? panelDeps.resolveWorkspaceRoot();
+    const store = selectedWorkspaceRoot ? getOrOpenStore(selectedWorkspaceRoot) : panelDeps.openStoreForCurrentWorkspace();
     if (!store) {
       const response: WebviewResponse = { id: message.id, ok: false, error: 'Ariadne needs an open folder/workspace.' };
       void panel.webview.postMessage(response);
@@ -147,18 +151,16 @@ async function handleWebviewRequest(message: unknown): Promise<void> {
     const response = handleWebviewMessage(
       {
         store,
-        currentTaskId: panelDeps.getCurrentTaskId(),
-        workspaceRoot: panelDeps.resolveWorkspaceRoot(),
+        currentTaskId: selectedWorkspaceRoot ? store.getCurrentTaskId() : panelDeps.getCurrentTaskId(),
+        workspaceRoot,
         setCurrentTaskId: panelDeps.setCurrentTask,
         setCurrentTaskIdForWorkspace: panelDeps.setCurrentTaskInWorkspace,
         sync: {
           push: () => {
-            const workspaceRoot = panelDeps.resolveWorkspaceRoot();
             if (!workspaceRoot) throw new Error('Ariadne needs an open folder/workspace for sync push.');
             return syncPush({ cwd: workspaceRoot });
           },
           pull: (options) => {
-            const workspaceRoot = panelDeps.resolveWorkspaceRoot();
             if (!workspaceRoot) throw new Error('Ariadne needs an open folder/workspace for sync pull.');
             return syncPull({
               cwd: workspaceRoot,
@@ -167,7 +169,6 @@ async function handleWebviewRequest(message: unknown): Promise<void> {
             });
           },
           listRemote: () => {
-            const workspaceRoot = panelDeps.resolveWorkspaceRoot();
             if (!workspaceRoot) throw new Error('Ariadne needs an open folder/workspace for sync list-remote.');
             return syncListRemote({ cwd: workspaceRoot });
           },
@@ -179,6 +180,7 @@ async function handleWebviewRequest(message: unknown): Promise<void> {
 
     void panel.webview.postMessage(response);
     if (response.ok && response.state) {
+      selectedWorkspaceRoot = response.state.workspaceRoot;
       postStateUpdate(response.state);
     }
     if (response.ok && response.state) {
@@ -220,6 +222,7 @@ export function openAriadnePanel(context: vscode.ExtensionContext, deps: Ariadne
   panel.onDidDispose(() => {
     panel = undefined;
     panelDeps = undefined;
+    selectedWorkspaceRoot = undefined;
   });
 
   postStateUpdate(currentState());

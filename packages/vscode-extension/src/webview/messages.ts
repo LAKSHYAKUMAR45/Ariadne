@@ -10,6 +10,21 @@ import type {
   TaskFileCaptureWithEntries,
   TaskStatus,
   Todo,
+  TodoStatus,
+} from '@ariadne-dev/core';
+
+export type {
+  Checkpoint,
+  CheckpointLevel,
+  Decision,
+  OpenQuestion,
+  SearchResult,
+  Task,
+  TaskError,
+  TaskFileCaptureWithEntries,
+  TaskStatus,
+  Todo,
+  TodoStatus,
 } from '@ariadne-dev/core';
 
 export const WebviewRequestTypes = {

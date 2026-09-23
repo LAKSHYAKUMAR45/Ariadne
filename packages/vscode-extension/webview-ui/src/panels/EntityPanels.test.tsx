@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react';
+import { fireEvent, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 import type { AriadneBridge } from '../bridge';
@@ -87,7 +87,7 @@ type BridgeHarness = AriadneBridge & {
 
 function createBridge(): BridgeHarness {
   return {
-    request: vi.fn(async () => ({})),
+    request: vi.fn(async () => ({})) as BridgeHarness['request'],
     subscribe: vi.fn(() => () => undefined),
   };
 }
@@ -231,7 +231,9 @@ describe('EntityPanels', () => {
     expect(bridge.request).toHaveBeenCalledWith('error.create', { message: 'Failed to sync' });
 
     await user.clear(screen.getByRole('textbox', { name: 'Error message for error-1' }));
-    await user.type(screen.getByRole('textbox', { name: 'Error message for error-1' }), 'Failed to sync again');
+    const errorMessage = screen.getByRole('textbox', { name: 'Error message for error-1' });
+    await user.clear(errorMessage);
+    await user.type(errorMessage, 'Failed to sync again');
     await user.click(screen.getByRole('button', { name: 'Save error-1' }));
     await user.click(screen.getByRole('button', { name: 'Resolve error-1' }));
     await user.click(screen.getByRole('button', { name: 'Reopen error-1' }));
@@ -260,7 +262,9 @@ describe('EntityPanels', () => {
 
     render(<ErrorsPanel state={baseState} bridge={bridge} onBusy={onBusy} onError={onError} />);
 
-    await user.type(screen.getByRole('textbox', { name: 'Error message for error-1' }), 'Failed to sync again');
+    fireEvent.change(screen.getByRole('textbox', { name: 'Error message for error-1' }), {
+      target: { value: 'Failed to sync again' },
+    });
     await user.click(screen.getByRole('button', { name: 'Save error-1' }));
     await user.click(screen.getByRole('button', { name: 'Save error-1' }));
 

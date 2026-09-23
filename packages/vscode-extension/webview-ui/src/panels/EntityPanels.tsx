@@ -49,6 +49,14 @@ type TextDraft = {
   dirty: boolean;
 };
 
+function readTaskErrorMessage(taskError: TaskError): string {
+  return taskError.message;
+}
+
+function readQuestionText(question: OpenQuestion): string {
+  return question.text;
+}
+
 function formatErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -154,10 +162,10 @@ function useDecisionDrafts(decisions: Decision[]) {
   return [drafts, setDrafts] as const;
 }
 
-function useTextDrafts<T extends { id: string; text: string }>(items: T[]) {
+function useTextDrafts<T extends { id: string }>(items: T[], readText: (item: T) => string) {
   const [drafts, setDrafts] = useState<Record<string, TextDraft>>(() =>
     items.reduce<Record<string, TextDraft>>((acc, item) => {
-      acc[item.id] = { text: item.text, dirty: false };
+      acc[item.id] = { text: readText(item), dirty: false };
       return acc;
     }, {}),
   );
@@ -166,16 +174,17 @@ function useTextDrafts<T extends { id: string; text: string }>(items: T[]) {
     setDrafts((current) => {
       return items.reduce<Record<string, TextDraft>>((next, item) => {
         const existing = current[item.id];
+        const text = readText(item);
         next[item.id] = existing
           ? {
-              text: existing.dirty ? existing.text : item.text,
-              dirty: existing.dirty && existing.text !== item.text,
+              text: existing.dirty ? existing.text : text,
+              dirty: existing.dirty && existing.text !== text,
             }
-          : { text: item.text, dirty: false };
+          : { text, dirty: false };
         return next;
       }, {});
     });
-  }, [items]);
+  }, [items, readText]);
 
   return [drafts, setDrafts] as const;
 }
@@ -499,7 +508,7 @@ export function DecisionsPanel({ state, bridge, onBusy, onError, highlightId }: 
 export function ErrorsPanel({ state, bridge, onBusy, onError, highlightId }: EntityPanelProps) {
   const runRequest = useRequestRunner(onBusy, onError);
   useHighlightScroll(highlightId);
-  const [drafts, setDrafts] = useTextDrafts(state.errors);
+  const [drafts, setDrafts] = useTextDrafts(state.errors, readTaskErrorMessage);
   const [newMessage, setNewMessage] = useState('');
 
   async function addError(event: FormEvent<HTMLFormElement>) {
@@ -615,7 +624,7 @@ export function ErrorsPanel({ state, bridge, onBusy, onError, highlightId }: Ent
 export function QuestionsPanel({ state, bridge, onBusy, onError, highlightId }: EntityPanelProps) {
   const runRequest = useRequestRunner(onBusy, onError);
   useHighlightScroll(highlightId);
-  const [drafts, setDrafts] = useTextDrafts(state.questions);
+  const [drafts, setDrafts] = useTextDrafts(state.questions, readQuestionText);
   const [newText, setNewText] = useState('');
 
   async function addQuestion(event: FormEvent<HTMLFormElement>) {

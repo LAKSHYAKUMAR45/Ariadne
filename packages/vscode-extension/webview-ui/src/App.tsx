@@ -51,7 +51,7 @@ function readError(error: unknown): string {
 }
 
 function taskSummary(task: Task): string {
-  const parts = [task.status];
+  const parts: string[] = [task.status];
   if (task.branch) parts.push(task.branch);
   if (task.goal) parts.push(task.goal);
   return parts.join(' · ');
@@ -116,14 +116,20 @@ export default function App({ bridge, initialState }: AppProps) {
     setBanner(message ? { kind: 'error', message } : null);
   }
 
-  async function switchTask(taskId: string): Promise<void> {
+  function handleBusy(label: string | undefined): void {
+    setBusyLabel(label ?? null);
+  }
+
+  async function switchTask(taskId: string): Promise<boolean> {
     setBusyLabel(`Switching to ${taskId}…`);
     setBanner(null);
     try {
       await bridge.request<{ currentTaskId: string }>('task.switch', { id: taskId });
+      return true;
     } catch (error) {
       setBanner({ kind: 'error', message: readError(error) });
       setBusyLabel(null);
+      return false;
     }
   }
 
@@ -149,7 +155,8 @@ export default function App({ bridge, initialState }: AppProps) {
   async function navigateToSearchHit(hit: SearchHit): Promise<void> {
     setBanner(null);
     if (hit.taskId !== state?.currentTaskId) {
-      await switchTask(hit.taskId);
+      const switched = await switchTask(hit.taskId);
+      if (!switched) return;
     }
     setActiveTab(categoryTabMap[hit.category]);
     setHighlightId(hit.id);
@@ -213,7 +220,7 @@ export default function App({ bridge, initialState }: AppProps) {
           <OverviewPanel
             state={state}
             bridge={bridge}
-            onBusy={setBusyLabel}
+            onBusy={handleBusy}
             onError={handlePanelError}
             highlightCheckpointId={highlightId}
           />
@@ -221,44 +228,52 @@ export default function App({ bridge, initialState }: AppProps) {
           <p>No task selected.</p>
         );
       case 'todos':
-        return (
+        return state ? (
           <TodosPanel
             state={state}
             bridge={bridge}
-            onBusy={setBusyLabel}
+            onBusy={handleBusy}
             onError={handlePanelError}
             highlightId={highlightId}
           />
+        ) : (
+          <p>No task selected.</p>
         );
       case 'decisions':
-        return (
+        return state ? (
           <DecisionsPanel
             state={state}
             bridge={bridge}
-            onBusy={setBusyLabel}
+            onBusy={handleBusy}
             onError={handlePanelError}
             highlightId={highlightId}
           />
+        ) : (
+          <p>No task selected.</p>
         );
       case 'errors':
-        return (
+        return state ? (
           <ErrorsPanel
             state={state}
             bridge={bridge}
-            onBusy={setBusyLabel}
+            onBusy={handleBusy}
             onError={handlePanelError}
             highlightId={highlightId}
           />
+        ) : (
+          <p>No task selected.</p>
         );
       case 'questions':
-        return (
+        return state ? (
           <QuestionsPanel
             state={state}
             bridge={bridge}
-            onBusy={setBusyLabel}
+            onBusy={handleBusy}
             onError={handlePanelError}
             highlightId={highlightId}
           />
+        ) : (
+          <p>No task selected.</p>
         );
       case 'files':
         return state ? <FilesPanel bridge={bridge} captures={state.fileCaptures} /> : <p>No task selected.</p>;

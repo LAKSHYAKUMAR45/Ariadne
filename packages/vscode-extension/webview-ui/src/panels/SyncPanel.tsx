@@ -21,6 +21,7 @@ export default function SyncPanel({ bridge }: SyncPanelProps) {
   const [guidance, setGuidance] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [lastAction, setLastAction] = useState<string | null>(null);
+  const [lastActionSucceeded, setLastActionSucceeded] = useState<boolean | null>(null);
   const [confirmingImportNew, setConfirmingImportNew] = useState(false);
 
   async function runSync(type: 'sync.push' | 'sync.pull' | 'sync.listRemote', payload?: unknown): Promise<void> {
@@ -35,10 +36,12 @@ export default function SyncPanel({ bridge }: SyncPanelProps) {
             : await bridge.request<{ output: string }>(type, payload);
       setOutput(result.output);
       setLastAction(type);
+      setLastActionSucceeded(true);
     } catch (error) {
       const message = readError(error);
       setOutput(message);
       setLastAction(type);
+      setLastActionSucceeded(false);
       if (looksLikeAuthError(message)) {
         setGuidance(AUTH_GUIDANCE);
       }
@@ -63,7 +66,7 @@ export default function SyncPanel({ bridge }: SyncPanelProps) {
   const statusText = busy
     ? `Running ${busy}…`
     : lastAction
-      ? `Last action: ${lastAction} completed`
+      ? `Last action: ${lastAction} ${lastActionSucceeded ? 'completed' : 'failed'}`
       : 'Idle. No sync actions run yet.';
 
   return (

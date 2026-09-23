@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { FormEvent } from 'react';
 import type { Task, WebviewState } from '@host/messages';
 import type { AriadneBridge } from '../bridge';
@@ -42,6 +42,8 @@ export default function OverviewPanel({ state, bridge, onBusy, onError, highligh
   useHighlightScroll(highlightCheckpointId);
 
   const currentTask = state.currentTask;
+  const currentTaskIdRef = useRef(currentTask?.id);
+  currentTaskIdRef.current = currentTask?.id;
   const checkpoints = [...state.checkpoints].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   const latestCheckpoint = checkpoints[0];
 
@@ -51,14 +53,24 @@ export default function OverviewPanel({ state, bridge, onBusy, onError, highligh
   const [checkpointSummary, setCheckpointSummary] = useState('');
   const [checkpointLevel, setCheckpointLevel] = useState<'micro' | 'session' | 'milestone'>('micro');
   const [context, setContext] = useState<ContextSnapshot | null>(null);
+  const [contextTaskId, setContextTaskId] = useState<string | null>(null);
+
+  useEffect(() => {
+    setIsEditing(false);
+    setTitleDraft(currentTask?.title ?? '');
+    setGoalDraft(currentTask?.goal ?? '');
+    setContext(null);
+    setContextTaskId(null);
+  }, [currentTask?.id]);
 
   if (!currentTask) {
     return <p>No task selected.</p>;
   }
+  const selectedTask = currentTask;
 
   function beginEdit(): void {
-    setTitleDraft(currentTask!.title);
-    setGoalDraft(currentTask!.goal ?? '');
+    setTitleDraft(selectedTask.title);
+    setGoalDraft(selectedTask.goal ?? '');
     setIsEditing(true);
   }
 
@@ -69,7 +81,7 @@ export default function OverviewPanel({ state, bridge, onBusy, onError, highligh
 
     await runRequest('Saving task…', async () => {
       await bridge.request('task.update', {
-        id: currentTask!.id,
+        id: selectedTask.id,
         title,
         goal: goalDraft.trim() || null,
       });
@@ -79,14 +91,17 @@ export default function OverviewPanel({ state, bridge, onBusy, onError, highligh
 
   async function setStatus(status: Task['status'], label: string): Promise<void> {
     await runRequest(label, async () => {
-      await bridge.request('task.setStatus', { id: currentTask!.id, status });
+      await bridge.request('task.setStatus', { id: selectedTask.id, status });
     });
   }
 
   async function resumeContext(): Promise<void> {
+    const requestedTaskId = selectedTask.id;
     await runRequest('Resuming context…', async () => {
       const result = await bridge.request<{ context: ContextSnapshot }>('context.get');
+      if (requestedTaskId !== currentTaskIdRef.current) return;
       setContext(result.context);
+      setContextTaskId(requestedTaskId);
     });
   }
 
@@ -128,12 +143,12 @@ export default function OverviewPanel({ state, bridge, onBusy, onError, highligh
         </form>
       ) : (
         <>
-          <h2>{currentTask.title}</h2>
+          <h2>{selectedTask.title}</h2>
           <p>
-            <strong>{currentTask.title}</strong>
+            <strong>{selectedTask.title}</strong>
           </p>
-          <p>Goal: {currentTask.goal ?? 'No goal set.'}</p>
-          <p>Branch: {currentTask.branch ?? 'No branch set.'}</p>
+          <p>Goal: {selectedTask.goal ?? 'No goal set.'}</p>
+          <p>Branch: {selectedTask.branch ?? 'No branch set.'}</p>
           <button type="button" onClick={beginEdit}>
             Edit title/goal
           </button>
@@ -148,10 +163,10 @@ export default function OverviewPanel({ state, bridge, onBusy, onError, highligh
 
       <section aria-label="Task lifecycle">
         <h3>Task lifecycle</h3>
-        <p>Current status: {currentTask.status}</p>
+        <p>Current status: {selectedTask.status}</p>
         <div>
           {lifecycleActions
-            .filter((action) => action.status !== currentTask.status)
+            .filter((action) => action.status !== selectedTask.status)
             .map((action) => (
               <button key={action.status} type="button" onClick={() => void setStatus(action.status, action.label)}>
                 {action.label}
@@ -230,7 +245,7 @@ export default function OverviewPanel({ state, bridge, onBusy, onError, highligh
 
       <section aria-label="Activity">
         <h3>Activity</h3>
-        {context ? (
+        {context && contextTaskId === selectedTask.id ? (
           <div>
             {context.latestSummary ? <p>{context.latestSummary}</p> : null}
             <h4>Recent commands</h4>

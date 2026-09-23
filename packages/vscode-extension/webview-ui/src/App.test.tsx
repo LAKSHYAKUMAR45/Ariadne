@@ -2,7 +2,7 @@ import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 import App from './App';
-import type { AriadneBridge } from './bridge';
+import type { AriadneBridge, AriadneRequestType } from './bridge';
 import type { Task, WebviewState } from '@host/messages';
 
 const task1: Task = {
@@ -51,9 +51,13 @@ type BridgeHarness = AriadneBridge & {
   emitState: (state: WebviewState) => void;
 };
 
+function makeRequestMock(impl: (type: AriadneRequestType, payload?: unknown) => Promise<unknown>): BridgeHarness['request'] {
+  return vi.fn(impl) as BridgeHarness['request'];
+}
+
 function bridge(overrides: Partial<BridgeHarness> = {}): BridgeHarness {
   let listener: ((state: WebviewState) => void) | undefined;
-  const request = vi.fn(async (type: string) => {
+  const request = makeRequestMock(async (type) => {
     switch (type) {
       case 'tasks.list':
         return { tasks: [task1, task2] };
@@ -171,7 +175,7 @@ describe('App', () => {
 
   it('navigates to a search result tab and highlights the matching entity', async () => {
     const harness = bridge({
-      request: vi.fn(async (type: string) => {
+      request: makeRequestMock(async (type) => {
         if (type === 'search.run') {
           return {
             results: [
@@ -226,7 +230,7 @@ describe('App', () => {
 
   it('shows an error banner when a bridge action fails', async () => {
     const harness = bridge({
-      request: vi.fn(async (type: string) => {
+      request: makeRequestMock(async (type) => {
         if (type === 'sync.push') {
           throw new Error('sync failed');
         }
