@@ -812,8 +812,17 @@ describe('compose topology', () => {
 describe('sync-server image', () => {
   const dockerfile = () =>
     fs.readFileSync(path.join(deployDir, 'sync-server.Dockerfile'), 'utf8');
+  const syncServerIndex = () =>
+    fs.readFileSync(path.join(repoRoot, 'packages', 'sync-server', 'src', 'index.ts'), 'utf8');
   const entrypointPath = path.join(scriptsDir, 'sync-server-entrypoint');
   const entrypoint = () => fs.readFileSync(entrypointPath, 'utf8');
+
+  it('wires mutation and read clients to the configured operator socket', () => {
+    const text = syncServerIndex();
+    expect(text).toContain('createOperatorClient({ socketPath: config.operatorSocketPath })');
+    expect(text).toContain('createOperatorQueryClient({ socketPath: config.operatorSocketPath })');
+    expect(text).toMatch(/createApp[\s\S]*operatorClient,[\s\S]*operatorQueryClient,/);
+  });
 
   it('builds a multi-stage production image without build tooling at runtime', () => {
     const text = dockerfile();

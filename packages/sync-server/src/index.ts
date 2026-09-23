@@ -6,6 +6,7 @@ import { createPool } from './db.js';
 import { loadEncryptionKeyring } from './encryption.js';
 import { runMigrations } from './migrate.js';
 import { createOperatorClient } from './operatorClient.js';
+import { createOperatorQueryClient } from './operatorQueryClient.js';
 
 /**
  * Entry point for `ariadne-sync-server`: runs any pending migrations, then
@@ -32,10 +33,14 @@ async function main(): Promise<void> {
   const operatorClient = config.operatorSocketPath
     ? createOperatorClient({ socketPath: config.operatorSocketPath })
     : null;
+  const operatorQueryClient = config.operatorSocketPath
+    ? createOperatorQueryClient({ socketPath: config.operatorSocketPath })
+    : null;
 
   const app = createApp(pool, config.jwtSecret, {
     encryptionKeyring,
     operatorClient,
+    operatorQueryClient,
     operatorCallbackTokenPath: config.operatorCallbackTokenPath,
     adminPublicOrigin: config.adminPublicOrigin,
     adminCookieSecure: config.adminCookieSecure,
