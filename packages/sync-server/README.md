@@ -280,6 +280,12 @@ the same transaction as the terminal state change, so `backup_create`,
 `backup_verify`, and `backup_restore` outcomes (including failures of the
 latter two) are always recorded against the backup they examined.
 
+The same shell library also closes the scheduled/manual gap: when no private
+result file is present, `backup` and `verify-backup` upsert the validated
+`backup_records` row directly via fixed `psql --set ... current_setting(...)`
+inputs, and `restore-backup` records only the fresh pre-restore safety backup
+before the application is stopped or the canonical database name is swapped.
+
 ## API surface
 
 Summary (full detail in `docs/07-CLOUD-SYNC-API-CONTRACT.md`):

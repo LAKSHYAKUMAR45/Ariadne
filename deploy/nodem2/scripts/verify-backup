@@ -17,6 +17,8 @@ ARIADNE_LOG_TAG=ariadne-backup-verify
 
 VERIFY_DB=""
 TARGET=""
+VERIFY_RECORD_BASE=""
+VERIFY_RECORD_FAILURE_ENABLED=0
 
 on_exit() {
     status=$?
@@ -28,6 +30,10 @@ on_exit() {
             log "warning: verification database $VERIFY_DB could not be dropped"
         fi
         VERIFY_DB=""
+    fi
+    if [ "$status" -ne 0 ] && [ -n "$VERIFY_RECORD_BASE" ] &&
+        [ "$VERIFY_RECORD_FAILURE_ENABLED" -eq 1 ]; then
+        ariadne_record_backup_metadata "$VERIFY_RECORD_BASE" verify_failed
     fi
     if [ "$status" -ne 0 ]; then
         log "verification failed for ${TARGET:-the selected backup}"
@@ -49,6 +55,8 @@ fi
 ariadne_require_backup_set "$ARIADNE_BACKUP_BASE"
 TARGET="$ARIADNE_BACKUP_BASE.dump"
 DUMP="$ARIADNE_BACKUP_DIR/$TARGET"
+VERIFY_RECORD_BASE="$ARIADNE_BACKUP_BASE"
+VERIFY_RECORD_FAILURE_ENABLED=1
 
 # Identity is reported before the checks run so a failed verification is still
 # attributed to the backup it examined; the outcome comes from the exit code.
@@ -89,7 +97,10 @@ case "$TABLE_COUNT" in
 esac
 [ "$TABLE_COUNT" -gt 0 ] || fail "the restored archive contains no tables"
 
+VERIFY_MESSAGE="verified: schema $SCHEMA_VERSION, $TABLE_COUNT tables"
+VERIFY_RECORD_FAILURE_ENABLED=0
+ariadne_record_backup_metadata "$ARIADNE_BACKUP_BASE" verified "$VERIFY_MESSAGE"
 ariadne_write_backup_result "$ARIADNE_BACKUP_BASE" \
-    "verified: schema $SCHEMA_VERSION, $TABLE_COUNT tables"
+    "$VERIFY_MESSAGE"
 
 log "verified $TARGET: schema $SCHEMA_VERSION, $TABLE_COUNT tables"

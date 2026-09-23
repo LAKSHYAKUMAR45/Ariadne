@@ -258,12 +258,19 @@ ariadne_dump_is_readable() {
 }
 
 ariadne_psql() {
+    ariadne_psql_db=$1
+    ariadne_psql_sql=$2
+    shift 2
     ariadne_compose exec -T postgres psql \
         --username "$ARIADNE_DB_USER" \
-        --dbname "$1" \
+        --dbname "$ariadne_psql_db" \
         --no-psqlrc --quiet --tuples-only --no-align \
         --set ON_ERROR_STOP=1 \
-        --command "$2" </dev/null
+        "$@" \
+        --command "$ariadne_psql_sql" </dev/null
+    ariadne_psql_status=$?
+    unset ariadne_psql_db ariadne_psql_sql
+    return "$ariadne_psql_status"
 }
 
 # Sanitises any value taken from the database before it reaches metadata so a
@@ -416,6 +423,37 @@ ariadne_create_backup() {
 
 ARIADNE_RESULT_MESSAGE_MAX=200
 
+ariadne_validate_sha256() {
+    case "$1" in
+        "" | *[!0-9a-f]*) fail "backup checksum must be a lowercase SHA-256 digest" ;;
+    esac
+    [ "${#1}" -eq 64 ] || fail "backup checksum must be a lowercase SHA-256 digest"
+}
+
+ariadne_validate_size_bytes() {
+    case "$1" in
+        "" | *[!0-9]*) fail "backup size must be a non-negative integer" ;;
+    esac
+}
+
+ariadne_validate_backup_record_status() {
+    case "$1" in
+        created | verified | verify_failed | restored | restore_failed) ;;
+        *) fail "backup record status must be one of created, verified, verify_failed, restored, restore_failed" ;;
+    esac
+}
+
+ariadne_validate_backup_record_message() {
+    ariadne_record_message_value=$1
+    [ "${#ariadne_record_message_value}" -le "$ARIADNE_RESULT_MESSAGE_MAX" ] ||
+        fail "backup record message must be at most $ARIADNE_RESULT_MESSAGE_MAX characters"
+    ariadne_sanitized_message=$(printf '%s' "$ariadne_record_message_value" |
+        tr -cd 'A-Za-z0-9 ._:,;()-')
+    [ "$ariadne_sanitized_message" = "$ariadne_record_message_value" ] ||
+        fail "backup record message must use safe text only"
+    unset ariadne_record_message_value ariadne_sanitized_message
+}
+
 ariadne_result_timestamp() {
     printf '%s-%s-%sT%s:%s:%sZ\n' \
         "$(printf '%s' "$1" | cut -c1-4)" \
@@ -480,6 +518,92 @@ ariadne_write_backup_result() {
 
     unset ariadne_result_base ariadne_result_stamp ariadne_result_sum ariadne_result_bytes \
         ariadne_result_message ariadne_result_tmp
+    return 0
+}
+
+ariadne_record_backup_metadata() {
+    [ -z "${ARIADNE_RESULT_FILE:-}" ] || return 0
+    if [ "$#" -lt 2 ] || [ "$#" -gt 3 ]; then
+        fail "usage: ariadne_record_backup_metadata <ariadne-YYYYMMDDTHHMMSSZ> <status> [message]"
+    fi
+
+    ariadne_record_base=$1
+    ariadne_record_status=$2
+    ariadne_record_message=${3:-}
+    case "$ariadne_record_base" in
+        ariadne-????????T??????Z) ;;
+        *) fail "backup record base must look like ariadne-YYYYMMDDTHHMMSSZ" ;;
+    esac
+    ariadne_record_stamp=${ariadne_record_base#ariadne-}
+    ariadne_validate_stamp "$ariadne_record_stamp"
+    ariadne_validate_backup_record_status "$ariadne_record_status"
+    ariadne_validate_backup_record_message "$ariadne_record_message"
+    ariadne_require_backup_set "$ariadne_record_base"
+
+    ariadne_record_sum=$(cut -d' ' -f1 <"$ARIADNE_BACKUP_DIR/$ariadne_record_base.sha256") ||
+        fail "failed to read the checksum sidecar of $ariadne_record_base.dump"
+    ariadne_validate_sha256 "$ariadne_record_sum"
+    ariadne_record_bytes=$(wc -c <"$ARIADNE_BACKUP_DIR/$ariadne_record_base.dump" | tr -d ' ') ||
+        fail "failed to measure $ariadne_record_base.dump"
+    ariadne_validate_size_bytes "$ariadne_record_bytes"
+    ariadne_record_created_at=$(ariadne_result_timestamp "$ariadne_record_stamp")
+    ariadne_record_verified_at=""
+    if [ "$ariadne_record_status" = "verified" ]; then
+        ariadne_verified_stamp=$(date -u +%Y%m%dT%H%M%SZ) || fail "failed to read the clock"
+        ariadne_validate_stamp "$ariadne_verified_stamp"
+        ariadne_record_verified_at=$(ariadne_result_timestamp "$ariadne_verified_stamp")
+        unset ariadne_verified_stamp
+    fi
+
+    ariadne_backup_sql="WITH params AS (
+    SELECT
+      set_config('ariadne.backup_filename', :'ariadne_backup_filename', true),
+      set_config('ariadne.backup_sha256', :'ariadne_backup_sha256', true),
+      set_config('ariadne.backup_size_bytes', :'ariadne_backup_size_bytes', true),
+      set_config('ariadne.backup_status', :'ariadne_backup_status', true),
+      set_config('ariadne.backup_created_at', :'ariadne_backup_created_at', true),
+      set_config('ariadne.backup_verified_at', :'ariadne_backup_verified_at', true),
+      set_config('ariadne.backup_message', :'ariadne_backup_message', true)
+)
+INSERT INTO backup_records (
+  filename,
+  sha256,
+  size_bytes,
+  status,
+  created_at,
+  verified_at,
+  restore_verification_message
+)
+SELECT
+  current_setting('ariadne.backup_filename'),
+  current_setting('ariadne.backup_sha256'),
+  current_setting('ariadne.backup_size_bytes')::bigint,
+  current_setting('ariadne.backup_status'),
+  current_setting('ariadne.backup_created_at')::timestamptz,
+  NULLIF(current_setting('ariadne.backup_verified_at'), '')::timestamptz,
+  NULLIF(current_setting('ariadne.backup_message'), '')
+FROM params
+ON CONFLICT (filename) DO UPDATE
+SET
+  sha256 = EXCLUDED.sha256,
+  size_bytes = EXCLUDED.size_bytes,
+  status = EXCLUDED.status,
+  created_at = backup_records.created_at,
+  verified_at = COALESCE(EXCLUDED.verified_at, backup_records.verified_at),
+  restore_verification_message = EXCLUDED.restore_verification_message"
+    ariadne_psql "$ARIADNE_DB_NAME" "$ariadne_backup_sql" \
+        --set=ariadne_backup_filename="$ariadne_record_base.dump" \
+        --set=ariadne_backup_sha256="$ariadne_record_sum" \
+        --set=ariadne_backup_size_bytes="$ariadne_record_bytes" \
+        --set=ariadne_backup_status="$ariadne_record_status" \
+        --set=ariadne_backup_created_at="$ariadne_record_created_at" \
+        --set=ariadne_backup_verified_at="$ariadne_record_verified_at" \
+        --set=ariadne_backup_message="$ariadne_record_message" >/dev/null ||
+        fail "failed to persist backup metadata for $ariadne_record_base.dump"
+
+    unset ariadne_record_base ariadne_record_status ariadne_record_message ariadne_record_stamp \
+        ariadne_record_sum ariadne_record_bytes ariadne_record_created_at \
+        ariadne_record_verified_at ariadne_backup_sql
     return 0
 }
 

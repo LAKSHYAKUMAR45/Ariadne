@@ -95,6 +95,7 @@ ariadne_checksum_matches "$SAFETY_BACKUP" ||
     fail "the safety backup failed checksum verification; nothing was changed"
 ariadne_dump_is_readable "$ARIADNE_BACKUP_DIR/$SAFETY_BACKUP.dump" ||
     fail "the safety backup could not be listed; nothing was changed"
+ariadne_record_backup_metadata "$SAFETY_BACKUP" verified "verified: pre-restore safety backup"
 
 STAMP=${SAFETY_BACKUP#ariadne-}
 NEW_DB=$(printf '%s_restore_%s' "$ARIADNE_DB_NAME" "$STAMP" | tr 'TZ' 'tz')

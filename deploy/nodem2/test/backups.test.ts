@@ -43,6 +43,7 @@ interface Harness {
   binDir: string;
   dockerLog: string;
   curlLog: string;
+  backupRecordLog: string;
 }
 
 function writeExecutable(target: string, body: string): void {
@@ -85,6 +86,7 @@ function createHarness(): Harness {
 
   const dockerLog = path.join(root, 'docker.log');
   const curlLog = path.join(root, 'curl.log');
+  const backupRecordLog = path.join(root, 'backup-records.jsonl');
 
   writeExecutable(
     path.join(binDir, 'docker'),
@@ -117,6 +119,48 @@ case "$*" in
     cat > /dev/null
     exit 0 ;;
   *psql*)
+    if printf '%s' "$*" | grep -F "INSERT INTO backup_records" >/dev/null 2>&1; then
+      ariadne_backup_filename=''
+      ariadne_backup_sha256=''
+      ariadne_backup_size_bytes=''
+      ariadne_backup_status=''
+      ariadne_backup_created_at=''
+      ariadne_backup_verified_at=''
+      ariadne_backup_message=''
+      for arg in "$@"; do
+        case "$arg" in
+          --set=ariadne_backup_filename=*) ariadne_backup_filename=\${arg#--set=ariadne_backup_filename=} ;;
+          --set=ariadne_backup_sha256=*) ariadne_backup_sha256=\${arg#--set=ariadne_backup_sha256=} ;;
+          --set=ariadne_backup_size_bytes=*) ariadne_backup_size_bytes=\${arg#--set=ariadne_backup_size_bytes=} ;;
+          --set=ariadne_backup_status=*) ariadne_backup_status=\${arg#--set=ariadne_backup_status=} ;;
+          --set=ariadne_backup_created_at=*) ariadne_backup_created_at=\${arg#--set=ariadne_backup_created_at=} ;;
+          --set=ariadne_backup_verified_at=*) ariadne_backup_verified_at=\${arg#--set=ariadne_backup_verified_at=} ;;
+          --set=ariadne_backup_message=*) ariadne_backup_message=\${arg#--set=ariadne_backup_message=} ;;
+        esac
+      done
+      if [ -n "$FAKE_BACKUP_RECORD_LOG" ]; then
+        if [ -n "$ariadne_backup_verified_at" ]; then
+          printf '{"filename":"%s","sha256":"%s","sizeBytes":%s,"status":"%s","createdAt":"%s","verifiedAt":"%s","message":"%s"}\\n' \
+            "$ariadne_backup_filename" \
+            "$ariadne_backup_sha256" \
+            "$ariadne_backup_size_bytes" \
+            "$ariadne_backup_status" \
+            "$ariadne_backup_created_at" \
+            "$ariadne_backup_verified_at" \
+            "$ariadne_backup_message" \
+            >> "$FAKE_BACKUP_RECORD_LOG"
+        else
+          printf '{"filename":"%s","sha256":"%s","sizeBytes":%s,"status":"%s","createdAt":"%s","verifiedAt":null,"message":"%s"}\\n' \
+            "$ariadne_backup_filename" \
+            "$ariadne_backup_sha256" \
+            "$ariadne_backup_size_bytes" \
+            "$ariadne_backup_status" \
+            "$ariadne_backup_created_at" \
+            "$ariadne_backup_message" \
+            >> "$FAKE_BACKUP_RECORD_LOG"
+        fi
+      fi
+    fi
     case "$*" in
       *migrations_applied*) printf '%s\\n' "\${FAKE_SCHEMA_VERSION:-0007_task_history.sql}" ;;
       *count*) printf '%s\\n' "\${FAKE_TABLE_COUNT:-42}" ;;
@@ -188,6 +232,7 @@ exec /usr/bin/id "$@"
     binDir,
     dockerLog,
     curlLog,
+    backupRecordLog,
   };
 }
 
@@ -204,6 +249,7 @@ function runScript(harness: Harness, script: string, options: RunOptions = {}) {
     HOME: harness.root,
     FAKE_DOCKER_LOG: harness.dockerLog,
     FAKE_CURL_LOG: harness.curlLog,
+    FAKE_BACKUP_RECORD_LOG: harness.backupRecordLog,
     ...(selftest
       ? {
           ARIADNE_DEPLOY_SELFTEST: '1',
@@ -248,6 +294,44 @@ function mode(target: string): number {
 
 function output(result: { stdout: string | null; stderr: string | null }): string {
   return `${result.stdout ?? ''}${result.stderr ?? ''}`;
+}
+
+function resultPath(harness: Harness): string {
+  return path.join(harness.root, 'result.json');
+}
+
+function expectedDigest(harness: Harness, base: string): string {
+  return crypto
+    .createHash('sha256')
+    .update(fs.readFileSync(path.join(harness.backupDir, `${base}.dump`)))
+    .digest('hex');
+}
+
+interface BackupRecordWrite {
+  filename: string;
+  sha256: string;
+  sizeBytes: number;
+  status: string;
+  createdAt: string;
+  verifiedAt: string | null;
+  message: string;
+}
+
+function readBackupRecordWrites(harness: Harness): BackupRecordWrite[] {
+  if (!fs.existsSync(harness.backupRecordLog)) return [];
+  return fs
+    .readFileSync(harness.backupRecordLog, 'utf8')
+    .split('\n')
+    .filter((line) => line.trim().length > 0)
+    .map((line) => JSON.parse(line) as BackupRecordWrite);
+}
+
+function backupRecordStatements(harness: Harness): string[] {
+  return readLog(harness.dockerLog).filter((line) => line.includes('INSERT INTO backup_records'));
+}
+
+function backupRecordSqlLog(harness: Harness): string {
+  return readLog(harness.dockerLog).join('\n');
 }
 
 interface SeedOptions {
@@ -1028,19 +1112,8 @@ describe('backup result metadata channel', () => {
     message?: string;
   }
 
-  function resultPath(harness: Harness): string {
-    return path.join(harness.root, 'result.json');
-  }
-
   function readResult(harness: Harness): BackupResult {
     return JSON.parse(fs.readFileSync(resultPath(harness), 'utf8')) as BackupResult;
-  }
-
-  function expectedDigest(harness: Harness, base: string): string {
-    return crypto
-      .createHash('sha256')
-      .update(fs.readFileSync(path.join(harness.backupDir, `${base}.dump`)))
-      .digest('hex');
   }
 
   it('describes a published backup with facts taken from its own sidecars', () => {
@@ -1160,6 +1233,112 @@ describe('backup result metadata channel', () => {
     const harness = createHarness();
     expect(runScript(harness, 'backup').status).toBe(0);
     expect(listBackupDir(harness)).toContain(`ariadne-${NOW_STAMP}.dump`);
+  });
+});
+
+describe('backup metadata direct writes', () => {
+  it('writes a backup_records row for scheduled/manual backup runs without an operator channel', () => {
+    const harness = createHarness();
+
+    expect(runScript(harness, 'backup').status).toBe(0);
+
+    const writes = readBackupRecordWrites(harness);
+    expect(writes).toEqual([
+      {
+        filename: `ariadne-${NOW_STAMP}.dump`,
+        sha256: expectedDigest(harness, `ariadne-${NOW_STAMP}`),
+        sizeBytes: fs.statSync(path.join(harness.backupDir, `ariadne-${NOW_STAMP}.dump`)).size,
+        status: 'created',
+        createdAt: '2026-04-01T02:15:00Z',
+        verifiedAt: null,
+        message: '',
+      },
+    ]);
+  });
+
+  it('updates verified_at, status, and message for scheduled/manual verification runs', () => {
+    const harness = createHarness();
+    const base = seedBackup(harness, '20260331T010000Z');
+
+    expect(runScript(harness, 'backup').status).toBe(0);
+    expect(runScript(harness, 'verify-backup', { args: [`${base}.dump`] }).status).toBe(0);
+
+    expect(readBackupRecordWrites(harness)).toContainEqual({
+      filename: `${base}.dump`,
+      sha256: expectedDigest(harness, base),
+      sizeBytes: fs.statSync(path.join(harness.backupDir, `${base}.dump`)).size,
+      status: 'verified',
+      createdAt: '2026-03-31T01:00:00Z',
+      verifiedAt: '2026-04-01T02:15:00Z',
+      message: 'verified: schema 0007_task_history.sql, 42 tables',
+    });
+  });
+
+  it('does not direct-write when the operator result channel is present', () => {
+    const harness = createHarness();
+    const base = seedBackup(harness, '20260331T010000Z');
+
+    expect(
+      runScript(harness, 'backup', { env: { ARIADNE_RESULT_FILE: resultPath(harness) } }).status,
+    ).toBe(0);
+    expect(
+      runScript(harness, 'verify-backup', {
+        args: [`${base}.dump`],
+        env: { ARIADNE_RESULT_FILE: resultPath(harness) },
+      }).status,
+    ).toBe(0);
+
+    expect(readBackupRecordWrites(harness)).toEqual([]);
+    expect(fs.existsSync(resultPath(harness))).toBe(true);
+  });
+
+  it('records the pre-restore safety backup before stopping the application', () => {
+    const harness = createHarness();
+    const base = seedBackup(harness, '20260330T040000Z');
+
+    expect(
+      runScript(harness, 'restore-backup', {
+        args: [`${base}.dump`],
+        env: { ARIADNE_RESTORE_CONFIRM: `${base}.dump` },
+      }).status,
+    ).toBe(0);
+
+    expect(readBackupRecordWrites(harness)).toContainEqual({
+      filename: `ariadne-${NOW_STAMP}.dump`,
+      sha256: expectedDigest(harness, `ariadne-${NOW_STAMP}`),
+      sizeBytes: fs.statSync(path.join(harness.backupDir, `ariadne-${NOW_STAMP}.dump`)).size,
+      status: 'verified',
+      createdAt: '2026-04-01T02:15:00Z',
+      verifiedAt: '2026-04-01T02:15:00Z',
+      message: 'verified: pre-restore safety backup',
+    });
+
+    const docker = readLog(harness.dockerLog);
+    const recordIndex = indexOfMatch(docker, 'INSERT INTO backup_records');
+    const stopIndex = indexOfMatch(docker, 'stop sync-server');
+    const renameIndex = indexOfMatch(docker, 'ALTER DATABASE ariadne_sync RENAME TO');
+    expect(recordIndex).toBeGreaterThanOrEqual(0);
+    expect(recordIndex).toBeLessThan(stopIndex);
+    expect(recordIndex).toBeLessThan(renameIndex);
+  });
+
+  it('keeps SQL inputs strict and free of backup bytes, key material, and secrets', () => {
+    const harness = createHarness();
+    const base = seedBackup(harness, '20260331T010000Z');
+
+    expect(runScript(harness, 'backup').status).toBe(0);
+    expect(runScript(harness, 'verify-backup', { args: [`${base}.dump`] }).status).toBe(0);
+
+    const statements = backupRecordStatements(harness);
+    const sqlLog = backupRecordSqlLog(harness);
+    expect(statements.length).toBeGreaterThanOrEqual(2);
+    expect(sqlLog).toContain("current_setting('ariadne.backup_filename')");
+    expect(sqlLog).toContain("set_config('ariadne.backup_filename'");
+    expect(sqlLog).not.toContain(JWT_SECRET_VALUE);
+    expect(sqlLog).not.toContain(POSTGRES_PASSWORD_VALUE);
+    expect(sqlLog).not.toContain(KEY_MATERIAL_VALUE);
+    expect(sqlLog).not.toContain('PGDMP fake custom dump');
+    expect(sqlLog).not.toContain(harness.backupDir);
   });
 });
 
