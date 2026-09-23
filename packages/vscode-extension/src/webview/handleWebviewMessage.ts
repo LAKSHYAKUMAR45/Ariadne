@@ -1,4 +1,5 @@
 import {
+  buildContext,
   exportTaskMarkdown,
   listTasksAcrossWorkspaces,
   searchAcrossWorkspaces,
@@ -8,6 +9,8 @@ import {
   searchWorkspace,
   type Task,
   type TaskStore,
+  type TaskStatus,
+  type CheckpointLevel,
   type TodoStatus,
 } from '@ariadne-dev/core';
 import {
@@ -48,6 +51,14 @@ function readNumber(value: unknown): number | undefined {
 
 function isTodoStatus(value: unknown): value is TodoStatus {
   return value === 'pending' || value === 'done' || value === 'blocked';
+}
+
+function isTaskStatus(value: unknown): value is TaskStatus {
+  return value === 'active' || value === 'paused' || value === 'done' || value === 'archived';
+}
+
+function isCheckpointLevel(value: unknown): value is CheckpointLevel {
+  return value === 'micro' || value === 'session' || value === 'milestone';
 }
 
 function errorResponse(id: string, error: string): WebviewResponse {
@@ -164,6 +175,81 @@ function handleTasksList(deps: WebviewDispatcherDeps, message: WebviewRequest): 
   const allWorkspaces = readBoolean(payload.allWorkspaces) ?? false;
   const tasks = allWorkspaces ? listTasksAcrossWorkspaces() : deps.store.listTasks();
   return { id: message.id, ok: true, data: { tasks }, state: buildWebviewState(deps) };
+}
+
+function handleTaskCreate(deps: WebviewDispatcherDeps, message: WebviewRequest): WebviewResponse {
+  const payload = getPayload(message);
+  const title = readString(payload.title);
+  if (!title) return errorResponse(message.id, 'task.create requires payload.title.');
+  if (payload.status !== undefined && !isTaskStatus(payload.status)) {
+    return errorResponse(message.id, 'task.create requires payload.status to be active, paused, done, or archived.');
+  }
+  const created = deps.store.createTask({
+    title,
+    goal: readOptionalString(payload.goal),
+    status: payload.status as TaskStatus | undefined,
+    parentTaskId: readOptionalString(payload.parentTaskId),
+    branch: readOptionalString(payload.branch),
+  });
+  deps.store.setCurrentTaskId(created.id);
+  deps.setCurrentTaskId?.(created.id);
+  return { id: message.id, ok: true, data: created, state: buildWebviewState({ ...deps, currentTaskId: created.id }) };
+}
+
+function handleTaskUpdate(deps: WebviewDispatcherDeps, message: WebviewRequest): WebviewResponse {
+  const payload = getPayload(message);
+  const taskId = readString(payload.id) ?? deps.currentTaskId;
+  if (!taskId) return errorResponse(message.id, 'task.update requires a current task or payload.id.');
+  if (!deps.store.getTask(taskId)) return errorResponse(message.id, `Task not found: ${taskId}`);
+  const title = payload.title === undefined ? undefined : readString(payload.title);
+  const goal = payload.goal === undefined ? undefined : readOptionalString(payload.goal);
+  const branch = payload.branch === undefined ? undefined : readOptionalString(payload.branch);
+  if (payload.title !== undefined && !title) return errorResponse(message.id, 'task.update payload.title must be a non-empty string.');
+  if (title !== undefined) deps.store.updateTaskTitle(taskId, title);
+  if (goal !== undefined) deps.store.updateTaskGoal(taskId, goal);
+  if (branch !== undefined) deps.store.updateTaskBranch(taskId, branch);
+  return mutateAndReturnState(deps, message.id, () => deps.store.getTask(taskId), taskId);
+}
+
+function handleTaskSetStatus(deps: WebviewDispatcherDeps, message: WebviewRequest): WebviewResponse {
+  const payload = getPayload(message);
+  const taskId = readString(payload.id) ?? deps.currentTaskId;
+  const status = payload.status;
+  if (!taskId || !isTaskStatus(status)) {
+    return errorResponse(message.id, 'task.setStatus requires a task id and status of active, paused, done, or archived.');
+  }
+  if (!deps.store.getTask(taskId)) return errorResponse(message.id, `Task not found: ${taskId}`);
+  deps.store.updateTaskStatus(taskId, status);
+  return mutateAndReturnState(deps, message.id, () => ({ id: taskId, status }), deps.currentTaskId);
+}
+
+function handleCheckpointCreate(deps: WebviewDispatcherDeps, message: WebviewRequest): WebviewResponse {
+  const taskId = requireCurrentTaskId(deps, message.id);
+  if (typeof taskId !== 'string') return taskId;
+  const payload = getPayload(message);
+  const summary = readString(payload.summary);
+  const level = payload.level === undefined ? 'micro' : payload.level;
+  if (!summary) return errorResponse(message.id, 'checkpoint.create requires payload.summary.');
+  if (!isCheckpointLevel(level)) return errorResponse(message.id, 'checkpoint.create requires payload.level to be micro, session, or milestone.');
+  const checkpoint = deps.store.createCheckpoint({
+    taskId,
+    summary,
+    level,
+    parentCheckpointId: readOptionalString(payload.parentCheckpointId),
+  });
+  return mutateAndReturnState(deps, message.id, () => checkpoint, taskId);
+}
+
+function handleContextGet(deps: WebviewDispatcherDeps, message: WebviewRequest): WebviewResponse {
+  const taskId = requireCurrentTaskId(deps, message.id);
+  if (typeof taskId !== 'string') return taskId;
+  const payload = getPayload(message);
+  const tokenBudget = payload.tokenBudget === undefined ? undefined : readNumber(payload.tokenBudget);
+  if (payload.tokenBudget !== undefined && tokenBudget === undefined) {
+    return errorResponse(message.id, 'context.get requires payload.tokenBudget to be a finite number.');
+  }
+  const context = buildContext(deps.store, taskId, { ...(tokenBudget === undefined ? {} : { tokenBudget }), workspaceRoot: deps.workspaceRoot });
+  return { id: message.id, ok: true, data: { context }, state: buildWebviewState({ ...deps, currentTaskId: taskId }) };
 }
 
 function handleTodoCreate(deps: WebviewDispatcherDeps, message: WebviewRequest): WebviewResponse {
@@ -496,11 +582,12 @@ function handleExportMarkdown(deps: WebviewDispatcherDeps, message: WebviewReque
   if (typeof taskId !== 'string') return taskId;
   if (!deps.writeExport) return errorResponse(message.id, 'Export writer is not configured.');
   const markdown = exportTaskMarkdown(deps.store as TaskStore, taskId);
+  const context = buildContext(deps.store, taskId, { workspaceRoot: deps.workspaceRoot });
   const path = deps.writeExport(taskId, markdown);
   return {
     id: message.id,
     ok: true,
-    data: { path, markdown },
+    data: { path, markdown, context },
     state: buildWebviewState({ ...deps, currentTaskId: taskId }),
   };
 }
@@ -510,8 +597,18 @@ export function handleWebviewMessage(deps: WebviewDispatcherDeps, message: Webvi
     switch (message.type) {
       case WebviewRequestTypes.StateGet:
         return { id: message.id, ok: true, data: buildWebviewState(deps) };
+      case WebviewRequestTypes.TaskCreate:
+        return handleTaskCreate(deps, message);
+      case WebviewRequestTypes.TaskUpdate:
+        return handleTaskUpdate(deps, message);
+      case WebviewRequestTypes.TaskSetStatus:
+        return handleTaskSetStatus(deps, message);
       case WebviewRequestTypes.TaskSwitch:
         return handleTaskSwitch(deps, message);
+      case WebviewRequestTypes.CheckpointCreate:
+        return handleCheckpointCreate(deps, message);
+      case WebviewRequestTypes.ContextGet:
+        return handleContextGet(deps, message);
       case WebviewRequestTypes.TasksList:
         return handleTasksList(deps, message);
       case WebviewRequestTypes.TodoCreate:
@@ -563,10 +660,10 @@ export function handleWebviewMessage(deps: WebviewDispatcherDeps, message: Webvi
       case WebviewRequestTypes.ExportMarkdown:
         return handleExportMarkdown(deps, message);
       default:
-        {
-          const unsupportedType: never = message.type;
-          return errorResponse(message.id, `Unsupported webview request: ${unsupportedType}`);
-        }
+        return errorResponse(
+          (message as WebviewRequest).id,
+          `Unsupported webview request: ${(message as WebviewRequest).type}`,
+        );
     }
   } catch (err) {
     const messageText = err instanceof Error ? err.message : String(err);

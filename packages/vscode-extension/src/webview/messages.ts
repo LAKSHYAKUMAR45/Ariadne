@@ -1,4 +1,5 @@
 import type {
+  CheckpointLevel,
   Checkpoint,
   Decision,
   OpenQuestion,
@@ -7,12 +8,18 @@ import type {
   Task,
   TaskError,
   TaskFileCaptureWithEntries,
+  TaskStatus,
   Todo,
 } from '@ariadne-dev/core';
 
 export const WebviewRequestTypes = {
   StateGet: 'state.get',
+  TaskCreate: 'task.create',
+  TaskUpdate: 'task.update',
+  TaskSetStatus: 'task.setStatus',
   TaskSwitch: 'task.switch',
+  CheckpointCreate: 'checkpoint.create',
+  ContextGet: 'context.get',
   TasksList: 'tasks.list',
   TodoCreate: 'todo.create',
   TodoUpdateText: 'todo.updateText',
@@ -42,11 +49,35 @@ export const WebviewRequestTypes = {
 
 export type WebviewRequestType = (typeof WebviewRequestTypes)[keyof typeof WebviewRequestTypes];
 
-export type WebviewRequest = {
+export interface WebviewRequestBase<T extends WebviewRequestType = WebviewRequestType> {
   id: string;
-  type: WebviewRequestType;
-  payload?: unknown;
-};
+  type: T;
+}
+
+export type WebviewRequest =
+  | (WebviewRequestBase<'state.get' | 'tasks.list' | 'sync.push' | 'sync.listRemote' | 'export.markdown'> & { payload?: undefined })
+  | (WebviewRequestBase<'task.create'> & {
+      payload: { title: string; goal?: string | null; status?: TaskStatus; parentTaskId?: string | null; branch?: string | null };
+    })
+  | (WebviewRequestBase<'task.update'> & {
+      payload: { id?: string; title?: string; goal?: string | null; branch?: string | null };
+    })
+  | (WebviewRequestBase<'task.setStatus'> & { payload: { id?: string; status: TaskStatus } })
+  | (WebviewRequestBase<'task.switch'> & { payload: { id: string } })
+  | (WebviewRequestBase<'checkpoint.create'> & {
+      payload: { summary: string; level?: CheckpointLevel; parentCheckpointId?: string | null };
+    })
+  | (WebviewRequestBase<'context.get'> & { payload?: { tokenBudget?: number } })
+  | (WebviewRequestBase<'todo.create'> & { payload: Record<string, unknown> })
+  | (WebviewRequestBase<'todo.updateText' | 'todo.setStatus' | 'todo.delete'> & { payload: Record<string, unknown> })
+  | (WebviewRequestBase<'decision.create' | 'decision.update' | 'decision.delete'> & { payload: Record<string, unknown> })
+  | (WebviewRequestBase<'error.create' | 'error.update' | 'error.resolve' | 'error.reopen' | 'error.delete'> & {
+      payload: Record<string, unknown>;
+    })
+  | (WebviewRequestBase<'question.create' | 'question.update' | 'question.resolve' | 'question.reopen' | 'question.delete'> & {
+      payload: Record<string, unknown>;
+    })
+  | (WebviewRequestBase<'files.list' | 'files.getCapture' | 'search.run' | 'sync.pull'> & { payload?: Record<string, unknown> });
 
 export interface WebviewCounts {
   pendingTodos: number;

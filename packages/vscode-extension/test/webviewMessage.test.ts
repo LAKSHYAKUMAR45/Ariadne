@@ -61,6 +61,111 @@ describe('buildWebviewState', () => {
 });
 
 describe('handleWebviewMessage', () => {
+  it('creates a task and selects it for the webview', () => {
+    const cleanupRegistry = setupRegistry();
+    const workspace = makeWorkspace('task-create');
+    const setCurrentTaskId = vi.fn();
+
+    const response = handleWebviewMessage(
+      { store: workspace.store, workspaceRoot: workspace.root, setCurrentTaskId },
+      { id: 'task-create', type: 'task.create', payload: { title: 'New task', goal: 'Ship P1' } },
+    );
+
+    expect(response.ok).toBe(true);
+    if (response.ok) {
+      expect(response.data).toMatchObject({ title: 'New task', goal: 'Ship P1', status: 'active' });
+      expect(response.state?.currentTask?.title).toBe('New task');
+      expect(response.state?.currentTask?.goal).toBe('Ship P1');
+    }
+    expect(setCurrentTaskId).toHaveBeenCalledWith(expect.any(String));
+    workspace.close();
+    cleanupRegistry();
+  });
+
+  it('edits a task and applies lifecycle status transitions', () => {
+    const cleanupRegistry = setupRegistry();
+    const workspace = makeWorkspace('task-lifecycle');
+    const task = workspace.store.getTask(workspace.taskId)!;
+
+    const edit = handleWebviewMessage(
+      { store: workspace.store, currentTaskId: task.id, workspaceRoot: workspace.root },
+      { id: 'task-edit', type: 'task.update', payload: { title: 'Renamed', goal: 'Updated goal' } },
+    );
+    expect(edit.ok).toBe(true);
+
+    const status = handleWebviewMessage(
+      { store: workspace.store, currentTaskId: task.id, workspaceRoot: workspace.root },
+      { id: 'task-status', type: 'task.setStatus', payload: { status: 'paused' } },
+    );
+    expect(status.ok).toBe(true);
+    expect(workspace.store.getTask(task.id)).toMatchObject({ title: 'Renamed', goal: 'Updated goal', status: 'paused' });
+
+    const done = handleWebviewMessage(
+      { store: workspace.store, currentTaskId: task.id, workspaceRoot: workspace.root },
+      { id: 'task-done', type: 'task.setStatus', payload: { id: task.id, status: 'done' } },
+    );
+    expect(done.ok).toBe(true);
+    expect(workspace.store.getTask(task.id)?.status).toBe('done');
+    workspace.close();
+    cleanupRegistry();
+  });
+
+  it('creates a checkpoint and returns it in refreshed state', () => {
+    const cleanupRegistry = setupRegistry();
+    const workspace = makeWorkspace('checkpoint-create');
+    const response = handleWebviewMessage(
+      { store: workspace.store, currentTaskId: workspace.taskId, workspaceRoot: workspace.root },
+      { id: 'checkpoint-create', type: 'checkpoint.create', payload: { summary: 'P1 contract complete', level: 'session' } },
+    );
+
+    expect(response.ok).toBe(true);
+    if (response.ok) {
+      expect(response.data).toMatchObject({ summary: 'P1 contract complete', level: 'session', taskId: workspace.taskId });
+      expect(response.state?.checkpoints[0].summary).toBe('P1 contract complete');
+    }
+    workspace.close();
+    cleanupRegistry();
+  });
+
+  it('returns ContextBuilder resume data and includes it with markdown export', () => {
+    const cleanupRegistry = setupRegistry();
+    const workspace = makeWorkspace('context-export');
+    workspace.store.createCheckpoint({ taskId: workspace.taskId, level: 'session', summary: 'Resume from here' });
+
+    const context = handleWebviewMessage(
+      { store: workspace.store, currentTaskId: workspace.taskId, workspaceRoot: workspace.root },
+      { id: 'context', type: 'context.get', payload: { tokenBudget: 500 } },
+    );
+    expect(context).toMatchObject({
+      id: 'context',
+      ok: true,
+      data: {
+        context: {
+          taskId: workspace.taskId,
+          latestSummary: 'Resume from here',
+          openTodos: ['Write host tests'],
+        },
+      },
+    });
+
+    const exportPath = path.join(workspace.root, 'task.md');
+    const exported = handleWebviewMessage(
+      { store: workspace.store, currentTaskId: workspace.taskId, workspaceRoot: workspace.root, writeExport: () => exportPath },
+      { id: 'export-context', type: 'export.markdown' },
+    );
+    expect(exported).toMatchObject({
+      id: 'export-context',
+      ok: true,
+      data: {
+        path: exportPath,
+        markdown: expect.stringContaining('Resume from here'),
+        context: { taskId: workspace.taskId, latestSummary: 'Resume from here' },
+      },
+    });
+    workspace.close();
+    cleanupRegistry();
+  });
+
   it('creates, edits, completes, reopens, and deletes todos', () => {
     const cleanupRegistry = setupRegistry();
     const workspace = makeWorkspace('todo-crud');
