@@ -23,6 +23,7 @@ interface UseOperationOptions {
 
 interface UseOperationResult {
   operation: AdminOperation | null;
+  events: AdminOperationEvent[];
   latestEvent: AdminOperationEvent | null;
   live: boolean;
   polling: boolean;
@@ -75,6 +76,7 @@ export function useOperation({
   initialOperation = null,
 }: UseOperationOptions): UseOperationResult {
   const [operation, setOperation] = useState<AdminOperation | null>(initialOperation);
+  const [events, setEvents] = useState<AdminOperationEvent[]>([]);
   const [latestEvent, setLatestEvent] = useState<AdminOperationEvent | null>(null);
   const [live, setLive] = useState(false);
   const [polling, setPolling] = useState(false);
@@ -87,6 +89,7 @@ export function useOperation({
   useEffect(() => {
     if (!operationId) {
       setOperation(initialOperation);
+      setEvents([]);
       setLatestEvent(null);
       setLive(false);
       setPolling(false);
@@ -98,6 +101,13 @@ export function useOperation({
     const controller = new AbortController();
     let disposed = false;
     let timeoutId: number | null = null;
+    const seenEventIds = new Set<number>();
+
+    setEvents([]);
+    setLatestEvent(null);
+    setLive(false);
+    setPolling(false);
+    setError(null);
 
     async function reloadOperation(): Promise<AdminOperation | null> {
       const response = await api.get(
@@ -110,6 +120,23 @@ export function useOperation({
       }
       setOperation(response.operation);
       return response.operation;
+    }
+
+    function recordEvent(operationEvent: AdminOperationEvent): void {
+      if (seenEventIds.has(operationEvent.id)) {
+        return;
+      }
+      seenEventIds.add(operationEvent.id);
+      setEvents((current) => [...current, operationEvent]);
+      setLatestEvent(operationEvent);
+      setOperation((current) =>
+        current
+          ? {
+              ...current,
+              state: operationEvent.state,
+            }
+          : current,
+      );
     }
 
     async function poll(attempt: number): Promise<void> {
@@ -203,15 +230,7 @@ export function useOperation({
               }
 
               const operationEvent = eventData as AdminOperationEvent;
-              setLatestEvent(operationEvent);
-              setOperation((current) =>
-                current
-                  ? {
-                      ...current,
-                      state: operationEvent.state,
-                    }
-                  : current,
-              );
+              recordEvent(operationEvent);
               continue;
             }
 
@@ -269,6 +288,7 @@ export function useOperation({
 
   return {
     operation,
+    events,
     latestEvent,
     live,
     polling,

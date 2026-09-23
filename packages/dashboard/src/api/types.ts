@@ -196,7 +196,7 @@ export interface BackupsResponse {
 export interface ServiceStatus {
   name: string;
   state: string;
-  detail: string;
+  detail?: string;
 }
 
 export interface ServicesResponse {
@@ -211,7 +211,7 @@ export interface DeploymentCandidate {
 
 export interface DeploymentsResponse {
   currentRevision: string;
-  rollbackRevision: string;
+  rollbackRevision: string | null;
   schemaVersion: number;
   candidates: DeploymentCandidate[];
 }

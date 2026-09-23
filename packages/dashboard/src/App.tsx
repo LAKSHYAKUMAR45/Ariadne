@@ -2,7 +2,9 @@ import { useState } from 'react';
 import { AuthProvider, useAuth } from './auth/AuthProvider';
 import { LoginPage } from './auth/LoginPage';
 import { MembersPage } from './members/MembersPage';
+import { AuditPage } from './operations/AuditPage';
 import { BackupsPage } from './operations/BackupsPage';
+import { DeploymentsPage } from './operations/DeploymentsPage';
 import { LogsPage } from './operations/LogsPage';
 import { OverviewPage } from './overview/OverviewPage';
 import { ServicesPage } from './operations/ServicesPage';
@@ -28,34 +30,6 @@ const sections: ReadonlyArray<{ id: Section; label: string; glyph: string }> = [
   { id: 'logs', label: 'Logs', glyph: 'LG' },
   { id: 'audit', label: 'Audit', glyph: 'AT' },
 ];
-
-function PlaceholderPage({
-  title,
-  eyebrow,
-  message,
-}: {
-  title: string;
-  eyebrow: string;
-  message: string;
-}) {
-  return (
-    <div className="page-stack">
-      <header className="page-heading">
-        <div>
-          <p className="eyebrow">{eyebrow}</p>
-          <h1>{title}</h1>
-          <p>{message}</p>
-        </div>
-      </header>
-      <section className="panel data-panel">
-        <div className="pane-empty">
-          <span>+</span>
-          <p>{message}</p>
-        </div>
-      </section>
-    </div>
-  );
-}
 
 function ConsoleShell() {
   const { error, logout, session } = useAuth();
@@ -113,21 +87,9 @@ function ConsoleShell() {
         {section === 'tasks' ? <TasksPage /> : null}
         {section === 'backups' ? <BackupsPage /> : null}
         {section === 'services' ? <ServicesPage /> : null}
-        {section === 'deployments' ? (
-          <PlaceholderPage
-            eyebrow="Delivery"
-            title="Deployments"
-            message="Deployment orchestration ships in the next dashboard task."
-          />
-        ) : null}
+        {section === 'deployments' ? <DeploymentsPage /> : null}
         {section === 'logs' ? <LogsPage /> : null}
-        {section === 'audit' ? (
-          <PlaceholderPage
-            eyebrow="Forensics"
-            title="Audit"
-            message="Audit exploration ships in the next dashboard task."
-          />
-        ) : null}
+        {section === 'audit' ? <AuditPage /> : null}
       </main>
     </div>
   );

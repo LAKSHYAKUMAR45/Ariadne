@@ -16,7 +16,7 @@ export function OperationProgress({
   initialOperation = null,
   onOperationChange,
 }: OperationProgressProps) {
-  const { operation, latestEvent, live, polling, error } = useOperation({
+  const { operation, events, latestEvent, live, polling, error } = useOperation({
     api,
     operationId,
     initialOperation,
@@ -45,7 +45,17 @@ export function OperationProgress({
         <StatusLabel status={status} />
       </div>
       <p className="muted">{helper}</p>
-      {latestEvent ? <p>{latestEvent.message}</p> : null}
+      {events.length > 0 ? (
+        <ol className="operation-event-list" aria-label="Operation events">
+          {events.map((event) => (
+            <li className="operation-event-row" key={event.id}>
+              <time dateTime={event.createdAt}>{new Date(event.createdAt).toLocaleString()}</time>
+              <span>{event.message}</span>
+            </li>
+          ))}
+        </ol>
+      ) : latestEvent ? <p>{latestEvent.message}</p> : null}
+      {operation?.output ? <pre className="operation-output">{operation.output}</pre> : null}
       {error ? <div className="notice notice--error" role="alert">{error}</div> : null}
     </section>
   );

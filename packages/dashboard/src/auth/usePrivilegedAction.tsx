@@ -26,6 +26,7 @@ interface PrivilegedAction {
   busy: boolean;
   error: string | null;
   message: string | null;
+  operation: AdminOperation | null;
   run: (
     path: string,
     successMessage: string,
@@ -113,6 +114,7 @@ export function usePrivilegedAction(): PrivilegedAction {
     busy,
     error,
     message,
+    operation,
     run: async (path, successMessage, body = {}, options) => {
       const action: PendingAction = {
         method: options?.method ?? 'POST',
@@ -148,6 +150,7 @@ export function usePrivilegedAction(): PrivilegedAction {
           api={api}
           operationId={operation?.id ?? null}
           initialOperation={operation}
+          onOperationChange={setOperation}
         />
       ),
       [api, operation],

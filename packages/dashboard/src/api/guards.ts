@@ -255,7 +255,7 @@ function isServiceStatus(value: unknown): value is ServiceStatus {
     isRecord(value) &&
     isNonEmptyString(value.name) &&
     isNonEmptyString(value.state) &&
-    isNonEmptyString(value.detail)
+    (value.detail === undefined || isNonEmptyString(value.detail))
   );
 }
 
@@ -276,7 +276,7 @@ export function isDeploymentsResponse(value: unknown): value is DeploymentsRespo
   return (
     isRecord(value) &&
     isNonEmptyString(value.currentRevision) &&
-    isNonEmptyString(value.rollbackRevision) &&
+    isNullableString(value.rollbackRevision) &&
     isInteger(value.schemaVersion) &&
     isArrayOf(value.candidates, isDeploymentCandidate)
   );

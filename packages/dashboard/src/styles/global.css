@@ -879,6 +879,25 @@ a:focus-visible {
   font-size: 10px;
 }
 
+.data-row--stacked {
+  align-items: start;
+}
+
+.data-detail {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.row-action-group,
+.row-pill-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
 .row-action {
   min-height: 32px;
   font-size: 10px;
@@ -918,21 +937,49 @@ a:focus-visible {
   line-height: 1.55;
 }
 
-.source-select {
+.service-static {
+  margin-top: 14px;
+  color: var(--text-faint);
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.service-action {
+  margin-top: 18px;
+}
+
+.operations-filter-bar {
   display: flex;
-  align-items: center;
-  gap: 10px;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 12px;
+  margin-top: 20px;
+}
+
+.source-select {
+  display: grid;
+  gap: 6px;
   color: var(--text-muted);
   font-size: 11px;
 }
 
-.source-select select {
+.source-select select,
+.source-select input {
   min-height: 38px;
+  min-width: 140px;
   padding: 0 30px 0 11px;
   border: 1px solid var(--line-strong);
   border-radius: 5px;
   background: var(--surface);
   color: var(--text);
+}
+
+.source-select input {
+  padding-right: 11px;
+}
+
+.source-select--wide {
+  min-width: min(280px, 100%);
 }
 
 .log-header,
@@ -985,8 +1032,55 @@ a:focus-visible {
   white-space: pre-wrap;
 }
 
+.log-message-stack {
+  display: grid;
+  gap: 8px;
+}
+
 .severity {
   color: var(--blue);
+}
+
+.load-more-action {
+  margin-top: 16px;
+}
+
+.operation-event-list {
+  display: grid;
+  gap: 10px;
+  margin: 16px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.operation-event-row {
+  display: grid;
+  grid-template-columns: 180px minmax(0, 1fr);
+  gap: 14px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--line);
+}
+
+.operation-event-row:last-child {
+  padding-bottom: 0;
+  border-bottom: 0;
+}
+
+.operation-event-row time,
+.operation-output {
+  color: var(--text-muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px;
+}
+
+.operation-output {
+  margin: 16px 0 0;
+  padding: 12px;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #09111b;
+  white-space: pre-wrap;
 }
 
 .dialog-backdrop {
@@ -1016,6 +1110,11 @@ a:focus-visible {
 .reauth-dialog > p:not(.eyebrow) {
   color: var(--text-muted);
   font-size: 12px;
+}
+
+.status-timestamp code {
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .capture-delete-preview {
@@ -1522,6 +1621,56 @@ a:focus-visible {
   line-height: 1.6;
 }
 
+.candidate-row {
+  cursor: pointer;
+}
+
+.candidate-radio {
+  margin-top: 5px;
+}
+
+.operations-actions {
+  padding: 16px;
+}
+
+.operations-board {
+  margin-top: 20px;
+}
+
+.deployment-summary {
+  display: grid;
+  gap: 10px;
+}
+
+.audit-list {
+  display: grid;
+}
+
+.audit-row {
+  display: grid;
+  grid-template-columns: 180px minmax(0, 1fr) 100px auto;
+  gap: 14px;
+  align-items: start;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--line);
+}
+
+.audit-row:last-child {
+  border-bottom: 0;
+}
+
+.audit-row__main {
+  display: grid;
+  gap: 4px;
+}
+
+.audit-row__main span,
+.audit-row__time,
+.audit-row a {
+  color: var(--text-muted);
+  font-size: 10px;
+}
+
 @media (max-width: 780px) {
   .login-shell {
     grid-template-columns: 1fr;
@@ -1656,6 +1805,61 @@ a:focus-visible {
     letter-spacing: 0.08em;
     text-transform: uppercase;
     content: attr(data-label);
+  }
+
+  .operations-filter-bar,
+  .page-heading,
+  .dialog-actions,
+  .row-action-group,
+  .row-pill-group {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .data-row,
+  .log-row,
+  .operation-event-row,
+  .audit-row {
+    grid-template-columns: 1fr;
+  }
+
+  .data-row {
+    gap: 10px;
+  }
+
+  .log-header {
+    display: none;
+  }
+
+  .log-row,
+  .audit-row {
+    gap: 8px;
+  }
+
+  .log-row time::before,
+  .audit-row__time time::before {
+    display: block;
+    margin-bottom: 4px;
+    color: var(--text-faint);
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    content: 'Time';
+  }
+
+  .source-select select,
+  .source-select input,
+  .page-action,
+  .operations-actions button,
+  .row-action-group button {
+    width: 100%;
+  }
+
+  .reauth-dialog {
+    width: min(430px, calc(100vw - 24px));
+    max-height: calc(100vh - 24px);
+    overflow: auto;
   }
 }
 
