@@ -6,13 +6,15 @@ import type { AriadneBridge } from '../bridge';
 interface SearchPanelProps {
   bridge: AriadneBridge;
   initialResults: SearchResult[];
+  onNavigate?: (hit: SearchHit) => void;
 }
 
-type SearchCategory = SearchResult['matches'][number]['category'];
+export type SearchCategory = SearchResult['matches'][number]['category'];
 
 const categoryOrder: SearchCategory[] = ['title', 'goal', 'checkpoint', 'decision', 'todo', 'error', 'question', 'file', 'commit'];
 
-interface SearchHit {
+export interface SearchHit {
+  id: string;
   category: SearchCategory;
   taskId: string;
   taskTitle: string;
@@ -24,6 +26,7 @@ interface SearchHit {
 function flattenResults(results: SearchResult[]): SearchHit[] {
   return results.flatMap((result) =>
     result.matches.map((match) => ({
+      id: match.id,
       category: match.category,
       taskId: result.taskId,
       taskTitle: result.taskTitle,
@@ -34,7 +37,7 @@ function flattenResults(results: SearchResult[]): SearchHit[] {
   );
 }
 
-export default function SearchPanel({ bridge, initialResults }: SearchPanelProps) {
+export default function SearchPanel({ bridge, initialResults, onNavigate }: SearchPanelProps) {
   const [query, setQuery] = useState('');
   const [allWorkspaces, setAllWorkspaces] = useState(false);
   const [results, setResults] = useState<SearchResult[]>(initialResults);
@@ -109,13 +112,20 @@ export default function SearchPanel({ bridge, initialResults }: SearchPanelProps
               <ul>
                 {group.hits.map((hit, index) => (
                   <li key={`${hit.taskId}-${hit.category}-${hit.createdAt}-${index}`}>
-                    <p>{hit.text}</p>
-                    <p>Task: {hit.taskId}</p>
-                    <p>
-                      <time dateTime={hit.createdAt}>{hit.createdAt}</time>
-                    </p>
-                    <p>{hit.taskTitle}</p>
-                    <p>{hit.taskStatus}</p>
+                    <button
+                      type="button"
+                      onClick={() => onNavigate?.(hit)}
+                      aria-label={`Open ${hit.category} result: ${hit.text}`}
+                      style={{ display: 'block', textAlign: 'left', width: '100%' }}
+                    >
+                      <span style={{ display: 'block' }}>{hit.text}</span>
+                      <span style={{ display: 'block' }}>Task: {hit.taskId}</span>
+                      <span style={{ display: 'block' }}>
+                        <time dateTime={hit.createdAt}>{hit.createdAt}</time>
+                      </span>
+                      <span style={{ display: 'block' }}>{hit.taskTitle}</span>
+                      <span style={{ display: 'block' }}>{hit.taskStatus}</span>
+                    </button>
                   </li>
                 ))}
               </ul>

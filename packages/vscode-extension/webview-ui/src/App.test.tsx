@@ -152,6 +152,78 @@ describe('App', () => {
     expect(screen.getByRole('button', { name: /Other task/ })).toBeInTheDocument();
   });
 
+  it('creates a new task through the New Task form', async () => {
+    const harness = bridge();
+    render(<App bridge={harness} initialState={baseState} />);
+
+    await userEvent.click(screen.getByRole('button', { name: 'New task' }));
+    await userEvent.type(screen.getByLabelText('New task title'), 'Ship the dashboard');
+    await userEvent.type(screen.getByLabelText('New task goal'), 'Ship it well');
+    await userEvent.click(screen.getByRole('button', { name: 'Create task' }));
+
+    await waitFor(() =>
+      expect(harness.request).toHaveBeenCalledWith('task.create', {
+        title: 'Ship the dashboard',
+        goal: 'Ship it well',
+      }),
+    );
+  });
+
+  it('navigates to a search result tab and highlights the matching entity', async () => {
+    const harness = bridge({
+      request: vi.fn(async (type: string) => {
+        if (type === 'search.run') {
+          return {
+            results: [
+              {
+                taskId: task1.id,
+                taskTitle: task1.title,
+                taskStatus: task1.status,
+                matches: [
+                  { category: 'todo', id: 'todo-1', text: 'Finish onboarding', createdAt: '2026-09-23T00:00:00.000Z' },
+                ],
+              },
+            ],
+          };
+        }
+        return baseState;
+      }),
+    });
+
+    render(
+      <App
+        bridge={harness}
+        initialState={{
+          ...baseState,
+          todos: [
+            {
+              id: 'todo-1',
+              taskId: task1.id,
+              text: 'Finish onboarding',
+              status: 'pending',
+              sourceCheckpointId: null,
+              createdAt: '',
+              updatedAt: '',
+              remoteId: null,
+              syncedAt: null,
+            },
+          ],
+        }}
+      />,
+    );
+
+    await userEvent.click(screen.getByRole('button', { name: 'Search' }));
+    await userEvent.type(screen.getByRole('textbox', { name: /search query/i }), 'onboarding');
+    const searchSubmitButtons = screen.getAllByRole('button', { name: 'Search' });
+    await userEvent.click(searchSubmitButtons[searchSubmitButtons.length - 1]);
+
+    await userEvent.click(await screen.findByRole('button', { name: /Open todo result: Finish onboarding/ }));
+
+    expect(screen.getByRole('button', { name: 'Todos' })).toHaveAttribute('aria-pressed', 'true');
+    const highlighted = document.querySelector('[data-entity-id="todo-1"]');
+    expect(highlighted).not.toBeNull();
+  });
+
   it('shows an error banner when a bridge action fails', async () => {
     const harness = bridge({
       request: vi.fn(async (type: string) => {

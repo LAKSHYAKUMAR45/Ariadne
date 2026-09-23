@@ -11,8 +11,17 @@ export interface VsCodeApi {
   setState(state: unknown): void;
 }
 
+/**
+ * Request types the host dispatcher already understands, widened to also
+ * accept forward-looking string literals (e.g. task-lifecycle or checkpoint
+ * actions the host may not implement yet). Unknown types still round-trip
+ * through the dispatcher's `default` case, which returns a normal error
+ * response instead of throwing, so the UI can be built ahead of the host.
+ */
+export type AriadneRequestType = WebviewRequestType | (string & Record<never, never>);
+
 export interface AriadneBridge {
-  request<T>(type: WebviewRequestType, payload?: unknown): Promise<T>;
+  request<T>(type: AriadneRequestType, payload?: unknown): Promise<T>;
   subscribe(listener: (state: WebviewState) => void): () => void;
 }
 
@@ -78,9 +87,13 @@ export function createVsCodeBridge(vscodeApi: VsCodeApi): AriadneBridge {
   window.addEventListener('message', handleMessage as EventListener);
 
   return {
-    request<T>(type: WebviewRequestType, payload?: unknown): Promise<T> {
+    request<T>(type: AriadneRequestType, payload?: unknown): Promise<T> {
       const id = createRequestId();
-      const request: WebviewRequest = { id, type, ...(payload === undefined ? {} : { payload }) };
+      const request: WebviewRequest = {
+        id,
+        type: type as WebviewRequestType,
+        ...(payload === undefined ? {} : { payload }),
+      };
       return new Promise<T>((resolve, reject) => {
         pending.set(id, { resolve, reject });
         try {

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type { ButtonHTMLAttributes, CSSProperties, FormEvent, ReactNode } from 'react';
 import type { AriadneBridge } from '../bridge';
 import type { Decision, OpenQuestion, TaskError, Todo, TodoStatus, WebviewState } from '@host/messages';
@@ -8,6 +8,26 @@ interface EntityPanelProps {
   bridge: AriadneBridge;
   onBusy(label: string | undefined): void;
   onError(message: string): void;
+  /** Id of an entity to visually highlight and scroll into view, e.g. from search navigation. */
+  highlightId?: string;
+}
+
+/**
+ * Scrolls the element tagged with `data-entity-id={highlightId}` into view whenever
+ * `highlightId` changes. Shared by the entity panels and the overview checkpoint timeline
+ * so search-result navigation lands on the right row.
+ */
+export function useHighlightScroll(highlightId: string | undefined, containerRef?: React.RefObject<HTMLElement | null>): void {
+  useEffect(() => {
+    if (!highlightId) return;
+    const root = containerRef?.current ?? document;
+    const target = root.querySelector<HTMLElement>(`[data-entity-id="${highlightId}"]`);
+    target?.scrollIntoView?.({ behavior: 'smooth', block: 'center' });
+  }, [highlightId, containerRef]);
+}
+
+function highlightStyle(isHighlighted: boolean): CSSProperties {
+  return isHighlighted ? { boxShadow: '0 0 0 2px #facc15 inset', background: '#1e293b' } : {};
 }
 
 type TodoDraft = {
@@ -33,7 +53,7 @@ function formatErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-function useRequestRunner(onBusy: (label: string | undefined) => void, onError: (message: string) => void) {
+export function useRequestRunner(onBusy: (label: string | undefined) => void, onError: (message: string) => void) {
   return async function runRequest(label: string, action: () => Promise<void>): Promise<void> {
     onError('');
     onBusy(label);
@@ -176,8 +196,9 @@ function ToolbarButton(props: ButtonHTMLAttributes<HTMLButtonElement>) {
   return <button {...props} type={props.type ?? 'button'} style={{ ...styles.button, ...(props.style ?? {}) }} />;
 }
 
-export function TodosPanel({ state, bridge, onBusy, onError }: EntityPanelProps) {
+export function TodosPanel({ state, bridge, onBusy, onError, highlightId }: EntityPanelProps) {
   const runRequest = useRequestRunner(onBusy, onError);
+  useHighlightScroll(highlightId);
   const [drafts, setDrafts] = useTodoDrafts(state.todos);
   const [newText, setNewText] = useState('');
   const currentTaskId = state.currentTaskId;
@@ -250,7 +271,7 @@ export function TodosPanel({ state, bridge, onBusy, onError }: EntityPanelProps)
             dirtyStatus: false,
           };
           return (
-            <article key={todo.id} style={styles.card}>
+            <article key={todo.id} data-entity-id={todo.id} style={{ ...styles.card, ...highlightStyle(todo.id === highlightId) }}>
               <div style={styles.row}>
                 <label style={styles.field}>
                   <span style={styles.label}>Todo text for {todo.id}</span>
@@ -319,8 +340,9 @@ export function TodosPanel({ state, bridge, onBusy, onError }: EntityPanelProps)
   );
 }
 
-export function DecisionsPanel({ state, bridge, onBusy, onError }: EntityPanelProps) {
+export function DecisionsPanel({ state, bridge, onBusy, onError, highlightId }: EntityPanelProps) {
   const runRequest = useRequestRunner(onBusy, onError);
+  useHighlightScroll(highlightId);
   const [drafts, setDrafts] = useDecisionDrafts(state.decisions);
   const [newText, setNewText] = useState('');
   const [newRationale, setNewRationale] = useState('');
@@ -409,7 +431,7 @@ export function DecisionsPanel({ state, bridge, onBusy, onError }: EntityPanelPr
             dirtyRationale: false,
           };
           return (
-            <article key={decision.id} style={styles.card}>
+            <article key={decision.id} data-entity-id={decision.id} style={{ ...styles.card, ...highlightStyle(decision.id === highlightId) }}>
               <div style={styles.row}>
                 <label style={styles.field}>
                   <span style={styles.label}>Decision text for {decision.id}</span>
@@ -474,8 +496,9 @@ export function DecisionsPanel({ state, bridge, onBusy, onError }: EntityPanelPr
   );
 }
 
-export function ErrorsPanel({ state, bridge, onBusy, onError }: EntityPanelProps) {
+export function ErrorsPanel({ state, bridge, onBusy, onError, highlightId }: EntityPanelProps) {
   const runRequest = useRequestRunner(onBusy, onError);
+  useHighlightScroll(highlightId);
   const [drafts, setDrafts] = useTextDrafts(state.errors);
   const [newMessage, setNewMessage] = useState('');
 
@@ -545,7 +568,7 @@ export function ErrorsPanel({ state, bridge, onBusy, onError }: EntityPanelProps
         {state.errors.map((taskError) => {
           const draft = drafts[taskError.id] ?? { text: taskError.message, dirty: false };
           return (
-            <article key={taskError.id} style={styles.card}>
+            <article key={taskError.id} data-entity-id={taskError.id} style={{ ...styles.card, ...highlightStyle(taskError.id === highlightId) }}>
               <div style={styles.row}>
                 <label style={styles.field}>
                   <span style={styles.label}>Error message for {taskError.id}</span>
@@ -589,8 +612,9 @@ export function ErrorsPanel({ state, bridge, onBusy, onError }: EntityPanelProps
   );
 }
 
-export function QuestionsPanel({ state, bridge, onBusy, onError }: EntityPanelProps) {
+export function QuestionsPanel({ state, bridge, onBusy, onError, highlightId }: EntityPanelProps) {
   const runRequest = useRequestRunner(onBusy, onError);
+  useHighlightScroll(highlightId);
   const [drafts, setDrafts] = useTextDrafts(state.questions);
   const [newText, setNewText] = useState('');
 
@@ -660,7 +684,7 @@ export function QuestionsPanel({ state, bridge, onBusy, onError }: EntityPanelPr
         {state.questions.map((question) => {
           const draft = drafts[question.id] ?? { text: question.text, dirty: false };
           return (
-            <article key={question.id} style={styles.card}>
+            <article key={question.id} data-entity-id={question.id} style={{ ...styles.card, ...highlightStyle(question.id === highlightId) }}>
               <div style={styles.row}>
                 <label style={styles.field}>
                   <span style={styles.label}>Question text for {question.id}</span>

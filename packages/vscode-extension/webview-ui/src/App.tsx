@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import type { CSSProperties } from 'react';
+import type { CSSProperties, FormEvent } from 'react';
 import type { Task } from '@host/messages';
 import type { AriadneBridge } from './bridge';
 import type { WebviewState } from '@host/messages';
@@ -7,7 +7,20 @@ import { DecisionsPanel, ErrorsPanel, QuestionsPanel, TodosPanel } from './panel
 import OverviewPanel from './panels/OverviewPanel';
 import FilesPanel from './panels/FilesPanel';
 import SearchPanel from './panels/SearchPanel';
+import type { SearchCategory, SearchHit } from './panels/SearchPanel';
 import SyncPanel from './panels/SyncPanel';
+
+const categoryTabMap: Record<SearchCategory, TabId> = {
+  title: 'overview',
+  goal: 'overview',
+  checkpoint: 'overview',
+  decision: 'decisions',
+  todo: 'todos',
+  error: 'errors',
+  question: 'questions',
+  file: 'files',
+  commit: 'files',
+};
 
 type TabId = 'overview' | 'todos' | 'decisions' | 'errors' | 'questions' | 'files' | 'search' | 'sync';
 
@@ -60,6 +73,10 @@ export default function App({ bridge, initialState }: AppProps) {
   const [taskFilter, setTaskFilter] = useState('');
   const [allWorkspaces, setAllWorkspaces] = useState(false);
   const [visibleTasks, setVisibleTasks] = useState<Task[]>(initialState?.tasks ?? []);
+  const [highlightId, setHighlightId] = useState<string | undefined>(undefined);
+  const [isCreatingTask, setIsCreatingTask] = useState(false);
+  const [newTaskTitle, setNewTaskTitle] = useState('');
+  const [newTaskGoal, setNewTaskGoal] = useState('');
 
   useEffect(() => {
     const unsubscribe = bridge.subscribe((nextState) => {
@@ -108,6 +125,39 @@ export default function App({ bridge, initialState }: AppProps) {
       setBanner({ kind: 'error', message: readError(error) });
       setBusyLabel(null);
     }
+  }
+
+  async function createTask(event: FormEvent<HTMLFormElement>): Promise<void> {
+    event.preventDefault();
+    const title = newTaskTitle.trim();
+    if (!title) return;
+
+    setBusyLabel('Creating task…');
+    setBanner(null);
+    try {
+      await bridge.request('task.create', { title, goal: newTaskGoal.trim() || null });
+      setNewTaskTitle('');
+      setNewTaskGoal('');
+      setIsCreatingTask(false);
+    } catch (error) {
+      setBanner({ kind: 'error', message: readError(error) });
+    } finally {
+      setBusyLabel(null);
+    }
+  }
+
+  async function navigateToSearchHit(hit: SearchHit): Promise<void> {
+    setBanner(null);
+    if (hit.taskId !== state?.currentTaskId) {
+      await switchTask(hit.taskId);
+    }
+    setActiveTab(categoryTabMap[hit.category]);
+    setHighlightId(hit.id);
+  }
+
+  function selectTab(tabId: TabId): void {
+    setActiveTab(tabId);
+    setHighlightId(undefined);
   }
 
   async function toggleAllWorkspaces(nextValue: boolean): Promise<void> {
@@ -159,19 +209,61 @@ export default function App({ bridge, initialState }: AppProps) {
   const tabContent = (() => {
     switch (activeTab) {
       case 'overview':
-        return state ? <OverviewPanel state={state} /> : <p>No task selected.</p>;
+        return state ? (
+          <OverviewPanel
+            state={state}
+            bridge={bridge}
+            onBusy={setBusyLabel}
+            onError={handlePanelError}
+            highlightCheckpointId={highlightId}
+          />
+        ) : (
+          <p>No task selected.</p>
+        );
       case 'todos':
-        return <TodosPanel state={state} bridge={bridge} onBusy={setBusyLabel} onError={handlePanelError} />;
+        return (
+          <TodosPanel
+            state={state}
+            bridge={bridge}
+            onBusy={setBusyLabel}
+            onError={handlePanelError}
+            highlightId={highlightId}
+          />
+        );
       case 'decisions':
-        return <DecisionsPanel state={state} bridge={bridge} onBusy={setBusyLabel} onError={handlePanelError} />;
+        return (
+          <DecisionsPanel
+            state={state}
+            bridge={bridge}
+            onBusy={setBusyLabel}
+            onError={handlePanelError}
+            highlightId={highlightId}
+          />
+        );
       case 'errors':
-        return <ErrorsPanel state={state} bridge={bridge} onBusy={setBusyLabel} onError={handlePanelError} />;
+        return (
+          <ErrorsPanel
+            state={state}
+            bridge={bridge}
+            onBusy={setBusyLabel}
+            onError={handlePanelError}
+            highlightId={highlightId}
+          />
+        );
       case 'questions':
-        return <QuestionsPanel state={state} bridge={bridge} onBusy={setBusyLabel} onError={handlePanelError} />;
+        return (
+          <QuestionsPanel
+            state={state}
+            bridge={bridge}
+            onBusy={setBusyLabel}
+            onError={handlePanelError}
+            highlightId={highlightId}
+          />
+        );
       case 'files':
         return state ? <FilesPanel bridge={bridge} captures={state.fileCaptures} /> : <p>No task selected.</p>;
       case 'search':
-        return <SearchPanel bridge={bridge} initialResults={state?.searchResults ?? []} />;
+        return <SearchPanel bridge={bridge} initialResults={state?.searchResults ?? []} onNavigate={(hit) => void navigateToSearchHit(hit)} />;
       case 'sync':
         return <SyncPanel bridge={bridge} />;
       default:
@@ -220,6 +312,36 @@ export default function App({ bridge, initialState }: AppProps) {
               aria-label="Filter tasks"
               style={styles.filterInput}
             />
+            {isCreatingTask ? (
+              <form onSubmit={(event) => void createTask(event)} aria-label="New task" style={styles.newTaskForm}>
+                <input
+                  aria-label="New task title"
+                  placeholder="Task title"
+                  value={newTaskTitle}
+                  onChange={(event) => setNewTaskTitle(event.target.value)}
+                  style={styles.filterInput}
+                />
+                <input
+                  aria-label="New task goal"
+                  placeholder="Task goal (optional)"
+                  value={newTaskGoal}
+                  onChange={(event) => setNewTaskGoal(event.target.value)}
+                  style={styles.filterInput}
+                />
+                <div style={styles.actionsRow}>
+                  <button type="submit" style={styles.toolbarButton}>
+                    Create task
+                  </button>
+                  <button type="button" onClick={() => setIsCreatingTask(false)} style={styles.toolbarButton}>
+                    Cancel
+                  </button>
+                </div>
+              </form>
+            ) : (
+              <button type="button" onClick={() => setIsCreatingTask(true)} style={styles.toolbarButton}>
+                New task
+              </button>
+            )}
           </div>
 
           <div style={styles.taskList}>
@@ -233,7 +355,10 @@ export default function App({ bridge, initialState }: AppProps) {
                     key={task.id}
                     type="button"
                     aria-pressed={active}
-                    onClick={() => void switchTask(task.id)}
+                    onClick={() => {
+                      void switchTask(task.id);
+                      setHighlightId(undefined);
+                    }}
                     style={active ? { ...styles.taskButton, ...styles.taskButtonActive } : styles.taskButton}
                   >
                     <strong>{task.title}</strong>
@@ -252,7 +377,7 @@ export default function App({ bridge, initialState }: AppProps) {
                 key={tab.id}
                 type="button"
                 aria-pressed={activeTab === tab.id}
-                onClick={() => setActiveTab(tab.id)}
+                onClick={() => selectTab(tab.id)}
                 style={activeTab === tab.id ? { ...styles.tabButton, ...styles.tabButtonActive } : styles.tabButton}
               >
                 {tab.label}
@@ -359,6 +484,15 @@ const styles: Record<string, CSSProperties> = {
     color: '#e2e8f0',
     padding: '0.5rem 0.75rem',
     boxSizing: 'border-box',
+  },
+  newTaskForm: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '0.5rem',
+  },
+  actionsRow: {
+    display: 'flex',
+    gap: '0.5rem',
   },
   taskList: {
     display: 'flex',

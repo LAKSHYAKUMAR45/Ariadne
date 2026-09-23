@@ -123,6 +123,20 @@ function createBridge(overrides: Partial<BridgeHarness> = {}): BridgeHarness {
         return { output: 'pull output' };
       case 'sync.listRemote':
         return { output: 'remote output' };
+      case 'context.get':
+        return {
+          context: {
+            latestSummary: 'Session summary',
+            openQuestions: [],
+            openTodos: [],
+            blockedTodos: [],
+            unresolvedErrors: [],
+            recentFiles: [],
+            recentCommits: [{ sha: 'abc1234def', message: 'fix: sync panel' }],
+            recentCommands: [{ cmd: 'pnpm test', exitCode: 0 }],
+            decisions: [],
+          },
+        };
       default:
         return payload;
     }
@@ -137,7 +151,8 @@ function createBridge(overrides: Partial<BridgeHarness> = {}): BridgeHarness {
 
 describe('UtilityPanels', () => {
   it('renders the overview goal, branch, counts, and latest checkpoint', () => {
-    render(<OverviewPanel state={baseState} />);
+    const harness = createBridge();
+    render(<OverviewPanel state={baseState} bridge={harness} onBusy={() => undefined} onError={() => undefined} />);
 
     expect(screen.getByRole('heading', { name: 'Utility panels' })).toBeInTheDocument();
     expect(screen.getByText(/feat\/utility-panels/)).toBeInTheDocument();
@@ -145,6 +160,82 @@ describe('UtilityPanels', () => {
     expect(screen.getByText(/1 unresolved error/)).toBeInTheDocument();
     expect(screen.getByText(/3 open questions/)).toBeInTheDocument();
     expect(within(screen.getByRole('region', { name: 'Latest checkpoint' })).getByText('Added overview counts')).toBeInTheDocument();
+  });
+
+  it('edits the task title and goal via task.update', async () => {
+    const harness = createBridge();
+    render(<OverviewPanel state={baseState} bridge={harness} onBusy={() => undefined} onError={() => undefined} />);
+
+    await userEvent.click(screen.getByRole('button', { name: 'Edit title/goal' }));
+    const titleInput = screen.getByLabelText('Task title');
+    await userEvent.clear(titleInput);
+    await userEvent.type(titleInput, 'Renamed task');
+    await userEvent.click(screen.getByRole('button', { name: 'Save task' }));
+
+    await waitFor(() =>
+      expect(harness.request).toHaveBeenCalledWith('task.update', {
+        id: task.id,
+        title: 'Renamed task',
+        goal: task.goal,
+      }),
+    );
+  });
+
+  it('runs a lifecycle action for the current task', async () => {
+    const harness = createBridge();
+    render(<OverviewPanel state={baseState} bridge={harness} onBusy={() => undefined} onError={() => undefined} />);
+
+    await userEvent.click(screen.getByRole('button', { name: 'Pause task' }));
+    await waitFor(() =>
+      expect(harness.request).toHaveBeenCalledWith('task.setStatus', { id: task.id, status: 'paused' }),
+    );
+  });
+
+  it('creates a checkpoint from the overview panel', async () => {
+    const harness = createBridge();
+    render(<OverviewPanel state={baseState} bridge={harness} onBusy={() => undefined} onError={() => undefined} />);
+
+    await userEvent.type(screen.getByLabelText('Checkpoint summary'), 'New checkpoint summary');
+    await userEvent.selectOptions(screen.getByLabelText('Checkpoint level'), 'milestone');
+    await userEvent.click(screen.getByRole('button', { name: 'Save checkpoint' }));
+
+    await waitFor(() =>
+      expect(harness.request).toHaveBeenCalledWith('checkpoint.create', {
+        summary: 'New checkpoint summary',
+        level: 'milestone',
+      }),
+    );
+  });
+
+  it('loads and displays activity via context.get when resuming context', async () => {
+    const harness = createBridge();
+    render(<OverviewPanel state={baseState} bridge={harness} onBusy={() => undefined} onError={() => undefined} />);
+
+    expect(screen.getByText(/Click "Resume context"/)).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole('button', { name: 'Resume context' }));
+
+    await waitFor(() => expect(harness.request).toHaveBeenCalledWith('context.get'));
+    expect(await screen.findByText('Session summary')).toBeInTheDocument();
+    expect(screen.getByText('pnpm test')).toBeInTheDocument();
+    expect(screen.getByText(/fix: sync panel/)).toBeInTheDocument();
+  });
+
+  it('highlights the checkpoint matching highlightCheckpointId', () => {
+    const harness = createBridge();
+    render(
+      <OverviewPanel
+        state={baseState}
+        bridge={harness}
+        onBusy={() => undefined}
+        onError={() => undefined}
+        highlightCheckpointId="checkpoint-1"
+      />,
+    );
+
+    const highlighted = document.querySelector('[data-entity-id="checkpoint-1"]');
+    expect(highlighted).not.toBeNull();
+    expect(highlighted).toHaveStyle({ background: '#1e293b' });
   });
 
   it('loads a file capture diff lazily when a capture is selected', async () => {
@@ -182,6 +273,18 @@ describe('UtilityPanels', () => {
     expect(screen.getByText('src/App.tsx')).toBeInTheDocument();
   });
 
+  it('invokes onNavigate with the matching hit when a search result is clicked', async () => {
+    const harness = createBridge();
+    const onNavigate = vi.fn();
+    render(<SearchPanel bridge={harness} initialResults={searchResults} onNavigate={onNavigate} />);
+
+    await userEvent.click(screen.getByRole('button', { name: /Open decision result: Use a thin panel wrapper/ }));
+
+    expect(onNavigate).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'decision-1', category: 'decision', taskId: task.id }),
+    );
+  });
+
   it('submits all-workspaces searches when the toggle is enabled', async () => {
     const harness = createBridge();
     render(<SearchPanel bridge={harness} initialResults={[]} />);
@@ -212,16 +315,51 @@ describe('UtilityPanels', () => {
       }),
     );
 
+    await userEvent.click(screen.getByRole('button', { name: 'List remote' }));
+    await waitFor(() => expect(harness.request).toHaveBeenCalledWith('sync.listRemote'));
+
+    expect(screen.getByLabelText('Sync output')).toHaveTextContent('remote output');
+  });
+
+  it('requires confirmation before pulling with import-new', async () => {
+    const harness = createBridge();
+    render(<SyncPanel bridge={harness} />);
+
     await userEvent.click(screen.getByRole('button', { name: 'Pull import-new' }));
+    expect(harness.request).not.toHaveBeenCalledWith('sync.pull', { importNew: true });
+    expect(screen.getByText('Import new remote tasks into this workspace?')).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    expect(screen.queryByText('Import new remote tasks into this workspace?')).not.toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole('button', { name: 'Pull import-new' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Confirm pull import-new' }));
     await waitFor(() =>
       expect(harness.request).toHaveBeenCalledWith('sync.pull', {
         importNew: true,
       }),
     );
+  });
 
-    await userEvent.click(screen.getByRole('button', { name: 'List remote' }));
-    await waitFor(() => expect(harness.request).toHaveBeenCalledWith('sync.listRemote'));
+  it('shows sign-in guidance when a sync action fails with an auth-shaped error', async () => {
+    const harness = createBridge({
+      request: vi.fn(async () => {
+        throw new Error('401 unauthorized: token expired');
+      }),
+    });
+    render(<SyncPanel bridge={harness} />);
 
-    expect(screen.getByLabelText('Sync output')).toHaveTextContent('remote output');
+    await userEvent.click(screen.getByRole('button', { name: 'Push' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('ariadne sync setup');
+  });
+
+  it('shows a clear idle/running/last-action status', async () => {
+    const harness = createBridge();
+    render(<SyncPanel bridge={harness} />);
+
+    expect(screen.getByLabelText('Sync status')).toHaveTextContent('Idle');
+
+    await userEvent.click(screen.getByRole('button', { name: 'Push' }));
+    await waitFor(() => expect(screen.getByLabelText('Sync status')).toHaveTextContent('Last action: sync.push completed'));
   });
 });
