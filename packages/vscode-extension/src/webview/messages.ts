@@ -65,7 +65,7 @@ export interface WebviewState {
   errors: TaskError[];
   questions: OpenQuestion[];
   fileCaptures: TaskFileCaptureWithEntries[];
-  searchResults?: SearchResult[];
+  searchResults: SearchResult[];
   counts: WebviewCounts;
 }
 

@@ -1,59 +1,93 @@
-import { render, screen } from '@testing-library/react';
+import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 import App from './App';
 import type { AriadneBridge } from './bridge';
-import type { WebviewState } from '@host/messages';
+import type { Task, WebviewState } from '@host/messages';
 
-const state: WebviewState = {
+const task1: Task = {
+  id: 'task-1',
+  title: 'Panel task',
+  goal: 'Make UI useful',
+  status: 'active',
+  parentTaskId: null,
+  branch: 'feat/ui',
+  createdAt: '',
+  updatedAt: '',
+  remoteId: null,
+  syncedAt: null,
+};
+
+const task2: Task = {
+  id: 'task-2',
+  title: 'Other task',
+  goal: 'Exercise the shell',
+  status: 'paused',
+  parentTaskId: null,
+  branch: 'feat/other',
+  createdAt: '',
+  updatedAt: '',
+  remoteId: null,
+  syncedAt: null,
+};
+
+const baseState: WebviewState = {
   workspaceRoot: '/repo',
-  currentTaskId: 'task-1',
-  currentTask: {
-    id: 'task-1',
-    title: 'Panel task',
-    goal: 'Make UI useful',
-    status: 'active',
-    parentTaskId: null,
-    branch: 'feat/ui',
-    createdAt: '',
-    updatedAt: '',
-    remoteId: null,
-    syncedAt: null,
-  },
-  tasks: [
-    {
-      id: 'task-1',
-      title: 'Panel task',
-      goal: 'Make UI useful',
-      status: 'active',
-      parentTaskId: null,
-      branch: 'feat/ui',
-      createdAt: '',
-      updatedAt: '',
-      remoteId: null,
-      syncedAt: null,
-    },
-  ],
+  currentTaskId: task1.id,
+  currentTask: task1,
+  tasks: [task1],
   checkpoints: [],
   todos: [],
   decisions: [],
   errors: [],
   questions: [],
   fileCaptures: [],
+  searchResults: [],
   counts: { pendingTodos: 0, unresolvedErrors: 0, openQuestions: 0 },
 };
 
-function bridge(overrides: Partial<AriadneBridge> = {}): AriadneBridge {
-  return {
-    request: vi.fn(async () => state),
-    subscribe: vi.fn(() => () => {}),
+type BridgeHarness = AriadneBridge & {
+  request: ReturnType<typeof vi.fn>;
+  emitState: (state: WebviewState) => void;
+};
+
+function bridge(overrides: Partial<BridgeHarness> = {}): BridgeHarness {
+  let listener: ((state: WebviewState) => void) | undefined;
+  const request = vi.fn(async (type: string) => {
+    switch (type) {
+      case 'tasks.list':
+        return { tasks: [task1, task2] };
+      case 'sync.push':
+        return { output: 'Pushed to cloud' };
+      case 'export.markdown':
+        return { path: '/repo/.ariadne/export/task-1.md', markdown: '# task' };
+      case 'task.switch':
+        return { currentTaskId: task2.id };
+      default:
+        return baseState;
+    }
+  });
+
+  const harness: BridgeHarness = {
+    request,
+    subscribe: vi.fn((nextListener: (state: WebviewState) => void) => {
+      listener = nextListener;
+      return () => {
+        listener = undefined;
+      };
+    }),
+    emitState: (state: WebviewState) => {
+      listener?.(state);
+    },
     ...overrides,
   };
+
+  return harness;
 }
 
 describe('App', () => {
   it('renders the task rail, toolbar, and tabs from the initial state', () => {
-    render(<App bridge={bridge()} initialState={state} />);
+    render(<App bridge={bridge()} initialState={baseState} />);
     expect(screen.getByRole('heading', { name: 'Ariadne' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Sync to Cloud' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Export to Markdown' })).toBeInTheDocument();
@@ -62,10 +96,75 @@ describe('App', () => {
   });
 
   it('switches tabs without routing', async () => {
-    render(<App bridge={bridge()} initialState={state} />);
+    render(<App bridge={bridge()} initialState={baseState} />);
     const [todosButton] = screen.getAllByRole('button', { name: 'Todos' });
     await userEvent.click(todosButton);
     expect(todosButton).toHaveAttribute('aria-pressed', 'true');
     expect(screen.getByRole('heading', { name: 'Todos' })).toBeInTheDocument();
+  });
+
+  it('requests sync.push and export.markdown from the toolbar', async () => {
+    const harness = bridge();
+    render(<App bridge={harness} initialState={baseState} />);
+
+    await userEvent.click(screen.getByRole('button', { name: 'Sync to Cloud' }));
+    await waitFor(() => expect(harness.request).toHaveBeenCalledWith('sync.push'));
+    expect(screen.getByText('Pushed to cloud')).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole('button', { name: 'Export to Markdown' }));
+    await waitFor(() => expect(harness.request).toHaveBeenCalledWith('export.markdown'));
+    expect(screen.getByText('Exported task markdown to /repo/.ariadne/export/task-1.md')).toBeInTheDocument();
+  });
+
+  it('switches tasks through the bridge and reflects the host state update', async () => {
+    const harness = bridge();
+    render(
+      <App
+        bridge={harness}
+        initialState={{
+          ...baseState,
+          tasks: [task1, task2],
+        }}
+      />,
+    );
+
+    await userEvent.click(screen.getByRole('button', { name: /Other task/ }));
+    await waitFor(() => expect(harness.request).toHaveBeenCalledWith('task.switch', { id: task2.id }));
+
+    harness.emitState({
+      ...baseState,
+      currentTaskId: task2.id,
+      currentTask: task2,
+      tasks: [task1, task2],
+    });
+    await waitFor(() => expect(screen.getByRole('button', { name: /Other task/ })).toHaveAttribute('aria-pressed', 'true'));
+    await waitFor(() => expect(screen.getByRole('button', { name: /Other task/ })).toHaveAttribute('aria-pressed', 'true'));
+    expect(screen.getByRole('heading', { name: 'Overview' })).toBeInTheDocument();
+  });
+
+  it('requests the all-workspaces task list and updates the rail', async () => {
+    const harness = bridge();
+    render(<App bridge={harness} initialState={baseState} />);
+
+    await userEvent.click(screen.getByRole('checkbox', { name: 'All workspaces' }));
+
+    await waitFor(() => expect(harness.request).toHaveBeenCalledWith('tasks.list', { allWorkspaces: true }));
+    expect(screen.getByRole('button', { name: /Other task/ })).toBeInTheDocument();
+  });
+
+  it('shows an error banner when a bridge action fails', async () => {
+    const harness = bridge({
+      request: vi.fn(async (type: string) => {
+        if (type === 'sync.push') {
+          throw new Error('sync failed');
+        }
+        return baseState;
+      }),
+    });
+
+    render(<App bridge={harness} initialState={baseState} />);
+    await userEvent.click(screen.getByRole('button', { name: 'Sync to Cloud' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('sync failed');
   });
 });

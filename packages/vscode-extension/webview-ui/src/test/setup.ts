@@ -1,5 +1,7 @@
 import '@testing-library/jest-dom/vitest';
+import { cleanup } from '@testing-library/react';
 import { vi } from 'vitest';
+import { afterEach } from 'vitest';
 
 if (typeof window.acquireVsCodeApi !== 'function') {
   Object.defineProperty(window, 'acquireVsCodeApi', {
@@ -11,3 +13,7 @@ if (typeof window.acquireVsCodeApi !== 'function') {
     }),
   });
 }
+
+afterEach(() => {
+  cleanup();
+});
