@@ -5,6 +5,11 @@ All notable changes to the Ariadne VS Code extension will be documented here.
 ## [Unreleased]
 
 ### Added
+- Visible Ariadne Activity Bar launcher/status view that opens the full
+  Ariadne panel, creates tasks, and starts cloud sync from the View Bar.
+- React webview panel for task switching, overview, editable todos,
+  decisions, errors, open questions, captured file diffs, search, sync, and
+  Markdown export.
 - Initial `@ariadne` chat participant with `/status`, `/resume`,
   `/checkpoint`, `/todo`, `/task`, `/decision`, and `/error` commands.
 - `Ariadne: New Task` and `Ariadne: Show Task Status` commands.

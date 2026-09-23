@@ -12,20 +12,26 @@ task state is identical no matter which one you use.
 
 ## What it does
 
+- Adds an **Ariadne Activity Bar entry**. Open it from the VS Code View Bar
+  for a compact launcher/status view, then click **Open Ariadne Panel** for
+  the full task UI.
+- Adds a full **Ariadne panel** with task switching, overview, editable
+  todos/decisions/errors/questions, captured file diffs, search, sync, and
+  Markdown export.
 - Adds an **`@ariadne` chat participant** to Copilot Chat, so you can recall
   or update the current task's state directly from the chat you're already
   using.
-- Adds two commands to the Command Palette: **Ariadne: New Task**,
-  **Ariadne: Show Task Status**, and **Ariadne: Select Workspace Folder**
-  (for multi-root workspaces).
+- Adds Command Palette entries including **Ariadne: Open Panel**,
+  **Ariadne: New Task**, **Ariadne: Show Task Status**, and
+  **Ariadne: Select Workspace Folder** (for multi-root workspaces).
 - Also adds cloud sync commands to the Command Palette — **Ariadne: Sync
   Push**, **Ariadne: Sync Pull** (offers an "import new" option), and
   **Ariadne: Sync List Remote** — which shell out to the `ariadne` CLI
   (must be installed and already logged in via `ariadne sync login`) and
   stream output to the "Ariadne" output channel.
-- Shows a **status bar item** (bottom-right) with the current task's title,
-  or "no task" if none is set for the workspace — click it to jump to
-  `/status` (or start a new task if there isn't one yet).
+- Shows a **status bar item** with the current task's title, or "no task" if
+  none is set for the workspace — click it to open the Ariadne panel (or
+  start a new task if there isn't one yet).
 - Passively captures saved files, terminal commands, and git commits against
   the current task in the background (toggle via the
   `ariadne.passiveCapture.enabled` setting).
@@ -72,6 +78,17 @@ workspaces — without it they operate on the current workspace only, as before.
 
 - An open folder/workspace (Ariadne stores state at
   `<workspace-root>/.ariadne/state.db`, gitignored by default).
+
+## Opening Ariadne
+
+After installing or updating the extension, reload the VS Code window so the
+extension host picks up the latest view contributions. Then use any of:
+
+- Click the **Ariadne** icon in the Activity Bar and choose **Open Ariadne
+  Panel**.
+- Run **Ariadne: Open Panel** from the Command Palette.
+- Click the Ariadne status bar item when a workspace is open.
+- Use `@ariadne` in Copilot Chat for command-style updates.
 
 ## Known limitations (early/pre-release)
 

@@ -14,6 +14,7 @@ import { registerPassiveCapture } from './passiveCapture.js';
 import { findWorkspaceRoot } from '@ariadne-dev/core';
 import { syncPush, syncPull, syncListRemote } from './syncCommands.js';
 import { openAriadnePanel, refreshAriadnePanel } from './webview/panel.js';
+import { registerAriadneLauncherView, refreshAriadneLauncherView } from './webview/launcherView.js';
 
 let output: vscode.OutputChannel;
 let statusBarItem: vscode.StatusBarItem | undefined;
@@ -55,6 +56,7 @@ function refreshStatusBar(): void {
 function refreshAll(): void {
   refreshStatusBar();
   refreshAriadnePanel();
+  refreshAriadneLauncherView();
 }
 
 async function openExportedMarkdown(filePath: string): Promise<void> {
@@ -94,6 +96,16 @@ export function activate(context: vscode.ExtensionContext): void {
       }),
     ),
   );
+
+  registerAriadneLauncherView(context, {
+    getCurrentTask: () => {
+      const taskId = getCurrentTaskId();
+      const store = openStoreForCurrentWorkspace();
+      return taskId && store ? store.getTask(taskId) : undefined;
+    },
+    getWorkspaceRoot: resolveWorkspaceRoot,
+    logError,
+  });
 
   context.subscriptions.push(vscode.window.onDidChangeActiveTextEditor(() => refreshStatusBar()));
 

@@ -12,6 +12,7 @@ vi.mock('node:child_process', () => ({ execFileSync: vi.fn() }));
 let workspaceFolders: { uri: { fsPath: string } }[] | undefined;
 let registeredCommands: Array<{ command: string; handler: (...args: unknown[]) => unknown }>;
 let registeredTreeProviders: Array<{ viewId: string }>;
+let registeredWebviewViewProviders: Array<{ viewId: string; provider: unknown }>;
 let quickPickChoice: unknown;
 
 vi.mock('vscode', () => {
@@ -67,6 +68,10 @@ vi.mock('vscode', () => {
         registeredTreeProviders.push({ viewId });
         return { dispose: () => {} };
       },
+      registerWebviewViewProvider: (viewId: string, provider: unknown) => {
+        registeredWebviewViewProviders.push({ viewId, provider });
+        return { dispose: () => {} };
+      },
       onDidChangeActiveTextEditor: () => ({ dispose: () => {} }),
       showWarningMessage: vi.fn(),
       showErrorMessage: vi.fn(),
@@ -116,6 +121,7 @@ describe('chat participant error handling', () => {
     outputLines = [];
     registeredCommands = [];
     registeredTreeProviders = [];
+    registeredWebviewViewProviders = [];
     vi.mocked(execFileSync).mockReset();
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ariadne-ext-test-'));
     fs.mkdirSync(path.join(tmpDir, '.git'));
@@ -247,5 +253,27 @@ describe('chat participant error handling', () => {
     expect(registeredCommands.map((entry) => entry.command)).toContain('ariadne.openPanel');
     expect(registeredCommands.map((entry) => entry.command)).not.toContain('ariadne.refreshTreeView');
     expect(registeredTreeProviders.map((entry) => entry.viewId)).not.toContain('ariadneTasks');
+  });
+
+  it('contributes a visible Activity Bar launcher view', () => {
+    const packageJson = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8')) as {
+      activationEvents?: string[];
+      contributes?: {
+        viewsContainers?: { activitybar?: Array<{ id: string; title: string; icon: string }> };
+        views?: Record<string, Array<{ id: string; name: string }>>;
+      };
+    };
+
+    expect(packageJson.activationEvents).toContain('onView:ariadne.launcherView');
+    expect(packageJson.contributes?.viewsContainers?.activitybar).toContainEqual(
+      expect.objectContaining({ id: 'ariadne', title: 'Ariadne', icon: 'resources/icon.png' }),
+    );
+    expect(packageJson.contributes?.views?.ariadne).toContainEqual(
+      expect.objectContaining({ id: 'ariadne.launcherView', name: 'Ariadne' }),
+    );
+  });
+
+  it('registers the Ariadne Activity Bar launcher provider', () => {
+    expect(registeredWebviewViewProviders.map((entry) => entry.viewId)).toContain('ariadne.launcherView');
   });
 });
