@@ -313,6 +313,93 @@ describe('operations pages', () => {
     ).toBe(true);
   });
 
+  it('refreshes service status when a reconnected restart reaches a terminal state', async () => {
+    let serviceReads = 0;
+    let operationCompleted = false;
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === '/api/v1/admin/session') {
+        return Promise.resolve(
+          json(sessionBody({ reauthenticatedUntil: '2026-09-23T20:00:00.000Z' })),
+        );
+      }
+      if (url === '/api/v1/admin/services') {
+        serviceReads += 1;
+        return Promise.resolve(
+          json({
+            services: [
+              {
+                name: 'sync-server',
+                state: 'running',
+                detail:
+                  operationCompleted
+                    ? 'HTTP listener healthy after restart.'
+                    : 'HTTP listener healthy.',
+              },
+              { name: 'operator', state: 'running', detail: 'Socket ready' },
+              { name: 'postgres', state: 'running', detail: 'Primary database available' },
+            ],
+          }),
+        );
+      }
+      if (url === '/api/v1/admin/operations?limit=20') {
+        return Promise.resolve(
+          json({
+            operations:
+              !operationCompleted
+                ? [
+                    {
+                      id: 'op-restart',
+                      requestedBy: 'admin-id',
+                      type: 'service_restart',
+                      state: 'running',
+                      summary: 'Restart sync-server',
+                      output: null,
+                      startedAt: '2026-09-23T08:01:00.000Z',
+                      completedAt: null,
+                      createdAt: '2026-09-23T08:00:59.000Z',
+                    },
+                  ]
+                : [],
+          }),
+        );
+      }
+      if (url === '/api/v1/admin/operations/op-restart/events') {
+        return Promise.resolve(
+          eventStream([
+            'event: operation_event\ndata: {"id":1,"operationId":"op-restart","state":"succeeded","message":"sync-server restart completed.","metadata":{},"createdAt":"2026-09-23T08:01:02.000Z"}\n\n',
+            'event: complete\ndata: {"operationId":"op-restart","state":"succeeded"}\n\n',
+          ]),
+        );
+      }
+      if (url === '/api/v1/admin/operations/op-restart') {
+        operationCompleted = true;
+        return Promise.resolve(
+          json({
+            operation: {
+              id: 'op-restart',
+              requestedBy: 'admin-id',
+              type: 'service_restart',
+              state: 'succeeded',
+              summary: 'Restart sync-server',
+              output: 'sync-server restarted and healthy.',
+              startedAt: '2026-09-23T08:01:00.000Z',
+              completedAt: '2026-09-23T08:01:02.000Z',
+              createdAt: '2026-09-23T08:00:59.000Z',
+            },
+          }),
+        );
+      }
+      return Promise.resolve(new Response(null, { status: 404 }));
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    renderWithProvider(<ServicesPage />);
+
+    expect(await screen.findByText('HTTP listener healthy after restart.')).toBeVisible();
+    expect(serviceReads).toBeGreaterThan(1);
+  });
+
   it('restarts postgres with exact confirmation and shows terminal failure details', async () => {
     const fetchMock = vi.fn((input: RequestInfo | URL) => {
       const url = String(input);

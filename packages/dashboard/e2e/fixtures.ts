@@ -590,11 +590,28 @@ async function assertCsrf(route: Route, state: FixtureState): Promise<boolean> {
     await fulfillError(route, 401, 'missing_session', 'Authentication required.');
     return false;
   }
+  const presentedToken = await route.request().headerValue('x-csrf-token');
+  if (presentedToken !== state.session.csrfToken) {
+    await fulfillError(route, 403, 'csrf_failed', 'A valid CSRF token is required');
+    return false;
+  }
   return true;
 }
 
 async function assertFreshReauthentication(route: Route, state: FixtureState): Promise<boolean> {
-  return assertSession(route, state);
+  if (!(await assertSession(route, state))) {
+    return false;
+  }
+  if (!hasFreshReauthentication(state.session)) {
+    await fulfillError(
+      route,
+      403,
+      'reauthentication_required',
+      'Reauthentication is required for this operation.',
+    );
+    return false;
+  }
+  return true;
 }
 
 function confirmationMatches(expected: string, actual: unknown): boolean {

@@ -204,6 +204,64 @@ describe('Ariadne operations console', () => {
     expect(screen.getByText('succeeded')).toBeVisible();
   });
 
+  it('does not reconnect the operation stream when the same operation receives persisted updates', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        new ReadableStream<Uint8Array>({
+          start() {},
+        }),
+        {
+          status: 200,
+          headers: { 'Content-Type': 'text/event-stream; charset=utf-8' },
+        },
+      ),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    const api: AdminApiClient = {
+      get: vi.fn(),
+      mutate: vi.fn(),
+      download: vi.fn(),
+    };
+    const queuedOperation = {
+      id: 'op-1',
+      requestedBy: 'admin-id',
+      type: 'backup_create' as const,
+      state: 'queued' as const,
+      summary: 'Create database backup',
+      output: null,
+      startedAt: null,
+      completedAt: null,
+      createdAt: '2026-09-23T08:00:00.000Z',
+    };
+
+    const { rerender } = render(
+      <OperationProgress
+        api={api}
+        operationId="op-1"
+        initialOperation={queuedOperation}
+      />,
+    );
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+
+    rerender(
+      <OperationProgress
+        api={api}
+        operationId="op-1"
+        initialOperation={{
+          ...queuedOperation,
+          state: 'running',
+          startedAt: '2026-09-23T08:00:30.000Z',
+        }}
+      />,
+    );
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
   it('surfaces malformed SSE JSON as an invalid response without falling back to polling', async () => {
     const fetchMock = vi.fn().mockImplementation((input: RequestInfo | URL) => {
       if (String(input) === '/api/v1/admin/operations/op-1/events') {

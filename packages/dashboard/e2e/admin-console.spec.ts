@@ -12,6 +12,59 @@ test('logs in, restores the session on reload, and logs out', async ({ harness, 
   await expect(page.getByRole('heading', { name: 'Command your Ariadne cloud' })).toBeVisible();
 });
 
+test('fixture rejects mutations without CSRF and fresh reauthentication', async ({ harness, page }) => {
+  await harness.openAuthenticatedConsole();
+
+  const missingCsrf = await page.evaluate(async () => {
+    const response = await fetch('/api/v1/admin/members/member-1', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        active: false,
+        confirmation: 'DEACTIVATE ops-member',
+      }),
+    });
+    return {
+      status: response.status,
+      body: await response.json(),
+    };
+  });
+  expect(missingCsrf).toMatchObject({
+    status: 403,
+    body: {
+      error: {
+        code: 'csrf_failed',
+      },
+    },
+  });
+
+  const staleReauthentication = await page.evaluate(async () => {
+    const response = await fetch('/api/v1/admin/members/member-1', {
+      method: 'PATCH',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-CSRF-Token': 'csrf-token',
+      },
+      body: JSON.stringify({
+        active: false,
+        confirmation: 'DEACTIVATE ops-member',
+      }),
+    });
+    return {
+      status: response.status,
+      body: await response.json(),
+    };
+  });
+  expect(staleReauthentication).toMatchObject({
+    status: 403,
+    body: {
+      error: {
+        code: 'reauthentication_required',
+      },
+    },
+  });
+});
+
 test('keeps database facts while showing overview partial failure', async ({ harness, page }) => {
   harness.setOverviewPartialFailure(true);
   await harness.openAuthenticatedConsole();

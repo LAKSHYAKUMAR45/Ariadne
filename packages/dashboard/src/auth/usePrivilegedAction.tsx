@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 import { AdminApiError } from '../api/client';
 import { isAcceptedOperationResponse } from '../api/guards';
 import type {
@@ -54,6 +54,17 @@ export function usePrivilegedAction(): PrivilegedAction {
   const [pending, setPending] = useState<PendingAction | null>(null);
   const [dialogError, setDialogError] = useState<string | null>(null);
   const [operation, setOperation] = useState<AdminOperation | null>(null);
+  const handleOperationChange = useCallback((nextOperation: AdminOperation | null): void => {
+    setOperation((currentOperation) => {
+      if (!nextOperation) {
+        return currentOperation;
+      }
+      if (currentOperation && currentOperation.id !== nextOperation.id) {
+        return currentOperation;
+      }
+      return nextOperation;
+    });
+  }, []);
 
   function requireReauthentication(action: PendingAction, confirmationValue = ''): PendingAction {
     return {
@@ -165,10 +176,10 @@ export function usePrivilegedAction(): PrivilegedAction {
           api={api}
           operationId={operation?.id ?? null}
           initialOperation={operation}
-          onOperationChange={setOperation}
+          onOperationChange={handleOperationChange}
         />
       ),
-      [api, operation],
+      [api, handleOperationChange, operation],
     ),
   };
 }

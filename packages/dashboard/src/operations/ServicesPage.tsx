@@ -102,11 +102,11 @@ export function ServicesPage() {
   }, [loadServices, reconnectOperation]);
 
   useEffect(() => {
-    if (action.operation?.state === 'succeeded' || action.operation?.state === 'failed') {
+    if (activeOperation?.state === 'succeeded' || activeOperation?.state === 'failed') {
       void reconnectOperation();
       void loadServices();
     }
-  }, [action.operation?.state, loadServices, reconnectOperation]);
+  }, [activeOperation?.state, loadServices, reconnectOperation]);
 
   const progress = useMemo(() => {
     if (action.operation?.id) {

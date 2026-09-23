@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { AdminApiError } from '../api/client';
 import {
   isAdminOperationCompleteEvent,
@@ -84,6 +84,8 @@ export function useOperation({
   operationId,
   initialOperation = null,
 }: UseOperationOptions): UseOperationResult {
+  const initialOperationRef = useRef(initialOperation);
+  initialOperationRef.current = initialOperation;
   const [operation, setOperation] = useState<AdminOperation | null>(initialOperation);
   const [events, setEvents] = useState<AdminOperationEvent[]>([]);
   const [latestEvent, setLatestEvent] = useState<AdminOperationEvent | null>(null);
@@ -92,12 +94,10 @@ export function useOperation({
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    setOperation(initialOperation);
-  }, [initialOperation]);
+    const seededOperation = initialOperationRef.current;
 
-  useEffect(() => {
     if (!operationId) {
-      setOperation(initialOperation);
+      setOperation(seededOperation);
       setEvents([]);
       setLatestEvent(null);
       setLive(false);
@@ -112,6 +112,7 @@ export function useOperation({
     let timeoutId: number | null = null;
     const seenEventIds = new Set<number>();
 
+    setOperation(seededOperation);
     setEvents([]);
     setLatestEvent(null);
     setLive(false);
@@ -318,7 +319,7 @@ export function useOperation({
         window.clearTimeout(timeoutId);
       }
     };
-  }, [api, initialOperation, operationId]);
+  }, [api, operationId]);
 
   return {
     operation,
