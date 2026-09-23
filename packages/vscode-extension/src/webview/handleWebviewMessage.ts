@@ -141,7 +141,11 @@ function handleTaskSwitch(deps: WebviewDispatcherDeps, message: WebviewRequest):
     return resolved;
   }
   resolved.store.setCurrentTaskId(taskId);
-  deps.setCurrentTaskId?.(taskId);
+  if (resolved.workspaceRoot === deps.workspaceRoot || !resolved.workspaceRoot) {
+    deps.setCurrentTaskId?.(taskId);
+  } else {
+    deps.setCurrentTaskIdForWorkspace?.(taskId, resolved.workspaceRoot);
+  }
   return {
     id: message.id,
     ok: true,

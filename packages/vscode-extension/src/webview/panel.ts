@@ -10,6 +10,7 @@ export interface AriadnePanelDeps {
   openStoreForCurrentWorkspace: () => TaskStore | undefined;
   getCurrentTaskId: () => string | undefined;
   setCurrentTask: (id: string) => void;
+  setCurrentTaskInWorkspace: (id: string, workspaceRoot: string) => void;
   resolveWorkspaceRoot: () => string | undefined;
   output: vscode.OutputChannel;
   logError: (context: string, err: unknown) => string;
@@ -66,7 +67,7 @@ function buildPanelHtml(webview: vscode.Webview, context: vscode.ExtensionContex
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src ${webview.cspSource} data:; style-src ${webview.cspSource}; script-src 'nonce-${cspNonce}';">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src ${webview.cspSource} data:; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'nonce-${cspNonce}';">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Ariadne</title>
 </head>
@@ -80,7 +81,7 @@ function buildPanelHtml(webview: vscode.Webview, context: vscode.ExtensionContex
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src ${webview.cspSource} data:; style-src ${webview.cspSource} 'nonce-${cspNonce}'; script-src 'nonce-${cspNonce}' ${webview.cspSource}; connect-src ${webview.cspSource}; font-src ${webview.cspSource};">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src ${webview.cspSource} data:; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'nonce-${cspNonce}' ${webview.cspSource}; connect-src ${webview.cspSource}; font-src ${webview.cspSource};">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Ariadne</title>
   ${styleTags}
@@ -122,9 +123,8 @@ function currentState(): WebviewState | undefined {
   });
 }
 
-function postStateUpdate(): void {
+function postStateUpdate(state?: WebviewState): void {
   if (!panel || !panelDeps) return;
-  const state = currentState();
   if (!state) return;
   void panel.webview.postMessage({ type: 'stateUpdate', state });
 }
@@ -150,6 +150,7 @@ async function handleWebviewRequest(message: unknown): Promise<void> {
         currentTaskId: panelDeps.getCurrentTaskId(),
         workspaceRoot: panelDeps.resolveWorkspaceRoot(),
         setCurrentTaskId: panelDeps.setCurrentTask,
+        setCurrentTaskIdForWorkspace: panelDeps.setCurrentTaskInWorkspace,
         sync: {
           push: () => {
             const workspaceRoot = panelDeps.resolveWorkspaceRoot();
@@ -176,10 +177,10 @@ async function handleWebviewRequest(message: unknown): Promise<void> {
       message,
     );
 
-    if (response.ok && response.state) {
-      postStateUpdate();
-    }
     void panel.webview.postMessage(response);
+    if (response.ok && response.state) {
+      postStateUpdate(response.state);
+    }
     if (response.ok && response.state) {
       panelDeps.refreshHost();
     }
@@ -205,7 +206,7 @@ export function openAriadnePanel(context: vscode.ExtensionContext, deps: Ariadne
 
   if (panel) {
     panel.reveal(vscode.ViewColumn.One);
-    postStateUpdate();
+    postStateUpdate(currentState());
     return;
   }
 
@@ -221,7 +222,7 @@ export function openAriadnePanel(context: vscode.ExtensionContext, deps: Ariadne
     panelDeps = undefined;
   });
 
-  postStateUpdate();
+  postStateUpdate(currentState());
 }
 
 export function refreshAriadnePanel(): void {

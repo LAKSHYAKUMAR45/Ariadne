@@ -113,6 +113,7 @@ describe('Ariadne webview panel', () => {
       openStoreForCurrentWorkspace: () => undefined,
       getCurrentTaskId: () => undefined,
       setCurrentTask: () => {},
+      setCurrentTaskInWorkspace: () => {},
       resolveWorkspaceRoot: () => '/workspace',
       output: { appendLine: (line: string) => outputLines.push(line) } as never,
       logError: (_context: string, err: unknown) => String(err),
@@ -134,6 +135,7 @@ describe('Ariadne webview panel', () => {
       openStoreForCurrentWorkspace: () => ({}) as never,
       getCurrentTaskId: () => 'task-1',
       setCurrentTask: () => {},
+      setCurrentTaskInWorkspace: () => {},
       resolveWorkspaceRoot: () => '/workspace',
       output: { appendLine: (line: string) => outputLines.push(line) } as never,
       logError: (_context: string, err: unknown) => (err instanceof Error ? err.message : String(err)),
@@ -159,6 +161,7 @@ describe('Ariadne webview panel', () => {
       openStoreForCurrentWorkspace: () => ({}) as never,
       getCurrentTaskId: () => 'task-1',
       setCurrentTask: () => {},
+      setCurrentTaskInWorkspace: () => {},
       resolveWorkspaceRoot: () => '/workspace',
       output: { appendLine: (line: string) => outputLines.push(line) } as never,
       logError: (_context: string, err: unknown) => (err instanceof Error ? err.message : String(err)),
@@ -178,5 +181,49 @@ describe('Ariadne webview panel', () => {
 
     expect(mocks.openExportedMarkdown).toHaveBeenCalledWith('/workspace/.ariadne/export/task-1.md');
     expect(postedMessages).toContainEqual({ id: 'export-1', ok: true, data: { path: '/workspace/.ariadne/export/task-1.md' } });
+  });
+
+  it('posts the dispatcher response state instead of recomputing current workspace state', async () => {
+    const { openAriadnePanel } = await loadPanelModule();
+
+    const responseState = {
+      workspaceRoot: '/other-workspace',
+      currentTaskId: 'task-2',
+      currentTask: undefined,
+      tasks: [],
+      checkpoints: [],
+      todos: [],
+      decisions: [],
+      errors: [],
+      questions: [],
+      fileCaptures: [],
+      searchResults: [],
+      counts: { pendingTodos: 0, unresolvedErrors: 0, openQuestions: 0 },
+    };
+
+    const deps = {
+      openStoreForCurrentWorkspace: () => ({}) as never,
+      getCurrentTaskId: () => 'task-1',
+      setCurrentTask: () => {},
+      setCurrentTaskInWorkspace: () => {},
+      resolveWorkspaceRoot: () => '/workspace',
+      output: { appendLine: (line: string) => outputLines.push(line) } as never,
+      logError: (_context: string, err: unknown) => (err instanceof Error ? err.message : String(err)),
+      refreshHost: () => {},
+      openExportedMarkdown: mocks.openExportedMarkdown,
+    };
+
+    mocks.handleWebviewMessage.mockReturnValue({
+      id: 'switch-1',
+      ok: true,
+      data: { currentTaskId: 'task-2' },
+      state: responseState,
+    });
+
+    openAriadnePanel({ extensionUri: { fsPath: '/extension' } } as never, deps);
+    receiveMessage?.({ id: 'switch-1', type: 'task.switch', payload: { id: 'task-2' } });
+    await flush();
+
+    expect(postedMessages).toContainEqual({ type: 'stateUpdate', state: responseState });
   });
 });

@@ -115,9 +115,16 @@ describe('handleWebviewMessage', () => {
     const current = makeWorkspace('current');
     const other = makeWorkspace('other');
     const setCurrentTaskId = vi.fn();
+    const setCurrentTaskIdForWorkspace = vi.fn();
 
     const response = handleWebviewMessage(
-      { store: current.store, currentTaskId: current.taskId, workspaceRoot: current.root, setCurrentTaskId },
+      {
+        store: current.store,
+        currentTaskId: current.taskId,
+        workspaceRoot: current.root,
+        setCurrentTaskId,
+        setCurrentTaskIdForWorkspace,
+      },
       { id: 'switch-cross', type: 'task.switch', payload: { id: other.taskId } },
     );
 
@@ -127,7 +134,8 @@ describe('handleWebviewMessage', () => {
       expect(response.state?.workspaceRoot).toBe(other.root);
       expect(response.state?.currentTaskId).toBe(other.taskId);
     }
-    expect(setCurrentTaskId).toHaveBeenCalledWith(other.taskId);
+    expect(setCurrentTaskId).not.toHaveBeenCalled();
+    expect(setCurrentTaskIdForWorkspace).toHaveBeenCalledWith(other.taskId, other.root);
     expect(other.store.getCurrentTaskId()).toBe(other.taskId);
     current.close();
     other.close();
@@ -152,9 +160,16 @@ describe('handleWebviewMessage', () => {
     const workspace = makeWorkspace('local-switch');
     const second = workspace.store.createTask({ title: 'local task 2', goal: 'Stay local' });
     const setCurrentTaskId = vi.fn();
+    const setCurrentTaskIdForWorkspace = vi.fn();
 
     const response = handleWebviewMessage(
-      { store: workspace.store, currentTaskId: workspace.taskId, workspaceRoot: workspace.root, setCurrentTaskId },
+      {
+        store: workspace.store,
+        currentTaskId: workspace.taskId,
+        workspaceRoot: workspace.root,
+        setCurrentTaskId,
+        setCurrentTaskIdForWorkspace,
+      },
       { id: 'switch-local', type: 'task.switch', payload: { id: second.id } },
     );
 
@@ -165,6 +180,7 @@ describe('handleWebviewMessage', () => {
       expect(response.state?.currentTaskId).toBe(second.id);
     }
     expect(setCurrentTaskId).toHaveBeenCalledWith(second.id);
+    expect(setCurrentTaskIdForWorkspace).not.toHaveBeenCalled();
     expect(workspace.store.getCurrentTaskId()).toBe(second.id);
     workspace.close();
     cleanupRegistry();

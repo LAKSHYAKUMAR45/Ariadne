@@ -1,5 +1,13 @@
 import * as vscode from 'vscode';
-import { openStoreForCurrentWorkspace, getCurrentTaskId, setCurrentTask, initWorkspaceResolution, promptSelectWorkspaceFolder, resolveWorkspaceRoot } from './workspace.js';
+import {
+  openStoreForCurrentWorkspace,
+  getCurrentTaskId,
+  setCurrentTask,
+  initWorkspaceResolution,
+  promptSelectWorkspaceFolder,
+  resolveWorkspaceRoot,
+} from './workspace.js';
+import { setCurrentTaskId as setCurrentTaskInWorkspace } from '@ariadne-dev/core';
 import { handleChatCommand, progressMessageFor, formatStatusBarItem } from './commands.js';
 import { closeAllStores, closeStore } from './storeCache.js';
 import { registerPassiveCapture } from './passiveCapture.js';
@@ -77,6 +85,7 @@ export function activate(context: vscode.ExtensionContext): void {
         openStoreForCurrentWorkspace,
         getCurrentTaskId,
         setCurrentTask,
+        setCurrentTaskInWorkspace: (taskId: string, workspaceRoot: string) => setCurrentTaskInWorkspace(taskId, workspaceRoot),
         resolveWorkspaceRoot,
         output,
         logError,

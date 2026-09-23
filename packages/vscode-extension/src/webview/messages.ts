@@ -80,6 +80,7 @@ export interface WebviewDispatcherDeps {
   currentTaskId?: string;
   workspaceRoot?: string;
   setCurrentTaskId?: (id: string) => void;
+  setCurrentTaskIdForWorkspace?: (id: string, workspaceRoot: string) => void;
   sync?: SyncActions;
   writeExport?: (taskId: string, markdown: string) => string;
 }
