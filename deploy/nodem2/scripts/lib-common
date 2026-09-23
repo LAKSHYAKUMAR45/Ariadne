@@ -324,6 +324,29 @@ ariadne_psql() {
     return "$ariadne_psql_status"
 }
 
+# Identical contract to ariadne_psql, except the SQL text is sent on stdin
+# instead of `--command`. psql only performs `:'name'` variable interpolation
+# when it reads SQL as a script (stdin or -f); `--command`/`-c` never expands
+# it and a literal `:'ariadne_backup_*'` reaches PostgreSQL unexpanded and
+# fails with "syntax error at or near \":\"". Values still only ever reach the
+# server through `--set name=value`, so this keeps the same parameter-safety
+# contract as ariadne_psql: SQL text is a fixed literal here too, never built
+# from untrusted input.
+ariadne_psql_script() {
+    ariadne_psql_db=$1
+    ariadne_psql_sql=$2
+    shift 2
+    printf '%s\n' "$ariadne_psql_sql" | ariadne_compose exec -T postgres psql \
+        --username "$ARIADNE_DB_USER" \
+        --dbname "$ariadne_psql_db" \
+        --no-psqlrc --quiet --tuples-only --no-align \
+        --set ON_ERROR_STOP=1 \
+        "$@"
+    ariadne_psql_status=$?
+    unset ariadne_psql_db ariadne_psql_sql
+    return "$ariadne_psql_status"
+}
+
 # Sanitises any value taken from the database before it reaches metadata so a
 # hostile string can never be embedded in JSON.
 ariadne_safe_token() {
@@ -642,7 +665,7 @@ SET
   created_at = backup_records.created_at,
   verified_at = COALESCE(EXCLUDED.verified_at, backup_records.verified_at),
   restore_verification_message = EXCLUDED.restore_verification_message"
-    ariadne_psql "$ARIADNE_DB_NAME" "$ariadne_backup_sql" \
+    ariadne_psql_script "$ARIADNE_DB_NAME" "$ariadne_backup_sql" \
         --set=ariadne_backup_filename="$ariadne_record_base.dump" \
         --set=ariadne_backup_sha256="$ariadne_record_sum" \
         --set=ariadne_backup_size_bytes="$ariadne_record_bytes" \

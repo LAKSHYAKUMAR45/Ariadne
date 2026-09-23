@@ -119,7 +119,15 @@ case "$*" in
     cat > /dev/null
     exit 0 ;;
   *psql*)
-    if printf '%s' "$*" | grep -F "INSERT INTO backup_records" >/dev/null 2>&1; then
+    # ariadne_record_backup_metadata sends its SQL on stdin (ariadne_psql_script)
+    # rather than as a --command argument, so the fixed statement text is
+    # captured here and logged alongside the invocation the way it would
+    # otherwise only be visible to psql itself.
+    ariadne_psql_stdin=$(cat)
+    if [ -n "$ariadne_psql_stdin" ]; then
+      printf '%s\n' "$ariadne_psql_stdin" >> "$FAKE_DOCKER_LOG"
+    fi
+    if printf '%s\n%s' "$*" "$ariadne_psql_stdin" | grep -F "INSERT INTO backup_records" >/dev/null 2>&1; then
       ariadne_backup_filename=''
       ariadne_backup_sha256=''
       ariadne_backup_size_bytes=''
