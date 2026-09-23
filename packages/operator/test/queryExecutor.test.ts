@@ -345,6 +345,122 @@ describe('createOperatorQueryExecutor', () => {
     });
   });
 
+  it('treats offset-based since and cursor instants as equal to normalized journal timestamps', async () => {
+    const executor = createOperatorQueryExecutor({
+      fileSystem: createMemoryFileSystem(),
+      spawnImpl() {
+        const child = new FakeChildProcess();
+        process.nextTick(() => {
+          child.stdout.write(
+            `${JSON.stringify({
+              __REALTIME_TIMESTAMP: '1727086815000000',
+              PRIORITY: '6',
+              MESSAGE: 'before-offset-since',
+            })}\n`,
+          );
+          child.stdout.write(
+            `${JSON.stringify({
+              __REALTIME_TIMESTAMP: '1727086845000000',
+              PRIORITY: '6',
+              MESSAGE: 'after-offset-since',
+            })}\n`,
+          );
+          child.stdout.write(
+            `${JSON.stringify({
+              __REALTIME_TIMESTAMP: '1727086860000000',
+              PRIORITY: '6',
+              MESSAGE: 'same-instant-cursor-sequence-0',
+            })}\n`,
+          );
+          child.stdout.write(
+            `${JSON.stringify({
+              __REALTIME_TIMESTAMP: '1727086860000000',
+              PRIORITY: '6',
+              MESSAGE: 'same-instant-cursor-sequence-1',
+            })}\n`,
+          );
+          child.stdout.write(
+            `${JSON.stringify({
+              __REALTIME_TIMESTAMP: '1727086920000000',
+              PRIORITY: '6',
+              MESSAGE: 'after-offset-cursor',
+            })}\n`,
+          );
+          child.finish(0);
+        });
+        return child;
+      },
+    });
+
+    const result = await executor.execute({
+      type: 'logs_read',
+      source: 'operator',
+      limit: 10,
+      since: '2024-09-23T12:20:30+02:00',
+      cursor: Buffer.from(
+        JSON.stringify({ timestamp: '2024-09-23T12:21:00+02:00', sequence: 0 }),
+        'utf8',
+      ).toString('base64url'),
+    });
+
+    expect(result.type).toBe('logs_read');
+    expect(result.value.entries).toEqual([
+      {
+        sequence: 1,
+        timestamp: '2024-09-23T10:21:00.000Z',
+        severity: 'info',
+        message: 'same-instant-cursor-sequence-1',
+        redacted: false,
+      },
+      {
+        sequence: 0,
+        timestamp: '2024-09-23T10:22:00.000Z',
+        severity: 'info',
+        message: 'after-offset-cursor',
+        redacted: false,
+      },
+    ]);
+  });
+
+  it('passes a normalized journalctl lower bound derived from since and cursor', async () => {
+    const invocations: Array<readonly string[]> = [];
+    const executor = createOperatorQueryExecutor({
+      fileSystem: createMemoryFileSystem(),
+      spawnImpl(_file, args) {
+        invocations.push(args);
+        const child = new FakeChildProcess();
+        process.nextTick(() => child.finish(0));
+        return child;
+      },
+    });
+
+    await executor.execute({
+      type: 'logs_read',
+      source: 'deployment',
+      limit: 100,
+      since: '2024-09-23T12:20:00+02:00',
+      cursor: Buffer.from(
+        JSON.stringify({ timestamp: '2024-09-23T12:21:00+02:00', sequence: 3 }),
+        'utf8',
+      ).toString('base64url'),
+    });
+
+    expect(invocations).toEqual([
+      [
+        '--no-pager',
+        '--output',
+        'json',
+        '--utc',
+        '--unit',
+        'ariadne-operator.service',
+        '--identifier',
+        'ariadne-deploy',
+        '--since',
+        '2024-09-23T10:21:00.000Z',
+      ],
+    ]);
+  });
+
   it('verifies backup metadata and returns a readable stream without exposing its path', async () => {
     const dumpPath = '/var/backups/ariadne/ariadne-20260923T032200Z.dump';
     const dumpContents = 'backup-bytes';

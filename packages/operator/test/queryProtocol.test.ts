@@ -16,12 +16,12 @@ describe('parseOperatorQuery', () => {
         type: 'logs_read',
         source: 'sync-server',
         cursor: encodeCursor({
-          timestamp: '2026-09-23T03:22:54Z',
+          timestamp: '2026-09-23T05:22:54+02:00',
           sequence: 7,
         }),
         limit: 100,
         severity: 'warning',
-        since: '2026-09-23T03:00:00Z',
+        since: '2026-09-23T05:00:00+02:00',
       },
     ];
 

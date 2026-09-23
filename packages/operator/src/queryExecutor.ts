@@ -526,6 +526,28 @@ function sourceArgs(source: OperatorQuery & { type: 'logs_read' }): string[] {
   }
 }
 
+function parseInstantEpochMs(value: string): number {
+  const epochMs = Date.parse(value);
+  if (!Number.isFinite(epochMs)) {
+    throw toInvalidResult('Log source is unavailable');
+  }
+  return epochMs;
+}
+
+function resolveLogLowerBoundIso(
+  query: Extract<OperatorQuery, { type: 'logs_read' }>,
+  decodedCursor: { timestamp: string; sequence: number } | null,
+): string | null {
+  const sinceEpochMs = query.since ? parseInstantEpochMs(query.since) : null;
+  const cursorEpochMs = decodedCursor ? parseInstantEpochMs(decodedCursor.timestamp) : null;
+
+  if (sinceEpochMs === null && cursorEpochMs === null) {
+    return null;
+  }
+
+  return new Date(Math.max(sinceEpochMs ?? 0, cursorEpochMs ?? 0)).toISOString();
+}
+
 function priorityToSeverity(priority: string): OperatorLogSeverity {
   const value = Number.parseInt(priority, 10);
   if (value <= 3) {
@@ -588,6 +610,8 @@ async function readLogs(
   maxLogLineBytes: number,
   query: Extract<OperatorQuery, { type: 'logs_read' }>,
 ): Promise<LogsReadResult> {
+  const decodedCursor = query.cursor === undefined ? null : decodeOperatorLogCursor(query.cursor);
+  const lowerBoundIso = resolveLogLowerBoundIso(query, decodedCursor);
   const command = await runCommand(
     spawnImpl,
     clock,
@@ -595,11 +619,11 @@ async function readLogs(
     timeoutMs,
     outputLimitBytes,
     JOURNALCTL,
-    sourceArgs(query),
+    lowerBoundIso === null ? sourceArgs(query) : [...sourceArgs(query), '--since', lowerBoundIso],
   );
 
-  const cursor = query.cursor ?? null;
-  const decodedCursor = cursor === null ? null : decodeOperatorLogCursor(cursor);
+  const sinceEpochMs = query.since ? parseInstantEpochMs(query.since) : null;
+  const cursorEpochMs = decodedCursor ? parseInstantEpochMs(decodedCursor.timestamp) : null;
 
   const matchedEntries: LogsReadResult['entries'] = [];
   let jsonBytes = Buffer.byteLength('{"entries":[],"nextCursor":null}', 'utf8');
@@ -624,6 +648,7 @@ async function readLogs(
     }
 
     const timestamp = microsToIso(entry.data.__REALTIME_TIMESTAMP);
+    const timestampEpochMs = parseInstantEpochMs(timestamp);
     if (timestamp === currentTimestamp) {
       currentSequence += 1;
     } else {
@@ -631,13 +656,13 @@ async function readLogs(
       currentSequence = 0;
     }
 
-    if (query.since && timestamp < query.since) {
+    if (sinceEpochMs !== null && timestampEpochMs < sinceEpochMs) {
       continue;
     }
     if (
       decodedCursor &&
-      (timestamp < decodedCursor.timestamp ||
-        (timestamp === decodedCursor.timestamp && currentSequence <= decodedCursor.sequence))
+      (timestampEpochMs < (cursorEpochMs ?? 0) ||
+        (timestampEpochMs === cursorEpochMs && currentSequence <= decodedCursor.sequence))
     ) {
       continue;
     }
