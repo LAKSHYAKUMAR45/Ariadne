@@ -28,6 +28,7 @@ ARIADNE_LOG_TAG=ariadne-restore
 APP_STOPPED=0
 SAFETY_BACKUP=""
 CANONICAL_DB_RETIRED=0
+PROMOTION_SUCCEEDED=0
 PROMOTION_RECOVERED=0
 PROMOTION_RECOVERY_COMMAND=""
 RETIRED_DB=""
@@ -36,15 +37,22 @@ on_exit() {
     status=$?
     ariadne_discard_partial "$ARIADNE_PARTIAL_BACKUP"
     if [ "$status" -ne 0 ] && [ "$APP_STOPPED" -eq 1 ]; then
+        if [ "$PROMOTION_SUCCEEDED" -eq 1 ]; then
+            log "stopping the application again so recovery starts from a known state"
+            if ! ariadne_compose stop sync-server >/dev/null 2>&1; then
+                log "failed to confirm the application is stopped; stop sync-server before recovery"
+            fi
+        fi
         log "the application is stopped and was NOT restarted"
         log "safety backup basename: $SAFETY_BACKUP.dump"
-        if [ "$CANONICAL_DB_RETIRED" -eq 1 ]; then
-            if [ "$PROMOTION_RECOVERED" -eq 1 ]; then
-                log "the previous database was restored to the canonical name $ARIADNE_DB_NAME"
-                log "next command: $ARIADNE_RESTART_SYNC_SERVER_COMMAND"
-            else
-                log "recover the canonical database name with: $PROMOTION_RECOVERY_COMMAND"
-            fi
+        if [ "$PROMOTION_RECOVERED" -eq 1 ]; then
+            log "the previous database was restored to the canonical name $ARIADNE_DB_NAME"
+            log "next command: $ARIADNE_RESTART_SYNC_SERVER_COMMAND"
+        elif [ "$CANONICAL_DB_RETIRED" -eq 1 ]; then
+            log "recover the canonical database name with: $PROMOTION_RECOVERY_COMMAND"
+        elif [ "$PROMOTION_SUCCEEDED" -eq 1 ]; then
+            log "the restored database is still published as $ARIADNE_DB_NAME"
+            log "recover with: ARIADNE_RESTORE_CONFIRM=$SAFETY_BACKUP.dump $ARIADNE_RESTORE_COMMAND $SAFETY_BACKUP.dump"
         else
             log "recover with: ARIADNE_RESTORE_CONFIRM=$SAFETY_BACKUP.dump $ARIADNE_RESTORE_COMMAND $SAFETY_BACKUP.dump"
         fi
@@ -123,11 +131,14 @@ if ! ariadne_psql "$ARIADNE_MAINTENANCE_DB" \
     log "promotion failed; attempting to restore the previous database name"
     if ariadne_psql "$ARIADNE_MAINTENANCE_DB" \
         "ALTER DATABASE $RETIRED_DB RENAME TO $ARIADNE_DB_NAME" >/dev/null; then
+        CANONICAL_DB_RETIRED=0
         PROMOTION_RECOVERED=1
         fail "failed to promote the restored database; the previous database was renamed back to $ARIADNE_DB_NAME"
     fi
     fail "failed to promote the restored database; rename $RETIRED_DB back to $ARIADNE_DB_NAME before using the safety backup"
 fi
+CANONICAL_DB_RETIRED=0
+PROMOTION_SUCCEEDED=1
 
 log "starting the application"
 ariadne_compose up -d --no-deps sync-server || fail "the application failed to start"

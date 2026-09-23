@@ -666,6 +666,41 @@ describe('restore-backup script', () => {
     expect(readLog(harness.curlLog).join('\n')).toContain('/healthz');
   });
 
+  it('stops the app and prints safety-backup restore steps when health fails after promotion', () => {
+    const harness = createHarness();
+    const base = seedBackup(harness, '20260301T021500Z');
+
+    const result = runScript(harness, 'restore-backup', {
+      args: [`${base}.dump`],
+      env: { ...confirmEnv(base), FAKE_CURL_EXIT: '1' },
+    });
+
+    expect(result.status).not.toBe(0);
+
+    const docker = readLog(harness.dockerLog);
+    const stopLines = docker.filter((line) => line.includes('stop sync-server'));
+    const promoteIndex = indexOfMatch(
+      docker,
+      'ALTER DATABASE ariadne_sync_restore_20260401t021500z RENAME TO ariadne_sync',
+    );
+    const restartIndex = indexOfMatch(docker, 'up -d --no-deps sync-server');
+    expect(promoteIndex).toBeGreaterThanOrEqual(0);
+    expect(restartIndex).toBeGreaterThan(promoteIndex);
+    expect(stopLines).toHaveLength(2);
+
+    const text = output(result);
+    expect(text).toContain('the application is stopped and was NOT restarted');
+    expect(text).toContain(`safety backup basename: ariadne-${NOW_STAMP}.dump`);
+    expect(text).toContain(
+      `ARIADNE_RESTORE_CONFIRM=ariadne-${NOW_STAMP}.dump /usr/local/lib/ariadne/restore-backup ariadne-${NOW_STAMP}.dump`,
+    );
+    expect(text).not.toContain('ALTER DATABASE ariadne_sync_prerestore_20260401t021500z RENAME TO ariadne_sync');
+    expect(text).not.toContain('/usr/local/lib/ariadne/restart-sync-server');
+    expect(text).not.toContain(JWT_SECRET_VALUE);
+    expect(text).not.toContain(POSTGRES_PASSWORD_VALUE);
+    expect(text).not.toContain(KEY_MATERIAL_VALUE);
+  });
+
   it('leaves the application stopped and prints the exact recovery command on failure', () => {
     const harness = createHarness();
     const base = seedBackup(harness, '20260301T021500Z');
