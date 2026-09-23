@@ -226,4 +226,43 @@ describe('Ariadne webview panel', () => {
 
     expect(postedMessages).toContainEqual({ type: 'stateUpdate', state: responseState });
   });
+
+  it('refreshAriadnePanel posts the current workspace state', async () => {
+    const { openAriadnePanel, refreshAriadnePanel } = await loadPanelModule();
+
+    const refreshedState = {
+      workspaceRoot: '/workspace',
+      currentTaskId: 'task-refreshed',
+      currentTask: undefined,
+      tasks: [],
+      checkpoints: [],
+      todos: [],
+      decisions: [],
+      errors: [],
+      questions: [],
+      fileCaptures: [],
+      searchResults: [],
+      counts: { pendingTodos: 0, unresolvedErrors: 0, openQuestions: 0 },
+    };
+
+    const deps = {
+      openStoreForCurrentWorkspace: () => ({}) as never,
+      getCurrentTaskId: () => 'task-refreshed',
+      setCurrentTask: () => {},
+      setCurrentTaskInWorkspace: () => {},
+      resolveWorkspaceRoot: () => '/workspace',
+      output: { appendLine: (line: string) => outputLines.push(line) } as never,
+      logError: (_context: string, err: unknown) => (err instanceof Error ? err.message : String(err)),
+      refreshHost: () => {},
+      openExportedMarkdown: mocks.openExportedMarkdown,
+    };
+
+    openAriadnePanel({ extensionUri: { fsPath: '/extension' } } as never, deps);
+    postedMessages = [];
+    mocks.buildWebviewState.mockReturnValue(refreshedState);
+
+    refreshAriadnePanel();
+
+    expect(postedMessages).toContainEqual({ type: 'stateUpdate', state: refreshedState });
+  });
 });

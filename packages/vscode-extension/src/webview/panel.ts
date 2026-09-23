@@ -227,5 +227,5 @@ export function openAriadnePanel(context: vscode.ExtensionContext, deps: Ariadne
 
 export function refreshAriadnePanel(): void {
   if (!panel || !panelDeps) return;
-  postStateUpdate();
+  postStateUpdate(currentState());
 }
