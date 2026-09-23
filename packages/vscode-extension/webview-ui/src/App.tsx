@@ -1,11 +1,15 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { CSSProperties } from 'react';
-import type { Task, TaskFileCaptureWithEntries } from '@host/messages';
+import type { Task } from '@host/messages';
 import type { AriadneBridge } from './bridge';
 import type { WebviewState } from '@host/messages';
 import { DecisionsPanel, ErrorsPanel, QuestionsPanel, TodosPanel } from './panels/EntityPanels';
+import OverviewPanel from './panels/OverviewPanel';
+import FilesPanel from './panels/FilesPanel';
+import SearchPanel from './panels/SearchPanel';
+import SyncPanel from './panels/SyncPanel';
 
-type TabId = 'overview' | 'todos' | 'decisions' | 'errors' | 'questions' | 'files';
+type TabId = 'overview' | 'todos' | 'decisions' | 'errors' | 'questions' | 'files' | 'search' | 'sync';
 
 interface AppProps {
   bridge: AriadneBridge;
@@ -24,6 +28,8 @@ const tabs: Array<{ id: TabId; label: string }> = [
   { id: 'errors', label: 'Errors' },
   { id: 'questions', label: 'Questions' },
   { id: 'files', label: 'Files' },
+  { id: 'search', label: 'Search' },
+  { id: 'sync', label: 'Sync' },
 ];
 
 function readError(error: unknown): string {
@@ -89,7 +95,6 @@ export default function App({ bridge, initialState }: AppProps) {
     [taskFilter, visibleTasks],
   );
 
-  const currentTask = state?.currentTask;
   function handlePanelError(message: string): void {
     setBanner(message ? { kind: 'error', message } : null);
   }
@@ -152,25 +157,9 @@ export default function App({ bridge, initialState }: AppProps) {
   }
 
   const tabContent = (() => {
-    if (!currentTask) {
-      return <p>No task selected.</p>;
-    }
-
     switch (activeTab) {
       case 'overview':
-        return (
-          <>
-            <p>
-              <strong>{currentTask.title}</strong>
-            </p>
-            <p>{taskSummary(currentTask)}</p>
-            <p>Workspace: {state?.workspaceRoot ?? 'Unknown'}</p>
-            <p>
-              Counts: {state?.counts.pendingTodos ?? 0} pending todos, {state?.counts.unresolvedErrors ?? 0} unresolved errors,{' '}
-              {state?.counts.openQuestions ?? 0} open questions
-            </p>
-          </>
-        );
+        return state ? <OverviewPanel state={state} /> : <p>No task selected.</p>;
       case 'todos':
         return <TodosPanel state={state} bridge={bridge} onBusy={setBusyLabel} onError={handlePanelError} />;
       case 'decisions':
@@ -180,17 +169,11 @@ export default function App({ bridge, initialState }: AppProps) {
       case 'questions':
         return <QuestionsPanel state={state} bridge={bridge} onBusy={setBusyLabel} onError={handlePanelError} />;
       case 'files':
-        return (
-          state?.fileCaptures.length ? (
-            <ul>
-              {state.fileCaptures.map((capture) => (
-                <li key={capture.id}>{`${capture.id} · ${capture.entries.length} file(s)`}</li>
-              ))}
-            </ul>
-          ) : (
-            <p>No file captures recorded for the current task.</p>
-          )
-        );
+        return state ? <FilesPanel bridge={bridge} captures={state.fileCaptures} /> : <p>No task selected.</p>;
+      case 'search':
+        return <SearchPanel bridge={bridge} initialResults={state?.searchResults ?? []} />;
+      case 'sync':
+        return <SyncPanel bridge={bridge} />;
       default:
         return null;
     }
