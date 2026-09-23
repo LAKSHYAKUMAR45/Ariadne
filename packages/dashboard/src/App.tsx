@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useCallback, useRef, useState, type MouseEvent } from 'react';
 import { AuthProvider, useAuth } from './auth/AuthProvider';
 import { LoginPage } from './auth/LoginPage';
 import { MembersPage } from './members/MembersPage';
@@ -34,14 +34,23 @@ const sections: ReadonlyArray<{ id: Section; label: string; glyph: string }> = [
 function ConsoleShell() {
   const { error, logout, session } = useAuth();
   const [section, setSection] = useState<Section>('overview');
+  const mainRef = useRef<HTMLElement | null>(null);
 
   if (!session) {
     return null;
   }
 
+  const activeSection = sections.find((item) => item.id === section);
+
+  const skipToContent = useCallback((event: MouseEvent<HTMLAnchorElement>) => {
+    event.preventDefault();
+    window.history.replaceState(null, '', '#main-content');
+    mainRef.current?.focus();
+  }, []);
+
   return (
     <div className="app-shell">
-      <a className="skip-link" href="#main-content">Skip to content</a>
+      <a className="skip-link" href="#main-content" onClick={skipToContent}>Skip to content</a>
       <aside className="sidebar">
         <div className="brand-lockup">
           <span className="brand-mark" aria-hidden="true">A</span>
@@ -80,7 +89,13 @@ function ConsoleShell() {
           </button>
         </div>
       </aside>
-      <main id="main-content" className="main-content">
+      <main
+        ref={mainRef}
+        id="main-content"
+        className="main-content"
+        tabIndex={-1}
+        aria-label={`${activeSection?.label ?? 'Operations console'} section`}
+      >
         {error ? <div className="notice notice--error" role="alert">{error}</div> : null}
         {section === 'overview' ? <OverviewPage /> : null}
         {section === 'members' ? <MembersPage /> : null}

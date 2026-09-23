@@ -1,4 +1,4 @@
-import { useState, type ChangeEvent, type FormEvent } from 'react';
+import { useEffect, useRef, useState, type ChangeEvent, type FormEvent } from 'react';
 import { useAuth } from './AuthProvider';
 
 export function LoginPage() {
@@ -6,6 +6,13 @@ export function LoginPage() {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [submitting, setSubmitting] = useState(false);
+  const errorRef = useRef<HTMLParagraphElement | null>(null);
+
+  useEffect(() => {
+    if (error) {
+      errorRef.current?.focus();
+    }
+  }, [error]);
 
   async function submit(event: FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
@@ -15,6 +22,8 @@ export function LoginPage() {
     try {
       await login(username, password);
       setPassword('');
+    } catch {
+      // AuthProvider surfaces the structured failure message for the form.
     } finally {
       setSubmitting(false);
     }
@@ -31,7 +40,7 @@ export function LoginPage() {
   }
 
   return (
-    <main className="login-shell">
+    <main className="login-shell" aria-label="Administrator sign in">
       <section className="login-story" aria-labelledby="login-title">
         <div className="brand-lockup brand-lockup--large">
           <span className="brand-mark" aria-hidden="true">A</span>
@@ -74,7 +83,11 @@ export function LoginPage() {
             value={password}
             onChange={updatePassword}
           />
-          {error ? <p className="form-error" role="alert">{error}</p> : null}
+          {error ? (
+            <p ref={errorRef} className="form-error" role="alert" tabIndex={-1}>
+              {error}
+            </p>
+          ) : null}
           <button className="primary-action" type="submit" disabled={submitting}>
             {submitting ? 'Signing in...' : 'Open console'}
           </button>

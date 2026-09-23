@@ -1,4 +1,13 @@
-import { useEffect, useId, useRef, useState, type FormEvent, type ReactNode } from 'react';
+import {
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+  type FormEvent,
+  type KeyboardEvent,
+  type ReactNode,
+} from 'react';
 import type { ConfirmationRequest } from '../api/types';
 
 interface ConfirmationDialogProps {
@@ -11,6 +20,20 @@ interface ConfirmationDialogProps {
   onConfirm: (input: { confirmation: string; password?: string }) => Promise<void>;
 }
 
+const FOCUSABLE_SELECTOR = [
+  'button:not([disabled])',
+  'input:not([disabled])',
+  'select:not([disabled])',
+  'textarea:not([disabled])',
+  '[href]',
+  '[tabindex]:not([tabindex="-1"])',
+].join(', ');
+
+function focusableElements(root: ParentNode): HTMLElement[] {
+  return [...root.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)]
+    .filter((element) => !element.hasAttribute('disabled') && element.tabIndex !== -1);
+}
+
 export function ConfirmationDialog({
   request,
   busy,
@@ -21,11 +44,15 @@ export function ConfirmationDialog({
   onConfirm,
 }: ConfirmationDialogProps) {
   const titleId = useId();
+  const descriptionId = useId();
+  const errorId = useId();
   const confirmationId = useId();
   const passwordId = useId();
+  const dialogRef = useRef<HTMLElement | null>(null);
   const confirmationRef = useRef<HTMLInputElement | null>(null);
   const passwordRef = useRef<HTMLInputElement | null>(null);
   const cancelRef = useRef<HTMLButtonElement | null>(null);
+  const errorRef = useRef<HTMLParagraphElement | null>(null);
   const restoreTargetRef = useRef<HTMLElement | null>(null);
   const [confirmation, setConfirmation] = useState('');
   const [password, setPassword] = useState('');
@@ -35,6 +62,10 @@ export function ConfirmationDialog({
     !busy &&
     (!requiresConfirmation || confirmation === request.expectedConfirmation) &&
     (!request.requiresReauthentication || password.length > 0);
+  const describedBy = useMemo(
+    () => (error ? `${descriptionId} ${errorId}` : descriptionId),
+    [descriptionId, error, errorId],
+  );
 
   useEffect(() => {
     restoreTargetRef.current = document.activeElement instanceof HTMLElement
@@ -60,8 +91,45 @@ export function ConfirmationDialog({
     requiresConfirmation,
   ]);
 
+  useEffect(() => {
+    if (error) {
+      errorRef.current?.focus();
+    }
+  }, [error]);
+
   function restoreFocus(): void {
     restoreTargetRef.current?.focus();
+  }
+
+  function handleKeyDown(event: KeyboardEvent<HTMLElement>): void {
+    if (event.key !== 'Tab') {
+      return;
+    }
+
+    const root = dialogRef.current;
+    if (!root) {
+      return;
+    }
+
+    const elements = focusableElements(root);
+    if (elements.length === 0) {
+      return;
+    }
+
+    const first = elements[0];
+    const last = elements[elements.length - 1];
+    const activeElement = document.activeElement;
+
+    if (event.shiftKey && activeElement === first) {
+      event.preventDefault();
+      last.focus();
+      return;
+    }
+
+    if (!event.shiftKey && activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
   }
 
   async function submit(event: FormEvent<HTMLFormElement>): Promise<void> {
@@ -82,10 +150,18 @@ export function ConfirmationDialog({
 
   return (
     <div className="dialog-backdrop">
-      <section className="reauth-dialog" role="dialog" aria-modal="true" aria-labelledby={titleId}>
+      <section
+        ref={dialogRef}
+        className="reauth-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        aria-describedby={describedBy}
+        onKeyDown={handleKeyDown}
+      >
         <p className="eyebrow">Protected action</p>
         <h2 id={titleId}>{request.title}</h2>
-        <p>{request.impact}</p>
+        <p id={descriptionId}>{request.impact}</p>
         {children}
         <form onSubmit={(event) => void submit(event)}>
           {requiresConfirmation ? (
@@ -117,7 +193,11 @@ export function ConfirmationDialog({
               />
             </>
           ) : null}
-          {error ? <p className="form-error" role="alert">{error}</p> : null}
+          {error ? (
+            <p ref={errorRef} id={errorId} className="form-error" role="alert" tabIndex={-1}>
+              {error}
+            </p>
+          ) : null}
           <div className="dialog-actions">
             <button ref={cancelRef} className="quiet-action" type="button" onClick={cancel}>
               Cancel

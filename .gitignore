@@ -10,3 +10,5 @@ coverage/
 *.vsix
 .superpowers/
 .worktrees/
+playwright-report/
+test-results/
