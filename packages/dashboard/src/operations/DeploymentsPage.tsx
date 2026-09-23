@@ -315,7 +315,11 @@ export function DeploymentsPage() {
         ) : (
           <div className="data-list">
             {recentOperations.map((operation) => (
-              <article className="data-row data-row--stacked" key={operation.id}>
+              <article
+                id={`operation-${operation.id}`}
+                className="data-row data-row--stacked"
+                key={operation.id}
+              >
                 <span className="status-dot status-dot--good" />
                 <div className="data-main">
                   <strong>{operation.summary}</strong>

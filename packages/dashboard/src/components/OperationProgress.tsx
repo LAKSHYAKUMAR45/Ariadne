@@ -39,7 +39,11 @@ export function OperationProgress({
       : 'Waiting for the persisted operation state.';
 
   return (
-    <section className="panel data-panel" aria-label="Operation progress">
+    <section
+      id={`operation-${operationId}`}
+      className="panel data-panel"
+      aria-label="Operation progress"
+    >
       <div className="table-heading">
         <strong>{summary}</strong>
         <StatusLabel status={status} />

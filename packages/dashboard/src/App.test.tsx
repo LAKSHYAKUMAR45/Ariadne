@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react';
+import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { App } from './App';
@@ -333,5 +333,79 @@ describe('Ariadne operations console', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent('The server returned an invalid response.');
     expect(api.get).not.toHaveBeenCalled();
     expect(screen.getByText('queued')).toBeVisible();
+  });
+
+  it('keeps polling beyond five attempts until the persisted operation becomes terminal and exposes a stable anchor target', async () => {
+    vi.useFakeTimers();
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation((input: RequestInfo | URL) => {
+        if (String(input) === '/api/v1/admin/operations/op-long/events') {
+          return Promise.resolve(
+            new Response(
+              new ReadableStream<Uint8Array>({
+                start(controller) {
+                  controller.close();
+                },
+              }),
+              {
+                status: 200,
+                headers: { 'Content-Type': 'text/event-stream; charset=utf-8' },
+              },
+            ),
+          );
+        }
+        return Promise.resolve(new Response(null, { status: 404 }));
+      }),
+    );
+
+    let pollCount = 0;
+    const api: AdminApiClient = {
+      get: vi.fn().mockImplementation(async () => {
+        pollCount += 1;
+        return {
+          operation: {
+            id: 'op-long',
+            requestedBy: 'admin-id',
+            type: 'backup_restore',
+            state: pollCount >= 7 ? 'succeeded' : 'running',
+            summary: 'Restore backup ariadne-20260923T032200Z.dump',
+            output: pollCount >= 7 ? 'Restore completed successfully.' : null,
+            startedAt: '2026-09-23T08:00:00.000Z',
+            completedAt: pollCount >= 7 ? '2026-09-23T08:06:00.000Z' : null,
+            createdAt: '2026-09-23T08:00:00.000Z',
+          },
+        };
+      }),
+      mutate: vi.fn(),
+      download: vi.fn(),
+    };
+
+    render(
+      <OperationProgress
+        api={api}
+        operationId="op-long"
+        initialOperation={{
+          id: 'op-long',
+          requestedBy: 'admin-id',
+          type: 'backup_restore',
+          state: 'queued',
+          summary: 'Restore backup ariadne-20260923T032200Z.dump',
+          output: null,
+          startedAt: null,
+          completedAt: null,
+          createdAt: '2026-09-23T08:00:00.000Z',
+        }}
+      />,
+    );
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(125_000);
+    });
+
+    expect(api.get).toHaveBeenCalledTimes(7);
+    expect(screen.getByText('Restore completed successfully.')).toBeVisible();
+    expect(screen.getByLabelText('Operation progress')).toHaveAttribute('id', 'operation-op-long');
   });
 });

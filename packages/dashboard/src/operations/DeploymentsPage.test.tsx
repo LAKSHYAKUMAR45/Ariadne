@@ -263,4 +263,114 @@ describe('DeploymentsPage', () => {
     expect(await screen.findByText('Restoring previous image')).toBeVisible();
     expect(await screen.findByText('Rollback healthy.')).toBeVisible();
   });
+
+  it('forces reauthentication after a stale deploy submission while preserving the selected revision confirmation', async () => {
+    let deployAttempts = 0;
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === '/api/v1/admin/session') {
+        return Promise.resolve(
+          json(sessionBody({ reauthenticatedUntil: '2026-09-23T20:00:00.000Z' })),
+        );
+      }
+      if (url === '/api/v1/admin/deployments') {
+        return Promise.resolve(
+          json({
+            currentRevision: 'a'.repeat(40),
+            rollbackRevision: 'b'.repeat(40),
+            schemaVersion: 8,
+            candidates: [
+              {
+                revision: 'c'.repeat(40),
+                committedAt: '2026-09-23T09:10:00.000Z',
+                subject: 'Ship migration hardening',
+              },
+            ],
+          }),
+        );
+      }
+      if (url === '/api/v1/admin/operations?limit=20') {
+        return Promise.resolve(json({ operations: [] }));
+      }
+      if (url === '/api/v1/admin/operations/deploy') {
+        deployAttempts += 1;
+        if (deployAttempts === 1) {
+          return Promise.resolve(
+            json({ error: { code: 'reauthentication_required', message: 'Password required' } }, 403),
+          );
+        }
+        return Promise.resolve(
+          json(
+            {
+              accepted: true,
+              operation: {
+                id: 'op-deploy-reauth',
+                requestedBy: 'admin-id',
+                type: 'deployment_apply',
+                state: 'queued',
+                summary: 'Deploy revision cccccccccccccccccccccccccccccccccccccccc',
+                output: null,
+                startedAt: null,
+                completedAt: null,
+                createdAt: '2026-09-23T09:20:00.000Z',
+              },
+            },
+            202,
+          ),
+        );
+      }
+      if (url === '/api/v1/admin/session/reauthenticate') {
+        return Promise.resolve(json({ reauthenticatedUntil: '2026-09-23T20:05:00.000Z' }));
+      }
+      if (url === '/api/v1/admin/operations/op-deploy-reauth/events') {
+        return Promise.resolve(
+          eventStream([
+            'event: operation_event\ndata: {"id":41,"operationId":"op-deploy-reauth","state":"running","message":"Running migrations","metadata":{},"createdAt":"2026-09-23T09:20:01.000Z"}\n\n',
+            'event: complete\ndata: {"operationId":"op-deploy-reauth","state":"succeeded"}\n\n',
+          ]),
+        );
+      }
+      if (url === '/api/v1/admin/operations/op-deploy-reauth') {
+        return Promise.resolve(
+          json({
+            operation: {
+              id: 'op-deploy-reauth',
+              requestedBy: 'admin-id',
+              type: 'deployment_apply',
+              state: 'succeeded',
+              summary: 'Deploy revision cccccccccccccccccccccccccccccccccccccccc',
+              output: 'Deployment healthy.',
+              startedAt: '2026-09-23T09:20:01.000Z',
+              completedAt: '2026-09-23T09:21:00.000Z',
+              createdAt: '2026-09-23T09:20:00.000Z',
+            },
+          }),
+        );
+      }
+      return Promise.resolve(new Response(null, { status: 404 }));
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const user = userEvent.setup();
+
+    renderWithProvider(<DeploymentsPage />);
+
+    await user.click(await screen.findByRole('radio', { name: /Ship migration hardening/i }));
+    await user.click(screen.getByRole('button', { name: 'Deploy selected revision' }));
+    expect(await screen.findByRole('dialog', { name: 'Deploy selected revision' })).toBeVisible();
+    expect(screen.queryByLabelText('Administrator password')).not.toBeInTheDocument();
+
+    await user.type(
+      screen.getByLabelText(`Type DEPLOY ${'c'.repeat(40)} to continue`),
+      `DEPLOY ${'c'.repeat(40)}`,
+    );
+    await user.click(screen.getByRole('button', { name: 'Continue operation' }));
+
+    expect(await screen.findByLabelText('Administrator password')).toBeVisible();
+    expect(await screen.findByDisplayValue(`DEPLOY ${'c'.repeat(40)}`)).toBeVisible();
+
+    await user.type(screen.getByLabelText('Administrator password'), 'correct horse battery staple');
+    await user.click(screen.getByRole('button', { name: 'Continue operation' }));
+
+    expect(await screen.findByText('Deployment healthy.')).toBeVisible();
+  });
 });

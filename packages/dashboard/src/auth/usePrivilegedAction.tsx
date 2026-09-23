@@ -15,6 +15,7 @@ interface PendingAction {
   body: Record<string, unknown>;
   successMessage: string;
   confirmation?: ConfirmationRequest;
+  confirmationValue?: string;
 }
 
 interface RunActionOptions {
@@ -54,6 +55,19 @@ export function usePrivilegedAction(): PrivilegedAction {
   const [dialogError, setDialogError] = useState<string | null>(null);
   const [operation, setOperation] = useState<AdminOperation | null>(null);
 
+  function requireReauthentication(action: PendingAction, confirmationValue = ''): PendingAction {
+    return {
+      ...action,
+      confirmationValue,
+      confirmation: action.confirmation
+        ? {
+            ...action.confirmation,
+            requiresReauthentication: true,
+          }
+        : REAUTH_REQUEST,
+    };
+  }
+
   async function execute(action: PendingAction, confirmation?: string): Promise<void> {
     setBusy(true);
     setError(null);
@@ -74,7 +88,7 @@ export function usePrivilegedAction(): PrivilegedAction {
       setMessage(action.successMessage);
     } catch (actionError: unknown) {
       if (actionError instanceof AdminApiError && actionError.code === 'reauthentication_required') {
-        setPending({ ...action, confirmation: action.confirmation ?? REAUTH_REQUEST });
+        setPending(requireReauthentication(action, confirmation ?? action.confirmationValue ?? ''));
         return;
       }
       setError(actionError instanceof Error ? actionError.message : 'The operation could not start.');
@@ -137,6 +151,7 @@ export function usePrivilegedAction(): PrivilegedAction {
         request={pending.confirmation}
         busy={busy}
         error={dialogError}
+        initialConfirmation={pending.confirmationValue}
         onCancel={() => {
           setPending(null);
           setDialogError(null);

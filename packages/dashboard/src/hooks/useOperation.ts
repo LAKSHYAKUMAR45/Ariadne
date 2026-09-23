@@ -12,8 +12,8 @@ import type {
   AdminOperationEvent,
 } from '../api/types';
 
-const POLL_INTERVAL_MS = 1_000;
-const MAX_POLL_ATTEMPTS = 5;
+const INITIAL_POLL_INTERVAL_MS = 1_000;
+const MAX_POLL_INTERVAL_MS = 15_000;
 
 interface UseOperationOptions {
   api: AdminApiClient;
@@ -36,6 +36,15 @@ function isTerminal(operation: AdminOperation | null): boolean {
 
 function invalidResponseError(): AdminApiError {
   return new AdminApiError(200, 'invalid_response', 'The server returned an invalid response.');
+}
+
+function isSessionFailure(error: unknown): boolean {
+  return (
+    error instanceof AdminApiError &&
+    (error.status === 401 ||
+      error.code === 'missing_session' ||
+      error.code === 'reauthentication_required')
+  );
 }
 
 function parseEventBlock(block: string): { event: string; data: unknown } | null {
@@ -139,7 +148,21 @@ export function useOperation({
       );
     }
 
-    async function poll(attempt: number): Promise<void> {
+    function schedulePoll(delayMs: number): void {
+      if (disposed) {
+        return;
+      }
+
+      if (timeoutId !== null) {
+        window.clearTimeout(timeoutId);
+      }
+
+      timeoutId = window.setTimeout(() => {
+        void poll(delayMs);
+      }, delayMs);
+    }
+
+    async function poll(delayMs: number): Promise<void> {
       if (disposed) {
         return;
       }
@@ -148,7 +171,7 @@ export function useOperation({
 
       try {
         const current = await reloadOperation();
-        if (!current || isTerminal(current) || attempt + 1 >= MAX_POLL_ATTEMPTS) {
+        if (!current || isTerminal(current)) {
           setPolling(false);
           return;
         }
@@ -156,13 +179,24 @@ export function useOperation({
         if (!disposed) {
           setError(pollError instanceof Error ? pollError.message : 'Unable to refresh the operation state.');
         }
+        if (isSessionFailure(pollError)) {
+          setPolling(false);
+          return;
+        }
+        schedulePoll(Math.min(delayMs * 2, MAX_POLL_INTERVAL_MS));
+        return;
+      }
+
+      if (!disposed) {
+        setError(null);
+      }
+
+      if (disposed) {
         setPolling(false);
         return;
       }
 
-      timeoutId = window.setTimeout(() => {
-        void poll(attempt + 1);
-      }, POLL_INTERVAL_MS);
+      schedulePoll(Math.min(delayMs * 2, MAX_POLL_INTERVAL_MS));
     }
 
     async function handleTerminalEvent(_event: AdminOperationCompleteEvent): Promise<void> {
@@ -252,7 +286,7 @@ export function useOperation({
         setLive(false);
 
         if (!completed && !disposed) {
-          void poll(0);
+          void poll(INITIAL_POLL_INTERVAL_MS);
         }
       } catch (streamError: unknown) {
         if (controller.signal.aborted || disposed) {
@@ -271,7 +305,7 @@ export function useOperation({
             ? streamError.message
             : 'Live updates disconnected; retrying persisted status.',
         );
-        void poll(0);
+        void poll(INITIAL_POLL_INTERVAL_MS);
       }
     }
 

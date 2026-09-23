@@ -78,11 +78,7 @@ export function ServicesPage() {
       if (controller.signal.aborted || reconnectControllerRef.current !== controller) {
         return;
       }
-      setReconnectedOperation(
-        response.operations.find(
-          (operation) => operation.type === 'service_restart' && isOperationActive(operation),
-        ) ?? null,
-      );
+      setReconnectedOperation(response.operations.find((operation) => isOperationActive(operation)) ?? null);
     } catch (reconnectError: unknown) {
       if (isAbortError(reconnectError)) {
         return;

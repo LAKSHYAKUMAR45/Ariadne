@@ -5,6 +5,7 @@ interface ConfirmationDialogProps {
   request: ConfirmationRequest;
   busy: boolean;
   error: string | null;
+  initialConfirmation?: string;
   children?: ReactNode;
   onCancel: () => void;
   onConfirm: (input: { confirmation: string; password?: string }) => Promise<void>;
@@ -14,6 +15,7 @@ export function ConfirmationDialog({
   request,
   busy,
   error,
+  initialConfirmation = '',
   children,
   onCancel,
   onConfirm,
@@ -38,7 +40,7 @@ export function ConfirmationDialog({
     restoreTargetRef.current = document.activeElement instanceof HTMLElement
       ? document.activeElement
       : null;
-    setConfirmation('');
+    setConfirmation(initialConfirmation);
     setPassword('');
 
     const focusTarget = requiresConfirmation
@@ -51,7 +53,12 @@ export function ConfirmationDialog({
     return () => {
       restoreTargetRef.current?.focus();
     };
-  }, [request.expectedConfirmation, request.requiresReauthentication, requiresConfirmation]);
+  }, [
+    initialConfirmation,
+    request.expectedConfirmation,
+    request.requiresReauthentication,
+    requiresConfirmation,
+  ]);
 
   function restoreFocus(): void {
     restoreTargetRef.current?.focus();
