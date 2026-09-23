@@ -334,6 +334,48 @@ describe('sync-server: admin dashboard sessions', () => {
       expect(forged.body.error.code).toBe('invalid_session');
     });
 
+    it('rotates the CSRF token on session restore and keeps only its hash', async () => {
+      await seedTeam();
+      const session = await login();
+      const before = await pool.query<{ csrf_hash: string }>(
+        'SELECT csrf_hash FROM admin_sessions WHERE token_hash = $1',
+        [hashSessionToken(session.sessionToken)],
+      );
+
+      const restored = await request(app)
+        .get('/api/v1/admin/session')
+        .set('Cookie', session.cookieHeader)
+        .expect(200);
+      const csrfToken = restored.body.csrfToken as string;
+
+      expect(csrfToken).toMatch(/^[0-9a-f]{64}$/);
+      expect(csrfToken).not.toBe(session.csrfToken);
+      expect(JSON.stringify(restored.body)).not.toContain(session.sessionToken);
+
+      const after = await pool.query<{ csrf_hash: string }>(
+        'SELECT csrf_hash FROM admin_sessions WHERE token_hash = $1',
+        [hashSessionToken(session.sessionToken)],
+      );
+      expect(after.rows[0].csrf_hash).toBe(hashSessionToken(csrfToken));
+      expect(after.rows[0].csrf_hash).not.toBe(csrfToken);
+      expect(after.rows[0].csrf_hash).not.toBe(before.rows[0].csrf_hash);
+
+      const oldToken = await request(app)
+        .post('/api/v1/admin/session/reauthenticate')
+        .set(session.headers)
+        .send({ password: ADMIN_PASSWORD });
+      expect(oldToken.status).toBe(403);
+      expect(oldToken.body.error.code).toBe('csrf_failed');
+
+      const newToken = await request(app)
+        .post('/api/v1/admin/session/reauthenticate')
+        .set('Cookie', session.cookieHeader)
+        .set('Origin', ALLOWED_ORIGIN)
+        .set('X-CSRF-Token', csrfToken)
+        .send({ password: ADMIN_PASSWORD });
+      expect(newToken.status).toBe(200);
+    });
+
     it('rejects expired and revoked sessions', async () => {
       await seedTeam();
       const expired = await login();
@@ -711,6 +753,72 @@ describe('sync-server: admin dashboard sessions', () => {
           .send({ username: 'dash-admin', password: 'wrong-password' });
         expect(res.status).toBe(401);
       }
+    });
+
+    it('writes one rate-limited audit row per blocked login window', async () => {
+      await seedTeam();
+      const limitedRateLimiter = createAdminAuthRateLimiter({ limit: 2, windowMs: 5_000 });
+      const limitedApp = createApp(pool, TEST_JWT_SECRET, {
+        encryptionKeyring: createTestEncryptionKeyring(),
+        adminPublicOrigin: ALLOWED_ORIGIN,
+        adminCookieSecure: true,
+        adminAuthRateLimiter: limitedRateLimiter,
+      });
+
+      async function exhaustThenBlock(): Promise<void> {
+        for (let attempt = 0; attempt < 2; attempt += 1) {
+          await request(limitedApp)
+            .post('/api/v1/admin/session')
+            .set('Origin', ALLOWED_ORIGIN)
+            .send({ username: 'dash-admin', password: 'wrong-password' })
+            .expect(401);
+        }
+      }
+
+      await exhaustThenBlock();
+
+      await request(limitedApp)
+        .post('/api/v1/admin/session')
+        .set('Origin', ALLOWED_ORIGIN)
+        .send({ username: 'dash-admin', password: 'wrong-password' })
+        .expect(429);
+      await request(limitedApp)
+        .post('/api/v1/admin/session')
+        .set('Origin', ALLOWED_ORIGIN)
+        .send({ username: 'dash-admin', password: ADMIN_PASSWORD })
+        .expect(429);
+
+      let audit = await pool.query<{ outcome: string; metadata: { reason?: string } | null }>(
+        `SELECT outcome, metadata
+           FROM admin_audit_events
+          WHERE action = 'admin_session_login'
+          ORDER BY created_at ASC`,
+      );
+      expect(
+        audit.rows.filter((row) => row.outcome === 'failed' && row.metadata?.reason === 'invalid_credentials'),
+      ).toHaveLength(2);
+      expect(
+        audit.rows.filter((row) => row.outcome === 'failed' && row.metadata?.reason === 'rate_limited'),
+      ).toHaveLength(1);
+
+      await new Promise((resolve) => setTimeout(resolve, 5_100));
+
+      await exhaustThenBlock();
+      await request(limitedApp)
+        .post('/api/v1/admin/session')
+        .set('Origin', ALLOWED_ORIGIN)
+        .send({ username: 'dash-admin', password: 'wrong-password' })
+        .expect(429);
+
+      audit = await pool.query<{ outcome: string; metadata: { reason?: string } | null }>(
+        `SELECT outcome, metadata
+           FROM admin_audit_events
+          WHERE action = 'admin_session_login'
+          ORDER BY created_at ASC`,
+      );
+      expect(
+        audit.rows.filter((row) => row.outcome === 'failed' && row.metadata?.reason === 'rate_limited'),
+      ).toHaveLength(2);
     });
 
     it('keeps the attempt table bounded and prunes expired windows', () => {

@@ -3578,6 +3578,21 @@ describe('sync-server: admin operator operations', () => {
       expect(await store.listOperationEvents(operationId)).toHaveLength(1);
     });
 
+    it('rejects a dashboard session cookie when the callback token is absent', async () => {
+      const operationId = await queueOperation('cb-cookie-without-token');
+      const cookieOnlySession = await openAdminSession(failClosedApp, 'ops-admin');
+
+      const res = await request(callbackApp)
+        .post(`/api/v1/admin/operations/${operationId}/callback`)
+        .set('Cookie', cookieOnlySession.Cookie)
+        .send({ operationId, state: 'running' });
+
+      expect(res.status).toBe(403);
+      expect(res.body.error.code).toBe('callback_forbidden');
+      expect((await store.getOperation(operationId))?.state).toBe('queued');
+      expect(await store.listOperationEvents(operationId)).toHaveLength(1);
+    });
+
     it('fails closed when no callback credential is provisioned', async () => {
       const operationId = await queueOperation('cb-unconfigured');
       callbackToken = null;

@@ -17,6 +17,7 @@ import {
   rateLimiterKey,
   recordAdminAuthAuditEvent,
   revokeAdminSession,
+  rotateAdminSessionCsrf,
   serializeAdminSessionCookie,
   serializeClearedAdminSessionCookie,
   type AdminAuthRateLimiter,
@@ -140,12 +141,14 @@ export function createAdminAuthRouter(pool: Pool, options: AdminAuthRouterOption
       const key = rateLimiterKey(username, req.ip);
       const decision = rateLimiter.check(key);
       if (!decision.allowed) {
-        await recordAdminAuthAuditEvent(pool, {
-          actorUserId: null,
-          action: ADMIN_LOGIN_ACTION,
-          outcome: 'failed',
-          reason: 'rate_limited',
-        });
+        if (rateLimiter.shouldAuditRateLimit(key)) {
+          await recordAdminAuthAuditEvent(pool, {
+            actorUserId: null,
+            action: ADMIN_LOGIN_ACTION,
+            outcome: 'failed',
+            reason: 'rate_limited',
+          });
+        }
         sendRateLimited(res, decision.retryAfterSeconds);
         return;
       }
@@ -200,10 +203,12 @@ export function createAdminAuthRouter(pool: Pool, options: AdminAuthRouterOption
     asyncHandler(async (req: AdminSessionRequest, res: Response) => {
       const session = req.adminSession!;
       const username = await loadUsername(pool, session.userId);
+      const csrfToken = await rotateAdminSessionCsrf(pool, session.id);
       res.setHeader('Cache-Control', 'no-store');
       res.status(200).json({
         userId: session.userId,
         username,
+        csrfToken,
         reauthenticatedUntil: session.reauthenticatedUntil,
       });
     }),
@@ -239,12 +244,14 @@ export function createAdminAuthRouter(pool: Pool, options: AdminAuthRouterOption
       const key = rateLimiterKey(username ?? session.userId, req.ip);
       const decision = rateLimiter.check(key);
       if (!decision.allowed) {
-        await recordAdminAuthAuditEvent(pool, {
-          actorUserId: session.userId,
-          action: ADMIN_REAUTHENTICATION_ACTION,
-          outcome: 'failed',
-          reason: 'rate_limited',
-        });
+        if (rateLimiter.shouldAuditRateLimit(key)) {
+          await recordAdminAuthAuditEvent(pool, {
+            actorUserId: session.userId,
+            action: ADMIN_REAUTHENTICATION_ACTION,
+            outcome: 'failed',
+            reason: 'rate_limited',
+          });
+        }
         sendRateLimited(res, decision.retryAfterSeconds);
         return;
       }

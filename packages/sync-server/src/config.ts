@@ -31,6 +31,8 @@ export interface SyncServerConfig {
    * never disagree.
    */
   adminCookieSecure: boolean;
+  /** Absolute path containing the built dashboard index.html and assets. */
+  dashboardDistDir: string | null;
 }
 
 export class SyncServerConfigError extends Error {
@@ -144,7 +146,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): SyncServerConf
   }
 
   const { adminPublicOrigin, adminCookieSecure } = resolveAdminOrigin(env);
-
+  const dashboardDistDir = env.DASHBOARD_DIST_DIR?.trim() || null;
+  if (dashboardDistDir !== null && !path.isAbsolute(dashboardDistDir)) {
+    throw new SyncServerConfigError(
+      'DASHBOARD_DIST_DIR must be an absolute path (e.g. /app/dashboard)',
+    );
+  }
   return {
     databaseUrl,
     encryptionKeyDir,
@@ -155,5 +162,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): SyncServerConf
     operatorCallbackTokenPath,
     adminPublicOrigin,
     adminCookieSecure,
+    dashboardDistDir,
   };
 }

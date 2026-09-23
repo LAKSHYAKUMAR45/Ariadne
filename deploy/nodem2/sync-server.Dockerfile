@@ -17,12 +17,17 @@ RUN corepack enable
 
 COPY pnpm-workspace.yaml pnpm-lock.yaml package.json tsconfig.base.json ./
 COPY packages/sync-server/package.json packages/sync-server/package.json
+COPY packages/dashboard/package.json packages/dashboard/package.json
 
-RUN pnpm install --frozen-lockfile --filter @ariadne-dev/sync-server...
+RUN pnpm install --frozen-lockfile \
+    --filter @ariadne-dev/sync-server... \
+    --filter @ariadne-dev/dashboard...
 
 COPY packages/sync-server packages/sync-server
+COPY packages/dashboard packages/dashboard
 
-RUN pnpm --filter @ariadne-dev/sync-server run build \
+RUN pnpm --filter @ariadne-dev/dashboard run build \
+    && pnpm --filter @ariadne-dev/sync-server run build \
     && pnpm deploy --legacy --filter @ariadne-dev/sync-server --prod /app \
     && rm -rf /app/src /app/test /app/tsconfig.json /app/vitest.config.ts
 
@@ -44,6 +49,7 @@ ENV PORT=4300
 
 WORKDIR /app
 COPY --from=builder --chown=root:root /app /app
+COPY --from=builder --chown=root:root /repo/packages/dashboard/dist /app/dashboard
 COPY --chown=root:root deploy/nodem2/scripts/sync-server-entrypoint /usr/local/bin/sync-server-entrypoint
 RUN chmod 0755 /usr/local/bin/sync-server-entrypoint
 

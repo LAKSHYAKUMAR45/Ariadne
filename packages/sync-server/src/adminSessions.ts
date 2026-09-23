@@ -184,6 +184,25 @@ export async function revokeAdminSession(pool: Pool, sessionId: string): Promise
   );
 }
 
+export async function rotateAdminSessionCsrf(
+  pool: Pool,
+  sessionId: string,
+): Promise<string> {
+  const csrfToken = generateSessionToken();
+  const { rowCount } = await pool.query(
+    `UPDATE admin_sessions
+        SET csrf_hash = $2
+      WHERE id = $1
+        AND revoked_at IS NULL
+        AND expires_at > now()`,
+    [sessionId, hashSessionToken(csrfToken)],
+  );
+  if (rowCount !== 1) {
+    throw new Error('Admin session is no longer active');
+  }
+  return csrfToken;
+}
+
 export async function markAdminSessionReauthenticated(
   pool: Pool,
   sessionId: string,
@@ -253,6 +272,7 @@ export interface RateLimitDecision {
 export interface AdminAuthRateLimiter {
   check(key: string): RateLimitDecision;
   recordFailure(key: string): void;
+  shouldAuditRateLimit(key: string): boolean;
   reset(key?: string): void;
   size(): number;
 }
@@ -260,6 +280,7 @@ export interface AdminAuthRateLimiter {
 interface AttemptWindow {
   failures: number;
   expiresAt: number;
+  rateLimitAudited: boolean;
 }
 
 /**
@@ -335,7 +356,20 @@ export function createAdminAuthRateLimiter(
           windows.delete(oldest.value);
         }
       }
-      windows.set(key, { failures: 1, expiresAt: now + windowMs });
+      windows.set(key, { failures: 1, expiresAt: now + windowMs, rateLimitAudited: false });
+    },
+
+    shouldAuditRateLimit(key: string): boolean {
+      const now = Date.now();
+      const window = windows.get(key);
+      if (!window || window.expiresAt <= now || window.failures < limit) {
+        return false;
+      }
+      if (window.rateLimitAudited) {
+        return false;
+      }
+      window.rateLimitAudited = true;
+      return true;
     },
 
     reset(key?: string): void {

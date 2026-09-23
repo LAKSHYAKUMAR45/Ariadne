@@ -16,9 +16,13 @@
 !pnpm-workspace.yaml
 !tsconfig.base.json
 !packages/sync-server
+!packages/dashboard
 !deploy/nodem2/scripts/sync-server-entrypoint
 
 packages/sync-server/node_modules
 packages/sync-server/dist
 packages/sync-server/test
 packages/sync-server/vitest.config.ts
+packages/dashboard/node_modules
+packages/dashboard/dist
+packages/dashboard/src/**/*.test.tsx

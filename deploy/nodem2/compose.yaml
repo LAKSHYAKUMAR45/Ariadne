@@ -113,6 +113,7 @@ services:
       # tmpfs), permanently shadowing the real files.
       OPERATOR_SOCKET_PATH: /run/ariadne-operator/operator.sock
       OPERATOR_CALLBACK_TOKEN_PATH: /run/ariadne-operator/operator-callback-token
+      DASHBOARD_DIST_DIR: /app/dashboard
     env_file:
       - path: /etc/ariadne/sync-server.env
         required: false

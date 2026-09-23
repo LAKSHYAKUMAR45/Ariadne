@@ -2,6 +2,7 @@ import { readFile, stat } from 'node:fs/promises';
 import express, { type Express } from 'express';
 import type { Pool } from 'pg';
 import { SyncServerConfigError } from './config.js';
+import { createDashboardRouter } from './dashboardStatic.js';
 import type { EncryptionKeyring } from './encryption.js';
 import { createAdminAuthRateLimiter, type AdminAuthRateLimiter } from './adminSessions.js';
 import { createMembersRouter } from './routes/members.js';
@@ -19,6 +20,7 @@ import {
 } from './routes/adminOperations.js';
 import { createAdminTasksRouter } from './routes/adminTasks.js';
 import { createAdminAuthRouter } from './routes/adminAuth.js';
+import { createAdminReadRouter } from './routes/adminRead.js';
 import { createAuthRouter } from './routes/auth.js';
 import { createSyncRouter } from './routes/sync.js';
 import { createTaskHistoryRouter } from './routes/taskHistory.js';
@@ -43,6 +45,8 @@ export interface CreateAppOptions {
   adminCookieSecure?: boolean;
   /** Injectable so tests can reset the bounded password-attempt table. */
   adminAuthRateLimiter?: AdminAuthRateLimiter;
+  /** Built dashboard directory. Omit in API-only tests and development. */
+  dashboardDistDir?: string | null;
 }
 
 const CALLBACK_TOKEN_PATTERN = /^[0-9a-f]{64}$/;
@@ -149,12 +153,23 @@ export function createApp(pool: Pool, jwtSecret: string, options: CreateAppOptio
   app.use(
     '/api/v1/admin',
     ...adminSession,
+    createAdminReadRouter(pool, {
+      operationsStore,
+      operatorClient: options?.operatorClient ?? null,
+    }),
+  );
+  app.use(
+    '/api/v1/admin',
+    ...adminSession,
     createAdminOperationsRouter(pool, {
       operationsStore,
       operatorClient: options?.operatorClient ?? null,
     }),
   );
   app.use('/api/v1/sync', requireAuth(jwtSecret), createSyncRouter(pool));
+  if (options.dashboardDistDir) {
+    app.use('/admin', createDashboardRouter(options.dashboardDistDir));
+  }
   app.use(handleUnexpectedError);
 
   return app;

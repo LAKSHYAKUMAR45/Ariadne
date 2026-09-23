@@ -297,7 +297,7 @@ ariadne_report_missing() {
         return 0
     fi
     for ariadne_variable in $2; do
-        if ! grep -q "^${ariadne_variable}=" "$1"; then
+        if ! grep -Eq "^${ariadne_variable}=.+" "$1"; then
             ariadne_missing="$ariadne_missing\n  - set $ariadne_variable in $1"
         fi
     done
@@ -305,7 +305,7 @@ ariadne_report_missing() {
 }
 
 ariadne_report_missing "$ARIADNE_COMPOSE_ENV_FILE" "POSTGRES_PASSWORD"
-ariadne_report_missing "$ARIADNE_SERVER_ENV_FILE" "DATABASE_URL SYNC_SERVER_JWT_SECRET"
+ariadne_report_missing "$ARIADNE_SERVER_ENV_FILE" "DATABASE_URL SYNC_SERVER_JWT_SECRET ADMIN_PUBLIC_ORIGIN"
 
 if [ -n "$ariadne_missing" ]; then
     log "next steps before the stack can start:"

@@ -61,7 +61,7 @@ function createHarness(): Harness {
   });
   fs.writeFileSync(
     path.join(etcDir, 'sync-server.env'),
-    `SYNC_SERVER_JWT_SECRET=${JWT_SECRET_VALUE}\n`,
+    `DATABASE_URL=postgres://ariadne@127.0.0.1:5432/ariadne_sync\nSYNC_SERVER_JWT_SECRET=${JWT_SECRET_VALUE}\nADMIN_PUBLIC_ORIGIN=http://127.0.0.1:14300\n`,
     { mode: 0o600 },
   );
   fs.writeFileSync(path.join(keysDir, 'active-key-id'), 'primary\n', { mode: 0o600 });
@@ -312,6 +312,22 @@ describe('deploy script', () => {
     expect(result.status).not.toBe(0);
     expect(`${result.stdout}${result.stderr}`).toContain('sync-server.env');
     expect(readLog(harness.dockerLog)).toEqual([]);
+  });
+
+  it('aborts before Compose when ADMIN_PUBLIC_ORIGIN is missing from sync-server.env', () => {
+    const harness = createHarness();
+    fs.writeFileSync(
+      path.join(harness.etcDir, 'sync-server.env'),
+      `DATABASE_URL=postgres://ariadne@127.0.0.1:5432/ariadne_sync\nSYNC_SERVER_JWT_SECRET=${JWT_SECRET_VALUE}\n`,
+      { mode: 0o600 },
+    );
+
+    const result = runScript(harness, 'deploy', { args: [VALID_SHA] });
+
+    expect(result.status).not.toBe(0);
+    expect(`${result.stdout}${result.stderr}`).toContain('ADMIN_PUBLIC_ORIGIN');
+    expect(indexOfMatch(readLog(harness.dockerLog), 'config --quiet')).toBe(-1);
+    expect(indexOfMatch(readLog(harness.dockerLog), 'run --rm')).toBe(-1);
   });
 
   it('requires the encryption key material before invoking Compose', () => {

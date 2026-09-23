@@ -61,6 +61,7 @@ describe('sync server configuration', () => {
           ...required,
           NODE_ENV: 'production',
           ADMIN_PUBLIC_ORIGIN: 'https://ariadne.example.com',
+          DASHBOARD_DIST_DIR: '/app/dashboard',
         }),
       ).toMatchObject({
         adminPublicOrigin: 'https://ariadne.example.com',
@@ -74,11 +75,21 @@ describe('sync server configuration', () => {
           ...required,
           NODE_ENV: 'production',
           ADMIN_PUBLIC_ORIGIN: 'http://127.0.0.1:4300',
+          DASHBOARD_DIST_DIR: '/app/dashboard',
         }),
       ).toMatchObject({
         adminPublicOrigin: 'http://127.0.0.1:4300',
         adminCookieSecure: false,
       });
+    });
+
+    it('requires an absolute dashboard build directory when one is configured', () => {
+      expect(() =>
+        loadConfig({
+          ...required,
+          DASHBOARD_DIST_DIR: 'packages/dashboard/dist',
+        }),
+      ).toThrow('DASHBOARD_DIST_DIR must be an absolute path');
     });
 
     it('refuses plain HTTP for any non-loopback origin, which would expose the session cookie', () => {

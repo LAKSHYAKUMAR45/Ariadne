@@ -153,6 +153,9 @@ require_deployment_inputs() {
     require_file "$ARIADNE_KEYS_DIR/active-key-id"
     require_file "$ARIADNE_COMPOSE_FILE"
 
+    grep -Eq '^ADMIN_PUBLIC_ORIGIN=.+' "$ARIADNE_SERVER_ENV_FILE" ||
+        fail "ADMIN_PUBLIC_ORIGIN is missing from $ARIADNE_SERVER_ENV_FILE"
+
     key_count=$(find "$ARIADNE_KEYS_DIR" -maxdepth 1 -type f -name '*.key' 2>/dev/null | wc -l)
     [ "$key_count" -ge 1 ] || fail "no encryption key files found in $ARIADNE_KEYS_DIR"
     unset key_count
