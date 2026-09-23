@@ -234,17 +234,21 @@ while IFS= read -r ariadne_entry; do
 done <"$ARIADNE_ARCHIVE_VERBOSE"
 unset ariadne_entry ariadne_type
 
-tar -xf "$ARIADNE_ARCHIVE" -C "$ARIADNE_STAGE_FILES" --no-same-owner --same-permissions ||
-    fail "failed to extract release archive"
+(
+    umask 022
+    tar -xf "$ARIADNE_ARCHIVE" -C "$ARIADNE_STAGE_FILES" --no-same-owner
+) || fail "failed to extract release archive"
 
 git -C "$ARIADNE_WORKTREE" bundle unbundle "$ARIADNE_BUNDLE" >/dev/null ||
     fail "failed to import release bundle objects"
 git -C "$ARIADNE_WORKTREE" cat-file -e "$ARIADNE_REVISION^{commit}" 2>/dev/null ||
     fail "requested revision is not a commit after bundle import"
 
-git -C "$ARIADNE_WORKTREE" archive --format=tar "$ARIADNE_REVISION" |
-    tar -xf - -C "$ARIADNE_EXPECTED_FILES" --no-same-owner --same-permissions ||
-    fail "failed to materialize the requested revision for comparison"
+(
+    umask 022
+    git -C "$ARIADNE_WORKTREE" archive --format=tar "$ARIADNE_REVISION" |
+        tar -xf - -C "$ARIADNE_EXPECTED_FILES" --no-same-owner
+) || fail "failed to materialize the requested revision for comparison"
 diff -qr --no-dereference "$ARIADNE_EXPECTED_FILES" "$ARIADNE_STAGE_FILES" >/dev/null ||
     fail "release archive content does not exactly match the requested revision"
 find "$ARIADNE_STAGE_FILES" -mindepth 1 -printf '%P\t%y\t%m\n' | sort >"$ARIADNE_STAGE_MANIFEST" ||
@@ -282,8 +286,10 @@ awk '
 
 rsync --archive --exclude=/.git "$ARIADNE_STAGE_FILES/" "$ARIADNE_WORKTREE/" ||
     fail "failed to synchronize reviewed release files"
-git -C "$ARIADNE_WORKTREE" checkout --detach --force "$ARIADNE_REVISION" >/dev/null 2>&1 ||
-    fail "failed to set the deployment worktree revision"
+(
+    umask 022
+    git -C "$ARIADNE_WORKTREE" checkout --detach --force "$ARIADNE_REVISION" >/dev/null 2>&1
+) || fail "failed to set the deployment worktree revision"
 [ "$(git -C "$ARIADNE_WORKTREE" rev-parse HEAD)" = "$ARIADNE_REVISION" ] ||
     fail "deployment worktree HEAD does not match the requested revision"
 [ -z "$(git -C "$ARIADNE_WORKTREE" status --porcelain --untracked-files=all)" ] ||

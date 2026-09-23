@@ -136,6 +136,32 @@ describe('release import script', () => {
     expect(fs.readFileSync(path.join(sibling, 'keep.txt'), 'utf8')).toBe('do not touch\n');
   });
 
+  it('restores tracked file permissions from Git instead of the importer umask', () => {
+    const fixture = createReleaseFixture();
+    const migration = path.join(
+      fixture.source,
+      'packages',
+      'sync-server',
+      'migrations',
+      '0010_complete_admin_operations.sql',
+    );
+    fs.mkdirSync(path.dirname(migration), { recursive: true });
+    fs.writeFileSync(migration, 'SELECT 10;\n', { mode: 0o644 });
+    const release = createNextRelease(fixture, () => {});
+
+    const result = runImport(fixture, [release.sha, release.bundle, release.archive]);
+
+    expect(result.status, output(result)).toBe(0);
+    const importedMigration = path.join(
+      fixture.worktree,
+      'packages',
+      'sync-server',
+      'migrations',
+      '0010_complete_admin_operations.sql',
+    );
+    expect(fs.statSync(importedMigration).mode & 0o777).toBe(0o644);
+  });
+
   it('removes tracked files absent from the new archive without touching untracked siblings', () => {
     const fixture = createReleaseFixture();
     fs.rmSync(path.join(fixture.source, 'obsolete.txt'));
