@@ -372,4 +372,62 @@ describe('MembersPage', () => {
     );
     await waitFor(() => expect(within(memberRow('ops-member')).getByText('inactive')).toBeVisible());
   });
+
+  it('shows an explicit refresh error and no success notice when the post-mutation refetch fails', async () => {
+    let patchCompleted = false;
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url === '/api/v1/admin/session') {
+          return Promise.resolve(json(sessionBody(futureReauthenticatedUntil())));
+        }
+        if (url === '/api/v1/admin/members') {
+          if (!patchCompleted) {
+            return Promise.resolve(json({ members: buildMembers() }));
+          }
+          return Promise.resolve(
+            json(
+              {
+                error: {
+                  code: 'database_unavailable',
+                  message: 'Unable to refresh members after the change.',
+                },
+              },
+              503,
+            ),
+          );
+        }
+        if (url === '/api/v1/admin/members/member-1') {
+          patchCompleted = true;
+          return Promise.resolve(
+            json({
+              member: {
+                userId: 'member-1',
+                username: 'ops-member',
+                role: 'member',
+                active: false,
+                createdAt: '2026-09-22T09:00:00.000Z',
+                immutable: false,
+              },
+            }),
+          );
+        }
+        return Promise.resolve(new Response(null, { status: 404 }));
+      }),
+    );
+    const user = userEvent.setup();
+
+    renderWithProvider(<MembersPage />);
+
+    expect(within(await waitFor(() => memberRow('ops-member'))).getByText('active')).toBeVisible();
+    await user.click(screen.getByRole('button', { name: 'Deactivate ops-member' }));
+    await user.type(screen.getByLabelText('Type DEACTIVATE ops-member to continue'), 'DEACTIVATE ops-member');
+    await user.click(screen.getByRole('button', { name: 'Continue operation' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Unable to refresh members after the change.');
+    expect(within(memberRow('ops-member')).getByText('active')).toBeVisible();
+    expect(screen.queryByText('ops-member deactivated.')).not.toBeInTheDocument();
+  });
 });

@@ -13,6 +13,10 @@ interface PendingMutation {
   request: ConfirmationRequest;
 }
 
+interface LoadMembersOptions {
+  propagateError?: boolean;
+}
+
 function formatAbsoluteDate(value: string): string {
   return value.slice(0, 16).replace('T', ' ') + ' UTC';
 }
@@ -52,7 +56,7 @@ export function MembersPage() {
     membersRef.current = members;
   }, [members]);
 
-  const loadMembers = useCallback(async (): Promise<void> => {
+  const loadMembers = useCallback(async ({ propagateError = false }: LoadMembersOptions = {}): Promise<void> => {
     controllerRef.current?.abort();
     const controller = new AbortController();
     controllerRef.current = controller;
@@ -75,11 +79,14 @@ export function MembersPage() {
       if (isAbortError(loadErrorValue) || controller.signal.aborted || controllerRef.current !== controller) {
         return;
       }
-      setLoadError(
-        loadErrorValue instanceof Error ? loadErrorValue.message : 'Unable to load members.',
-      );
+      const nextError =
+        loadErrorValue instanceof Error ? loadErrorValue : new Error('Unable to load members.');
+      setLoadError(nextError.message);
       if (!hasExistingData) {
         setMembers([]);
+      }
+      if (propagateError) {
+        throw nextError;
       }
     } finally {
       if (controllerRef.current === controller) {
@@ -112,29 +119,34 @@ export function MembersPage() {
       return;
     }
 
+    const currentPending = pending;
+    let mutationApplied = false;
     setBusy(true);
     setDialogError(null);
     setLoadError(null);
     setMessage(null);
 
     try {
-      if (pending.request.requiresReauthentication) {
+      if (currentPending.request.requiresReauthentication) {
         await reauthenticate(input.password ?? '');
       }
 
       await api.mutate(
         'PATCH',
-        `/api/v1/admin/members/${encodeURIComponent(pending.member.userId)}`,
+        `/api/v1/admin/members/${encodeURIComponent(currentPending.member.userId)}`,
         {
-          active: pending.nextActive,
+          active: currentPending.nextActive,
           confirmation: input.confirmation,
         },
         isMemberMutationResponse,
       );
 
+      mutationApplied = true;
       setPending(null);
-      await loadMembers();
-      setMessage(`${pending.member.username} ${pending.nextActive ? 'activated' : 'deactivated'}.`);
+      await loadMembers({ propagateError: true });
+      setMessage(
+        `${currentPending.member.username} ${currentPending.nextActive ? 'activated' : 'deactivated'}.`,
+      );
     } catch (mutationError: unknown) {
       if (mutationError instanceof AdminApiError && mutationError.code === 'reauthentication_required') {
         setPending((current) =>
@@ -149,9 +161,11 @@ export function MembersPage() {
             : current,
         );
       }
-      setDialogError(
-        mutationError instanceof Error ? mutationError.message : 'The member change could not be completed.',
-      );
+      if (!mutationApplied) {
+        setDialogError(
+          mutationError instanceof Error ? mutationError.message : 'The member change could not be completed.',
+        );
+      }
     } finally {
       setBusy(false);
     }
