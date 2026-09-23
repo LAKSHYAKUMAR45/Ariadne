@@ -4,9 +4,10 @@
 #   deploy <40-character-commit-sha>
 #
 # The revision must already be reachable from the configured trusted remote ref
-# (origin/main). The script validates Compose configuration, builds an immutable
-# candidate image, runs migrations as a one-shot job, replaces the app, verifies
-# /healthz, and rolls back to the previously deployed image on failure.
+# (origin/deploy/nodem2). The script validates Compose configuration, builds an
+# immutable candidate image, runs migrations as a one-shot job, replaces the
+# app, verifies /healthz, and rolls back to the previously deployed image on
+# failure.
 set -eu
 umask 077
 

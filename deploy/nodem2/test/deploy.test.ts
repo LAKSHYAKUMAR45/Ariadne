@@ -425,6 +425,19 @@ describe('deploy script', () => {
     expect(indexOfMatch(git, 'checkout')).toBeGreaterThan(fetchIndex);
   });
 
+  it('fetches only the dedicated nodem2 deployment branch into the trusted remote ref', () => {
+    const harness = createHarness();
+    const result = runScript(harness, 'deploy', { args: [VALID_SHA] });
+
+    expect(result.status).toBe(0);
+    const fetch = readLog(harness.gitLog).find((line) => line.includes('fetch --quiet --no-tags'));
+    expect(fetch).toContain(
+      'origin +refs/heads/deploy/nodem2:refs/remotes/origin/deploy/nodem2',
+    );
+    expect(fetch).not.toContain('refs/heads/main');
+    expect(fetch).not.toContain('refs/remotes/origin/main');
+  });
+
   it('rejects a dirty deployment worktree', () => {
     const harness = createHarness();
     const result = runScript(harness, 'deploy', {

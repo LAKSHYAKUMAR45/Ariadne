@@ -232,14 +232,14 @@ Fixed host layout (the scripts never accept these as arguments):
 ```
 
 The script requires all secret/key files before touching Compose, rejects a
-dirty worktree and any revision that is not reachable from the configured
-trusted ref (`origin/main`), validates `docker compose config --quiet` before
-building, builds the immutable candidate tag `ariadne-sync-server:<sha>` from the
-`build.context` declared for `sync-server`/`migrate` (the checked-out worktree
-root), runs migrations as a one-shot `migrate` service *before* replacing the
-app, polls `http://127.0.0.1:4300/healthz`, and rolls the `sync-server` service
-back to the previously deployed image when health verification fails. It never
-prints secret values.
+dirty worktree and any revision that is not reachable from the fixed trusted
+ref (`origin/deploy/nodem2`), validates `docker compose config --quiet` before
+building, builds the immutable candidate tag `ariadne-sync-server:<sha>` from
+the `build.context` declared for `sync-server`/`migrate` (the checked-out
+worktree root), runs migrations as a one-shot `migrate` service *before*
+replacing the app, polls `http://127.0.0.1:4300/healthz`, and rolls the
+`sync-server` service back to the previously deployed image when health
+verification fails. It never prints secret values.
 
 Caution: plain `docker compose config` renders every `env_file` value into its
 output. Only `docker compose config --quiet` is safe to run where output may be
@@ -251,6 +251,10 @@ invocation carrying `ARIADNE_DEPLOY_ROOT`/`ARIADNE_DEPLOY_ETC`/
 contract tests drive the same tracked scripts with `ARIADNE_DEPLOY_SELFTEST=1`,
 which is itself refused when the caller is root or when the scripts are the copy
 installed under `/opt/ariadne`.
+
+All Compose operations are Ariadne-only: the scripts pin the
+`ariadne-nodem2` project and exact Compose file, never run host-wide Docker
+cleanup, and never restart services outside this tracked stack.
 
 ### Runtime hardening and the root-owned key handoff
 

@@ -46,6 +46,11 @@ must not be improvised with shell or Docker commands: the tracked workflow
 records state, creates and verifies a safety backup, validates eligibility,
 and fails explicitly if migration or health checks do not pass.
 
+These controls are Ariadne-only. They pin the `ariadne-nodem2` Compose project
+and exact Compose file, and they must not be replaced by host-wide Docker
+cleanup, host-wide restarts, or commands that can disturb unrelated nodem2
+workloads.
+
 The backup and verification systemd timers are
 `ariadne-backup.timer` and `ariadne-backup-verify.timer`; the privileged
 boundary is `ariadne-operator.service`. Check their state with standard

@@ -81,7 +81,7 @@ ARIADNE_HEALTH_URL="http://127.0.0.1:4300/healthz"
 
 # The only source a deployable revision may come from.
 ARIADNE_TRUSTED_REMOTE=origin
-ARIADNE_TRUSTED_BRANCH=main
+ARIADNE_TRUSTED_BRANCH=deploy/nodem2
 ARIADNE_TRUSTED_REF="refs/remotes/$ARIADNE_TRUSTED_REMOTE/$ARIADNE_TRUSTED_BRANCH"
 
 # Every Compose invocation uses the same fixed file, project, and env file.
