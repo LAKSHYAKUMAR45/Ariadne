@@ -16,7 +16,11 @@ import {
 } from '../src/middleware.js';
 import { createOperatorClient, type OperatorClient } from '../src/operatorClient.js';
 import { createOperationsStore, type OperationsStore } from '../src/operationsStore.js';
-import { createAdminOperationsRouter } from '../src/routes/adminOperations.js';
+import {
+  ADMIN_OPERATION_SOURCE,
+  createAdminOperationsRouter,
+  createOperatorCallbackRouter,
+} from '../src/routes/adminOperations.js';
 import { createTaskHistoryRouter } from '../src/routes/taskHistory.js';
 import { createTaskHistoryStore } from '../src/taskHistoryStore.js';
 import { signToken } from '../src/auth.js';
@@ -3007,5 +3011,219 @@ describe('sync-server: admin operator operations', () => {
     expect(serialized).not.toContain('super-secret-value');
     expect(serialized).not.toContain(operator.dir);
     expect(serialized).not.toContain('.sock');
+  });
+
+  describe('operator result callbacks', () => {
+    const OPERATOR_TOKEN = 'a'.repeat(64);
+    let callbackApp: Express;
+    let callbackToken: string | null;
+    let peerUid: number | null;
+
+    beforeAll(() => {
+      callbackApp = express();
+      callbackApp.use(express.json());
+      callbackApp.use(
+        '/api/v1/admin',
+        createOperatorCallbackRouter({
+          operationsStore: store,
+          readCallbackToken: () => callbackToken,
+          verifyPeerUid: () => peerUid,
+        }),
+      );
+      callbackApp.use(handleUnexpectedError);
+    });
+
+    beforeEach(() => {
+      callbackToken = OPERATOR_TOKEN;
+      peerUid = null;
+    });
+
+    async function queueOperation(id: string): Promise<string> {
+      await store.createOperation({
+        id,
+        requestedBy: adminUserId,
+        type: 'backup_create',
+        summary: 'Create database backup',
+        source: ADMIN_OPERATION_SOURCE,
+        metadata: {},
+      });
+      return id;
+    }
+
+    function callback(operationId: string, body: unknown, token: string | null = OPERATOR_TOKEN) {
+      const pending = request(callbackApp).post(
+        `/api/v1/admin/operations/${operationId}/callback`,
+      );
+      if (token !== null) {
+        pending.set('x-ariadne-operator-token', token);
+      }
+      return pending.send(body as object);
+    }
+
+    it('records a started then succeeded operation using legal transitions', async () => {
+      const operationId = await queueOperation('cb-success');
+
+      const started = await callback(operationId, {
+        operationId,
+        state: 'running',
+        message: 'Operation started',
+      });
+      expect(started.status).toBe(200);
+      expect(started.body.operation.state).toBe('running');
+
+      const finished = await callback(operationId, {
+        operationId,
+        state: 'succeeded',
+        message: 'Operation succeeded',
+        output: 'published backup ariadne-20260101T000000Z.dump',
+        metadata: { exitCode: 0 },
+      });
+      expect(finished.status).toBe(200);
+      expect(finished.body.operation.state).toBe('succeeded');
+
+      const persisted = await store.getOperation(operationId);
+      expect(persisted).toMatchObject({ state: 'succeeded' });
+      expect(persisted?.output).toContain('published backup');
+      expect(persisted?.startedAt).not.toBeNull();
+      expect(persisted?.completedAt).not.toBeNull();
+
+      const events = await store.listOperationEvents(operationId);
+      expect(events.map((event) => event.state)).toEqual(['queued', 'running', 'succeeded']);
+
+      const audit = await store.listAuditEvents();
+      expect(
+        audit.some(
+          (event) =>
+            event.action === 'admin_operation.state_changed' &&
+            event.source === 'operator_callback' &&
+            event.outcome === 'succeeded',
+        ),
+      ).toBe(true);
+    });
+
+    it('starts a queued operation before recording a terminal result', async () => {
+      const operationId = await queueOperation('cb-terminal-only');
+
+      const finished = await callback(operationId, {
+        operationId,
+        state: 'failed',
+        message: 'Operation failed',
+        output: 'exited with code 2',
+      });
+      expect(finished.status).toBe(200);
+
+      const events = await store.listOperationEvents(operationId);
+      expect(events.map((event) => event.state)).toEqual(['queued', 'running', 'failed']);
+    });
+
+    it('treats a repeated running callback as idempotent', async () => {
+      const operationId = await queueOperation('cb-repeat-running');
+
+      await callback(operationId, { operationId, state: 'running' }).expect(200);
+      const repeated = await callback(operationId, { operationId, state: 'running' });
+      expect(repeated.status).toBe(200);
+
+      const events = await store.listOperationEvents(operationId);
+      expect(events.map((event) => event.state)).toEqual(['queued', 'running']);
+    });
+
+    it('refuses to reopen a terminal operation', async () => {
+      const operationId = await queueOperation('cb-terminal-guard');
+      await callback(operationId, { operationId, state: 'running' }).expect(200);
+      await callback(operationId, { operationId, state: 'succeeded' }).expect(200);
+
+      const reopened = await callback(operationId, { operationId, state: 'running' });
+      expect(reopened.status).toBe(409);
+      expect(reopened.body.error.code).toBe('illegal_transition');
+      expect((await store.getOperation(operationId))?.state).toBe('succeeded');
+    });
+
+    it('rejects a missing or incorrect callback token', async () => {
+      const operationId = await queueOperation('cb-bad-token');
+
+      const missing = await callback(operationId, { operationId, state: 'running' }, null);
+      expect(missing.status).toBe(403);
+      expect(missing.body.error.code).toBe('callback_forbidden');
+
+      const wrong = await callback(operationId, { operationId, state: 'running' }, 'b'.repeat(64));
+      expect(wrong.status).toBe(403);
+
+      const shorter = await callback(operationId, { operationId, state: 'running' }, 'b');
+      expect(shorter.status).toBe(403);
+
+      expect((await store.getOperation(operationId))?.state).toBe('queued');
+      expect(await store.listOperationEvents(operationId)).toHaveLength(1);
+    });
+
+    it('fails closed when no callback credential is provisioned', async () => {
+      const operationId = await queueOperation('cb-unconfigured');
+      callbackToken = null;
+
+      const res = await callback(operationId, { operationId, state: 'running' });
+      expect(res.status).toBe(503);
+      expect(res.body.error.code).toBe('callback_unavailable');
+      expect((await store.getOperation(operationId))?.state).toBe('queued');
+    });
+
+    it('rejects a peer that is not the root operator when peer credentials are available', async () => {
+      const operationId = await queueOperation('cb-peer-uid');
+      peerUid = 1000;
+
+      const res = await callback(operationId, { operationId, state: 'running' });
+      expect(res.status).toBe(403);
+      expect(res.body.error.code).toBe('callback_forbidden');
+      expect((await store.getOperation(operationId))?.state).toBe('queued');
+    });
+
+    it('refuses to update any operation other than its own', async () => {
+      const own = await queueOperation('cb-own');
+      const other = await queueOperation('cb-other');
+
+      const res = await callback(own, { operationId: other, state: 'running' });
+      expect(res.status).toBe(400);
+      expect(res.body.error.code).toBe('invalid_request');
+      expect((await store.getOperation(own))?.state).toBe('queued');
+      expect((await store.getOperation(other))?.state).toBe('queued');
+    });
+
+    it('rejects unknown operations and malformed payloads', async () => {
+      const unknown = await callback('cb-missing', { operationId: 'cb-missing', state: 'running' });
+      expect(unknown.status).toBe(404);
+      expect(unknown.body.error.code).toBe('operation_not_found');
+
+      const operationId = await queueOperation('cb-malformed');
+      const badState = await callback(operationId, { operationId, state: 'queued' });
+      expect(badState.status).toBe(400);
+
+      const badShape = await callback(operationId, { operationId, state: 'running', output: 42 });
+      expect(badShape.status).toBe(400);
+      expect((await store.getOperation(operationId))?.state).toBe('queued');
+    });
+
+    it('sanitises secrets in callback output before persisting it', async () => {
+      const operationId = await queueOperation('cb-secrets');
+
+      await callback(operationId, {
+        operationId,
+        state: 'failed',
+        output: 'POSTGRES_PASSWORD=super-secret-value\nfailed to connect',
+      }).expect(200);
+
+      const persisted = await store.getOperation(operationId);
+      expect(persisted?.output).not.toContain('super-secret-value');
+      expect(persisted?.output).toContain('failed to connect');
+    });
+
+    it('does not accept a dashboard session token in place of the callback credential', async () => {
+      const operationId = await queueOperation('cb-jwt-rejected');
+
+      const res = await request(callbackApp)
+        .post(`/api/v1/admin/operations/${operationId}/callback`)
+        .set(adminAuth())
+        .send({ operationId, state: 'running' });
+
+      expect(res.status).toBe(403);
+      expect((await store.getOperation(operationId))?.state).toBe('queued');
+    });
   });
 });

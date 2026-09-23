@@ -13,6 +13,11 @@ export interface SyncServerConfig {
   port: number;
   /** Absolute Unix socket path of the privileged operator service, when deployed. */
   operatorSocketPath: string | null;
+  /**
+   * Absolute path of the shared credential the root operator uses to report
+   * results. `null` disables the callback route entirely.
+   */
+  operatorCallbackTokenPath: string | null;
 }
 
 export class SyncServerConfigError extends Error {
@@ -58,5 +63,20 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): SyncServerConf
     );
   }
 
-  return { databaseUrl, encryptionKeyDir, jwtSecret, host, port, operatorSocketPath };
+  const operatorCallbackTokenPath = env.OPERATOR_CALLBACK_TOKEN_PATH ?? null;
+  if (operatorCallbackTokenPath !== null && !path.isAbsolute(operatorCallbackTokenPath)) {
+    throw new SyncServerConfigError(
+      'OPERATOR_CALLBACK_TOKEN_PATH must be an absolute path (e.g. /run/ariadne/operator-callback-token)',
+    );
+  }
+
+  return {
+    databaseUrl,
+    encryptionKeyDir,
+    jwtSecret,
+    host,
+    port,
+    operatorSocketPath,
+    operatorCallbackTokenPath,
+  };
 }

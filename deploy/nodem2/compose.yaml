@@ -107,6 +107,9 @@ services:
       HOST: 0.0.0.0
       PORT: "4300"
       OPERATOR_SOCKET_PATH: /run/ariadne-operator/operator.sock
+      # Root-created on the host (0640 root:ariadne-web) and mounted read-only;
+      # the service account shares gid 10001 with ariadne-web so it can read it.
+      OPERATOR_CALLBACK_TOKEN_PATH: /run/ariadne-operator/callback-token
     env_file:
       - path: /etc/ariadne/sync-server.env
         required: false
@@ -115,6 +118,7 @@ services:
     volumes:
       - /etc/ariadne/keys:/etc/ariadne/keys:ro
       - /run/ariadne/operator.sock:/run/ariadne-operator/operator.sock
+      - /run/ariadne/operator-callback-token:/run/ariadne-operator/callback-token:ro
     read_only: true
     tmpfs:
       - /tmp:mode=1777,size=32m

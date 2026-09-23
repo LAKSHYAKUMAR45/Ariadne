@@ -5,7 +5,12 @@ import path from 'node:path';
 import { access, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
+  CALLBACK_TOKEN_HEADER,
+  DEFAULT_CALLBACK_TOKEN_PATH,
+  createCallbackReporter,
   createOperatorServer,
+  ensureCallbackToken,
+  getCallbackConfig,
   getOperatorSocketPath,
   withRestrictiveUmask,
   MAX_OPERATOR_REQUEST_BODY_BYTES,
@@ -715,5 +720,231 @@ describe('createOperatorServer', () => {
     expect(executed).toEqual(['op-invalid']);
 
     await server.close();
+  });
+});
+
+describe('operator callback channel', () => {
+  const tempDirectories: string[] = [];
+  const servers: http.Server[] = [];
+
+  afterEach(async () => {
+    await Promise.all(
+      servers.splice(0).map(
+        (server) =>
+          new Promise<void>((resolve) => {
+            server.closeAllConnections?.();
+            server.close(() => resolve());
+          }),
+      ),
+    );
+    await Promise.all(
+      tempDirectories.splice(0).map(async (directory) => {
+        await rm(directory, { recursive: true, force: true });
+      }),
+    );
+  });
+
+  async function createTempDirectory(): Promise<string> {
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'ariadne-callback-test-'));
+    tempDirectories.push(directory);
+    return directory;
+  }
+
+  interface RecordedCallback {
+    url: string;
+    method: string;
+    token: string | undefined;
+    body: unknown;
+  }
+
+  interface CallbackSink {
+    baseUrl: string;
+    received: RecordedCallback[];
+    status: number;
+  }
+
+  async function startCallbackSink(): Promise<CallbackSink> {
+    const received: RecordedCallback[] = [];
+    const sink: Partial<CallbackSink> & { received: RecordedCallback[]; status: number } = {
+      received,
+      status: 200,
+    };
+
+    const server = http.createServer((req, res) => {
+      const chunks: Buffer[] = [];
+      req.on('data', (chunk: Buffer) => chunks.push(Buffer.from(chunk)));
+      req.on('end', () => {
+        const text = Buffer.concat(chunks).toString('utf8');
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(text);
+        } catch {
+          parsed = text;
+        }
+        received.push({
+          url: req.url ?? '',
+          method: req.method ?? '',
+          token: req.headers[CALLBACK_TOKEN_HEADER] as string | undefined,
+          body: parsed,
+        });
+        res.statusCode = sink.status;
+        res.setHeader('content-type', 'application/json');
+        res.end(JSON.stringify({ ok: sink.status < 400 }));
+      });
+    });
+    servers.push(server);
+
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(0, '127.0.0.1', () => {
+        server.off('error', reject);
+        resolve();
+      });
+    });
+
+    const address = server.address();
+    if (typeof address === 'string' || address === null) {
+      throw new Error('Callback sink did not bind a TCP port');
+    }
+    sink.baseUrl = `http://127.0.0.1:${address.port}/api/v1/admin/operations`;
+    return sink as CallbackSink;
+  }
+
+  it('creates a 32-byte callback token readable only by the web group', async () => {
+    const directory = await createTempDirectory();
+    const tokenPath = path.join(directory, 'operator-callback-token');
+
+    const token = await ensureCallbackToken(tokenPath);
+    expect(token).toMatch(/^[0-9a-f]{64}$/);
+
+    const stats = await stat(tokenPath);
+    expect(stats.mode & 0o7777).toBe(0o640);
+
+    // A second start must reuse the token the web tier already holds.
+    expect(await ensureCallbackToken(tokenPath)).toBe(token);
+  });
+
+  it('refuses a token that any other account could read or write', async () => {
+    const directory = await createTempDirectory();
+    const tokenPath = path.join(directory, 'operator-callback-token');
+    const token = 'a'.repeat(64);
+    await writeFile(tokenPath, token, { mode: 0o644 });
+
+    await expect(ensureCallbackToken(tokenPath)).rejects.toThrow(/mode/i);
+    await expect(ensureCallbackToken(tokenPath)).rejects.not.toThrow(new RegExp(token));
+  });
+
+  it('refuses a token that is not 32 random bytes', async () => {
+    const directory = await createTempDirectory();
+    const tokenPath = path.join(directory, 'operator-callback-token');
+    await writeFile(tokenPath, 'too-short', { mode: 0o640 });
+
+    await expect(ensureCallbackToken(tokenPath)).rejects.toThrow(/32 bytes/);
+  });
+
+  it('reports a started operation once and then its result', async () => {
+    const sink = await startCallbackSink();
+    const reporter = createCallbackReporter({ callbackUrl: sink.baseUrl, token: 'b'.repeat(64) });
+
+    await reporter.onProgress?.({ operationId: 'op-1', stream: 'stdout', chunk: 'working\n' });
+    await reporter.onProgress?.({ operationId: 'op-1', stream: 'stdout', chunk: 'still\n' });
+    await reporter.onResult?.({
+      operationId: 'op-1',
+      success: true,
+      output: 'working\nstill\n',
+      exitCode: 0,
+      signal: null,
+      truncated: false,
+    });
+
+    expect(sink.received.map((entry) => entry.method)).toEqual(['POST', 'POST']);
+    expect(sink.received.map((entry) => entry.url)).toEqual([
+      '/api/v1/admin/operations/op-1/callback',
+      '/api/v1/admin/operations/op-1/callback',
+    ]);
+    expect(sink.received.map((entry) => entry.token)).toEqual(['b'.repeat(64), 'b'.repeat(64)]);
+    expect(sink.received[0].body).toMatchObject({ operationId: 'op-1', state: 'running' });
+    expect(sink.received[1].body).toMatchObject({
+      operationId: 'op-1',
+      state: 'succeeded',
+      output: 'working\nstill\n',
+    });
+  });
+
+  it('never places the callback token in the request body', async () => {
+    const sink = await startCallbackSink();
+    const token = 'c'.repeat(64);
+    const reporter = createCallbackReporter({ callbackUrl: sink.baseUrl, token });
+
+    await reporter.onResult?.({
+      operationId: 'op-2',
+      success: false,
+      output: 'boom',
+      exitCode: 3,
+      signal: null,
+      truncated: true,
+    });
+
+    expect(sink.received).toHaveLength(2);
+    expect(JSON.stringify(sink.received.map((entry) => entry.body))).not.toContain(token);
+    expect(sink.received.every((entry) => entry.token === token)).toBe(true);
+    expect(sink.received[1].body).toMatchObject({
+      operationId: 'op-2',
+      state: 'failed',
+      metadata: { exitCode: 3, truncated: true },
+    });
+  });
+
+  it('marks a result-only operation as started before reporting its outcome', async () => {
+    const sink = await startCallbackSink();
+    const reporter = createCallbackReporter({ callbackUrl: sink.baseUrl, token: 'd'.repeat(64) });
+
+    await reporter.onResult?.({
+      operationId: 'op-3',
+      success: true,
+      output: '',
+      exitCode: 0,
+      signal: null,
+      truncated: false,
+    });
+
+    expect(sink.received.map((entry) => (entry.body as { state: string }).state)).toEqual([
+      'running',
+      'succeeded',
+    ]);
+  });
+
+  it('surfaces delivery failures without throwing or leaking the token', async () => {
+    const sink = await startCallbackSink();
+    sink.status = 500;
+    const token = 'e'.repeat(64);
+    const errors: Error[] = [];
+    const reporter = createCallbackReporter({
+      callbackUrl: sink.baseUrl,
+      token,
+      onError: (error) => errors.push(error),
+    });
+
+    await expect(
+      reporter.onProgress?.({ operationId: 'op-4', stream: 'stderr', chunk: 'oops\n' }),
+    ).resolves.toBeUndefined();
+
+    expect(errors.length).toBeGreaterThan(0);
+    for (const error of errors) {
+      expect(error.message).not.toContain(token);
+    }
+  });
+
+  it('is disabled when no callback destination is configured', () => {
+    expect(getCallbackConfig({})).toBeNull();
+    expect(
+      getCallbackConfig({ OPERATOR_CALLBACK_URL: 'http://127.0.0.1:4300/api/v1/admin/operations' }),
+    ).toMatchObject({
+      callbackUrl: 'http://127.0.0.1:4300/api/v1/admin/operations',
+      tokenPath: DEFAULT_CALLBACK_TOKEN_PATH,
+    });
+    expect(() =>
+      getCallbackConfig({ OPERATOR_CALLBACK_URL: 'https://ariadne.example.com/callback' }),
+    ).toThrowError(/loopback/i);
   });
 });

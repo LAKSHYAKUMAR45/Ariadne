@@ -1,6 +1,7 @@
 import http, { type IncomingMessage, type ServerResponse } from 'node:http';
 import path from 'node:path';
-import { chmod, lstat, rm } from 'node:fs/promises';
+import { randomBytes } from 'node:crypto';
+import { chmod, lstat, open, rm } from 'node:fs/promises';
 import { parseOperatorRequest, type OperatorAccepted, type OperatorRequest } from './protocol.js';
 import {
   OperationAdmissionRegistry,
@@ -12,6 +13,8 @@ import {
   createOperatorExecutor,
   type OperatorEventSink,
   type OperatorExecutor,
+  type OperatorProgressEvent,
+  type OperatorResultEvent,
 } from './executor.js';
 
 export const MAX_OPERATOR_REQUEST_BODY_BYTES = 8 * 1024;
@@ -19,6 +22,24 @@ export { DEFAULT_TERMINAL_CACHE_TTL_MS, DEFAULT_TERMINAL_CACHE_MAX_ENTRIES };
 export const DEFAULT_HEADERS_TIMEOUT_MS = 10 * 1000;
 export const DEFAULT_REQUEST_TIMEOUT_MS = 20 * 1000;
 export const SOCKET_CREATION_UMASK = 0o177;
+
+/**
+ * Result reporting channel.
+ *
+ * Linux peer credentials (`SO_PEERCRED`) are not exposed by Node's net module,
+ * so the operator authenticates itself to the web tier with a root-created
+ * 32-byte token that only root and the `ariadne-web` group can read. The token
+ * lives on the `/run` tmpfs, is never written anywhere else, and is never
+ * logged or included in a callback body.
+ */
+export const DEFAULT_CALLBACK_TOKEN_PATH = '/run/ariadne/operator-callback-token';
+export const CALLBACK_TOKEN_HEADER = 'x-ariadne-operator-token';
+export const CALLBACK_TOKEN_BYTES = 32;
+export const CALLBACK_TOKEN_MODE = 0o640;
+export const DEFAULT_CALLBACK_TIMEOUT_MS = 10 * 1000;
+
+const CALLBACK_TOKEN_PATTERN = /^[0-9a-f]{64}$/;
+const LOOPBACK_HOSTNAMES = new Set(['127.0.0.1', 'localhost', '::1', '[::1]']);
 
 const OPERATOR_ROUTE_PATH = '/v1/operations';
 
@@ -195,6 +216,282 @@ function readJsonBody(
       settle({ kind: 'body', value: Buffer.concat(chunks).toString('utf8') });
     });
   });
+}
+
+export interface CallbackConfig {
+  callbackUrl: string;
+  tokenPath: string;
+}
+
+/**
+ * Reads the callback destination from the environment. Returns `null` when no
+ * destination is configured (the operator then runs without result reporting
+ * rather than failing to start), and refuses any non-loopback destination: the
+ * service unit denies non-local egress, and a remote callback would put the
+ * shared credential on the wire.
+ */
+export function getCallbackConfig(env: NodeJS.ProcessEnv = process.env): CallbackConfig | null {
+  const callbackUrl = env.OPERATOR_CALLBACK_URL;
+  if (!callbackUrl) {
+    return null;
+  }
+
+  let parsed: URL;
+  try {
+    parsed = new URL(callbackUrl);
+  } catch {
+    throw new OperatorServerConfigError('OPERATOR_CALLBACK_URL must be an absolute http URL');
+  }
+
+  if (parsed.protocol !== 'http:' || !LOOPBACK_HOSTNAMES.has(parsed.hostname)) {
+    throw new OperatorServerConfigError(
+      'OPERATOR_CALLBACK_URL must address the loopback interface over http',
+    );
+  }
+
+  const tokenPath = env.OPERATOR_CALLBACK_TOKEN_PATH ?? DEFAULT_CALLBACK_TOKEN_PATH;
+  if (!path.isAbsolute(tokenPath)) {
+    throw new OperatorServerConfigError('OPERATOR_CALLBACK_TOKEN_PATH must be an absolute path');
+  }
+
+  return { callbackUrl: callbackUrl.replace(/\/+$/, ''), tokenPath };
+}
+
+function assertCallbackTokenMode(mode: number, tokenPath: string): void {
+  // Owner read/write plus at most group read; anything broader would let a
+  // second account impersonate the operator.
+  const permissions = mode & 0o7777;
+  if ((permissions & ~0o640) !== 0 || (permissions & 0o600) !== 0o600) {
+    throw new OperatorServerConfigError(
+      `Operator callback token has an unsafe mode (expected 0640): ${tokenPath}`,
+    );
+  }
+}
+
+/**
+ * Returns the shared callback token, creating it with a restrictive mode when
+ * it does not exist yet (the `/run` tmpfs is cleared on reboot). Token bytes
+ * never appear in a thrown message.
+ */
+export async function ensureCallbackToken(tokenPath: string): Promise<string> {
+  const existing = await readCallbackToken(tokenPath);
+  if (existing !== null) {
+    return existing;
+  }
+
+  const token = randomBytes(CALLBACK_TOKEN_BYTES).toString('hex');
+  const handle = await withRestrictiveUmask(async () =>
+    open(tokenPath, 'wx', CALLBACK_TOKEN_MODE),
+  ).catch(async (error: unknown) => {
+    if (isNodeError(error) && error.code === 'EEXIST') {
+      return null;
+    }
+    throw error;
+  });
+
+  if (handle === null) {
+    // Another start raced us to the same tmpfs path; its token is authoritative.
+    const raced = await readCallbackToken(tokenPath);
+    if (raced === null) {
+      throw new OperatorServerConfigError(
+        `Operator callback token could not be created: ${tokenPath}`,
+      );
+    }
+    return raced;
+  }
+
+  try {
+    await handle.writeFile(token, 'utf8');
+    await handle.chmod(CALLBACK_TOKEN_MODE);
+  } finally {
+    await handle.close();
+  }
+
+  return token;
+}
+
+async function readCallbackToken(tokenPath: string): Promise<string | null> {
+  let handle;
+  try {
+    handle = await open(tokenPath, 'r');
+  } catch (error: unknown) {
+    if (isNodeError(error) && error.code === 'ENOENT') {
+      return null;
+    }
+    throw error;
+  }
+
+  try {
+    const stats = await handle.stat();
+    if (!stats.isFile()) {
+      throw new OperatorServerConfigError(
+        `Operator callback token is not a regular file: ${tokenPath}`,
+      );
+    }
+    assertCallbackTokenMode(stats.mode, tokenPath);
+
+    const raw = (await handle.readFile('utf8')).trim();
+    if (!CALLBACK_TOKEN_PATTERN.test(raw)) {
+      throw new OperatorServerConfigError(
+        `Operator callback token must be 32 bytes of lowercase hex: ${tokenPath}`,
+      );
+    }
+    return raw;
+  } finally {
+    await handle.close();
+  }
+}
+
+export interface CreateCallbackReporterOptions {
+  callbackUrl: string;
+  token: string;
+  requestTimeoutMs?: number;
+  onError?(error: Error): void;
+}
+
+type CallbackState = 'running' | 'succeeded' | 'failed';
+
+interface CallbackPayload {
+  operationId: string;
+  state: CallbackState;
+  message: string;
+  output?: string;
+  metadata?: Record<string, string | number | boolean | null>;
+}
+
+/**
+ * Event sink that reports operation progress and results to the web tier.
+ *
+ * Only state changes the operations store accepts are sent: one `running`
+ * report per operation, then exactly one terminal report. Delivery failures are
+ * surfaced through `onError` (never thrown into the executor) so a callback
+ * outage can never turn a completed privileged action into an unhandled
+ * rejection.
+ */
+export function createCallbackReporter(
+  options: CreateCallbackReporterOptions,
+): OperatorEventSink {
+  const callbackUrl = options.callbackUrl.replace(/\/+$/, '');
+  const requestTimeoutMs = options.requestTimeoutMs ?? DEFAULT_CALLBACK_TIMEOUT_MS;
+  const started = new Set<string>();
+
+  async function post(payload: CallbackPayload): Promise<void> {
+    const target = new URL(`${callbackUrl}/${encodeURIComponent(payload.operationId)}/callback`);
+    const body = JSON.stringify(payload);
+
+    await new Promise<void>((resolve, reject) => {
+      let settled = false;
+      const settle = (error?: Error): void => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        clearTimeout(timer);
+        if (error) {
+          reject(error);
+          return;
+        }
+        resolve();
+      };
+
+      const request = http.request(
+        {
+          protocol: target.protocol,
+          hostname: target.hostname,
+          port: target.port,
+          path: `${target.pathname}${target.search}`,
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json; charset=utf-8',
+            'content-length': Buffer.byteLength(body, 'utf8'),
+            [CALLBACK_TOKEN_HEADER]: options.token,
+            connection: 'close',
+          },
+        },
+        (response) => {
+          response.resume();
+          const statusCode = response.statusCode ?? 0;
+          response.on('end', () => {
+            if (statusCode >= 200 && statusCode < 300) {
+              settle();
+              return;
+            }
+            settle(new Error(`Operator callback was rejected with status ${statusCode}`));
+          });
+        },
+      );
+
+      const timer = setTimeout(() => {
+        request.destroy();
+        settle(new Error('Operator callback timed out'));
+      }, requestTimeoutMs);
+
+      request.on('error', (error: NodeJS.ErrnoException) => {
+        settle(new Error(`Operator callback could not be delivered (${error.code ?? 'unknown'})`));
+      });
+
+      request.end(body);
+    });
+  }
+
+  async function deliver(payload: CallbackPayload): Promise<void> {
+    try {
+      await post(payload);
+    } catch (error: unknown) {
+      const reported =
+        error instanceof Error ? error : new Error('Operator callback failed unexpectedly');
+      options.onError?.(reported);
+      throw reported;
+    }
+  }
+
+  async function markStarted(operationId: string): Promise<void> {
+    if (started.has(operationId)) {
+      return;
+    }
+    started.add(operationId);
+    try {
+      await deliver({ operationId, state: 'running', message: 'Operation started' });
+    } catch (error: unknown) {
+      // A failed start report must not suppress the terminal report.
+      started.delete(operationId);
+      throw error;
+    }
+  }
+
+  return {
+    async onProgress(event: OperatorProgressEvent): Promise<void> {
+      try {
+        await markStarted(event.operationId);
+      } catch {
+        // Already surfaced through onError.
+      }
+    },
+    async onResult(event: OperatorResultEvent): Promise<void> {
+      try {
+        await markStarted(event.operationId);
+      } catch {
+        // Already surfaced through onError; the terminal report still follows.
+      }
+
+      started.delete(event.operationId);
+      try {
+        await deliver({
+          operationId: event.operationId,
+          state: event.success ? 'succeeded' : 'failed',
+          message: event.success ? 'Operation succeeded' : 'Operation failed',
+          output: event.output,
+          metadata: {
+            exitCode: event.exitCode,
+            signal: event.signal,
+            truncated: event.truncated,
+          },
+        });
+      } catch {
+        // Already surfaced through onError.
+      }
+    },
+  };
 }
 
 export function getOperatorSocketPath(env: NodeJS.ProcessEnv = process.env): string {

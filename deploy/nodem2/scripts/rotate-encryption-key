@@ -1,0 +1,140 @@
+#!/bin/sh
+# Rotates the active content-encryption key of the tracked nodem2 deployment.
+#
+#   rotate-encryption-key
+#
+# Root only. A new root-owned 0600 key file is created, `active-key-id` is
+# switched atomically, and every previous key is retained so existing encrypted
+# rows stay readable. No stored blob is rewritten, and key bytes are never
+# printed, logged, or passed as an argument.
+set -eu
+umask 077
+
+SCRIPT_DIR=$(unset CDPATH; cd -- "$(dirname -- "$0")" && pwd)
+ARIADNE_LOG_TAG=ariadne-rotate-key
+
+log() {
+    printf '[%s] %s\n' "$ARIADNE_LOG_TAG" "$1"
+}
+
+fail() {
+    printf '[%s] error: %s\n' "$ARIADNE_LOG_TAG" "$1" >&2
+    exit 1
+}
+
+ARIADNE_PRODUCTION_ROOT=/opt/ariadne
+ARIADNE_INSTALLED_LIB_DIR=/usr/local/lib/ariadne
+
+# See deploy/nodem2/scripts/install for the self-test contract.
+if [ "${ARIADNE_ADMIN_SELFTEST:-}" = "1" ]; then
+    case "$SCRIPT_DIR" in
+        "$ARIADNE_PRODUCTION_ROOT" | "$ARIADNE_PRODUCTION_ROOT"/* | "$ARIADNE_INSTALLED_LIB_DIR" | "$ARIADNE_INSTALLED_LIB_DIR"/*)
+            fail "ARIADNE_ADMIN_SELFTEST=1 is refused for installed copies of this script"
+            ;;
+    esac
+
+    [ -n "${ARIADNE_ADMIN_PREFIX:-}" ] ||
+        fail "ARIADNE_ADMIN_SELFTEST=1 requires ARIADNE_ADMIN_PREFIX"
+    case "${ARIADNE_ADMIN_PREFIX:-}" in
+        /bin* | /boot* | /etc* | /lib* | /opt* | /root* | /run* | /sbin* | /srv* | /usr* | /var*)
+            fail "ARIADNE_ADMIN_PREFIX must not name a system directory"
+            ;;
+        /*/*) ;;
+        *) fail "ARIADNE_ADMIN_PREFIX must be an absolute path below the filesystem root" ;;
+    esac
+    ARIADNE_PREFIX="$ARIADNE_ADMIN_PREFIX"
+    ARIADNE_OWNER_UID="${ARIADNE_ADMIN_OWNER_UID:-0}"
+elif [ -n "${ARIADNE_ADMIN_SELFTEST:-}" ]; then
+    fail "ARIADNE_ADMIN_SELFTEST must not be set for a privileged invocation"
+else
+    for ariadne_override in ARIADNE_ADMIN_PREFIX ARIADNE_ADMIN_OWNER_UID; do
+        eval "ariadne_override_value=\${$ariadne_override:-}"
+        [ -z "$ariadne_override_value" ] ||
+            fail "$ariadne_override must not be set: rotation uses the fixed host paths"
+    done
+    unset ariadne_override ariadne_override_value
+
+    PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+    export PATH
+    ARIADNE_PREFIX=""
+    ARIADNE_OWNER_UID=0
+fi
+
+[ "$(id -u)" = "0" ] || fail "rotate-encryption-key must run as root (uid 0)"
+[ "$#" -eq 0 ] || fail "usage: rotate-encryption-key (takes no arguments)"
+
+ARIADNE_KEYS_DIR="$ARIADNE_PREFIX/etc/ariadne/keys"
+ARIADNE_ACTIVE_KEY_FILE="$ARIADNE_KEYS_DIR/active-key-id"
+ARIADNE_RESTART_COMMAND="$ARIADNE_INSTALLED_LIB_DIR/restart-sync-server"
+
+[ -d "$ARIADNE_KEYS_DIR" ] || fail "the encryption keys directory is missing: $ARIADNE_KEYS_DIR"
+
+ariadne_keys_uid=$(stat -c '%u' "$ARIADNE_KEYS_DIR") || fail "cannot inspect $ARIADNE_KEYS_DIR"
+[ "$ariadne_keys_uid" = "$ARIADNE_OWNER_UID" ] ||
+    fail "refusing to rotate: $ARIADNE_KEYS_DIR is not owned by uid $ARIADNE_OWNER_UID"
+
+ariadne_keys_mode=$(stat -c '%a' "$ARIADNE_KEYS_DIR") || fail "cannot inspect $ARIADNE_KEYS_DIR"
+[ "$(( 0$ariadne_keys_mode & 077 ))" -eq 0 ] ||
+    fail "refusing to rotate: $ARIADNE_KEYS_DIR is group- or world-readable or writable"
+unset ariadne_keys_uid ariadne_keys_mode
+
+ARIADNE_NEW_KEY_ID="ariadne-$(date -u +%Y%m%dt%H%M%Sz)"
+ARIADNE_NEW_KEY_FILE="$ARIADNE_KEYS_DIR/$ARIADNE_NEW_KEY_ID.key"
+[ ! -e "$ARIADNE_NEW_KEY_FILE" ] ||
+    fail "a key named $ARIADNE_NEW_KEY_ID already exists; retry in a second"
+
+if [ -f "$ARIADNE_ACTIVE_KEY_FILE" ]; then
+    ARIADNE_PREVIOUS_KEY_ID=$(head -n 1 "$ARIADNE_ACTIVE_KEY_FILE" | tr -d ' \t\r\n')
+else
+    ARIADNE_PREVIOUS_KEY_ID=""
+fi
+
+ariadne_cleanup_partial() {
+    rm -f "$ARIADNE_NEW_KEY_FILE.tmp" "$ARIADNE_ACTIVE_KEY_FILE.tmp"
+}
+
+ariadne_fail_partial() {
+    ariadne_cleanup_partial
+    fail "$1"
+}
+
+# 32 random bytes as lowercase hex, written straight to the restricted file.
+dd if=/dev/urandom bs=32 count=1 2>/dev/null | od -An -v -tx1 | tr -d ' \n' \
+    >"$ARIADNE_NEW_KEY_FILE.tmp" ||
+    ariadne_fail_partial "failed to generate new key material"
+
+ariadne_key_bytes=$(wc -c <"$ARIADNE_NEW_KEY_FILE.tmp" | tr -d ' ')
+[ "$ariadne_key_bytes" -eq 64 ] ||
+    ariadne_fail_partial "failed to generate 32 bytes of key material"
+unset ariadne_key_bytes
+
+chmod 0600 "$ARIADNE_NEW_KEY_FILE.tmp" || ariadne_fail_partial "failed to secure the new key"
+chown root:root "$ARIADNE_NEW_KEY_FILE.tmp" || ariadne_fail_partial "failed to own the new key"
+sync "$ARIADNE_NEW_KEY_FILE.tmp" 2>/dev/null || sync || true
+
+# The key file is published before the pointer, so `active-key-id` never names
+# a key that does not exist yet.
+mv "$ARIADNE_NEW_KEY_FILE.tmp" "$ARIADNE_NEW_KEY_FILE" ||
+    ariadne_fail_partial "failed to publish the new key"
+
+printf '%s\n' "$ARIADNE_NEW_KEY_ID" >"$ARIADNE_ACTIVE_KEY_FILE.tmp" ||
+    ariadne_fail_partial "failed to stage active-key-id"
+chmod 0600 "$ARIADNE_ACTIVE_KEY_FILE.tmp" ||
+    ariadne_fail_partial "failed to secure active-key-id"
+chown root:root "$ARIADNE_ACTIVE_KEY_FILE.tmp" ||
+    ariadne_fail_partial "failed to own active-key-id"
+sync "$ARIADNE_ACTIVE_KEY_FILE.tmp" 2>/dev/null || sync || true
+
+# Atomic switch: readers see either the old id or the new one, never a
+# truncated file.
+mv "$ARIADNE_ACTIVE_KEY_FILE.tmp" "$ARIADNE_ACTIVE_KEY_FILE" ||
+    ariadne_fail_partial "failed to switch active-key-id"
+
+if [ -n "$ARIADNE_PREVIOUS_KEY_ID" ]; then
+    log "rotated the active key from $ARIADNE_PREVIOUS_KEY_ID to $ARIADNE_NEW_KEY_ID"
+    log "the previous key file was retained so existing rows stay readable"
+else
+    log "set the active key to $ARIADNE_NEW_KEY_ID"
+fi
+log "key bytes were never printed"
+log "next step: apply the new key with $ARIADNE_RESTART_COMMAND"

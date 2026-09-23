@@ -1,5 +1,6 @@
-import { randomUUID } from 'node:crypto';
-import { Router, type Response } from 'express';
+import { randomUUID, timingSafeEqual } from 'node:crypto';
+import type { Socket } from 'node:net';
+import { Router, type Request, type Response } from 'express';
 import type { Pool } from 'pg';
 import { z } from 'zod';
 import { requireSingletonAdmin } from '../adminAccess.js';
@@ -11,10 +12,12 @@ import {
   type OperatorClient,
   type OperatorSubmitRequest,
 } from '../operatorClient.js';
-import type {
-  AdminOperation,
-  AdminOperationType,
-  OperationsStore,
+import {
+  AdminOperationNotFoundError,
+  OperationTransitionError,
+  type AdminOperation,
+  type AdminOperationType,
+  type OperationsStore,
 } from '../operationsStore.js';
 
 /**
@@ -27,6 +30,9 @@ export interface ReauthenticatedAdminRequest extends AuthenticatedRequest {
 }
 
 export const ADMIN_OPERATION_SOURCE = 'admin_api';
+export const OPERATOR_CALLBACK_SOURCE = 'operator_callback';
+export const OPERATOR_CALLBACK_TOKEN_HEADER = 'x-ariadne-operator-token';
+export const OPERATOR_CALLBACK_UID = 0;
 export const DEFAULT_HEARTBEAT_INTERVAL_MS = 15_000;
 export const DEFAULT_POLL_INTERVAL_MS = 1_000;
 export const DEFAULT_MAX_STREAM_DURATION_MS = 30 * 60 * 1000;
@@ -461,6 +467,152 @@ export function createAdminOperationsRouter(
           backupName,
         }),
       });
+    }),
+  );
+
+  return router;
+}
+
+
+const callbackBodySchema = z
+  .object({
+    operationId: z.string().regex(OPERATION_ID_PATTERN),
+    state: z.enum(['running', 'succeeded', 'failed']),
+    message: z.string().min(1).max(2000).optional(),
+    output: z.string().nullable().optional(),
+    metadata: z.record(z.union([z.string(), z.number(), z.boolean(), z.null()])).optional(),
+  })
+  .strict();
+
+export interface OperatorCallbackRouterOptions {
+  operationsStore: OperationsStore;
+  /**
+   * Returns the shared credential the root operator writes to the `/run`
+   * tmpfs, or `null` when none is provisioned. Read per request so a token
+   * regenerated after a reboot is picked up without a restart.
+   */
+  readCallbackToken(): Promise<string | null> | string | null;
+  /**
+   * Peer UID of the calling process when the platform exposes it, or `null`
+   * when it does not. Node has no portable `SO_PEERCRED` accessor, so this is
+   * an injection point: when a UID is available it must be root's.
+   */
+  verifyPeerUid?(socket: Socket | undefined): number | null;
+}
+
+function timingSafeMatches(provided: string, expected: string): boolean {
+  const providedBytes = Buffer.from(provided, 'utf8');
+  const expectedBytes = Buffer.from(expected, 'utf8');
+  if (providedBytes.length !== expectedBytes.length) {
+    return false;
+  }
+  return timingSafeEqual(providedBytes, expectedBytes);
+}
+
+function callbackForbidden(): ApiError {
+  // One fixed message for every rejection reason: a caller must not learn
+  // whether the token, its length, or the peer identity was wrong.
+  return new ApiError(403, 'callback_forbidden', 'Operator callback credentials were rejected');
+}
+
+/**
+ * Result-reporting channel for the root-owned operator service.
+ *
+ * Mounted without the dashboard session middleware — the operator holds no JWT
+ * — and therefore authenticates only with the shared root-created credential
+ * (plus a peer UID check where the platform offers one). A callback may move
+ * exactly one operation (the id in its own URL) and only through transitions
+ * the operations store considers legal.
+ */
+export function createOperatorCallbackRouter(options: OperatorCallbackRouterOptions): Router {
+  const router = Router();
+  const store = options.operationsStore;
+
+  async function authenticate(req: Request): Promise<void> {
+    const expected = await options.readCallbackToken();
+    if (!expected) {
+      throw new ApiError(
+        503,
+        'callback_unavailable',
+        'No operator callback credential is provisioned for this deployment',
+      );
+    }
+
+    const peerUid = options.verifyPeerUid?.(req.socket) ?? null;
+    if (peerUid !== null && peerUid !== OPERATOR_CALLBACK_UID) {
+      throw callbackForbidden();
+    }
+
+    const provided = req.header(OPERATOR_CALLBACK_TOKEN_HEADER);
+    if (typeof provided !== 'string' || !timingSafeMatches(provided, expected)) {
+      throw callbackForbidden();
+    }
+  }
+
+  router.post(
+    '/operations/:operationId/callback',
+    asyncHandler(async (req, res) => {
+      await authenticate(req);
+
+      const operationId = requireOperationId(req.params.operationId);
+      const parsed = callbackBodySchema.safeParse(req.body ?? {});
+      if (!parsed.success) {
+        throw invalidRequest('callback payload is not a valid operation result');
+      }
+      if (parsed.data.operationId !== operationId) {
+        throw invalidRequest('a callback may only update its own operation');
+      }
+
+      const existing = await store.getOperation(operationId);
+      if (!existing) {
+        throw new ApiError(404, 'operation_not_found', 'No such admin operation');
+      }
+
+      const { state, message, output, metadata } = parsed.data;
+
+      // Repeating the start report is how the operator recovers from a dropped
+      // callback; it must not be an error, and it must not append an event.
+      if (state === 'running' && existing.state === 'running') {
+        noStore(res);
+        res.status(200).json({ operation: serializeOperation(existing) });
+        return;
+      }
+
+      try {
+        // A result that arrives without its start report still has to pass
+        // through `running` so the stored lifecycle stays complete.
+        if (state !== 'running' && existing.state === 'queued') {
+          await store.transitionOperation({
+            id: operationId,
+            nextState: 'running',
+            actorUserId: existing.requestedBy,
+            source: OPERATOR_CALLBACK_SOURCE,
+            message: 'Operation started',
+            metadata: { reportedBy: 'operator' },
+          });
+        }
+
+        const operation = await store.transitionOperation({
+          id: operationId,
+          nextState: state,
+          actorUserId: existing.requestedBy,
+          source: OPERATOR_CALLBACK_SOURCE,
+          message: message ?? `Operation ${state}`,
+          metadata: { ...(metadata ?? {}), reportedBy: 'operator' },
+          output: output === undefined ? undefined : output,
+        });
+
+        noStore(res);
+        res.status(200).json({ operation: serializeOperation(operation) });
+      } catch (error: unknown) {
+        if (error instanceof OperationTransitionError) {
+          throw new ApiError(409, 'illegal_transition', 'Operation is already in a terminal state');
+        }
+        if (error instanceof AdminOperationNotFoundError) {
+          throw new ApiError(404, 'operation_not_found', 'No such admin operation');
+        }
+        throw error;
+      }
     }),
   );
 

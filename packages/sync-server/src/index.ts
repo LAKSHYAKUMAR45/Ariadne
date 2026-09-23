@@ -24,7 +24,11 @@ async function main(): Promise<void> {
     ? createOperatorClient({ socketPath: config.operatorSocketPath })
     : null;
 
-  const app = createApp(pool, config.jwtSecret, { encryptionKeyring, operatorClient });
+  const app = createApp(pool, config.jwtSecret, {
+    encryptionKeyring,
+    operatorClient,
+    operatorCallbackTokenPath: config.operatorCallbackTokenPath,
+  });
   app.listen(config.port, config.host, () => {
     console.log(`ariadne-sync-server listening on ${config.host}:${config.port}`);
   });

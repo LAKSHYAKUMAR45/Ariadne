@@ -1,0 +1,303 @@
+#!/bin/sh
+# Installs the tracked nodem2 host artifacts: the privileged operator service,
+# the fixed operation scripts, the systemd units, and the runtime directories.
+#
+#   install
+#
+# Idempotent by design. Existing secrets, encryption keys, and the operator
+# callback token are never rewritten; missing ones are either generated (keys,
+# callback token) or reported as explicit next steps (environment secrets).
+# Every installed artifact comes from the tracked allowlists below - nothing is
+# discovered from the filesystem, and no argument or environment variable can
+# redirect a production install.
+set -eu
+umask 077
+
+SCRIPT_DIR=$(unset CDPATH; cd -- "$(dirname -- "$0")" && pwd)
+ARIADNE_SOURCE_SYSTEMD_DIR=$(unset CDPATH; cd -- "$SCRIPT_DIR/../systemd" && pwd)
+ARIADNE_LOG_TAG=ariadne-install
+
+log() {
+    printf '[%s] %s\n' "$ARIADNE_LOG_TAG" "$1"
+}
+
+fail() {
+    printf '[%s] error: %s\n' "$ARIADNE_LOG_TAG" "$1" >&2
+    exit 1
+}
+
+# Artifacts that may be installed onto the host. `sync-server-entrypoint` is a
+# container-only script and this installer itself is never copied.
+ARIADNE_INSTALL_EXECUTABLES="backup deploy prune-backups restart-postgres restart-sync-server restore-backup rotate-encryption-key transfer-admin verify-backup"
+ARIADNE_INSTALL_LIBRARIES="lib-common"
+ARIADNE_INSTALL_UNITS="ariadne-operator.service ariadne-backup.service ariadne-backup.timer ariadne-backup-verify.service ariadne-backup-verify.timer"
+ARIADNE_ENABLE_UNITS="ariadne-operator.service ariadne-backup.timer ariadne-backup-verify.timer"
+
+# The web tier runs as uid/gid 10001 inside its container, so the host group
+# that owns the operator socket and the callback token must use that same gid.
+ARIADNE_WEB_GROUP=ariadne-web
+ARIADNE_WEB_GID=10001
+
+# ---------------------------------------------------------------------------
+# Self-test harness
+#
+# deploy/nodem2/test/install.test.ts runs this installer against a throwaway
+# prefix. The flag is refused whenever it could touch a real host: for a copy
+# installed under the production paths, without an explicit prefix, or with a
+# prefix that names a system directory. A production invocation carrying any
+# override fails before a single file is written.
+# ---------------------------------------------------------------------------
+ARIADNE_PRODUCTION_ROOT=/opt/ariadne
+ARIADNE_INSTALLED_LIB_DIR=/usr/local/lib/ariadne
+
+if [ "${ARIADNE_ADMIN_SELFTEST:-}" = "1" ]; then
+    case "$SCRIPT_DIR" in
+        "$ARIADNE_PRODUCTION_ROOT" | "$ARIADNE_PRODUCTION_ROOT"/* | "$ARIADNE_INSTALLED_LIB_DIR" | "$ARIADNE_INSTALLED_LIB_DIR"/*)
+            fail "ARIADNE_ADMIN_SELFTEST=1 is refused for installed copies of this script"
+            ;;
+    esac
+
+    [ -n "${ARIADNE_ADMIN_PREFIX:-}" ] ||
+        fail "ARIADNE_ADMIN_SELFTEST=1 requires ARIADNE_ADMIN_PREFIX"
+    case "${ARIADNE_ADMIN_PREFIX:-}" in
+        /bin* | /boot* | /etc* | /lib* | /opt* | /root* | /run* | /sbin* | /srv* | /usr* | /var*)
+            fail "ARIADNE_ADMIN_PREFIX must not name a system directory"
+            ;;
+        /*/*) ;;
+        *) fail "ARIADNE_ADMIN_PREFIX must be an absolute path below the filesystem root" ;;
+    esac
+    [ -d "$ARIADNE_ADMIN_PREFIX" ] ||
+        fail "ARIADNE_ADMIN_PREFIX must be an existing directory"
+
+    ARIADNE_PREFIX="$ARIADNE_ADMIN_PREFIX"
+    ARIADNE_OWNER_UID="${ARIADNE_ADMIN_OWNER_UID:-0}"
+elif [ -n "${ARIADNE_ADMIN_SELFTEST:-}" ]; then
+    fail "ARIADNE_ADMIN_SELFTEST must not be set for a privileged invocation"
+else
+    for ariadne_override in ARIADNE_ADMIN_PREFIX ARIADNE_ADMIN_OWNER_UID; do
+        eval "ariadne_override_value=\${$ariadne_override:-}"
+        [ -z "$ariadne_override_value" ] ||
+            fail "$ariadne_override must not be set: installation uses the fixed host paths"
+    done
+    unset ariadne_override ariadne_override_value
+
+    PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+    export PATH
+    ARIADNE_PREFIX=""
+    ARIADNE_OWNER_UID=0
+fi
+
+[ "$(id -u)" = "0" ] || fail "install must run as root (uid 0)"
+
+ARIADNE_ETC_DIR="$ARIADNE_PREFIX/etc/ariadne"
+ARIADNE_KEYS_DIR="$ARIADNE_ETC_DIR/keys"
+ARIADNE_LIB_DIR="$ARIADNE_PREFIX$ARIADNE_INSTALLED_LIB_DIR"
+ARIADNE_UNIT_DIR="$ARIADNE_PREFIX/etc/systemd/system"
+ARIADNE_RUN_DIR="$ARIADNE_PREFIX/run/ariadne"
+ARIADNE_BACKUP_DIR="$ARIADNE_PREFIX/var/backups/ariadne"
+ARIADNE_STATE_DIR="$ARIADNE_PREFIX/var/lib/ariadne/deploy"
+ARIADNE_DEPLOY_ROOT="$ARIADNE_PREFIX$ARIADNE_PRODUCTION_ROOT"
+ARIADNE_CALLBACK_TOKEN="$ARIADNE_RUN_DIR/operator-callback-token"
+ARIADNE_COMPOSE_ENV_FILE="$ARIADNE_ETC_DIR/compose.env"
+ARIADNE_SERVER_ENV_FILE="$ARIADNE_ETC_DIR/sync-server.env"
+
+# Refuses to write into anything an unexpected account owns or any account
+# other than the owner can write to.
+ariadne_require_safe_path() {
+    [ -e "$1" ] || return 0
+    [ -d "$1" ] || fail "refusing to use $1: it is not a directory"
+
+    ariadne_path_uid=$(stat -c '%u' "$1") || fail "cannot inspect $1"
+    [ "$ariadne_path_uid" = "$ARIADNE_OWNER_UID" ] ||
+        fail "refusing to use $1: it is not owned by uid $ARIADNE_OWNER_UID"
+
+    ariadne_path_mode=$(stat -c '%a' "$1") || fail "cannot inspect $1"
+    [ "$(( 0$ariadne_path_mode & 022 ))" -eq 0 ] ||
+        fail "refusing to use $1: it is group- or world-writable"
+    unset ariadne_path_uid ariadne_path_mode
+}
+
+ariadne_install_dir() {
+    ariadne_dir=$1
+    ariadne_mode=$2
+    ariadne_group=${3:-root}
+
+    ariadne_require_safe_path "$ariadne_dir"
+    mkdir -p "$ariadne_dir" || fail "failed to create $ariadne_dir"
+    chmod "$ariadne_mode" "$ariadne_dir" || fail "failed to set the mode of $ariadne_dir"
+    chown "root:$ariadne_group" "$ariadne_dir" || fail "failed to set the owner of $ariadne_dir"
+    unset ariadne_dir ariadne_mode ariadne_group
+}
+
+ariadne_install_file() {
+    ariadne_source=$1
+    ariadne_target=$2
+    ariadne_mode=$3
+
+    [ -f "$ariadne_source" ] || fail "tracked artifact is missing: $ariadne_source"
+    cat "$ariadne_source" >"$ariadne_target.tmp" ||
+        fail "failed to copy $ariadne_source"
+    chmod "$ariadne_mode" "$ariadne_target.tmp" ||
+        fail "failed to set the mode of $ariadne_target"
+    chown root:root "$ariadne_target.tmp" ||
+        fail "failed to set the owner of $ariadne_target"
+    mv "$ariadne_target.tmp" "$ariadne_target" ||
+        fail "failed to publish $ariadne_target"
+    unset ariadne_source ariadne_target ariadne_mode
+}
+
+# 32 random bytes as lowercase hex. The value is only ever written to a
+# restricted file; it is never logged, echoed, or passed as an argument.
+ariadne_random_hex() {
+    ariadne_hex=$(dd if=/dev/urandom bs=32 count=1 2>/dev/null | od -An -v -tx1 | tr -d ' \n')
+    [ "${#ariadne_hex}" -eq 64 ] || fail "failed to read 32 bytes of randomness"
+    case "$ariadne_hex" in
+        *[!0-9a-f]*) fail "failed to read 32 bytes of randomness" ;;
+    esac
+    printf '%s' "$ariadne_hex"
+    unset ariadne_hex
+}
+
+# ---------------------------------------------------------------------------
+# Service account
+# ---------------------------------------------------------------------------
+ariadne_group_line=$(getent group "$ARIADNE_WEB_GROUP" 2>/dev/null || true)
+if [ -n "$ariadne_group_line" ]; then
+    ariadne_existing_gid=$(printf '%s' "$ariadne_group_line" | cut -d: -f3)
+    [ "$ariadne_existing_gid" = "$ARIADNE_WEB_GID" ] ||
+        fail "group $ARIADNE_WEB_GROUP exists with gid $ariadne_existing_gid but the sync-server container requires gid $ARIADNE_WEB_GID"
+    log "reusing existing group $ARIADNE_WEB_GROUP"
+    unset ariadne_existing_gid
+else
+    groupadd --system --gid "$ARIADNE_WEB_GID" "$ARIADNE_WEB_GROUP" ||
+        fail "failed to create group $ARIADNE_WEB_GROUP"
+    log "created group $ARIADNE_WEB_GROUP (gid $ARIADNE_WEB_GID)"
+fi
+unset ariadne_group_line
+
+# ---------------------------------------------------------------------------
+# Directories
+# ---------------------------------------------------------------------------
+ariadne_require_safe_path "$ARIADNE_ETC_DIR"
+ariadne_require_safe_path "$ARIADNE_KEYS_DIR"
+ariadne_require_safe_path "$ARIADNE_LIB_DIR"
+ariadne_require_safe_path "$ARIADNE_RUN_DIR"
+
+ariadne_install_dir "$ARIADNE_ETC_DIR" 0750
+ariadne_install_dir "$ARIADNE_KEYS_DIR" 0700
+ariadne_install_dir "$ARIADNE_LIB_DIR" 0755
+ariadne_install_dir "$ARIADNE_UNIT_DIR" 0755
+ariadne_install_dir "$ARIADNE_BACKUP_DIR" 0700
+ariadne_install_dir "$ARIADNE_STATE_DIR" 0700
+ariadne_install_dir "$ARIADNE_DEPLOY_ROOT" 0755
+# Shared with the web tier: it must reach the operator socket and the callback
+# credential, and nothing else may.
+ariadne_install_dir "$ARIADNE_RUN_DIR" 0750 "$ARIADNE_WEB_GROUP"
+log "prepared the fixed installation directories"
+
+# ---------------------------------------------------------------------------
+# Scripts and units
+# ---------------------------------------------------------------------------
+for ariadne_name in $ARIADNE_INSTALL_EXECUTABLES; do
+    ariadne_install_file "$SCRIPT_DIR/$ariadne_name" "$ARIADNE_LIB_DIR/$ariadne_name" 0755
+done
+for ariadne_name in $ARIADNE_INSTALL_LIBRARIES; do
+    ariadne_install_file "$SCRIPT_DIR/$ariadne_name" "$ARIADNE_LIB_DIR/$ariadne_name" 0644
+done
+log "installed the tracked operation scripts"
+
+for ariadne_name in $ARIADNE_INSTALL_UNITS; do
+    ariadne_install_file "$ARIADNE_SOURCE_SYSTEMD_DIR/$ariadne_name" \
+        "$ARIADNE_UNIT_DIR/$ariadne_name" 0644
+done
+unset ariadne_name
+log "installed the tracked systemd units"
+
+systemctl daemon-reload || fail "systemctl daemon-reload failed"
+for ariadne_unit in $ARIADNE_ENABLE_UNITS; do
+    systemctl enable "$ariadne_unit" || fail "failed to enable $ariadne_unit"
+done
+unset ariadne_unit
+log "enabled the operator service and the backup timers"
+
+# ---------------------------------------------------------------------------
+# Encryption key material
+# ---------------------------------------------------------------------------
+ariadne_key_count=$(find "$ARIADNE_KEYS_DIR" -maxdepth 1 -type f -name '*.key' 2>/dev/null | wc -l)
+if [ "$ariadne_key_count" -ge 1 ]; then
+    log "keeping the $ariadne_key_count existing encryption key file(s)"
+else
+    ariadne_key_id="ariadne-$(date -u +%Y%m%dt%H%M%Sz)"
+    ariadne_key_file="$ARIADNE_KEYS_DIR/$ariadne_key_id.key"
+    [ ! -e "$ariadne_key_file" ] || fail "encryption key $ariadne_key_id already exists"
+
+    ariadne_random_hex >"$ariadne_key_file.tmp" || fail "failed to generate an encryption key"
+    chmod 0600 "$ariadne_key_file.tmp" || fail "failed to secure the new encryption key"
+    chown root:root "$ariadne_key_file.tmp" || fail "failed to own the new encryption key"
+    mv "$ariadne_key_file.tmp" "$ariadne_key_file" || fail "failed to publish the encryption key"
+
+    printf '%s\n' "$ariadne_key_id" >"$ARIADNE_KEYS_DIR/active-key-id.tmp" ||
+        fail "failed to write active-key-id"
+    chmod 0600 "$ARIADNE_KEYS_DIR/active-key-id.tmp" || fail "failed to secure active-key-id"
+    chown root:root "$ARIADNE_KEYS_DIR/active-key-id.tmp" || fail "failed to own active-key-id"
+    mv "$ARIADNE_KEYS_DIR/active-key-id.tmp" "$ARIADNE_KEYS_DIR/active-key-id" ||
+        fail "failed to publish active-key-id"
+
+    log "generated encryption key $ariadne_key_id (key bytes are never printed)"
+    unset ariadne_key_id ariadne_key_file
+fi
+unset ariadne_key_count
+
+# ---------------------------------------------------------------------------
+# Operator callback credential
+# ---------------------------------------------------------------------------
+if [ -e "$ARIADNE_CALLBACK_TOKEN" ]; then
+    log "keeping the existing operator callback token"
+else
+    ariadne_random_hex >"$ARIADNE_CALLBACK_TOKEN.tmp" ||
+        fail "failed to generate the operator callback token"
+    chmod 0640 "$ARIADNE_CALLBACK_TOKEN.tmp" ||
+        fail "failed to secure the operator callback token"
+    chown "root:$ARIADNE_WEB_GROUP" "$ARIADNE_CALLBACK_TOKEN.tmp" ||
+        fail "failed to own the operator callback token"
+    mv "$ARIADNE_CALLBACK_TOKEN.tmp" "$ARIADNE_CALLBACK_TOKEN" ||
+        fail "failed to publish the operator callback token"
+    log "generated the operator callback token (token bytes are never printed)"
+fi
+
+# ---------------------------------------------------------------------------
+# Next steps
+#
+# Secret files are never created or modified here: only the names of the
+# variables that are still missing are reported, never any value.
+# ---------------------------------------------------------------------------
+ariadne_missing=""
+
+ariadne_report_missing() {
+    if [ ! -f "$1" ]; then
+        ariadne_missing="$ariadne_missing\n  - create $1 (root-owned, mode 0600) with: $2"
+        return 0
+    fi
+    for ariadne_variable in $2; do
+        if ! grep -q "^${ariadne_variable}=" "$1"; then
+            ariadne_missing="$ariadne_missing\n  - set $ariadne_variable in $1"
+        fi
+    done
+    unset ariadne_variable
+}
+
+ariadne_report_missing "$ARIADNE_COMPOSE_ENV_FILE" "POSTGRES_PASSWORD"
+ariadne_report_missing "$ARIADNE_SERVER_ENV_FILE" "DATABASE_URL SYNC_SERVER_JWT_SECRET"
+
+if [ -n "$ariadne_missing" ]; then
+    log "next steps before the stack can start:"
+    # shellcheck disable=SC2059  # the accumulated list carries its own newlines
+    printf "$ariadne_missing\n"
+    log "then deploy a trusted revision with $ARIADNE_INSTALLED_LIB_DIR/deploy <commit-sha>"
+else
+    log "environment secrets are present"
+    log "next step: deploy a trusted revision with $ARIADNE_INSTALLED_LIB_DIR/deploy <commit-sha>"
+fi
+unset ariadne_missing
+
+log "installation complete"
