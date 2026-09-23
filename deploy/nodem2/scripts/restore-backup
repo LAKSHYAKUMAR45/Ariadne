@@ -27,6 +27,10 @@ ARIADNE_LOG_TAG=ariadne-restore
 
 APP_STOPPED=0
 SAFETY_BACKUP=""
+CANONICAL_DB_RETIRED=0
+PROMOTION_RECOVERED=0
+PROMOTION_RECOVERY_COMMAND=""
+RETIRED_DB=""
 
 on_exit() {
     status=$?
@@ -34,7 +38,16 @@ on_exit() {
     if [ "$status" -ne 0 ] && [ "$APP_STOPPED" -eq 1 ]; then
         log "the application is stopped and was NOT restarted"
         log "safety backup basename: $SAFETY_BACKUP.dump"
-        log "recover with: ARIADNE_RESTORE_CONFIRM=$SAFETY_BACKUP.dump $ARIADNE_RESTORE_COMMAND $SAFETY_BACKUP.dump"
+        if [ "$CANONICAL_DB_RETIRED" -eq 1 ]; then
+            if [ "$PROMOTION_RECOVERED" -eq 1 ]; then
+                log "the previous database was restored to the canonical name $ARIADNE_DB_NAME"
+                log "next command: $ARIADNE_RESTART_SYNC_SERVER_COMMAND"
+            else
+                log "recover the canonical database name with: $PROMOTION_RECOVERY_COMMAND"
+            fi
+        else
+            log "recover with: ARIADNE_RESTORE_CONFIRM=$SAFETY_BACKUP.dump $ARIADNE_RESTORE_COMMAND $SAFETY_BACKUP.dump"
+        fi
     fi
     exit "$status"
 }
@@ -103,9 +116,18 @@ ariadne_psql "$ARIADNE_MAINTENANCE_DB" \
 ariadne_psql "$ARIADNE_MAINTENANCE_DB" \
     "ALTER DATABASE $ARIADNE_DB_NAME RENAME TO $RETIRED_DB" >/dev/null ||
     fail "failed to retire the previous database; the production database is unchanged"
-ariadne_psql "$ARIADNE_MAINTENANCE_DB" \
-    "ALTER DATABASE $NEW_DB RENAME TO $ARIADNE_DB_NAME" >/dev/null ||
-    fail "failed to promote the restored database; the previous database is retained as $RETIRED_DB"
+CANONICAL_DB_RETIRED=1
+PROMOTION_RECOVERY_COMMAND="docker compose -f $ARIADNE_COMPOSE_FILE -p $ARIADNE_COMPOSE_PROJECT --env-file $ARIADNE_COMPOSE_ENV_FILE exec -T postgres psql --username $ARIADNE_DB_USER --dbname $ARIADNE_MAINTENANCE_DB --no-psqlrc --quiet --tuples-only --no-align --set ON_ERROR_STOP=1 --command \"ALTER DATABASE $RETIRED_DB RENAME TO $ARIADNE_DB_NAME\""
+if ! ariadne_psql "$ARIADNE_MAINTENANCE_DB" \
+    "ALTER DATABASE $NEW_DB RENAME TO $ARIADNE_DB_NAME" >/dev/null; then
+    log "promotion failed; attempting to restore the previous database name"
+    if ariadne_psql "$ARIADNE_MAINTENANCE_DB" \
+        "ALTER DATABASE $RETIRED_DB RENAME TO $ARIADNE_DB_NAME" >/dev/null; then
+        PROMOTION_RECOVERED=1
+        fail "failed to promote the restored database; the previous database was renamed back to $ARIADNE_DB_NAME"
+    fi
+    fail "failed to promote the restored database; rename $RETIRED_DB back to $ARIADNE_DB_NAME before using the safety backup"
+fi
 
 log "starting the application"
 ariadne_compose up -d --no-deps sync-server || fail "the application failed to start"

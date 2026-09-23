@@ -125,6 +125,7 @@ ARIADNE_MAINTENANCE_DB=postgres
 ARIADNE_BACKUP_RETENTION_DAYS=30
 ARIADNE_BACKUP_TMP_RETENTION_DAYS=1
 ARIADNE_RESTORE_COMMAND=/usr/local/lib/ariadne/restore-backup
+ARIADNE_RESTART_SYNC_SERVER_COMMAND=/usr/local/lib/ariadne/restart-sync-server
 
 # Basename of the most recent backup this process published, used by callers to
 # report the safety backup and to discard partial output.

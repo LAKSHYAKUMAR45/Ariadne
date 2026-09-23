@@ -64,9 +64,9 @@ case "$CANDIDATE_DB" in
     *[!a-z0-9_]*) fail "refusing to use a generated database name that is not plain identifier text" ;;
 esac
 
+VERIFY_DB="$CANDIDATE_DB"
 ariadne_psql "$ARIADNE_MAINTENANCE_DB" "CREATE DATABASE $CANDIDATE_DB" >/dev/null ||
     fail "failed to create the isolated verification database"
-VERIFY_DB="$CANDIDATE_DB"
 
 ariadne_compose exec -T postgres pg_restore \
     --no-owner --no-acl --exit-on-error \

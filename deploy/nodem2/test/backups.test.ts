@@ -90,11 +90,17 @@ function createHarness(): Harness {
     path.join(binDir, 'docker'),
     `#!/bin/sh
 printf '%s\\n' "$*" >> "$FAKE_DOCKER_LOG"
-if [ -n "\${FAKE_DOCKER_FAIL:-}" ]; then
-  case "$*" in
-    *"\$FAKE_DOCKER_FAIL"*) echo "fake docker failure: \$FAKE_DOCKER_FAIL" >&2; exit 1 ;;
+for var_name in FAKE_DOCKER_FAIL FAKE_DOCKER_FAIL_2; do
+  case "$var_name" in
+    FAKE_DOCKER_FAIL) fail_pattern="\${FAKE_DOCKER_FAIL:-}" ;;
+    FAKE_DOCKER_FAIL_2) fail_pattern="\${FAKE_DOCKER_FAIL_2:-}" ;;
   esac
-fi
+  if [ -n "$fail_pattern" ]; then
+    case "$*" in
+      *"$fail_pattern"*) echo "fake docker failure: $fail_pattern" >&2; exit 1 ;;
+    esac
+  fi
+done
 if [ "\${1:-}" = image ] && [ "\${2:-}" = inspect ]; then
   echo "${IMAGE_ID}"
   exit 0
@@ -683,6 +689,65 @@ describe('restore-backup script', () => {
     expect(text).not.toMatch(/restore complete|succeeded/i);
   });
 
+  it('renames the retired database back and points the operator at restart-sync-server when promotion fails', () => {
+    const harness = createHarness();
+    const base = seedBackup(harness, '20260301T021500Z');
+
+    const result = runScript(harness, 'restore-backup', {
+      args: [`${base}.dump`],
+      env: { ...confirmEnv(base), FAKE_DOCKER_FAIL: 'ALTER DATABASE ariadne_sync_restore_' },
+    });
+
+    expect(result.status).not.toBe(0);
+    const docker = readLog(harness.dockerLog);
+    const retireIndex = indexOfMatch(docker, 'ALTER DATABASE ariadne_sync RENAME TO ariadne_sync_prerestore_');
+    const promoteIndex = indexOfMatch(
+      docker,
+      'ALTER DATABASE ariadne_sync_restore_20260401t021500z RENAME TO ariadne_sync',
+    );
+    const recoverIndex = indexOfMatch(
+      docker,
+      'ALTER DATABASE ariadne_sync_prerestore_20260401t021500z RENAME TO ariadne_sync',
+    );
+    expect(retireIndex).toBeGreaterThanOrEqual(0);
+    expect(promoteIndex).toBeGreaterThan(retireIndex);
+    expect(recoverIndex).toBeGreaterThan(promoteIndex);
+    expect(docker.join('\n')).not.toContain('up -d --no-deps sync-server');
+
+    const text = output(result);
+    expect(text).toContain('the application is stopped and was NOT restarted');
+    expect(text).toContain('/usr/local/lib/ariadne/restart-sync-server');
+    expect(text).toContain(`ariadne-${NOW_STAMP}.dump`);
+    expect(text).not.toContain('/usr/local/lib/ariadne/restore-backup');
+    expect(text).not.toContain(JWT_SECRET_VALUE);
+    expect(text).not.toContain(POSTGRES_PASSWORD_VALUE);
+    expect(text).not.toContain(KEY_MATERIAL_VALUE);
+  });
+
+  it('prints the exact ALTER DATABASE recovery command when promotion rollback also fails', () => {
+    const harness = createHarness();
+    const base = seedBackup(harness, '20260301T021500Z');
+
+    const result = runScript(harness, 'restore-backup', {
+      args: [`${base}.dump`],
+      env: {
+        ...confirmEnv(base),
+        FAKE_DOCKER_FAIL: 'ALTER DATABASE ariadne_sync_restore_',
+        FAKE_DOCKER_FAIL_2: 'ALTER DATABASE ariadne_sync_prerestore_',
+      },
+    });
+
+    expect(result.status).not.toBe(0);
+    const text = output(result);
+    expect(text).toContain('the application is stopped and was NOT restarted');
+    expect(text).toContain(`safety backup basename: ariadne-${NOW_STAMP}.dump`);
+    expect(text).toContain('ALTER DATABASE ariadne_sync_prerestore_20260401t021500z RENAME TO ariadne_sync');
+    expect(text).toContain('--dbname postgres');
+    expect(text).not.toContain(JWT_SECRET_VALUE);
+    expect(text).not.toContain(POSTGRES_PASSWORD_VALUE);
+    expect(text).not.toContain(KEY_MATERIAL_VALUE);
+  });
+
   it('fails without stopping the application when the safety backup cannot be made', () => {
     const harness = createHarness();
     const base = seedBackup(harness, '20260301T021500Z');
@@ -791,6 +856,23 @@ describe('verify-backup script', () => {
     expect(docker[dropIndex]).toContain('ariadne_verify_');
     expect(fs.existsSync(path.join(harness.backupDir, `${base}.dump`))).toBe(true);
     expect(output(result)).toMatch(/verification failed/i);
+  });
+
+  it('drops the verification database even when database creation exits non-zero', () => {
+    const harness = createHarness();
+    const base = seedBackup(harness, '20260301T021500Z');
+
+    const result = runScript(harness, 'verify-backup', {
+      args: [`${base}.dump`],
+      env: { FAKE_DOCKER_FAIL: 'CREATE DATABASE ariadne_verify_' },
+    });
+
+    expect(result.status).not.toBe(0);
+    const docker = readLog(harness.dockerLog);
+    const createIndex = indexOfMatch(docker, 'CREATE DATABASE ariadne_verify_');
+    const dropIndex = indexOfMatch(docker, 'DROP DATABASE IF EXISTS ariadne_verify_');
+    expect(createIndex).toBeGreaterThanOrEqual(0);
+    expect(dropIndex).toBeGreaterThan(createIndex);
   });
 
   it('fails clearly when there is no backup to verify', () => {
@@ -974,9 +1056,15 @@ describe('systemd units', () => {
       expect(text, name).toContain('PrivateTmp=true');
       expect(text, name).toContain('ProtectSystem=strict');
       expect(text, name).toContain('ProtectHome=true');
-      expect(text, name).toContain('ReadWritePaths=/var/backups/ariadne');
+      expect(text, name).toContain('ExecStartPre=/usr/bin/install -d -m 0700 /var/backups/ariadne');
+      expect(text, name).toContain('ReadWritePaths=/var/backups');
       expect(text, name).toContain('UMask=0077');
     }
+  });
+
+  it('documents the correct verify service install path', () => {
+    const text = unit('ariadne-backup-verify.service');
+    expect(text).toContain('Install as /etc/systemd/system/ariadne-backup-verify.service');
   });
 
   it('keeps the encryption key directory out of the backup units', () => {
