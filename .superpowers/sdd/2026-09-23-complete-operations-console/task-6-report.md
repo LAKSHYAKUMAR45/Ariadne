@@ -20,6 +20,7 @@
 
 ## Files changed
 
+- `.superpowers/sdd/2026-09-23-complete-operations-console/task-6-report.md`
 - `packages/dashboard/src/components/ConfirmationDialog.tsx`
 - `packages/dashboard/src/components/OperationProgress.tsx`
 - `packages/dashboard/src/styles/global.css`
@@ -29,7 +30,7 @@
 
 ## Commit
 
-- **Pending** — update after commit
+- `7998f37` — `feat(dashboard): add guarded capture deletion`
 
 ## Self-review
 
