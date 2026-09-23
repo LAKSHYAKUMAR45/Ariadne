@@ -18,7 +18,7 @@ function renderWithProvider(child: ReactNode) {
 }
 
 function ApiHarness() {
-  const { api, ready, session, login, error } = useAuth();
+  const { api, ready, session, login, error, reauthenticationRequired, reauthenticate } = useAuth();
   const [message, setMessage] = useState<string>('');
 
   if (!ready) {
@@ -28,6 +28,7 @@ function ApiHarness() {
   return (
     <div>
       <p>{session ? `Session:${session.username}` : 'Signed out'}</p>
+      <p>{reauthenticationRequired ? 'Reauthentication required' : 'Reauthentication current'}</p>
       {error ? <p role="alert">{error}</p> : null}
       <p data-testid="message">{message}</p>
       <button type="button" onClick={() => void login('admin', 'password-123')}>
@@ -92,6 +93,14 @@ function ApiHarness() {
         }
       >
         Download backup
+      </button>
+      <button
+        type="button"
+        onClick={() =>
+          void reauthenticate('password-123').then(() => setMessage('reauthenticated'))
+        }
+      >
+        Reauthenticate
       </button>
     </div>
   );
@@ -288,5 +297,85 @@ describe('AuthProvider', () => {
     )).toBe(true);
     expect(await screen.findByText('Signed out')).toBeVisible();
     expect(localStorageSpy).not.toHaveBeenCalled();
+  });
+
+  it('keeps the session and requests reauthentication when a privileged read window expires', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        json({
+          userId: 'admin-id',
+          username: 'admin',
+          csrfToken: 'csrf-token',
+          reauthenticatedUntil: '2026-09-23T08:05:00.000Z',
+        }),
+      )
+      .mockResolvedValueOnce(
+        json(
+          {
+            error: {
+              code: 'reauthentication_required',
+              message: 'This action requires a freshly reauthenticated dashboard session',
+            },
+          },
+          403,
+        ),
+      )
+      .mockResolvedValueOnce(
+        json({ reauthenticatedUntil: '2026-09-23T08:10:00.000Z' }),
+      );
+    vi.stubGlobal('fetch', fetchMock);
+    const user = userEvent.setup();
+
+    renderWithProvider(<ApiHarness />);
+
+    expect(await screen.findByText('Session:admin')).toBeVisible();
+    expect(screen.getByText('Reauthentication current')).toBeVisible();
+
+    await user.click(screen.getByRole('button', { name: 'Load overview' }));
+
+    expect(await screen.findByText('Reauthentication required')).toBeVisible();
+    expect(screen.getByText('Session:admin')).toBeVisible();
+
+    await user.click(screen.getByRole('button', { name: 'Reauthenticate' }));
+
+    expect(await screen.findByText('Reauthentication current')).toBeVisible();
+    expect(screen.getByTestId('message')).toHaveTextContent('reauthenticated');
+  });
+
+  it('leaves mutation reauthentication recovery to the action that owns the confirmation dialog', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        json({
+          userId: 'admin-id',
+          username: 'admin',
+          csrfToken: 'csrf-token',
+          reauthenticatedUntil: '2026-09-23T08:05:00.000Z',
+        }),
+      )
+      .mockResolvedValueOnce(
+        json(
+          {
+            error: {
+              code: 'reauthentication_required',
+              message: 'This action requires a freshly reauthenticated dashboard session',
+            },
+          },
+          403,
+        ),
+      );
+    vi.stubGlobal('fetch', fetchMock);
+    const user = userEvent.setup();
+
+    renderWithProvider(<ApiHarness />);
+
+    expect(await screen.findByText('Reauthentication current')).toBeVisible();
+    await user.click(screen.getByRole('button', { name: 'Start backup' }));
+
+    expect(await screen.findByTestId('message')).toHaveTextContent(
+      'This action requires a freshly reauthenticated dashboard session',
+    );
+    expect(screen.getByText('Reauthentication current')).toBeVisible();
   });
 });

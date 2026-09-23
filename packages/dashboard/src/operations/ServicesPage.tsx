@@ -89,7 +89,7 @@ export function ServicesPage() {
       }
       setReconnectedOperation(null);
     }
-  }, [api, session?.reauthenticatedUntil]);
+  }, [api]);
 
   useEffect(() => {
     void loadServices();

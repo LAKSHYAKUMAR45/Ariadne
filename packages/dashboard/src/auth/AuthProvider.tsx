@@ -17,7 +17,9 @@ interface AuthContextValue {
   session: AdminSession | null;
   api: AdminApiClient;
   error: string | null;
+  reauthenticationRequired: boolean;
   clearError: () => void;
+  clearReauthenticationRequired: () => void;
   login: (username: string, password: string, signal?: AbortSignal) => Promise<void>;
   logout: (signal?: AbortSignal) => Promise<void>;
   reauthenticate: (password: string, signal?: AbortSignal) => Promise<ReauthenticationResponse>;
@@ -68,6 +70,8 @@ export function AuthProvider({ children }: AuthProviderProps) {
   const [session, setSession] = useState<AdminSession | null>(null);
   const [ready, setReady] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [reauthenticationRequired, setReauthenticationRequired] = useState(false);
+  const [apiRevision, setApiRevision] = useState(0);
   const expiredRef = useRef(false);
 
   const expireSession = useCallback(() => {
@@ -76,7 +80,20 @@ export function AuthProvider({ children }: AuthProviderProps) {
     }
     expiredRef.current = true;
     setSession(null);
+    setReauthenticationRequired(false);
     setError('Session expired. Sign in again.');
+  }, []);
+
+  const requireReauthentication = useCallback(() => {
+    setSession((current) =>
+      current
+        ? {
+            ...current,
+            reauthenticatedUntil: null,
+          }
+        : current,
+    );
+    setReauthenticationRequired(true);
   }, []);
 
   const api = useMemo(
@@ -84,17 +101,28 @@ export function AuthProvider({ children }: AuthProviderProps) {
       createAdminApiClient({
         getCsrfToken: () => session?.csrfToken ?? null,
         onUnauthorized: expireSession,
+        onReauthenticationRequired: requireReauthentication,
       }),
-    [expireSession, session?.csrfToken],
+    [
+      expireSession,
+      requireReauthentication,
+      apiRevision,
+      session?.csrfToken,
+    ],
   );
 
   const clearError = useCallback(() => {
     setError(null);
   }, []);
 
+  const clearReauthenticationRequired = useCallback(() => {
+    setReauthenticationRequired(false);
+  }, []);
+
   const applySession = useCallback((nextSession: AdminSession) => {
     expiredRef.current = false;
     setSession(nextSession);
+    setReauthenticationRequired(false);
     setError(null);
   }, []);
 
@@ -171,6 +199,7 @@ export function AuthProvider({ children }: AuthProviderProps) {
       if (!session?.csrfToken) {
         expiredRef.current = false;
         setSession(null);
+        setReauthenticationRequired(false);
         return;
       }
 
@@ -186,6 +215,7 @@ export function AuthProvider({ children }: AuthProviderProps) {
       if (response.ok || response.status === 401) {
         expiredRef.current = false;
         setSession(null);
+        setReauthenticationRequired(false);
         setError(null);
       }
     },
@@ -210,6 +240,8 @@ export function AuthProvider({ children }: AuthProviderProps) {
             }
           : current,
       );
+      setReauthenticationRequired(false);
+      setApiRevision((current) => current + 1);
 
       return response;
     },
@@ -222,12 +254,25 @@ export function AuthProvider({ children }: AuthProviderProps) {
       session,
       api,
       error,
+      reauthenticationRequired,
       clearError,
+      clearReauthenticationRequired,
       login,
       logout,
       reauthenticate,
     }),
-    [api, clearError, error, login, logout, ready, reauthenticate, session],
+    [
+      api,
+      clearError,
+      clearReauthenticationRequired,
+      error,
+      login,
+      logout,
+      ready,
+      reauthenticate,
+      reauthenticationRequired,
+      session,
+    ],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

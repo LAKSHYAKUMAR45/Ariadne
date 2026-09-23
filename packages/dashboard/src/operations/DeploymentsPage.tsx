@@ -130,7 +130,7 @@ export function DeploymentsPage() {
       setRecentOperations([]);
       setReconnectedOperation(null);
     }
-  }, [api, session?.reauthenticatedUntil]);
+  }, [api]);
 
   useEffect(() => {
     void loadDeployments();

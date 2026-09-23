@@ -1,6 +1,8 @@
 import { useCallback, useRef, useState, type MouseEvent } from 'react';
 import { AuthProvider, useAuth } from './auth/AuthProvider';
 import { LoginPage } from './auth/LoginPage';
+import type { ConfirmationRequest } from './api/types';
+import { ConfirmationDialog } from './components/ConfirmationDialog';
 import { MembersPage } from './members/MembersPage';
 import { AuditPage } from './operations/AuditPage';
 import { BackupsPage } from './operations/BackupsPage';
@@ -31,9 +33,26 @@ const sections: ReadonlyArray<{ id: Section; label: string; glyph: string }> = [
   { id: 'audit', label: 'Audit', glyph: 'AT' },
 ];
 
+const REAUTHENTICATION_REQUEST: ConfirmationRequest = {
+  title: 'Confirm administrator',
+  impact: 'Your protected operations access expired. Enter your password to refresh it.',
+  expectedConfirmation: '',
+  confirmationLabel: '',
+  requiresReauthentication: true,
+};
+
 function ConsoleShell() {
-  const { error, logout, session } = useAuth();
+  const {
+    clearReauthenticationRequired,
+    error,
+    logout,
+    reauthenticate,
+    reauthenticationRequired,
+    session,
+  } = useAuth();
   const [section, setSection] = useState<Section>('overview');
+  const [reauthenticating, setReauthenticating] = useState(false);
+  const [reauthenticationError, setReauthenticationError] = useState<string | null>(null);
   const mainRef = useRef<HTMLElement | null>(null);
 
   if (!session) {
@@ -106,6 +125,32 @@ function ConsoleShell() {
         {section === 'logs' ? <LogsPage /> : null}
         {section === 'audit' ? <AuditPage /> : null}
       </main>
+      {reauthenticationRequired ? (
+        <ConfirmationDialog
+          request={REAUTHENTICATION_REQUEST}
+          busy={reauthenticating}
+          error={reauthenticationError}
+          onCancel={() => {
+            clearReauthenticationRequired();
+            setReauthenticationError(null);
+          }}
+          onConfirm={async ({ password }) => {
+            setReauthenticating(true);
+            setReauthenticationError(null);
+            try {
+              await reauthenticate(password ?? '');
+            } catch (reauthenticateError: unknown) {
+              setReauthenticationError(
+                reauthenticateError instanceof Error
+                  ? reauthenticateError.message
+                  : 'The password was not accepted.',
+              );
+            } finally {
+              setReauthenticating(false);
+            }
+          }}
+        />
+      ) : null}
     </div>
   );
 }

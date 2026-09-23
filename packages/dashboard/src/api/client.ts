@@ -23,6 +23,7 @@ interface ErrorPayload {
 interface CreateAdminApiClientOptions {
   getCsrfToken: () => string | null;
   onUnauthorized?: () => void;
+  onReauthenticationRequired?: () => void;
 }
 
 const INVALID_RESPONSE_MESSAGE = 'The server returned an invalid response.';
@@ -76,6 +77,7 @@ async function expectJson<T>(
   response: Response,
   guard: Guard<T>,
   onUnauthorized?: () => void,
+  onReauthenticationRequired?: () => void,
 ): Promise<T> {
   const payload = await readJson(response);
 
@@ -83,6 +85,9 @@ async function expectJson<T>(
     const details = errorDetails(payload);
     if (response.status === 401) {
       onUnauthorized?.();
+    }
+    if (response.status === 403 && details.code === 'reauthentication_required') {
+      onReauthenticationRequired?.();
     }
     throw new AdminApiError(response.status, details.code, details.message);
   }
@@ -106,7 +111,12 @@ export function createAdminApiClient(options: CreateAdminApiClientOptions): Admi
         signal,
       });
 
-      return expectJson(response, guard, options.onUnauthorized);
+      return expectJson(
+        response,
+        guard,
+        options.onUnauthorized,
+        options.onReauthenticationRequired,
+      );
     },
 
     async mutate<T>(
@@ -146,6 +156,9 @@ export function createAdminApiClient(options: CreateAdminApiClientOptions): Admi
         const details = errorDetails(payload);
         if (response.status === 401) {
           options.onUnauthorized?.();
+        }
+        if (response.status === 403 && details.code === 'reauthentication_required') {
+          options.onReauthenticationRequired?.();
         }
         throw new AdminApiError(response.status, details.code, details.message);
       }

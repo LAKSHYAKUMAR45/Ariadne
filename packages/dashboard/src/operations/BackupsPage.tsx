@@ -137,7 +137,7 @@ export function BackupsPage() {
       }
       setReconnectedOperation(null);
     }
-  }, [api, session?.reauthenticatedUntil]);
+  }, [api]);
 
   useEffect(() => {
     void loadBackups();

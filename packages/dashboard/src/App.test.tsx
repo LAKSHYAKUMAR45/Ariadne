@@ -151,6 +151,85 @@ describe('Ariadne operations console', () => {
     );
   });
 
+  it('prompts for reauthentication when protected reads report an expired window', async () => {
+    let operationsRequestCount = 0;
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === '/api/v1/admin/session') {
+        return Promise.resolve(
+          json({
+            userId: 'admin-id',
+            username: 'admin',
+            reauthenticatedUntil: '2026-09-23T08:05:00.000Z',
+            csrfToken: 'csrf-token',
+          }),
+        );
+      }
+      if (url === '/api/v1/admin/overview') {
+        return Promise.resolve(
+          json({
+            generatedAt: '2026-09-23T08:00:00.000Z',
+            database: { status: 'healthy', healthy: true, latencyMs: 4 },
+            host: null,
+            databaseSizeBytes: 512,
+            tasks: { total: 0, active: 0, updatedLast24h: 0 },
+            members: { total: 1, active: 1, inactive: 0, admins: 1, members: 0 },
+            sync: { lastPushAt: null, lastPullAt: null },
+            backup: { latestAt: null, latestVerifiedAt: null, status: 'unavailable' },
+            operations: { running: 0, failedLast24h: 0 },
+            components: { database: { healthy: true }, operator: { healthy: true } },
+          }),
+        );
+      }
+      if (url === '/api/v1/admin/backups') {
+        return Promise.resolve(json({ backups: [] }));
+      }
+      if (url === '/api/v1/admin/operations?limit=20') {
+        operationsRequestCount += 1;
+        if (operationsRequestCount === 1) {
+          return Promise.resolve(
+            json(
+              {
+                error: {
+                  code: 'reauthentication_required',
+                  message: 'This action requires a freshly reauthenticated dashboard session',
+                },
+              },
+              403,
+            ),
+          );
+        }
+        return Promise.resolve(json({ operations: [] }));
+      }
+      if (url === '/api/v1/admin/session/reauthenticate') {
+        return Promise.resolve(json({ reauthenticatedUntil: '2026-09-23T08:10:00.000Z' }));
+      }
+      return Promise.resolve(new Response(null, { status: 404 }));
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const user = userEvent.setup();
+
+    render(<App />);
+
+    await user.click(await screen.findByRole('button', { name: 'Backups' }));
+
+    expect(await screen.findByRole('dialog', { name: 'Confirm administrator' })).toBeVisible();
+    await user.type(screen.getByLabelText('Administrator password'), 'password-123');
+    await user.click(screen.getByRole('button', { name: 'Continue operation' }));
+
+    await waitFor(() =>
+      expect(screen.queryByRole('dialog', { name: 'Confirm administrator' })).not.toBeInTheDocument(),
+    );
+    expect(operationsRequestCount).toBe(2);
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/v1/admin/session/reauthenticate',
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({ password: 'password-123' }),
+      }),
+    );
+  });
+
   it('reconnects an operation stream after remount and reloads the persisted terminal operation', async () => {
     const eventStreamChunks = [
       'id: 1\nevent: operation_event\ndata: {"id":1,"operationId":"op-1","state":"running","message":"Operation started","metadata":{},"createdAt":"2026-09-23T08:00:00.000Z"}\n\n',
