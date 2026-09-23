@@ -347,6 +347,21 @@ function copyNativeBootstrap() {
   fs.copyFileSync(path.join(__dirname, 'src', 'native-bootstrap.js'), path.join(__dirname, 'dist', 'native-bootstrap.js'));
 }
 
+function buildWebviewUi() {
+  const webviewUiRoot = path.join(__dirname, 'webview-ui');
+  const webviewUiNodeModules = path.join(webviewUiRoot, 'node_modules');
+  if (!fs.existsSync(webviewUiNodeModules)) {
+    execFileSync('pnpm', ['install', '--ignore-scripts'], { cwd: webviewUiRoot, stdio: 'inherit' });
+  }
+
+  execFileSync('pnpm', ['run', 'build'], { cwd: webviewUiRoot, stdio: 'inherit' });
+
+  const webviewUiDist = path.join(webviewUiRoot, 'dist');
+  const destWebviewDist = path.join(__dirname, 'dist', 'webview');
+  fs.rmSync(destWebviewDist, { recursive: true, force: true });
+  fs.cpSync(webviewUiDist, destWebviewDist, { recursive: true });
+}
+
 // Minimal magic-byte checks per platform, so a corrupt/truncated download or
 // an unexpected prebuild-install fallback (e.g. silently building from
 // source for the *host* platform instead of downloading the requested
@@ -518,10 +533,12 @@ async function main() {
   if (watch) {
     const ctx = await esbuild.context(options);
     await ctx.watch();
+    buildWebviewUi();
     copyBetterSqlite3Runtime();
     copyNativeBootstrap();
   } else {
     await esbuild.build(options);
+    buildWebviewUi();
     copyBetterSqlite3Runtime();
     copyNativeBootstrap();
   }
@@ -531,4 +548,3 @@ main().catch((err) => {
   console.error(err);
   process.exit(1);
 });
-
