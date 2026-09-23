@@ -19,6 +19,7 @@ const composeSource = path.join(deployDir, 'compose.yaml');
 
 const VALID_SHA = 'a'.repeat(40);
 const ROLLBACK_SHA = 'b'.repeat(40);
+const NEXT_SHA = 'c'.repeat(40);
 const PREVIOUS_IMAGE_ID = `sha256:${'1'.repeat(64)}`;
 const JWT_SECRET_VALUE = 'top-secret-jwt-value-must-never-be-printed';
 const POSTGRES_PASSWORD_VALUE = 'top-secret-postgres-password-value';
@@ -37,6 +38,7 @@ interface Harness {
   dockerLog: string;
   gitLog: string;
   curlLog: string;
+  gitHeadFile: string;
 }
 
 function createHarness(): Harness {
@@ -77,6 +79,8 @@ function createHarness(): Harness {
   const dockerLog = path.join(root, 'docker.log');
   const gitLog = path.join(root, 'git.log');
   const curlLog = path.join(root, 'curl.log');
+  const gitHeadFile = path.join(root, 'git-head');
+  fs.writeFileSync(gitHeadFile, `${VALID_SHA}\n`, { mode: 0o600 });
 
   writeExecutable(
     path.join(binDir, 'docker'),
@@ -125,13 +129,20 @@ case "\${1:-}" in
   fetch) exit "\${FAKE_GIT_FETCH_EXIT:-0}" ;;
   rev-parse)
     case "$*" in
-      *HEAD*) printf '%s\\n' "\${FAKE_GIT_HEAD:-${VALID_SHA}}" ;;
+      *HEAD*)
+        if [ -n "\${FAKE_GIT_HEAD:-}" ]; then
+          printf '%s\\n' "$FAKE_GIT_HEAD"
+        else
+          head -n 1 "$FAKE_GIT_HEAD_FILE"
+        fi ;;
       *) printf '%s\\n' "\${FAKE_GIT_TRUSTED_TIP:-${'b'.repeat(40)}}" ;;
     esac
     exit 0 ;;
   merge-base) exit "\${FAKE_GIT_ANCESTOR_EXIT:-0}" ;;
   cat-file) exit "\${FAKE_GIT_CATFILE_EXIT:-0}" ;;
-  checkout) exit "\${FAKE_GIT_CHECKOUT_EXIT:-0}" ;;
+  checkout)
+    [ -z "\${4:-}" ] || printf '%s\\n' "$4" > "$FAKE_GIT_HEAD_FILE"
+    exit "\${FAKE_GIT_CHECKOUT_EXIT:-0}" ;;
 esac
 exit 0
 `,
@@ -157,7 +168,19 @@ exec /usr/bin/id "$@"
 `,
   );
 
-  return { root, etcDir, keysDir, stateDir, worktree, composeFile, binDir, dockerLog, gitLog, curlLog };
+  return {
+    root,
+    etcDir,
+    keysDir,
+    stateDir,
+    worktree,
+    composeFile,
+    binDir,
+    dockerLog,
+    gitLog,
+    curlLog,
+    gitHeadFile,
+  };
 }
 
 function writeExecutable(target: string, body: string): void {
@@ -178,6 +201,7 @@ function runScript(harness: Harness, script: string, options: RunOptions = {}) {
     FAKE_DOCKER_LOG: harness.dockerLog,
     FAKE_GIT_LOG: harness.gitLog,
     FAKE_CURL_LOG: harness.curlLog,
+    FAKE_GIT_HEAD_FILE: harness.gitHeadFile,
     ...(selftest
       ? {
           ARIADNE_DEPLOY_SELFTEST: '1',
@@ -208,6 +232,10 @@ function readLog(file: string): string[] {
 
 function indexOfMatch(lines: string[], needle: string): number {
   return lines.findIndex((line) => line.includes(needle));
+}
+
+function readGitHead(harness: Harness): string {
+  return fs.readFileSync(harness.gitHeadFile, 'utf8').trim();
 }
 
 afterEach(() => {
@@ -489,6 +517,46 @@ describe('deploy script', () => {
       ROLLBACK_SHA,
     );
     expect(fs.readFileSync(path.join(harness.stateDir, 'current-revision'), 'utf8').trim()).toBe(
+      VALID_SHA,
+    );
+  });
+
+  it('restores the worktree revision recorded as running when rollback cleanup fails after cutover', () => {
+    const harness = createHarness();
+    fs.writeFileSync(path.join(harness.stateDir, 'rollback-revision'), `${ROLLBACK_SHA}\n`, {
+      mode: 0o600,
+    });
+    fs.writeFileSync(path.join(harness.stateDir, 'current-revision'), `${VALID_SHA}\n`, {
+      mode: 0o600,
+    });
+
+    const result = runScript(harness, 'rollback', {
+      args: [ROLLBACK_SHA],
+      env: { FAKE_CURL_EXIT: '7' },
+    });
+
+    expect(result.status).not.toBe(0);
+    expect(readGitHead(harness)).toBe(VALID_SHA);
+  });
+
+  it('keeps rollback-revision pinned to the pre-failure running revision after a failed rollback and later deploy', () => {
+    const harness = createHarness();
+    fs.writeFileSync(path.join(harness.stateDir, 'rollback-revision'), `${ROLLBACK_SHA}\n`, {
+      mode: 0o600,
+    });
+    fs.writeFileSync(path.join(harness.stateDir, 'current-revision'), `${VALID_SHA}\n`, {
+      mode: 0o600,
+    });
+
+    const failedRollback = runScript(harness, 'rollback', {
+      args: [ROLLBACK_SHA],
+      env: { FAKE_CURL_EXIT: '7' },
+    });
+    expect(failedRollback.status).not.toBe(0);
+
+    const deploy = runScript(harness, 'deploy', { args: [NEXT_SHA] });
+    expect(deploy.status).toBe(0);
+    expect(fs.readFileSync(path.join(harness.stateDir, 'rollback-revision'), 'utf8').trim()).toBe(
       VALID_SHA,
     );
   });

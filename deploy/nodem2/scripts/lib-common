@@ -161,6 +161,54 @@ require_deployment_inputs() {
     unset key_count
 }
 
+ariadne_read_recorded_revision() {
+    if [ ! -f "$1" ]; then
+        return 1
+    fi
+    ariadne_recorded_revision=$(head -n 1 "$1" | tr -d ' \t\r\n')
+    case "$ariadne_recorded_revision" in
+        *[!0-9a-f]* | "") unset ariadne_recorded_revision; return 1 ;;
+    esac
+    [ "${#ariadne_recorded_revision}" -eq 40 ] || {
+        unset ariadne_recorded_revision
+        return 1
+    }
+    printf '%s\n' "$ariadne_recorded_revision"
+    unset ariadne_recorded_revision
+    return 0
+}
+
+ariadne_current_revision() {
+    if ariadne_read_recorded_revision "$ARIADNE_STATE_DIR/current-revision"; then
+        return 0
+    fi
+    git -C "$ARIADNE_WORKTREE" rev-parse HEAD | tr -d ' \t\r\n'
+}
+
+ariadne_restore_worktree_revision() {
+    ariadne_restore_revision=$1
+    case "$ariadne_restore_revision" in
+        *[!0-9a-f]* | "") unset ariadne_restore_revision; return 1 ;;
+    esac
+    [ "${#ariadne_restore_revision}" -eq 40 ] || {
+        unset ariadne_restore_revision
+        return 1
+    }
+
+    log "restoring the deployment worktree to revision $ariadne_restore_revision"
+    git -C "$ARIADNE_WORKTREE" checkout --detach --force "$ariadne_restore_revision" >/dev/null 2>&1 ||
+        {
+            unset ariadne_restore_revision
+            return 1
+        }
+    if [ -n "$(git -C "$ARIADNE_WORKTREE" status --porcelain)" ]; then
+        unset ariadne_restore_revision
+        return 1
+    fi
+    unset ariadne_restore_revision
+    return 0
+}
+
 # ---------------------------------------------------------------------------
 # Backup contract
 #

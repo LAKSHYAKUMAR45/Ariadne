@@ -30,10 +30,22 @@ rollback_app() {
     fi
 }
 
+restore_worktree() {
+    if [ -z "$PREVIOUS_REVISION" ]; then
+        return 0
+    fi
+    if ariadne_restore_worktree_revision "$PREVIOUS_REVISION"; then
+        log "restored the deployment worktree to the recorded running revision"
+    else
+        log "warning: failed to restore the deployment worktree to the recorded running revision"
+    fi
+}
+
 on_exit() {
     status=$?
     if [ "$status" -ne 0 ]; then
         rollback_app
+        restore_worktree
     fi
     exit "$status"
 }
@@ -62,12 +74,8 @@ esac
 
 trap on_exit EXIT INT TERM
 
-if [ -f "$ARIADNE_STATE_DIR/current-revision" ]; then
-    PREVIOUS_REVISION=$(head -n 1 "$ARIADNE_STATE_DIR/current-revision" | tr -d ' \t\r\n')
-else
-    PREVIOUS_REVISION=$(git -C "$ARIADNE_WORKTREE" rev-parse HEAD | tr -d ' \t\r\n') ||
-        fail "current revision is unavailable"
-fi
+PREVIOUS_REVISION=$(ariadne_current_revision | tr -d ' \t\r\n') ||
+    fail "current revision is unavailable"
 
 log "creating a pre-rollback safety backup"
 ariadne_create_backup

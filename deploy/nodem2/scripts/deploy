@@ -71,7 +71,7 @@ git -C "$ARIADNE_WORKTREE" fetch --quiet --no-tags "$ARIADNE_TRUSTED_REMOTE" \
 TRUSTED_TIP=$(git -C "$ARIADNE_WORKTREE" rev-parse --verify --quiet "$ARIADNE_TRUSTED_REF^{commit}") ||
     fail "trusted ref $ARIADNE_TRUSTED_REF is not available"
 [ -n "$TRUSTED_TIP" ] || fail "trusted ref $ARIADNE_TRUSTED_REF is not available"
-PREVIOUS_REVISION=$(git -C "$ARIADNE_WORKTREE" rev-parse HEAD | tr -d ' \t\r\n') ||
+PREVIOUS_REVISION=$(ariadne_current_revision | tr -d ' \t\r\n') ||
     fail "current revision is unavailable"
 
 git -C "$ARIADNE_WORKTREE" cat-file -e "$REVISION^{commit}" 2>/dev/null ||
