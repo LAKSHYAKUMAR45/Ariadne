@@ -205,6 +205,7 @@ export function createApp(pool: Pool, jwtSecret: string, options: CreateAppOptio
     createAdminOperationsRouter(pool, {
       operationsStore,
       operatorClient: options?.operatorClient ?? null,
+      operatorQueryClient: options?.operatorQueryClient ?? null,
     }),
   );
   app.use('/api/v1/sync', requireAuth(jwtSecret), createSyncRouter(pool));

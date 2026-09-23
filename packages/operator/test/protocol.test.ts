@@ -25,6 +25,11 @@ describe('parseOperatorRequest', () => {
         revision: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
       },
       {
+        operationId: 'op-deployment-rollback',
+        type: 'deployment_rollback',
+        revision: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+      },
+      {
         operationId: 'op-backup-create',
         type: 'backup_create',
       },
@@ -59,6 +64,14 @@ describe('parseOperatorRequest', () => {
         operationId: 'op-invalid-revision',
         type: 'deployment_apply',
         revision: 'ABCDEF',
+      }),
+    ).toThrowError();
+
+    expect(() =>
+      parseOperatorRequest({
+        operationId: 'op-invalid-rollback-revision',
+        type: 'deployment_rollback',
+        revision: 'not-a-sha',
       }),
     ).toThrowError();
 

@@ -40,6 +40,16 @@ const deploymentApplyRequestSchema = z
   })
   .strict();
 
+const deploymentRollbackRequestSchema = z
+  .object({
+    operationId: operatorIdSchema,
+    type: z.literal('deployment_rollback'),
+    revision: z
+      .string()
+      .regex(REVISION_PATTERN, 'revision must be a 40-character lowercase hexadecimal sha'),
+  })
+  .strict();
+
 const backupCreateRequestSchema = z
   .object({
     operationId: operatorIdSchema,
@@ -66,6 +76,7 @@ const backupRestoreRequestSchema = z
 export const operatorRequestSchema = z.discriminatedUnion('type', [
   serviceRestartRequestSchema,
   deploymentApplyRequestSchema,
+  deploymentRollbackRequestSchema,
   backupCreateRequestSchema,
   backupVerifyRequestSchema,
   backupRestoreRequestSchema,

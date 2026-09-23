@@ -3,6 +3,8 @@ import type { Pool, PoolClient } from 'pg';
 export type AdminOperationType =
   | 'service_restart'
   | 'deployment_apply'
+  | 'deployment_rollback'
+  | 'file_capture_delete'
   | 'backup_create'
   | 'backup_verify'
   | 'backup_restore';
@@ -121,6 +123,7 @@ export interface OperationsStore {
     outcome?: string;
   }): Promise<{ events: AdminAuditEvent[]; nextCursor: string | null }>;
   upsertBackupRecord(input: UpsertBackupRecordInput): Promise<BackupRecord>;
+  getBackupRecord(filename: string): Promise<BackupRecord | null>;
   listBackupRecords(limit?: number): Promise<BackupRecord[]>;
 }
 
@@ -808,6 +811,24 @@ export function createOperationsStore(pool: Pool): OperationsStore {
       } finally {
         client.release();
       }
+    },
+
+    async getBackupRecord(filename: string): Promise<BackupRecord | null> {
+      const { rows } = await pool.query<BackupRecordRow>(
+        `SELECT
+           filename,
+           sha256,
+           size_bytes,
+           status,
+           created_at,
+           verified_at,
+           restore_verification_message
+         FROM backup_records
+         WHERE filename = $1
+         LIMIT 1`,
+        [filename],
+      );
+      return rows[0] ? mapBackupRecord(rows[0]) : null;
     },
 
     async listBackupRecords(limit = 50): Promise<BackupRecord[]> {

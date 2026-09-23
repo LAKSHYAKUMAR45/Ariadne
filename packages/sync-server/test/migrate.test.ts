@@ -62,7 +62,7 @@ describe('runMigrations', () => {
     const version = await pool.query<{ value: string }>(
       `SELECT value FROM schema_meta WHERE key = 'schema_version'`,
     );
-    expect(version.rows[0].value).toBe('9');
+    expect(version.rows[0].value).toBe('10');
 
     const dedupIndex = await pool.query<{ indexdef: string }>(
       `SELECT indexdef FROM pg_indexes
@@ -200,6 +200,7 @@ describe('runMigrations', () => {
         '0007_encrypted_task_history.sql',
         '0008_admin_operations.sql',
         '0009_admin_sessions.sql',
+        '0010_complete_admin_operations.sql',
       ]);
 
       const secondRun = await runMigrations(pool);
@@ -214,7 +215,7 @@ describe('runMigrations', () => {
         `SELECT value FROM schema_meta WHERE key = 'schema_version'`,
       );
       expect(schemaVersion.rows).toHaveLength(1);
-      expect(schemaVersion.rows[0].value).toBe('9');
+      expect(schemaVersion.rows[0].value).toBe('10');
 
       const memberships = await pool.query(
         `SELECT u.username, m.role, m.active
@@ -290,7 +291,7 @@ describe('runMigrations', () => {
     const version = await pool.query<{ value: string }>(
       `SELECT value FROM schema_meta WHERE key = 'schema_version'`,
     );
-    expect(version.rows[0].value).toBe('9');
+    expect(version.rows[0].value).toBe('10');
 
     const operationChecks = await pool.query<{ definition: string }>(
       `SELECT pg_get_constraintdef(oid) AS definition
@@ -355,6 +356,111 @@ describe('runMigrations', () => {
        )`,
     );
     expect(descendingIndexes.rows.map((row) => row.indexdef).join(' | ')).toContain('DESC');
+  });
+
+  it('upgrades admin operation types in place for rollback and local deletion', async () => {
+    if (!pool) {
+      pool = createPool(TEST_DATABASE_URL);
+    }
+    await pool.query('DROP SCHEMA public CASCADE; CREATE SCHEMA public;');
+
+    const v9MigrationsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ariadne-sync-v9-'));
+    try {
+      for (const file of [
+        '0001_init.sql',
+        '0002_workspace_label.sql',
+        '0003_checkpoint_attribution.sql',
+        '0004_subentity_sync.sql',
+        '0005_subentity_updated_at.sql',
+        '0006_single_team_authorization.sql',
+        '0007_encrypted_task_history.sql',
+        '0008_admin_operations.sql',
+        '0009_admin_sessions.sql',
+      ]) {
+        fs.copyFileSync(
+          path.join(process.cwd(), 'migrations', file),
+          path.join(v9MigrationsDir, file),
+        );
+      }
+
+      const applied = await runMigrations(pool, v9MigrationsDir);
+      expect(applied.at(-1)).toBe('0009_admin_sessions.sql');
+
+      const team = await pool.query<{ id: string }>(
+        `SELECT id FROM teams WHERE singleton_key = 'default'`,
+      );
+      const teamId = team.rows[0].id;
+      const user = await pool.query<{ id: string }>(
+        `INSERT INTO users (username, password_hash, created_at)
+         VALUES ('migration-admin', 'hash', '2026-09-23T09:00:00Z')
+         RETURNING id`,
+      );
+      await pool.query(
+        `INSERT INTO team_memberships (team_id, user_id, role, active, created_at)
+         VALUES ($1, $2, 'member', true, '2026-09-23T09:00:01Z')`,
+        [teamId, user.rows[0].id],
+      );
+      await pool.query(
+        `INSERT INTO admin_operations (id, requested_by, type, state, summary, created_at)
+         VALUES ('op-pre-0010', $1, 'backup_restore', 'queued', 'Restore backup', '2026-09-23T09:05:00Z')`,
+        [user.rows[0].id],
+      );
+      await pool.query(
+        `INSERT INTO admin_audit_events (
+           actor_user_id, action, source, outcome, metadata, created_at
+         )
+         VALUES ($1, 'admin_operation.created', 'admin_api', 'accepted', '{"operationId":"op-pre-0010"}', '2026-09-23T09:05:01Z')`,
+        [user.rows[0].id],
+      );
+
+      const upgraded = await runMigrations(pool);
+      expect(upgraded).toEqual(['0010_complete_admin_operations.sql']);
+
+      await expect(
+        pool.query(
+          `INSERT INTO admin_operations (id, requested_by, type, state, summary, created_at)
+           VALUES ('op-rollback', $1, 'deployment_rollback', 'queued', 'Rollback revision', now())`,
+          [user.rows[0].id],
+        ),
+      ).resolves.toBeTruthy();
+      await expect(
+        pool.query(
+          `INSERT INTO admin_operations (id, requested_by, type, state, summary, created_at)
+           VALUES ('op-delete', $1, 'file_capture_delete', 'queued', 'Delete file capture', now())`,
+          [user.rows[0].id],
+        ),
+      ).resolves.toBeTruthy();
+
+      const preserved = await pool.query<{ summary: string }>(
+        `SELECT summary FROM admin_operations WHERE id = 'op-pre-0010'`,
+      );
+      expect(preserved.rows).toEqual([{ summary: 'Restore backup' }]);
+
+      const audits = await pool.query<{ action: string }>(
+        `SELECT action FROM admin_audit_events WHERE metadata->>'operationId' = 'op-pre-0010'`,
+      );
+      expect(audits.rows).toEqual([{ action: 'admin_operation.created' }]);
+
+      const constraints = await pool.query<{ definition: string }>(
+        `SELECT pg_get_constraintdef(oid) AS definition
+           FROM pg_constraint
+          WHERE conrelid = 'admin_operations'::regclass
+            AND contype = 'c'
+            AND conname = 'admin_operations_type_check'`,
+      );
+      expect(constraints.rows[0].definition).toContain("'deployment_rollback'");
+      expect(constraints.rows[0].definition).toContain("'file_capture_delete'");
+
+      const schemaVersion = await pool.query<{ value: string }>(
+        `SELECT value FROM schema_meta WHERE key = 'schema_version'`,
+      );
+      expect(schemaVersion.rows[0].value).toBe('10');
+
+      const secondRun = await runMigrations(pool);
+      expect(secondRun).toEqual([]);
+    } finally {
+      fs.rmSync(v9MigrationsDir, { recursive: true, force: true });
+    }
   });
 
   it('stores admin dashboard sessions as hashes with an expiry index', async () => {

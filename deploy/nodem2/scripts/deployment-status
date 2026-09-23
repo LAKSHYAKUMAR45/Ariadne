@@ -42,13 +42,19 @@ require_deployment_inputs
 [ -d "$ARIADNE_WORKTREE/.git" ] || [ -f "$ARIADNE_WORKTREE/.git" ] ||
     fail "deployment worktree is missing: $ARIADNE_WORKTREE"
 
-current_revision=$(git -C "$ARIADNE_WORKTREE" rev-parse HEAD | tr -d ' \t\r\n') ||
-    fail "current revision is unavailable"
+current_revision=
+if [ -f "$ARIADNE_STATE_DIR/current-revision" ]; then
+    current_revision=$(head -n 1 "$ARIADNE_STATE_DIR/current-revision" | tr -d ' \t\r\n')
+fi
+if [ -z "$current_revision" ]; then
+    current_revision=$(git -C "$ARIADNE_WORKTREE" rev-parse HEAD | tr -d ' \t\r\n') ||
+        fail "current revision is unavailable"
+fi
 require_sha "$current_revision" "current revision is unavailable"
 
 rollback_revision=null
-if [ -f "$ARIADNE_STATE_DIR/rollback-image" ]; then
-    rollback_candidate=$(head -n 1 "$ARIADNE_STATE_DIR/rollback-image" | tr -d ' \t\r\n')
+if [ -f "$ARIADNE_STATE_DIR/rollback-revision" ]; then
+    rollback_candidate=$(head -n 1 "$ARIADNE_STATE_DIR/rollback-revision" | tr -d ' \t\r\n')
     case "$rollback_candidate" in
         "" | *[!0-9a-f]*)
             rollback_revision=null

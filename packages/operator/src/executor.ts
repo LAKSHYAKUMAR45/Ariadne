@@ -28,6 +28,7 @@ export const DEFAULT_EXEC_ENV = Object.freeze({
 
 const operationCommands = {
   deployment_apply: ['/usr/local/lib/ariadne/deploy'],
+  deployment_rollback: ['/usr/local/lib/ariadne/rollback'],
   backup_create: ['/usr/local/lib/ariadne/backup'],
   backup_verify: ['/usr/local/lib/ariadne/verify-backup'],
   backup_restore: ['/usr/local/lib/ariadne/restore-backup'],
@@ -314,6 +315,8 @@ function resolveCommand(request: OperatorRequest): [string, string[]] {
       return appendArgument(serviceRestartCommands[request.service]);
     case 'deployment_apply':
       return appendArgument(operationCommands.deployment_apply, request.revision);
+    case 'deployment_rollback':
+      return appendArgument(operationCommands.deployment_rollback, request.revision);
     case 'backup_create':
       return appendArgument(operationCommands.backup_create);
     case 'backup_verify':

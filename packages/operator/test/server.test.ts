@@ -475,8 +475,8 @@ describe('createOperatorServer', () => {
     const accepted = await request(socketPath, {
       body: JSON.stringify({
         operationId: 'op-3',
-        type: 'deployment_apply',
-        revision: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+        type: 'deployment_rollback',
+        revision: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
       }),
     });
 
@@ -484,8 +484,8 @@ describe('createOperatorServer', () => {
     expect(requests).toEqual([
       {
         operationId: 'op-3',
-        type: 'deployment_apply',
-        revision: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+        type: 'deployment_rollback',
+        revision: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
       },
     ]);
 

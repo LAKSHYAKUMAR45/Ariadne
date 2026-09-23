@@ -17,6 +17,7 @@ export const MAX_OPERATOR_RESPONSE_BYTES = 8 * 1024;
 export type OperatorSubmitRequest =
   | { operationId: string; type: 'service_restart'; service: 'sync-server' | 'postgres' }
   | { operationId: string; type: 'deployment_apply'; revision: string }
+  | { operationId: string; type: 'deployment_rollback'; revision: string }
   | { operationId: string; type: 'backup_create' }
   | { operationId: string; type: 'backup_verify'; backupName: string }
   | { operationId: string; type: 'backup_restore'; backupName: string };

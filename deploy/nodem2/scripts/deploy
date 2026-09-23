@@ -16,6 +16,7 @@ SCRIPT_DIR=$(unset CDPATH; cd -- "$(dirname -- "$0")" && pwd)
 
 CANDIDATE_IMAGE=""
 PREVIOUS_IMAGE=""
+PREVIOUS_REVISION=""
 APP_REPLACED=0
 
 on_exit() {
@@ -70,6 +71,8 @@ git -C "$ARIADNE_WORKTREE" fetch --quiet --no-tags "$ARIADNE_TRUSTED_REMOTE" \
 TRUSTED_TIP=$(git -C "$ARIADNE_WORKTREE" rev-parse --verify --quiet "$ARIADNE_TRUSTED_REF^{commit}") ||
     fail "trusted ref $ARIADNE_TRUSTED_REF is not available"
 [ -n "$TRUSTED_TIP" ] || fail "trusted ref $ARIADNE_TRUSTED_REF is not available"
+PREVIOUS_REVISION=$(git -C "$ARIADNE_WORKTREE" rev-parse HEAD | tr -d ' \t\r\n') ||
+    fail "current revision is unavailable"
 
 git -C "$ARIADNE_WORKTREE" cat-file -e "$REVISION^{commit}" 2>/dev/null ||
     fail "revision is not a known commit in the trusted worktree"
@@ -134,4 +137,17 @@ fi
 APP_REPLACED=0
 docker tag "$CANDIDATE_IMAGE" "$ARIADNE_CURRENT_TAG" ||
     fail "failed to update the $ARIADNE_CURRENT_TAG rollback pointer"
+
+printf '%s\n' "$REVISION" >"$ARIADNE_STATE_DIR/current-revision" ||
+    fail "failed to record the current deployment revision"
+chmod 600 "$ARIADNE_STATE_DIR/current-revision" ||
+    fail "failed to secure the current deployment revision"
+if [ -n "$PREVIOUS_REVISION" ] && [ "$PREVIOUS_REVISION" != "$REVISION" ]; then
+    printf '%s\n' "$PREVIOUS_REVISION" >"$ARIADNE_STATE_DIR/rollback-revision" ||
+        fail "failed to record the eligible rollback revision"
+    chmod 600 "$ARIADNE_STATE_DIR/rollback-revision" ||
+        fail "failed to secure the eligible rollback revision"
+else
+    rm -f "$ARIADNE_STATE_DIR/rollback-revision"
+fi
 log "deployment of revision $REVISION succeeded"

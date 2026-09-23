@@ -16,6 +16,7 @@ import {
   requireCsrf,
 } from '../src/middleware.js';
 import { ADMIN_SESSION_COOKIE_NAME } from '../src/adminSessions.js';
+import { confirmationFor } from '../src/operationConfirmation.js';
 import { createOperatorClient, type OperatorClient } from '../src/operatorClient.js';
 import {
   createOperationsStore,
@@ -241,6 +242,7 @@ describe('sync-server: auth + sync routes', () => {
       await addMembership(teamId, member.userId, 'member');
 
       const session = await openAdminSession(app, 'singleton-admin');
+      await reauthenticateAdminSession(app, session);
 
       return { teamId, admin: { ...admin, session }, member };
     }
@@ -275,7 +277,10 @@ describe('sync-server: auth + sync routes', () => {
       const deactivateRes = await request(app)
         .patch(`/api/v1/admin/members/${member.userId}`)
         .set(admin.session)
-        .send({ active: false });
+        .send({
+          active: false,
+          confirmation: confirmationFor.memberState('teammate-member', false),
+        });
       expect(deactivateRes.status).toBe(200);
       expect(deactivateRes.body.member).toMatchObject({
         userId: member.userId,
@@ -293,7 +298,10 @@ describe('sync-server: auth + sync routes', () => {
       const reactivateRes = await request(app)
         .patch(`/api/v1/admin/members/${member.userId}`)
         .set(admin.session)
-        .send({ active: true });
+        .send({
+          active: true,
+          confirmation: confirmationFor.memberState('teammate-member', true),
+        });
       expect(reactivateRes.status).toBe(200);
       expect(reactivateRes.body.member).toMatchObject({
         userId: member.userId,
@@ -333,7 +341,10 @@ describe('sync-server: auth + sync routes', () => {
       const patchRes = await request(app)
         .patch(`/api/v1/admin/members/${member.userId}`)
         .set(member.authHeader)
-        .send({ active: false });
+        .send({
+          active: false,
+          confirmation: confirmationFor.memberState('teammate-member', false),
+        });
       expect(patchRes.status).toBe(401);
       expect(patchRes.body.error.code).toBe('missing_session');
     });
@@ -365,7 +376,10 @@ describe('sync-server: auth + sync routes', () => {
       const res = await request(app)
         .patch(`/api/v1/admin/members/${member.userId}`)
         .set({ Cookie: admin.session.Cookie })
-        .send({ active: false });
+        .send({
+          active: false,
+          confirmation: confirmationFor.memberState('teammate-member', false),
+        });
 
       expect(res.status).toBe(403);
       expect(res.body.error.code).toBe('csrf_failed');
@@ -383,7 +397,10 @@ describe('sync-server: auth + sync routes', () => {
       const res = await request(app)
         .patch('/api/v1/admin/members/00000000-0000-0000-0000-000000000099')
         .set(admin.session)
-        .send({ active: false });
+        .send({
+          active: false,
+          confirmation: confirmationFor.memberState('missing-member', false),
+        });
 
       expect(res.status).toBe(404);
     });
@@ -394,7 +411,10 @@ describe('sync-server: auth + sync routes', () => {
       const res = await request(app)
         .patch(`/api/v1/admin/members/${admin.userId}`)
         .set(admin.session)
-        .send({ active: false });
+        .send({
+          active: false,
+          confirmation: confirmationFor.memberState('singleton-admin', false),
+        });
 
       expect(res.status).toBe(409);
       expect(res.body.error.code).toBe('admin_immutable');
@@ -450,6 +470,7 @@ describe('sync-server: auth + sync routes', () => {
       await addMembership(teamId, admin.userId, 'admin');
       await addMembership(teamId, member.userId, 'member');
       const adminSession = await openAdminSession(app, 'revocation-admin');
+      await reauthenticateAdminSession(app, adminSession);
 
       // The member token is minted while the membership is still active, then
       // the admin deactivates them from the dashboard: the already-issued JWT
@@ -457,7 +478,10 @@ describe('sync-server: auth + sync routes', () => {
       const deactivate = await request(app)
         .patch(`/api/v1/admin/members/${member.userId}`)
         .set(adminSession)
-        .send({ active: false });
+        .send({
+          active: false,
+          confirmation: confirmationFor.memberState('revocation-member', false),
+        });
       expect(deactivate.status).toBe(200);
 
       return { authHeader: member.authHeader, teamId };
@@ -2579,6 +2603,27 @@ describe('sync-server: admin operator operations', () => {
   }): Express {
     const testApp = express();
     testApp.use(express.json());
+    testApp.use('/api/v1/admin', (req, _res, next) => {
+      const body = (req.body ?? {}) as Record<string, unknown>;
+      if (req.method === 'POST' && req.path === '/operations/service-restart') {
+        if (typeof body.service === 'string' && typeof body.confirmation !== 'string') {
+          body.confirmation = confirmationFor.serviceRestart(
+            body.service as 'sync-server' | 'postgres',
+          );
+        }
+      } else if (req.method === 'POST' && req.path === '/operations/deploy') {
+        if (typeof body.revision === 'string' && typeof body.confirmation !== 'string') {
+          body.confirmation = confirmationFor.deploy(body.revision);
+        }
+      } else if (req.method === 'POST' && /\/operations\/backups\/.+\/restore$/.test(req.path)) {
+        const backupName = decodeURIComponent(req.path.split('/').at(-2) ?? '');
+        if (backupName && typeof body.confirmation !== 'string') {
+          body.confirmation = confirmationFor.restore(backupName);
+        }
+      }
+      req.body = body;
+      next();
+    });
     testApp.use(
       '/api/v1/admin',
       requireAdminSession(pool),
@@ -2586,6 +2631,51 @@ describe('sync-server: admin operator operations', () => {
       createAdminOperationsRouter(pool, {
         operationsStore: store,
         operatorClient: options.operatorClient,
+        operatorQueryClient: {
+          query: async (operatorQuery) => {
+            switch (operatorQuery.type) {
+              case 'deployment_status':
+                return {
+                  currentRevision: 'a'.repeat(40),
+                  rollbackRevision: 'b'.repeat(40),
+                  schemaVersion: 10,
+                  candidates: [
+                    {
+                      revision: 'b'.repeat(40),
+                      committedAt: '2026-09-23T09:00:00Z',
+                      subject: 'feat: deployable',
+                    },
+                    {
+                      revision: 'c'.repeat(40),
+                      committedAt: '2026-09-23T10:00:00Z',
+                      subject: 'feat: second deployable',
+                    },
+                  ],
+                };
+              case 'host_metrics':
+                return {
+                  cpuPercent: 1,
+                  memoryUsedBytes: 1,
+                  memoryTotalBytes: 2,
+                  filesystemUsedBytes: 3,
+                  filesystemTotalBytes: 4,
+                };
+              case 'service_status':
+                return {
+                  services: [
+                    { name: 'sync-server', state: 'running' },
+                    { name: 'operator', state: 'running' },
+                    { name: 'postgres', state: 'running' },
+                  ],
+                };
+              case 'logs_read':
+                return { entries: [], nextCursor: null };
+            }
+          },
+          downloadBackup: async () => {
+            throw new Error('downloadBackup not used in this suite');
+          },
+        },
         heartbeatIntervalMs: options.heartbeatIntervalMs,
         pollIntervalMs: options.pollIntervalMs,
       }),
@@ -2668,7 +2758,10 @@ describe('sync-server: admin operator operations', () => {
     const res = await request(adminApp)
       .post('/api/v1/admin/operations/service-restart')
       .set(adminAuth())
-      .send({ service: 'sync-server' });
+      .send({
+        service: 'sync-server',
+        confirmation: confirmationFor.serviceRestart('sync-server'),
+      });
 
     expect(res.status).toBe(202);
     expect(res.body.accepted).toBe(true);
@@ -2731,12 +2824,18 @@ describe('sync-server: admin operator operations', () => {
     const first = await request(adminApp)
       .post('/api/v1/admin/operations/service-restart')
       .set(adminAuth())
-      .send({ service: 'postgres' })
+      .send({
+        service: 'postgres',
+        confirmation: confirmationFor.serviceRestart('postgres'),
+      })
       .expect(202);
     const second = await request(adminApp)
       .post('/api/v1/admin/operations/service-restart')
       .set(adminAuth())
-      .send({ service: 'postgres' })
+      .send({
+        service: 'postgres',
+        confirmation: confirmationFor.serviceRestart('postgres'),
+      })
       .expect(202);
 
     expect(second.body.operation.id).not.toBe(first.body.operation.id);
@@ -2747,7 +2846,10 @@ describe('sync-server: admin operator operations', () => {
     const res = await request(failClosedApp)
       .post('/api/v1/admin/operations/service-restart')
       .set(staleAuth())
-      .send({ service: 'sync-server' });
+      .send({
+        service: 'sync-server',
+        confirmation: confirmationFor.serviceRestart('sync-server'),
+      });
 
     expect(res.status).toBe(403);
     expect(res.body.error.code).toBe('reauthentication_required');
@@ -2759,7 +2861,10 @@ describe('sync-server: admin operator operations', () => {
     const res = await request(adminApp)
       .post('/api/v1/admin/operations/service-restart')
       .set({ Authorization: `Bearer ${memberToken}` })
-      .send({ service: 'sync-server' });
+      .send({
+        service: 'sync-server',
+        confirmation: confirmationFor.serviceRestart('sync-server'),
+      });
 
     expect(res.status).toBe(401);
     expect(res.body.error.code).toBe('missing_session');
@@ -2775,7 +2880,10 @@ describe('sync-server: admin operator operations', () => {
     const res = await request(adminApp)
       .post('/api/v1/admin/operations/service-restart')
       .set(adminAuth())
-      .send({ service: 'sync-server' });
+      .send({
+        service: 'sync-server',
+        confirmation: confirmationFor.serviceRestart('sync-server'),
+      });
 
     expect(res.status).toBe(403);
     expect(res.body.error.code).toBe('admin_required');
@@ -2787,7 +2895,10 @@ describe('sync-server: admin operator operations', () => {
     const res = await request(adminApp)
       .post('/api/v1/admin/operations/service-restart')
       .set({ Cookie: adminAuth().Cookie })
-      .send({ service: 'sync-server' });
+      .send({
+        service: 'sync-server',
+        confirmation: confirmationFor.serviceRestart('sync-server'),
+      });
 
     expect(res.status).toBe(403);
     expect(res.body.error.code).toBe('csrf_failed');
@@ -2800,7 +2911,10 @@ describe('sync-server: admin operator operations', () => {
       .post('/api/v1/admin/operations/service-restart')
       .set(adminAuth())
       .set('Origin', 'https://evil.example.test')
-      .send({ service: 'sync-server' });
+      .send({
+        service: 'sync-server',
+        confirmation: confirmationFor.serviceRestart('sync-server'),
+      });
 
     expect(res.status).toBe(403);
     expect(res.body.error.code).toBe('origin_not_allowed');
@@ -2811,7 +2925,10 @@ describe('sync-server: admin operator operations', () => {
   it('requires authentication', async () => {
     const res = await request(adminApp)
       .post('/api/v1/admin/operations/service-restart')
-      .send({ service: 'sync-server' });
+      .send({
+        service: 'sync-server',
+        confirmation: confirmationFor.serviceRestart('sync-server'),
+      });
     expect(res.status).toBe(401);
   });
 
@@ -2855,10 +2972,18 @@ describe('sync-server: admin operator operations', () => {
 
   it('submits deploy and backup verify/restore with the operator wire shape', async () => {
     const revision = 'b'.repeat(40);
+    await store.upsertBackupRecord({
+      filename: 'ariadne-2026-09-21.dump',
+      sha256: 'd'.repeat(64),
+      sizeBytes: 1024,
+      status: 'verified',
+      createdAt: '2026-09-21T00:00:00Z',
+      verifiedAt: '2026-09-21T00:01:00Z',
+    });
     const deploy = await request(adminApp)
       .post('/api/v1/admin/operations/deploy')
       .set(adminAuth())
-      .send({ revision })
+      .send({ revision, confirmation: confirmationFor.deploy(revision) })
       .expect(202);
     const verify = await request(adminApp)
       .post('/api/v1/admin/operations/backups/ariadne-2026-09-21.dump/verify')
@@ -2868,7 +2993,7 @@ describe('sync-server: admin operator operations', () => {
     const restore = await request(adminApp)
       .post('/api/v1/admin/operations/backups/ariadne-2026-09-21.dump/restore')
       .set(adminAuth())
-      .send({})
+      .send({ confirmation: confirmationFor.restore('ariadne-2026-09-21.dump') })
       .expect(202);
 
     expect(operator.requests.map((recorded) => recorded.body)).toEqual([
@@ -2900,7 +3025,10 @@ describe('sync-server: admin operator operations', () => {
     const res = await request(unavailableApp)
       .post('/api/v1/admin/operations/service-restart')
       .set(adminAuth())
-      .send({ service: 'sync-server' });
+      .send({
+        service: 'sync-server',
+        confirmation: confirmationFor.serviceRestart('sync-server'),
+      });
 
     expect(res.status).toBe(503);
     expect(res.body.error.code).toBe('operator_connect_failed');
@@ -2936,7 +3064,10 @@ describe('sync-server: admin operator operations', () => {
     const res = await request(refusedApp)
       .post('/api/v1/admin/operations/service-restart')
       .set(adminAuth())
-      .send({ service: 'sync-server' });
+      .send({
+        service: 'sync-server',
+        confirmation: confirmationFor.serviceRestart('sync-server'),
+      });
 
     expect(res.status).toBe(503);
     expect(res.body.error.code).toBe('operator_connect_failed');
@@ -2952,7 +3083,10 @@ describe('sync-server: admin operator operations', () => {
     const res = await request(adminApp)
       .post('/api/v1/admin/operations/service-restart')
       .set(adminAuth())
-      .send({ service: 'sync-server' });
+      .send({
+        service: 'sync-server',
+        confirmation: confirmationFor.serviceRestart('sync-server'),
+      });
 
     expect(res.status).toBe(503);
     expect(res.body.error.code).toBe('operator_unavailable');
@@ -3014,7 +3148,10 @@ describe('sync-server: admin operator operations', () => {
     const res = await request(adminApp)
       .post('/api/v1/admin/operations/service-restart')
       .set(adminAuth())
-      .send({ service: 'sync-server' });
+      .send({
+        service: 'sync-server',
+        confirmation: confirmationFor.serviceRestart('sync-server'),
+      });
 
     expect(res.status).toBe(504);
     expect(res.body.error.code).toBe('operator_timeout');
@@ -3056,7 +3193,10 @@ describe('sync-server: admin operator operations', () => {
     const res = await request(adminApp)
       .post('/api/v1/admin/operations/service-restart')
       .set(adminAuth())
-      .send({ service: 'sync-server' });
+      .send({
+        service: 'sync-server',
+        confirmation: confirmationFor.serviceRestart('sync-server'),
+      });
 
     expect(res.status).toBe(502);
     expect(res.body.error.code).toBe('operator_invalid_response');
@@ -3103,7 +3243,10 @@ describe('sync-server: admin operator operations', () => {
     const res = await request(adminApp)
       .post('/api/v1/admin/operations/deploy')
       .set(adminAuth())
-      .send({ revision: 'c'.repeat(40) });
+      .send({
+        revision: 'c'.repeat(40),
+        confirmation: confirmationFor.deploy('c'.repeat(40)),
+      });
 
     expect(res.status).toBe(409);
     expect(res.body.error.code).toBe('operator_busy');
@@ -3115,7 +3258,10 @@ describe('sync-server: admin operator operations', () => {
     const created = await request(adminApp)
       .post('/api/v1/admin/operations/service-restart')
       .set(adminAuth())
-      .send({ service: 'sync-server' })
+      .send({
+        service: 'sync-server',
+        confirmation: confirmationFor.serviceRestart('sync-server'),
+      })
       .expect(202);
     const operationId = created.body.operation.id as string;
 
@@ -3225,7 +3371,11 @@ describe('sync-server: admin operator operations', () => {
     await request(unavailableApp)
       .post('/api/v1/admin/operations/service-restart')
       .set(adminAuth())
-      .send({ service: 'sync-server', password: 'super-secret-value' })
+      .send({
+        service: 'sync-server',
+        confirmation: confirmationFor.serviceRestart('sync-server'),
+        password: 'super-secret-value',
+      })
       .expect(503);
 
     const { operations } = await store.listOperations({ limit: 50 });

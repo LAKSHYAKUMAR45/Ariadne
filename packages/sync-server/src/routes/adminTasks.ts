@@ -1,12 +1,17 @@
+import { randomUUID } from 'node:crypto';
 import { Router, type Response } from 'express';
 import type { Pool } from 'pg';
+import { z } from 'zod';
 import { requireSingletonAdmin } from '../adminAccess.js';
 import { MAX_CAPTURE_ID_LENGTH, requireCapturePath, requireSafeId } from '../captureValidation.js';
 import { ApiError } from '../errors.js';
 import { asyncHandler, type AuthenticatedRequest } from '../middleware.js';
+import { createOperationsStore, type AdminOperation } from '../operationsStore.js';
+import { confirmationFor, requireConfirmation } from '../operationConfirmation.js';
 import { requireTeamTask } from '../taskAccess.js';
 import type { FileCaptureTrigger, TaskHistoryStore } from '../taskHistoryTypes.js';
 import { requireUuidParam } from './taskHistory.js';
+import { ADMIN_OPERATION_SOURCE } from './adminOperations.js';
 
 export type AdminTimelineKind =
   | 'task'
@@ -85,6 +90,16 @@ interface CaptureTimelineRow {
   files: CaptureFileMetadata[];
 }
 
+interface ReauthenticatedAdminRequest extends AuthenticatedRequest {
+  adminReauthenticated?: boolean;
+}
+
+const deleteCaptureBodySchema = z
+  .object({
+    confirmation: z.string(),
+  })
+  .strict();
+
 /**
  * Sorts by instant, then by the fixed kind order, then by id. Timestamps are
  * all produced by `Date.toISOString()`, so lexicographic comparison is
@@ -153,6 +168,7 @@ function noStore(res: Response): void {
  */
 export function createAdminTasksRouter(pool: Pool, store: TaskHistoryStore): Router {
   const router = Router();
+  const operationsStore = createOperationsStore(pool);
 
   async function requireAdminTask(req: AuthenticatedRequest): Promise<{ teamId: string; taskId: string }> {
     const membership = await requireSingletonAdmin(pool, req.userId!);
@@ -199,6 +215,96 @@ export function createAdminTasksRouter(pool: Pool, store: TaskHistoryStore): Rou
         hasMore,
         nextOffset: hasMore ? offset + limit : null,
       });
+    }),
+  );
+
+  router.delete(
+    '/tasks/:taskId/file-captures/:captureId',
+    asyncHandler(async (req: ReauthenticatedAdminRequest, res) => {
+      const { teamId, taskId } = await requireAdminTask(req);
+      if (req.adminReauthenticated !== true) {
+        throw new ApiError(
+          403,
+          'reauthentication_required',
+          'This action requires a freshly reauthenticated dashboard session',
+        );
+      }
+
+      const captureId = requireCaptureIdParam(req.params.captureId);
+      const parsed = deleteCaptureBodySchema.safeParse(req.body ?? {});
+      if (!parsed.success) {
+        throw new ApiError(400, 'invalid_request', 'Request body is invalid');
+      }
+      try {
+        requireConfirmation(
+          confirmationFor.captureDelete(captureId),
+          parsed.data.confirmation,
+        );
+      } catch {
+        throw new ApiError(
+          400,
+          'confirmation_mismatch',
+          'Confirmation text does not match the requested capture deletion',
+        );
+      }
+
+      const operation = await operationsStore.createOperation({
+        id: randomUUID(),
+        requestedBy: req.userId!,
+        type: 'file_capture_delete',
+        summary: `Delete file capture ${captureId}`,
+        source: ADMIN_OPERATION_SOURCE,
+        metadata: { taskId, captureId },
+      });
+
+      await operationsStore.transitionOperation({
+        id: operation.id,
+        nextState: 'running',
+        actorUserId: req.userId!,
+        source: ADMIN_OPERATION_SOURCE,
+        message: 'Deleting file capture',
+        metadata: { taskId, captureId },
+      });
+
+      let finalOperation: AdminOperation;
+      try {
+        const deleted = await store.deleteCapture({
+          teamId,
+          taskId,
+          captureId,
+          actorUserId: req.userId!,
+          reason: 'admin requested history purge',
+        });
+        finalOperation = await operationsStore.transitionOperation({
+          id: operation.id,
+          nextState: 'succeeded',
+          actorUserId: req.userId!,
+          source: ADMIN_OPERATION_SOURCE,
+          message: 'File capture deleted',
+          metadata: {
+            taskId,
+            captureId,
+            deletionId: deleted.deletionId,
+            deletedEntryCount: deleted.deletedEntryCount,
+            deletedBlobCount: deleted.deletedBlobCount,
+          },
+          output: 'Capture deletion completed',
+        });
+      } catch (error: unknown) {
+        const reason = error instanceof ApiError ? error.code : 'capture_delete_failed';
+        finalOperation = await operationsStore.transitionOperation({
+          id: operation.id,
+          nextState: 'failed',
+          actorUserId: req.userId!,
+          source: ADMIN_OPERATION_SOURCE,
+          message: 'File capture deletion failed',
+          metadata: { taskId, captureId, reason },
+          output: error instanceof Error ? error.message : 'Capture deletion failed',
+        });
+      }
+
+      noStore(res);
+      res.status(202).json({ accepted: true, operation: finalOperation });
     }),
   );
 

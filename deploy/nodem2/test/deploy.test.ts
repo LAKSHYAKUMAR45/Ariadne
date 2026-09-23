@@ -18,6 +18,7 @@ const scriptsDir = path.join(deployDir, 'scripts');
 const composeSource = path.join(deployDir, 'compose.yaml');
 
 const VALID_SHA = 'a'.repeat(40);
+const ROLLBACK_SHA = 'b'.repeat(40);
 const PREVIOUS_IMAGE_ID = `sha256:${'1'.repeat(64)}`;
 const JWT_SECRET_VALUE = 'top-secret-jwt-value-must-never-be-printed';
 const POSTGRES_PASSWORD_VALUE = 'top-secret-postgres-password-value';
@@ -89,6 +90,20 @@ if [ "\${1:-}" = image ] && [ "\${2:-}" = inspect ]; then
   echo "${PREVIOUS_IMAGE_ID}"
   exit 0
 fi
+case "$*" in
+  *pg_dump*)
+    printf 'PGDMP fake custom dump\\n'
+    exit 0 ;;
+  *"pg_restore --list"*)
+    cat > /dev/null
+    printf ';\\n; Archive created by fake pg_dump\\n;\\n245; 1259 16385 TABLE public tasks ariadne\\n'
+    exit 0 ;;
+  *pg_restore*)
+    cat > /dev/null
+    exit 0 ;;
+  *psql*)
+    exit 0 ;;
+esac
 for pattern in \${FAKE_DOCKER_FAIL:-}; do
   case "$*" in
     *"$pattern"*) echo "fake docker failure: $pattern" >&2; exit 1 ;;
@@ -417,6 +432,65 @@ describe('deploy script', () => {
     expect(result.status).toBe(0);
     const recorded = fs.readFileSync(path.join(harness.stateDir, 'rollback-image'), 'utf8').trim();
     expect(recorded).toBe(PREVIOUS_IMAGE_ID);
+  });
+
+  it('runs the tracked rollback only for the exact eligible revision', () => {
+    const harness = createHarness();
+    fs.writeFileSync(path.join(harness.stateDir, 'rollback-revision'), `${ROLLBACK_SHA}\n`, {
+      mode: 0o600,
+    });
+
+    const wrong = runScript(harness, 'rollback', { args: [VALID_SHA] });
+    expect(wrong.status).not.toBe(0);
+    expect(readLog(harness.dockerLog)).toEqual([]);
+
+    const correct = runScript(harness, 'rollback', { args: [ROLLBACK_SHA] });
+    expect(correct.status).toBe(0);
+    const docker = readLog(harness.dockerLog);
+    expect(indexOfMatch(docker, 'build sync-server')).toBeGreaterThanOrEqual(0);
+    expect(indexOfMatch(docker, 'run --rm')).toBeGreaterThanOrEqual(0);
+    expect(indexOfMatch(docker, 'up -d --no-deps sync-server')).toBeGreaterThanOrEqual(0);
+  });
+
+  it('takes and verifies a fresh safety backup before rollback cutover', () => {
+    const harness = createHarness();
+    fs.writeFileSync(path.join(harness.stateDir, 'rollback-revision'), `${ROLLBACK_SHA}\n`, {
+      mode: 0o600,
+    });
+
+    const result = runScript(harness, 'rollback', { args: [ROLLBACK_SHA] });
+
+    expect(result.status).toBe(0);
+    const docker = readLog(harness.dockerLog);
+    const backupIndex = indexOfMatch(docker, 'exec -T postgres pg_dump');
+    const verifyIndex = indexOfMatch(docker, 'pg_restore --list');
+    const buildIndex = indexOfMatch(docker, 'build sync-server');
+    expect(backupIndex).toBeGreaterThanOrEqual(0);
+    expect(verifyIndex).toBeGreaterThan(backupIndex);
+    expect(buildIndex).toBeGreaterThan(verifyIndex);
+  });
+
+  it('preserves rollback artifacts when rollback health verification fails', () => {
+    const harness = createHarness();
+    fs.writeFileSync(path.join(harness.stateDir, 'rollback-revision'), `${ROLLBACK_SHA}\n`, {
+      mode: 0o600,
+    });
+    fs.writeFileSync(path.join(harness.stateDir, 'current-revision'), `${VALID_SHA}\n`, {
+      mode: 0o600,
+    });
+
+    const result = runScript(harness, 'rollback', {
+      args: [ROLLBACK_SHA],
+      env: { FAKE_CURL_EXIT: '7' },
+    });
+
+    expect(result.status).not.toBe(0);
+    expect(fs.readFileSync(path.join(harness.stateDir, 'rollback-revision'), 'utf8').trim()).toBe(
+      ROLLBACK_SHA,
+    );
+    expect(fs.readFileSync(path.join(harness.stateDir, 'current-revision'), 'utf8').trim()).toBe(
+      VALID_SHA,
+    );
   });
 
   it('rolls back to the prior image when health verification fails', () => {

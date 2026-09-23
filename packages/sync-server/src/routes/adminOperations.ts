@@ -12,6 +12,11 @@ import {
   type OperatorClient,
   type OperatorSubmitRequest,
 } from '../operatorClient.js';
+import type {
+  DeploymentStatusResult,
+  OperatorQueryClient,
+} from '../operatorQueryClient.js';
+import { confirmationFor, requireConfirmation } from '../operationConfirmation.js';
 import {
   AdminOperationNotFoundError,
   OperationTransitionError,
@@ -62,16 +67,25 @@ const BACKUP_ARTIFACT_PATTERN = /^ariadne-\d{8}T\d{6}Z\.dump$/;
 
 const serviceRestartBodySchema = z.object({
   service: z.enum(['sync-server', 'postgres']),
+  confirmation: z.string(),
 });
 
 const deployBodySchema = z.object({
   revision: z.string().regex(REVISION_PATTERN),
+  confirmation: z.string(),
 });
+
+const restoreBodySchema = z
+  .object({
+    confirmation: z.string(),
+  })
+  .strict();
 
 export interface AdminOperationsRouterOptions {
   operationsStore: OperationsStore;
   /** `null` when no operator socket is configured for this deployment. */
   operatorClient: OperatorClient | null;
+  operatorQueryClient?: OperatorQueryClient | null;
   heartbeatIntervalMs?: number;
   pollIntervalMs?: number;
   maxStreamDurationMs?: number;
@@ -82,6 +96,11 @@ interface OperationSpec {
   type: AdminOperationType;
   summary: string;
   metadata: Record<string, string>;
+  confirmation?: {
+    expected: string;
+    provided: unknown;
+  };
+  beforeCreate?(): Promise<void>;
   buildOperatorRequest(operationId: string): OperatorSubmitRequest;
 }
 
@@ -150,6 +169,7 @@ export function createAdminOperationsRouter(
   const router = Router();
   const store = options.operationsStore;
   const operatorClient = options.operatorClient;
+  const operatorQueryClient = options.operatorQueryClient ?? null;
   const heartbeatIntervalMs = options.heartbeatIntervalMs ?? DEFAULT_HEARTBEAT_INTERVAL_MS;
   const pollIntervalMs = options.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
   const maxStreamDurationMs = options.maxStreamDurationMs ?? DEFAULT_MAX_STREAM_DURATION_MS;
@@ -228,6 +248,18 @@ export function createAdminOperationsRouter(
     spec: OperationSpec,
   ): Promise<void> {
     const userId = await requireReauthenticatedAdmin(req);
+    if (spec.confirmation) {
+      try {
+        requireConfirmation(spec.confirmation.expected, spec.confirmation.provided);
+      } catch {
+        throw new ApiError(
+          400,
+          'confirmation_mismatch',
+          'Confirmation text does not match the requested action',
+        );
+      }
+    }
+    await spec.beforeCreate?.();
     const operationId = generateOperationId();
 
     // Queued record first: an operator submission must never run without an
@@ -267,6 +299,27 @@ export function createAdminOperationsRouter(
 
     noStore(res);
     res.status(202).json({ accepted: true, operation: serializeOperation(operation) });
+  }
+
+  function requireOperatorQueryClient(): OperatorQueryClient {
+    if (!operatorQueryClient) {
+      throw new ApiError(503, 'operator_unavailable', 'The operator service is not configured');
+    }
+    return operatorQueryClient;
+  }
+
+  async function loadDeploymentStatus(): Promise<DeploymentStatusResult> {
+    const result = await requireOperatorQueryClient().query({ type: 'deployment_status' });
+    if (
+      typeof result !== 'object' ||
+      result === null ||
+      !('currentRevision' in result) ||
+      !('rollbackRevision' in result) ||
+      !('candidates' in result)
+    ) {
+      throw new ApiError(503, 'operator_invalid_response', 'The operator service returned an unusable response');
+    }
+    return result as DeploymentStatusResult;
   }
 
   router.get(
@@ -395,7 +448,7 @@ export function createAdminOperationsRouter(
   router.post(
     '/operations/service-restart',
     asyncHandler(async (req: ReauthenticatedAdminRequest, res) => {
-      const { service } = parseBody(
+      const { service, confirmation } = parseBody(
         serviceRestartBodySchema,
         req.body,
         'service must be one of: sync-server, postgres',
@@ -404,6 +457,10 @@ export function createAdminOperationsRouter(
         type: 'service_restart',
         summary: `Restart ${service} service`,
         metadata: { service },
+        confirmation: {
+          expected: confirmationFor.serviceRestart(service),
+          provided: confirmation,
+        },
         buildOperatorRequest: (operationId) => ({
           operationId,
           type: 'service_restart',
@@ -416,7 +473,7 @@ export function createAdminOperationsRouter(
   router.post(
     '/operations/deploy',
     asyncHandler(async (req: ReauthenticatedAdminRequest, res) => {
-      const { revision } = parseBody(
+      const { revision, confirmation } = parseBody(
         deployBodySchema,
         req.body,
         'revision must be a 40-character lowercase hexadecimal commit sha',
@@ -425,9 +482,58 @@ export function createAdminOperationsRouter(
         type: 'deployment_apply',
         summary: `Deploy revision ${revision}`,
         metadata: { revision },
+        confirmation: {
+          expected: confirmationFor.deploy(revision),
+          provided: confirmation,
+        },
+        async beforeCreate() {
+          const deployment = await loadDeploymentStatus();
+          if (!deployment.candidates.some((candidate) => candidate.revision === revision)) {
+            throw new ApiError(
+              409,
+              'deployment_revision_not_allowed',
+              'The selected revision is not currently deployable',
+            );
+          }
+        },
         buildOperatorRequest: (operationId) => ({
           operationId,
           type: 'deployment_apply',
+          revision,
+        }),
+      });
+    }),
+  );
+
+  router.post(
+    '/operations/rollback',
+    asyncHandler(async (req: ReauthenticatedAdminRequest, res) => {
+      const { revision, confirmation } = parseBody(
+        deployBodySchema,
+        req.body,
+        'revision must be a 40-character lowercase hexadecimal commit sha',
+      );
+      await submitOperation(req, res, {
+        type: 'deployment_rollback',
+        summary: `Rollback to revision ${revision}`,
+        metadata: { revision },
+        confirmation: {
+          expected: confirmationFor.rollback(revision),
+          provided: confirmation,
+        },
+        async beforeCreate() {
+          const deployment = await loadDeploymentStatus();
+          if (deployment.rollbackRevision !== revision) {
+            throw new ApiError(
+              409,
+              'rollback_revision_not_allowed',
+              'The selected revision is not the currently eligible rollback target',
+            );
+          }
+        },
+        buildOperatorRequest: (operationId) => ({
+          operationId,
+          type: 'deployment_rollback',
           revision,
         }),
       });
@@ -467,10 +573,29 @@ export function createAdminOperationsRouter(
     '/operations/backups/:name/restore',
     asyncHandler(async (req: ReauthenticatedAdminRequest, res) => {
       const backupName = requireBackupName(req.params.name);
+      const { confirmation } = parseBody(
+        restoreBodySchema,
+        req.body,
+        'confirmation must match the selected backup restore action',
+      );
       await submitOperation(req, res, {
         type: 'backup_restore',
         summary: `Restore backup ${backupName}`,
         metadata: { backupName },
+        confirmation: {
+          expected: confirmationFor.restore(backupName),
+          provided: confirmation,
+        },
+        async beforeCreate() {
+          const backup = await store.getBackupRecord(backupName);
+          if (!backup || backup.status !== 'verified') {
+            throw new ApiError(
+              409,
+              'backup_not_verified',
+              'Only currently verified backups can be restored',
+            );
+          }
+        },
         buildOperatorRequest: (operationId) => ({
           operationId,
           type: 'backup_restore',

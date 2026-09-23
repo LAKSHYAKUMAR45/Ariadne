@@ -32,6 +32,7 @@ const INSTALLED_EXECUTABLES = [
   'deployment-status',
   'deploy',
   'prune-backups',
+  'rollback',
   'restart-postgres',
   'restart-sync-server',
   'restore-backup',
@@ -463,6 +464,7 @@ describe('install script', () => {
     expect(runScript(harness, 'install').status).toBe(0);
     expect(modeOf(path.join(harness.libDir, 'status'))).toBe('755');
     expect(modeOf(path.join(harness.libDir, 'deployment-status'))).toBe('755');
+    expect(modeOf(path.join(harness.libDir, 'rollback'))).toBe('755');
 
     const statusResult = runInstalledScript(harness, 'status', {
       env: {

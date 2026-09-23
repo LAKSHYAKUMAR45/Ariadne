@@ -79,6 +79,14 @@ describe('operator executor command mapping', () => {
     });
     expect(restore.file).toBe('/usr/local/lib/ariadne/restore-backup');
     expect(restore.args).toEqual(['ariadne-20260401T021500Z.dump']);
+
+    const rollback = await run({
+      operationId: 'op-3-rollback',
+      type: 'deployment_rollback',
+      revision: 'b'.repeat(40),
+    });
+    expect(rollback.file).toBe('/usr/local/lib/ariadne/rollback');
+    expect(rollback.args).toEqual(['b'.repeat(40)]);
   });
 
   it('supplies the restore confirmation environment from the operator itself', async () => {
@@ -98,6 +106,7 @@ describe('operator executor command mapping', () => {
       { operationId: 'op-6', type: 'backup_verify', backupName: 'ariadne-20260401T021500Z.dump' },
       { operationId: 'op-7', type: 'service_restart', service: 'sync-server' },
       { operationId: 'op-8', type: 'deployment_apply', revision: 'a'.repeat(40) },
+      { operationId: 'op-10', type: 'deployment_rollback', revision: 'b'.repeat(40) },
     ];
 
     for (const request of requests) {
@@ -215,6 +224,7 @@ describe('operator executor backup result channel', () => {
     for (const request of [
       { operationId: 'op-result-3', type: 'service_restart', service: 'sync-server' },
       { operationId: 'op-result-4', type: 'deployment_apply', revision: 'a'.repeat(40) },
+      { operationId: 'op-result-7', type: 'deployment_rollback', revision: 'b'.repeat(40) },
     ] as OperatorRequest[]) {
       const spawn = createWritingSpawn(`${JSON.stringify(VALID_RESULT)}\n`);
       const result = await execute(request, spawn);
