@@ -2859,7 +2859,7 @@ describe('sync-server: admin operator operations', () => {
     expect(afterCallback?.state).toBe('failed');
   });
 
-  it('maps a malformed operator response to 502 and fails the operation', async () => {
+  it('keeps the operation queued when the operator response is unusable after acceptance', async () => {
     operatorBehaviour = { kind: 'malformed' };
 
     const res = await request(adminApp)
@@ -2869,8 +2869,41 @@ describe('sync-server: admin operator operations', () => {
 
     expect(res.status).toBe(502);
     expect(res.body.error.code).toBe('operator_invalid_response');
+
+    // A malformed or oversized acceptance body can be produced *after* the
+    // operator already admitted the operation, so the submission is uncertain
+    // rather than failed: the operation stays queued and awaits the callback.
     const operations = await store.listOperations();
-    expect(operations[0].state).toBe('failed');
+    expect(operations).toHaveLength(1);
+    expect(operations[0].state).toBe('queued');
+
+    const audit = await store.listAuditEvents();
+    expect(
+      audit.some(
+        (event) =>
+          event.action === 'admin_operation.submission_uncertain' &&
+          event.outcome === 'queued' &&
+          event.metadata.operationId === operations[0].id &&
+          event.metadata.reason === 'operator_invalid_response' &&
+          event.metadata.message ===
+            'Operator submission status is uncertain; awaiting callback or reconciliation',
+      ),
+    ).toBe(true);
+
+    await store.transitionOperation({
+      id: operations[0].id,
+      nextState: 'running',
+      source: 'operator_callback',
+      message: 'Operator reported start after an unusable acceptance body',
+    });
+    await store.transitionOperation({
+      id: operations[0].id,
+      nextState: 'succeeded',
+      source: 'operator_callback',
+      message: 'Operator completed after an unusable acceptance body',
+    });
+
+    expect((await store.getOperation(operations[0].id))?.state).toBe('succeeded');
   });
 
   it('maps a busy operator to 409 so the dashboard can reattach instead of retrying', async () => {
@@ -3021,7 +3054,8 @@ describe('sync-server: admin operator operations', () => {
 
     beforeAll(() => {
       callbackApp = express();
-      callbackApp.use(express.json());
+      // Mirrors app.ts: the callback router carries its own bounded parser and
+      // is mounted ahead of the 100 KB global parser.
       callbackApp.use(
         '/api/v1/admin',
         createOperatorCallbackRouter({
@@ -3030,6 +3064,10 @@ describe('sync-server: admin operator operations', () => {
           verifyPeerUid: () => peerUid,
         }),
       );
+      callbackApp.use(express.json());
+      callbackApp.post('/api/v1/other', (req, res) => {
+        res.status(200).json({ received: typeof req.body });
+      });
       callbackApp.use(handleUnexpectedError);
     });
 
@@ -3224,6 +3262,59 @@ describe('sync-server: admin operator operations', () => {
 
       expect(res.status).toBe(403);
       expect((await store.getOperation(operationId))?.state).toBe('queued');
+    });
+
+    it('accepts a terminal callback carrying a full 256 KiB operator output tail', async () => {
+      const operationId = await queueOperation('cb-large-output');
+      // The operator's bounded tail is 256 KiB, which is far beyond the 100 KB
+      // default of `express.json()`; this body is what a chatty deploy really
+      // sends back.
+      const output = 'deploy log line\n'.repeat(16 * 1024);
+      expect(Buffer.byteLength(output, 'utf8')).toBeGreaterThan(256 * 1000);
+
+      const res = await callback(operationId, {
+        operationId,
+        state: 'succeeded',
+        message: 'Operation succeeded',
+        output,
+        metadata: { exitCode: 0, signal: null, truncated: true },
+      });
+
+      expect(res.status).toBe(200);
+      const persisted = await store.getOperation(operationId);
+      expect(persisted?.state).toBe('succeeded');
+      expect(Buffer.byteLength(persisted?.output ?? '', 'utf8')).toBeGreaterThan(100 * 1024);
+      expect(persisted?.output).toContain('deploy log line');
+
+      const events = await store.listOperationEvents(operationId);
+      expect(events.some((event) => event.state === 'running')).toBe(true);
+      expect(events.some((event) => event.state === 'succeeded')).toBe(true);
+    });
+
+    it('rejects a callback beyond the route limit with a stable 413 and no body echo', async () => {
+      const operationId = await queueOperation('cb-oversize');
+      const marker = 'OVERSIZE-CANARY';
+      const output = `${marker}${'z'.repeat(700 * 1024)}`;
+
+      const res = await callback(operationId, { operationId, state: 'succeeded', output });
+
+      expect(res.status).toBe(413);
+      expect(res.body.error.code).toBe('callback_payload_too_large');
+      expect(JSON.stringify(res.body)).not.toContain(marker);
+      expect(JSON.stringify(res.body)).not.toContain('zzzz');
+      expect((await store.getOperation(operationId))?.state).toBe('queued');
+    });
+
+    it('leaves unrelated routes on the 100 KB global parser limit', async () => {
+      const small = await request(callbackApp)
+        .post('/api/v1/other')
+        .send({ value: 'x'.repeat(1024) });
+      expect(small.status).toBe(200);
+
+      const large = await request(callbackApp)
+        .post('/api/v1/other')
+        .send({ value: 'x'.repeat(200 * 1024) });
+      expect(large.status).toBe(413);
     });
   });
 });

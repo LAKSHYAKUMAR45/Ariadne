@@ -61,11 +61,21 @@ export interface CreateOperatorServerOptions {
   terminalCacheMaxEntries?: number;
   headersTimeoutMs?: number;
   requestTimeoutMs?: number;
+  /**
+   * Receives sanitized post-listen HTTP server failures. Node emits `error` on
+   * the server object for accept-time failures long after `listen` resolved, so
+   * the handler stays attached for the life of the process; without it such an
+   * event would be an unhandled `error` and would terminate the privileged
+   * service.
+   */
+  onError?(error: Error): void;
 }
 
 export interface OperatorServer {
   readonly headersTimeoutMs: number;
   readonly requestTimeoutMs: number;
+  /** Exposed for lifecycle wiring and tests; not part of the wire contract. */
+  readonly httpServer: http.Server;
   start(): Promise<void>;
   close(): Promise<void>;
 }
@@ -591,6 +601,17 @@ export function createOperatorServer(options: CreateOperatorServerOptions): Oper
 
   server.headersTimeout = headersTimeoutMs;
   server.requestTimeout = requestTimeoutMs;
+
+  /**
+   * Only the errno code is reported. The raw message can name the socket path
+   * or echo request bytes, and neither belongs in a journal line the web tier
+   * or an operator can read.
+   */
+  const reportServerError = (error: NodeJS.ErrnoException): void => {
+    const code = typeof error.code === 'string' && error.code ? error.code : 'unknown';
+    options.onError?.(new Error(`Operator HTTP server error (${code})`));
+  };
+
   server.on('clientError', (error: NodeJS.ErrnoException, socket) => {
     const statusLine =
       error.code === 'HPE_HEADERS_TIMEOUT' || error.code === 'ERR_HTTP_REQUEST_TIMEOUT'
@@ -610,6 +631,7 @@ export function createOperatorServer(options: CreateOperatorServerOptions): Oper
   return {
     headersTimeoutMs,
     requestTimeoutMs,
+    httpServer: server,
     async start(): Promise<void> {
       await safeRemoveOwnedSocket(options.socketPath);
 
@@ -622,6 +644,10 @@ export function createOperatorServer(options: CreateOperatorServerOptions): Oper
           });
         });
       });
+
+      // Attached only after a successful listen so it cannot swallow a startup
+      // failure, and never removed so an accept-time error is always handled.
+      server.on('error', reportServerError);
 
       await chmod(options.socketPath, 0o660);
     },

@@ -8,7 +8,7 @@ import {
   SHA256_PATTERN,
   UUID_PATTERN,
 } from '../captureValidation.js';
-import { ApiError } from '../errors.js';
+import { ApiError, isPayloadTooLargeError } from '../errors.js';
 import { asyncHandler, type AuthenticatedRequest } from '../middleware.js';
 import { requireTeamTask } from '../taskAccess.js';
 import { requireActiveMembership } from '../teamAccess.js';
@@ -64,14 +64,6 @@ function assertWellFormedText(value: string, field: string): void {
   }
 }
 
-function isPayloadTooLarge(error: unknown): boolean {
-  return (
-    typeof error === 'object' &&
-    error !== null &&
-    (error as { type?: unknown }).type === 'entity.too.large'
-  );
-}
-
 /**
  * Wraps the route-scoped JSON parser so its two interesting failures become
  * stable capture errors instead of a generic 500/403: an over-limit body is a
@@ -94,7 +86,7 @@ function createCaptureBodyParser(limit: string) {
         next(error);
         return;
       }
-      if (isPayloadTooLarge(error)) {
+      if (isPayloadTooLargeError(error)) {
         next(new TaskHistoryLimitError('Capture upload exceeds the maximum request body size'));
         return;
       }

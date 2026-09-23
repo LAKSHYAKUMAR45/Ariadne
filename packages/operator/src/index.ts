@@ -7,12 +7,21 @@ import {
 } from './server.js';
 import type { OperatorEventSink } from './executor.js';
 
-export { createOperatorExecutor, DEFAULT_OUTPUT_TAIL_BYTES } from './executor.js';
+export {
+  createOperatorExecutor,
+  DEFAULT_DRAIN_GRACE_MS,
+  DEFAULT_OUTPUT_TAIL_BYTES,
+  PROCESS_GROUPS_SUPPORTED,
+} from './executor.js';
 export type {
+  KillImplementation,
   OperatorEventSink,
   OperatorExecutor,
   OperatorProgressEvent,
   OperatorResultEvent,
+  OperatorSpawnOptions,
+  OperatorSpawnedProcess,
+  SpawnImplementation,
 } from './executor.js';
 export {
   OperationAdmissionRegistry,
@@ -63,7 +72,13 @@ async function startOperatorService(): Promise<void> {
     process.stderr.write('No OPERATOR_CALLBACK_URL configured; results are not reported\n');
   }
 
-  const server = createOperatorServer({ socketPath, reporter });
+  const server = createOperatorServer({
+    socketPath,
+    reporter,
+    onError: (error) => {
+      process.stderr.write(`${error.message}\n`);
+    },
+  });
   await server.start();
 }
 

@@ -1,10 +1,10 @@
 import { randomUUID, timingSafeEqual } from 'node:crypto';
 import type { Socket } from 'node:net';
-import { Router, type Request, type Response } from 'express';
+import express, { Router, type NextFunction, type Request, type Response } from 'express';
 import type { Pool } from 'pg';
 import { z } from 'zod';
 import { requireSingletonAdmin } from '../adminAccess.js';
-import { ApiError } from '../errors.js';
+import { ApiError, isPayloadTooLargeError } from '../errors.js';
 import { asyncHandler, type AuthenticatedRequest } from '../middleware.js';
 import {
   OperatorClientError,
@@ -44,6 +44,12 @@ const OPERATOR_SUBMISSION_UNCERTAIN_MESSAGE =
 const UNCERTAIN_SUBMISSION_FAILURE_CODES = new Set<OperatorClientErrorCode>([
   'operator_timeout',
   'operator_unavailable',
+  // A malformed or oversized acceptance body is only observable *after* the
+  // operator has already read the request, so it may well have been admitted
+  // and started. Treating it as a definite failure would close out an
+  // operation that is still running; the operation stays queued for the
+  // callback instead.
+  'operator_invalid_response',
 ]);
 
 const OPERATION_ID_PATTERN = /^[A-Za-z0-9_-]{1,200}$/;
@@ -498,6 +504,49 @@ export interface OperatorCallbackRouterOptions {
    * an injection point: when a UID is available it must be root's.
    */
   verifyPeerUid?(socket: Socket | undefined): number | null;
+  /** Overridable only so tests can exercise the over-limit path cheaply. */
+  bodyLimit?: string;
+}
+
+/**
+ * The operator reports up to `DEFAULT_OUTPUT_TAIL_BYTES` (256 KiB) of command
+ * output in a terminal callback, and JSON string escaping inflates that on the
+ * wire. This route therefore parses with its own bounded limit — roughly twice
+ * the maximum legitimate tail plus metadata, still a hard cap — while every
+ * other route keeps `express.json()`'s 100 KB default. The router is mounted
+ * ahead of the global parser in `app.ts` for that reason.
+ */
+export const OPERATOR_CALLBACK_REQUEST_BODY_LIMIT = '512kb';
+
+/**
+ * Wraps the route-scoped parser so an over-limit callback becomes a stable 413
+ * instead of a generic 500. The raw `body` body-parser attaches to the error is
+ * dropped first: operator output routinely contains deployment paths and
+ * command fragments that must never reach a log line or an error response.
+ */
+function createCallbackBodyParser(limit: string) {
+  const parser = express.json({ limit });
+
+  return (req: Request, res: Response, next: NextFunction): void => {
+    parser(req, res, (error?: unknown) => {
+      if (!error) {
+        next();
+        return;
+      }
+      if (isPayloadTooLargeError(error)) {
+        delete (error as { body?: unknown }).body;
+        next(
+          new ApiError(
+            413,
+            'callback_payload_too_large',
+            'Operator callback exceeds the maximum request body size',
+          ),
+        );
+        return;
+      }
+      next(error);
+    });
+  };
 }
 
 function timingSafeMatches(provided: string, expected: string): boolean {
@@ -527,6 +576,9 @@ function callbackForbidden(): ApiError {
 export function createOperatorCallbackRouter(options: OperatorCallbackRouterOptions): Router {
   const router = Router();
   const store = options.operationsStore;
+  const parseCallbackBody = createCallbackBodyParser(
+    options.bodyLimit ?? OPERATOR_CALLBACK_REQUEST_BODY_LIMIT,
+  );
 
   async function authenticate(req: Request): Promise<void> {
     const expected = await options.readCallbackToken();
@@ -551,6 +603,7 @@ export function createOperatorCallbackRouter(options: OperatorCallbackRouterOpti
 
   router.post(
     '/operations/:operationId/callback',
+    parseCallbackBody,
     asyncHandler(async (req, res) => {
       await authenticate(req);
 

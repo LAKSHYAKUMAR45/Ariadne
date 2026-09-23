@@ -5,6 +5,17 @@ import type { OperatorRequest } from './protocol.js';
 export const DEFAULT_EXEC_TIMEOUT_MS = 15 * 60 * 1000;
 export const DEFAULT_KILL_GRACE_MS = 10 * 1000;
 export const DEFAULT_OUTPUT_TAIL_BYTES = 256 * 1024;
+/**
+ * How long the executor waits after the direct child has exited for its stdio
+ * pipes to close. A descendant that inherited stdout keeps the pipe open, so
+ * `close` may never fire; after this window the execution settles from `exit`
+ * alone and the pipes are torn down, which is what keeps a wedged descendant
+ * from holding the operator's single execution slot forever.
+ */
+export const DEFAULT_DRAIN_GRACE_MS = 5 * 1000;
+
+/** Process groups (and therefore negative-pid signalling) are POSIX-only. */
+export const PROCESS_GROUPS_SUPPORTED = process.platform !== 'win32';
 export const DEFAULT_EXEC_ENV = Object.freeze({
   PATH: '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
   LANG: 'C.UTF-8',
@@ -52,13 +63,21 @@ export interface OperatorSpawnOptions {
   shell: false;
   windowsHide: true;
   stdio: ['ignore', 'pipe', 'pipe'];
+  /**
+   * POSIX only. The child leads its own process group so the timeout path can
+   * signal every descendant with one `kill(-pid)` instead of orphaning
+   * grandchildren that still hold the stdout pipe.
+   */
+  detached: boolean;
 }
 
 export interface OperatorSpawnedProcess {
+  readonly pid?: number | undefined;
   stdout: Readable | null;
   stderr: Readable | null;
   kill(signal?: NodeJS.Signals): boolean;
   on(event: 'close', listener: (code: number | null, signal: NodeJS.Signals | null) => void): unknown;
+  on(event: 'exit', listener: (code: number | null, signal: NodeJS.Signals | null) => void): unknown;
   on(event: 'error', listener: (error: Error) => void): unknown;
 }
 
@@ -68,11 +87,16 @@ export type SpawnImplementation = (
   options: OperatorSpawnOptions,
 ) => OperatorSpawnedProcess;
 
+/** Injection point for `process.kill`, which vitest cannot safely stub. */
+export type KillImplementation = (pid: number, signal: NodeJS.Signals) => void;
+
 export interface CreateOperatorExecutorOptions {
   spawnImpl?: SpawnImplementation;
+  killImpl?: KillImplementation;
   reporter?: OperatorEventSink;
   timeoutMs?: number;
   killGraceMs?: number;
+  drainGraceMs?: number;
   outputTailBytes?: number;
   env?: NodeJS.ProcessEnv;
 }
@@ -128,8 +152,24 @@ class BoundedOutputTail {
   }
 
   toString(): string {
-    return Buffer.concat(this.chunks, this.bytes).toString('utf8');
+    const buffer = Buffer.concat(this.chunks, this.bytes);
+    return dropLeadingContinuationBytes(buffer).toString('utf8');
   }
+}
+
+/**
+ * Byte-bounded truncation can land in the middle of a multi-byte sequence, and
+ * decoding the resulting leading fragment would produce U+FFFD replacement
+ * characters at the head of every truncated result. Dropping the orphaned
+ * continuation bytes (`10xxxxxx`) instead yields text that is whole from its
+ * first character on. At most three bytes can ever be discarded.
+ */
+function dropLeadingContinuationBytes(buffer: Buffer): Buffer {
+  let offset = 0;
+  while (offset < buffer.length && offset < 3 && (buffer[offset] & 0xc0) === 0x80) {
+    offset += 1;
+  }
+  return offset === 0 ? buffer : buffer.subarray(offset);
 }
 
 function appendArgument(command: readonly string[], argument?: string): [string, string[]] {
@@ -173,13 +213,49 @@ function defaultSpawn(
   return spawn(file, [...args], options);
 }
 
+function defaultKill(pid: number, signal: NodeJS.Signals): void {
+  process.kill(pid, signal);
+}
+
+/**
+ * Signals the child's entire process group when the platform supports it, so a
+ * grandchild that outlived its parent (and may still be holding the inherited
+ * stdout pipe) is terminated too. Falls back to signalling the direct child
+ * when there is no usable pid or the group signal cannot be delivered.
+ */
+function terminateProcessTree(
+  child: OperatorSpawnedProcess,
+  signal: NodeJS.Signals,
+  killImpl: KillImplementation,
+): void {
+  const pid = child.pid;
+
+  if (PROCESS_GROUPS_SUPPORTED && typeof pid === 'number' && pid > 0) {
+    try {
+      killImpl(-pid, signal);
+      return;
+    } catch {
+      // The group is already gone, or this process cannot signal it; fall
+      // through to the direct handle rather than leaving the child running.
+    }
+  }
+
+  try {
+    child.kill(signal);
+  } catch {
+    // Nothing further can be done; the settlement timers still fire.
+  }
+}
+
 export function createOperatorExecutor(
   options: CreateOperatorExecutorOptions = {},
 ): OperatorExecutor {
   const spawnImpl = options.spawnImpl ?? defaultSpawn;
+  const killImpl = options.killImpl ?? defaultKill;
   const defaultReporter = options.reporter;
   const timeoutMs = options.timeoutMs ?? DEFAULT_EXEC_TIMEOUT_MS;
   const killGraceMs = options.killGraceMs ?? DEFAULT_KILL_GRACE_MS;
+  const drainGraceMs = options.drainGraceMs ?? DEFAULT_DRAIN_GRACE_MS;
   const outputTailBytes = options.outputTailBytes ?? DEFAULT_OUTPUT_TAIL_BYTES;
   const env = options.env ?? DEFAULT_EXEC_ENV;
 
@@ -215,21 +291,39 @@ export function createOperatorExecutor(
           shell: false,
           windowsHide: true,
           stdio: ['ignore', 'pipe', 'pipe'],
+          detached: PROCESS_GROUPS_SUPPORTED,
         });
 
         let settled = false;
         let timedOut = false;
         let killTimer: NodeJS.Timeout | undefined;
+        let drainTimer: NodeJS.Timeout | undefined;
+        let forceSettleTimer: NodeJS.Timeout | undefined;
+
+        // The timeout and kill timers are unref'd because they only bound a
+        // process that is already keeping the loop alive. The drain and
+        // force-settle timers are deliberately *not*: they are the mechanism
+        // that releases the execution slot, so they must survive an otherwise
+        // idle loop.
+        const unrefTimer = (timer: NodeJS.Timeout | undefined): void => {
+          timer?.unref?.();
+        };
 
         const timeoutTimer = setTimeout(() => {
           timedOut = true;
-          child.kill('SIGTERM');
+          terminateProcessTree(child, 'SIGTERM', killImpl);
           killTimer = setTimeout(() => {
-            child.kill('SIGKILL');
+            terminateProcessTree(child, 'SIGKILL', killImpl);
+            // Last resort: a SIGKILLed group can still leave an escaped
+            // descendant holding the pipes, so the execution is settled from
+            // the timeout path alone rather than waiting on `exit`/`close`.
+            forceSettleTimer = setTimeout(() => {
+              settle({ exitCode: null, signal: 'SIGKILL', spawnError: null });
+            }, drainGraceMs);
           }, killGraceMs);
-          killTimer.unref?.();
+          unrefTimer(killTimer);
         }, timeoutMs);
-        timeoutTimer.unref?.();
+        unrefTimer(timeoutTimer);
 
         const settle = (outcomeValue: {
           exitCode: number | null;
@@ -244,6 +338,16 @@ export function createOperatorExecutor(
           if (killTimer) {
             clearTimeout(killTimer);
           }
+          if (drainTimer) {
+            clearTimeout(drainTimer);
+          }
+          if (forceSettleTimer) {
+            clearTimeout(forceSettleTimer);
+          }
+          // Releases this process' read ends so a surviving descendant cannot
+          // keep the executor attached to a finished operation.
+          child.stdout?.destroy();
+          child.stderr?.destroy();
           resolve({ ...outcomeValue, timedOut });
         };
 
@@ -258,6 +362,18 @@ export function createOperatorExecutor(
 
         child.on('error', (error: Error) => {
           settle({ exitCode: null, signal: null, spawnError: error });
+        });
+        // `close` is preferred because it guarantees the pipes are drained, but
+        // it only fires once every writer is gone. `exit` always fires, so it
+        // starts a bounded drain window after which the result is reported with
+        // whatever output arrived.
+        child.on('exit', (code: number | null, signal: NodeJS.Signals | null) => {
+          if (settled || drainTimer) {
+            return;
+          }
+          drainTimer = setTimeout(() => {
+            settle({ exitCode: code, signal, spawnError: null });
+          }, drainGraceMs);
         });
         child.on('close', (code: number | null, signal: NodeJS.Signals | null) => {
           settle({ exitCode: code, signal, spawnError: null });

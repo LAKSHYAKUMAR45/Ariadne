@@ -1,6 +1,6 @@
 import type { ErrorRequestHandler, NextFunction, Request, RequestHandler, Response } from 'express';
 import { verifyToken } from './auth.js';
-import { ApiError, errorBody, internalErrorBody } from './errors.js';
+import { ApiError, errorBody, internalErrorBody, isPayloadTooLargeError } from './errors.js';
 
 export interface AuthenticatedRequest extends Request {
   userId?: string;
@@ -73,6 +73,15 @@ export const handleUnexpectedError: ErrorRequestHandler = (error, req, res, next
 
   if (error instanceof ApiError) {
     res.status(error.status).json(errorBody(error));
+    return;
+  }
+
+  if (isPayloadTooLargeError(error)) {
+    // Routes that need a larger ceiling (capture uploads, operator callbacks)
+    // translate this into their own code before it reaches here; anything else
+    // gets the stable global answer instead of a misleading 500.
+    const err = new ApiError(413, 'payload_too_large', 'Request body is too large');
+    res.status(err.status).json(errorBody(err));
     return;
   }
 

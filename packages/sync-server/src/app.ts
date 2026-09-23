@@ -84,11 +84,12 @@ export function createApp(pool: Pool, jwtSecret: string, options: CreateAppOptio
   // router does not match fall through to the parser and routers below.
   app.use('/api/v1/sync', requireAuth(jwtSecret), createTaskHistoryRouter(pool, taskHistoryStore));
 
-  app.use(express.json());
-
   // The operator holds no dashboard session, so its result callbacks are
   // mounted ahead of `requireAuth` and authenticate with the root-created
-  // credential instead.
+  // credential instead. It is also mounted ahead of the global JSON parser: a
+  // terminal callback carries up to 256 KiB of command output, which needs the
+  // router's own larger, route-scoped limit (see
+  // OPERATOR_CALLBACK_REQUEST_BODY_LIMIT) rather than the 100 KB default.
   if (operatorCallbackTokenPath) {
     app.use(
       '/api/v1/admin',
@@ -98,6 +99,8 @@ export function createApp(pool: Pool, jwtSecret: string, options: CreateAppOptio
       }),
     );
   }
+
+  app.use(express.json());
 
   app.use('/api/v1/auth', createAuthRouter(pool, jwtSecret));
   app.use('/api/v1/admin', requireAuth(jwtSecret), createMembersRouter(pool));
