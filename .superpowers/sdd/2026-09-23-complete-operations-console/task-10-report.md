@@ -1,8 +1,8 @@
 # Task 10 rollout report
 
-**Status:** BLOCKED  
-**Date:** 2026-09-23  
-**Reviewed retry revision:** `3ce974cb243aa929c261b66b916880d7926103e1`  
+**Status:** BLOCKED
+**Date:** 2026-09-23
+**Reviewed retry revision:** `3ce974cb243aa929c261b66b916880d7926103e1`
 **Deployed revision:** Not deployed; production remained on its pre-rollout image and database.
 
 ## Prior blocked attempt preserved
@@ -148,7 +148,7 @@ Schema version remains `9`; the required schema version `10` acceptance check wa
 
 ## Bounded deployment-policy fix
 
-**Status:** IMPLEMENTED LOCALLY; not deployed to nodem2.  
+**Status:** IMPLEMENTED LOCALLY; not deployed to nodem2.
 **Implementation commit:** `b5e5a7195f24b079c3c948b21791d2eadbeb10c8`
 
 **Root cause:** the production deployment contract intentionally fails closed by fetching the fixed trusted ref before checking immutable SHA reachability. The fixed branch was `main`, but this repository does not publish `origin/main`, so every rollout stopped at the mandatory trusted-ref refresh before build, migration, or cutover.
@@ -182,6 +182,8 @@ shellcheck deploy/nodem2/scripts/*
 # passed
 ```
 
-Tracked search for stale deployment-policy refs found no `origin/main`,
-`refs/heads/main`, `refs/remotes/origin/main`, or `ARIADNE_TRUSTED_BRANCH=main`
-references outside the new negative contract assertions.
+Tracked search of deployment code and public docs found no stale
+deployment-policy `origin/main`, `refs/heads/main`,
+`refs/remotes/origin/main`, or `ARIADNE_TRUSTED_BRANCH=main` references outside
+the new negative contract assertions. Historical failure evidence in this
+report intentionally preserves the old `main` output.
