@@ -178,6 +178,23 @@ describe('GitWatcher', () => {
     expect(store.getTaskFileCaptures(task.id)).toHaveLength(1);
   });
 
+  it('syncTaskGit backfills captures for commits recorded before capture support', () => {
+    const task = store.createTask({ title: 'A' });
+    const sha = commit(repoRoot, 'a.txt', 'First commit');
+    store.recordCommit({ taskId: task.id, sha, message: 'First commit' });
+
+    const result = syncTaskGit(store, task.id, repoRoot);
+
+    expect(result.recordedCommits).toEqual([]);
+    expect(result.captureFailures).toEqual([]);
+    expect(result.captures.map((capture) => capture.gitCommitSha)).toEqual([sha]);
+    expect(store.getTaskFileCaptures(task.id)).toHaveLength(1);
+
+    const second = syncTaskGit(store, task.id, repoRoot);
+    expect(second.captures).toEqual([]);
+    expect(store.getTaskFileCaptures(task.id)).toHaveLength(1);
+  });
+
   it('syncTaskGit surfaces and records capture failures without marking the commit captured', () => {
     const task = store.createTask({ title: 'A' });
     const sha = commit(repoRoot, 'a.txt', 'First commit');
@@ -198,6 +215,39 @@ describe('GitWatcher', () => {
     expect(errors).toHaveLength(1);
     expect(errors[0].message).toContain(sha);
     expect(errors[0].message).toContain('disk exploded');
+  });
+
+  it('does not duplicate an unresolved capture failure while retrying a missing capture', () => {
+    const task = store.createTask({ title: 'A' });
+    const sha = commit(repoRoot, 'a.txt', 'First commit');
+    store.recordCommit({ taskId: task.id, sha, message: 'First commit' });
+    const failing = Object.create(store) as TaskStore;
+    (failing as unknown as { createTaskFileCapture: () => never }).createTaskFileCapture = () => {
+      throw new Error('disk exploded');
+    };
+
+    syncTaskGit(failing, task.id, repoRoot);
+    syncTaskGit(failing, task.id, repoRoot);
+
+    expect(store.listErrors(task.id, { resolved: false })).toHaveLength(1);
+  });
+
+  it('does not rescan a commit that was already found to contain no eligible files', () => {
+    const task = store.createTask({ title: 'A' });
+    const sha = commit(repoRoot, '.env', 'Add excluded environment file');
+    store.recordCommit({ taskId: task.id, sha, message: 'Add excluded environment file' });
+
+    const first = syncTaskGit(store, task.id, repoRoot);
+    expect(first.captures).toEqual([]);
+    expect(first.captureFailures).toEqual([]);
+    expect(store.hasTaskFileCaptureEmptyMarker(task.id, sha)).toBe(true);
+
+    const blob = git(['rev-parse', `${sha}:.env`], repoRoot);
+    fs.rmSync(path.join(repoRoot, '.git', 'objects', blob.slice(0, 2), blob.slice(2)));
+
+    const second = syncTaskGit(store, task.id, repoRoot);
+    expect(second.captures).toEqual([]);
+    expect(second.captureFailures).toEqual([]);
   });
 
   it('syncTaskGit records a capture failure when a committed blob is unreadable', () => {

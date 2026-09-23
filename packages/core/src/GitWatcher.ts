@@ -163,12 +163,19 @@ function captureCommitFiles(
     );
     if (result.capture) {
       captures.push(result.capture);
+    } else if (getHeadSha(repoRoot) !== null) {
+      store.markTaskFileCaptureEmpty(taskId, sha);
     }
   } catch (error: unknown) {
     const message = `Task file capture failed for commit ${sha}: ${errorMessage(error)}`;
     failures.push({ sha, message });
     try {
-      store.recordError({ taskId, message });
+      const alreadyRecorded = store
+        .listErrors(taskId, { resolved: false })
+        .some((taskError) => taskError.message === message);
+      if (!alreadyRecorded) {
+        store.recordError({ taskId, message });
+      }
     } catch {
       // Recording the failure must never mask the original sync result.
     }
@@ -221,10 +228,37 @@ export function syncTaskGit(
     for (const changed of listCommitFiles(repoRoot, commit.sha)) {
       store.touchFile({ taskId, path: changed.path, role: fileRoleFromGitStatus(changed.status) });
     }
-    // Only after the commit and its touched files are recorded locally does
-    // the immutable file capture run, so a capture always references a commit
-    // row that already exists.
-    captureCommitFiles(store, taskId, repoRoot, commit.sha, options.captureLimits, captures, captureFailures);
+  }
+
+  const capturedCommitShas = new Set(
+    store
+      .getTaskFileCaptures(taskId)
+      .map((capture) => capture.gitCommitSha)
+      .filter((sha): sha is string => sha !== null),
+  );
+  const emptyCommitShas = new Set(store.listTaskFileCaptureEmptyCommitShas(taskId));
+  const commitsMissingCaptures =
+    getHeadSha(repoRoot) === null
+      ? []
+      : store
+          .listCommits(taskId)
+          .filter(
+            (commit) =>
+              !capturedCommitShas.has(commit.sha) &&
+              !emptyCommitShas.has(commit.sha),
+          )
+          .reverse();
+
+  for (const commit of commitsMissingCaptures) {
+    captureCommitFiles(
+      store,
+      taskId,
+      repoRoot,
+      commit.sha,
+      options.captureLimits,
+      captures,
+      captureFailures,
+    );
   }
 
   return {

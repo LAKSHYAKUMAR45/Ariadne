@@ -144,6 +144,21 @@ export const MIGRATIONS: Migration[] = [
       `);
     },
   },
+  {
+    version: 6,
+    description: 'Track commits whose file capture contained no eligible files',
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS task_file_capture_empty_commits (
+          task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+          git_commit_sha TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          PRIMARY KEY (task_id, git_commit_sha),
+          FOREIGN KEY (git_commit_sha, task_id) REFERENCES commits(sha, task_id)
+        );
+      `);
+    },
+  },
 ];
 
 function getSchemaVersion(db: Database.Database): number {

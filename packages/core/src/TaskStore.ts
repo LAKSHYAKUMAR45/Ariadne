@@ -806,6 +806,35 @@ export class TaskStore {
     }));
   }
 
+  markTaskFileCaptureEmpty(taskId: string, gitCommitSha: string): void {
+    this.db
+      .prepare(
+        `INSERT OR IGNORE INTO task_file_capture_empty_commits (task_id, git_commit_sha, created_at)
+         VALUES (?, ?, ?)`,
+      )
+      .run(taskId, gitCommitSha, nowIso());
+  }
+
+  hasTaskFileCaptureEmptyMarker(taskId: string, gitCommitSha: string): boolean {
+    const row = this.db
+      .prepare(
+        `SELECT 1 FROM task_file_capture_empty_commits
+         WHERE task_id = ? AND git_commit_sha = ?`,
+      )
+      .get(taskId, gitCommitSha);
+    return Boolean(row);
+  }
+
+  listTaskFileCaptureEmptyCommitShas(taskId: string): string[] {
+    const rows = this.db
+      .prepare(
+        `SELECT git_commit_sha FROM task_file_capture_empty_commits
+         WHERE task_id = ? ORDER BY created_at ASC`,
+      )
+      .all(taskId) as Array<{ git_commit_sha: string }>;
+    return rows.map((row) => row.git_commit_sha);
+  }
+
   getPendingTaskFileCaptures(taskId: string): TaskFileCaptureWithEntries[] {
     return this.listTaskFileCaptures(
       `task_id = ? AND synced_at IS NULL AND failed_at IS NULL`,

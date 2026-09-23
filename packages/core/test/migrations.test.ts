@@ -172,7 +172,7 @@ describe('MIGRATIONS (real app migrations)', () => {
     db.prepare(
       `INSERT INTO decisions (id, task_id, text, created_at, updated_at) VALUES ('d1', 't1', 'Decide', '2020-01-03', '2020-01-03')`,
     ).run();
-    runMigrations(db, MIGRATIONS);
+    runMigrations(db, MIGRATIONS.filter((m) => m.version <= 5));
 
     const version = db.prepare(`SELECT value FROM schema_meta WHERE key = 'schema_version'`).get() as { value: string };
     expect(version.value).toBe('5');
@@ -248,6 +248,37 @@ describe('MIGRATIONS (real app migrations)', () => {
     expect(
       db.prepare(`SELECT path, content_sha256 FROM task_file_capture_entries WHERE capture_id = 'cap-e1'`).get(),
     ).toEqual({ path: 'src/index.ts', content_sha256: 'sha256' });
+
+    db.close();
+  });
+
+  it('v6 records commits that produced no eligible capture without duplicating markers', () => {
+    const db = freshDb();
+    runMigrations(db, MIGRATIONS.filter((m) => m.version <= 5));
+
+    db.prepare(
+      `INSERT INTO tasks (id, title, status, created_at, updated_at) VALUES ('t1', 'Task', 'active', '2020-01-01', '2020-01-01')`,
+    ).run();
+    db.prepare(
+      `INSERT INTO commits (sha, task_id, message, created_at) VALUES ('commit-1', 't1', 'excluded files', '2020-01-02')`,
+    ).run();
+
+    runMigrations(db, MIGRATIONS);
+
+    const version = db.prepare(`SELECT value FROM schema_meta WHERE key = 'schema_version'`).get() as { value: string };
+    expect(version.value).toBe('6');
+    expect(() =>
+      db.prepare(
+        `INSERT INTO task_file_capture_empty_commits (task_id, git_commit_sha, created_at)
+         VALUES ('t1', 'commit-1', '2020-01-03')`,
+      ).run(),
+    ).not.toThrow();
+    expect(() =>
+      db.prepare(
+        `INSERT INTO task_file_capture_empty_commits (task_id, git_commit_sha, created_at)
+         VALUES ('t1', 'commit-1', '2020-01-04')`,
+      ).run(),
+    ).toThrow(/UNIQUE/);
 
     db.close();
   });
