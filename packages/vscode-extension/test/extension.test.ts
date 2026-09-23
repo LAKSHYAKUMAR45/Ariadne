@@ -10,7 +10,8 @@ vi.mock('node:child_process', () => ({ execFileSync: vi.fn() }));
 // can exercise extension.ts's error-handling paths without a real extension
 // host. Must be declared before importing extension.ts/workspace.ts.
 let workspaceFolders: { uri: { fsPath: string } }[] | undefined;
-let registeredCommands: Record<string, (...args: unknown[]) => unknown>;
+let registeredCommands: Array<{ command: string; handler: (...args: unknown[]) => unknown }>;
+let registeredTreeProviders: Array<{ viewId: string }>;
 let quickPickChoice: unknown;
 
 vi.mock('vscode', () => {
@@ -62,7 +63,10 @@ vi.mock('vscode', () => {
         tooltip: '',
         command: undefined,
       }),
-      registerTreeDataProvider: () => ({ dispose: () => {} }),
+      registerTreeDataProvider: (viewId: string) => {
+        registeredTreeProviders.push({ viewId });
+        return { dispose: () => {} };
+      },
       onDidChangeActiveTextEditor: () => ({ dispose: () => {} }),
       showWarningMessage: vi.fn(),
       showErrorMessage: vi.fn(),
@@ -71,7 +75,7 @@ vi.mock('vscode', () => {
     },
     commands: {
       registerCommand: (id: string, fn: (...args: unknown[]) => unknown) => {
-        registeredCommands[id] = fn;
+        registeredCommands.push({ command: id, handler: fn });
         return { dispose: () => {} };
       },
     },
@@ -110,7 +114,8 @@ describe('chat participant error handling', () => {
 
   beforeEach(async () => {
     outputLines = [];
-    registeredCommands = {};
+    registeredCommands = [];
+    registeredTreeProviders = [];
     vi.mocked(execFileSync).mockReset();
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ariadne-ext-test-'));
     fs.mkdirSync(path.join(tmpDir, '.git'));
@@ -209,7 +214,7 @@ describe('chat participant error handling', () => {
 
   it('ariadne.syncPush shells out to `ariadne sync push` and logs its output', async () => {
     vi.mocked(execFileSync).mockReturnValue('Pushed 1 task.\n');
-    await registeredCommands['ariadne.syncPush']();
+    await registeredCommands.find((entry) => entry.command === 'ariadne.syncPush')?.handler();
     expect(execFileSync).toHaveBeenCalledWith('ariadne', ['sync', 'push'], expect.objectContaining({ cwd: tmpDir }));
     expect(outputLines.some((l) => l.includes('Pushed 1 task'))).toBe(true);
   });
@@ -217,13 +222,13 @@ describe('chat participant error handling', () => {
   it('ariadne.syncPull respects the quick-pick choice, including "import new"', async () => {
     vi.mocked(execFileSync).mockReturnValue('Pulled 2 tasks.\n');
     quickPickChoice = { label: 'Pull (import new)', importNew: true };
-    await registeredCommands['ariadne.syncPull']();
+    await registeredCommands.find((entry) => entry.command === 'ariadne.syncPull')?.handler();
     expect(execFileSync).toHaveBeenCalledWith('ariadne', ['sync', 'pull', '--import-new'], expect.objectContaining({ cwd: tmpDir }));
   });
 
   it('ariadne.syncPull does nothing if the quick pick is dismissed', async () => {
     quickPickChoice = undefined;
-    await registeredCommands['ariadne.syncPull']();
+    await registeredCommands.find((entry) => entry.command === 'ariadne.syncPull')?.handler();
     expect(execFileSync).not.toHaveBeenCalled();
   });
 
@@ -234,7 +239,13 @@ describe('chat participant error handling', () => {
       err.stderr = 'Not logged in.';
       throw err;
     });
-    await registeredCommands['ariadne.syncListRemote']();
+    await registeredCommands.find((entry) => entry.command === 'ariadne.syncListRemote')?.handler();
     expect(vi.mocked(vscode.window.showErrorMessage)).toHaveBeenCalledWith(expect.stringContaining('Not logged in'));
+  });
+
+  it('registers the Ariadne panel command and no longer registers the tree provider', async () => {
+    expect(registeredCommands.map((entry) => entry.command)).toContain('ariadne.openPanel');
+    expect(registeredCommands.map((entry) => entry.command)).not.toContain('ariadne.refreshTreeView');
+    expect(registeredTreeProviders.map((entry) => entry.viewId)).not.toContain('ariadneTasks');
   });
 });

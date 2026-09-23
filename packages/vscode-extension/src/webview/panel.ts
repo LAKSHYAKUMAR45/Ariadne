@@ -1,0 +1,225 @@
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import * as vscode from 'vscode';
+import { buildWebviewState, handleWebviewMessage } from './handleWebviewMessage.js';
+import { WebviewRequestTypes, type WebviewRequest, type WebviewResponse, type WebviewState } from './messages.js';
+import type { TaskStore } from '@ariadne-dev/core';
+import { syncPush, syncPull, syncListRemote } from '../syncCommands.js';
+
+export interface AriadnePanelDeps {
+  openStoreForCurrentWorkspace: () => TaskStore | undefined;
+  getCurrentTaskId: () => string | undefined;
+  setCurrentTask: (id: string) => void;
+  resolveWorkspaceRoot: () => string | undefined;
+  output: vscode.OutputChannel;
+  logError: (context: string, err: unknown) => string;
+  refreshHost: () => void;
+  openExportedMarkdown: (filePath: string) => Promise<void>;
+}
+
+let panel: vscode.WebviewPanel | undefined;
+let panelDeps: AriadnePanelDeps | undefined;
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function isWebviewRequest(value: unknown): value is WebviewRequest {
+  return isRecord(value) && typeof value.id === 'string' && typeof value.type === 'string';
+}
+
+function nonce(): string {
+  return `${Date.now().toString(36)}${Math.random().toString(36).slice(2)}`;
+}
+
+function listAssets(extensionUri: vscode.Uri): { scripts: vscode.Uri[]; styles: vscode.Uri[] } {
+  const assetsDir = vscode.Uri.joinPath(extensionUri, 'dist', 'webview', 'assets');
+  if (!fs.existsSync(assetsDir.fsPath)) {
+    return { scripts: [], styles: [] };
+  }
+
+  const scripts: vscode.Uri[] = [];
+  const styles: vscode.Uri[] = [];
+  for (const fileName of fs.readdirSync(assetsDir.fsPath).sort()) {
+    const assetPath = path.join(assetsDir.fsPath, fileName);
+    if (fileName.endsWith('.js')) {
+      scripts.push(vscode.Uri.file(assetPath));
+    } else if (fileName.endsWith('.css')) {
+      styles.push(vscode.Uri.file(assetPath));
+    }
+  }
+  return { scripts, styles };
+}
+
+function buildPanelHtml(webview: vscode.Webview, context: vscode.ExtensionContext): string {
+  const { scripts, styles } = listAssets(context.extensionUri);
+  const cspNonce = nonce();
+  const styleTags = styles
+    .map((uri) => `<link rel="stylesheet" href="${webview.asWebviewUri(uri)}">`)
+    .join('\n');
+  const scriptTags = scripts
+    .map((uri) => `<script nonce="${cspNonce}" src="${webview.asWebviewUri(uri)}"></script>`)
+    .join('\n');
+
+  if (scripts.length === 0 && styles.length === 0) {
+    return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src ${webview.cspSource} data:; style-src ${webview.cspSource}; script-src 'nonce-${cspNonce}';">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Ariadne</title>
+</head>
+<body>
+  <div id="root">Ariadne panel assets are not built yet.</div>
+</body>
+</html>`;
+  }
+
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src ${webview.cspSource} data:; style-src ${webview.cspSource} 'nonce-${cspNonce}'; script-src 'nonce-${cspNonce}' ${webview.cspSource}; connect-src ${webview.cspSource}; font-src ${webview.cspSource};">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Ariadne</title>
+  ${styleTags}
+</head>
+<body>
+  <div id="root"></div>
+  ${scriptTags}
+</body>
+</html>`;
+}
+
+function buildExportPath(workspaceRoot: string, taskId: string): string {
+  const exportDir = path.join(workspaceRoot, '.ariadne', 'export');
+  fs.mkdirSync(exportDir, { recursive: true });
+  return path.join(exportDir, `${taskId}.md`);
+}
+
+function writeExportMarkdown(taskId: string, markdown: string): string {
+  if (!panelDeps) {
+    throw new Error('Ariadne panel is not initialized.');
+  }
+  const workspaceRoot = panelDeps.resolveWorkspaceRoot();
+  if (!workspaceRoot) {
+    throw new Error('Ariadne needs an open folder/workspace to export Markdown.');
+  }
+  const filePath = buildExportPath(workspaceRoot, taskId);
+  fs.writeFileSync(filePath, markdown, 'utf8');
+  return filePath;
+}
+
+function currentState(): WebviewState | undefined {
+  if (!panelDeps) return undefined;
+  const store = panelDeps.openStoreForCurrentWorkspace();
+  if (!store) return undefined;
+  return buildWebviewState({
+    store,
+    currentTaskId: panelDeps.getCurrentTaskId(),
+    workspaceRoot: panelDeps.resolveWorkspaceRoot(),
+  });
+}
+
+function postStateUpdate(): void {
+  if (!panel || !panelDeps) return;
+  const state = currentState();
+  if (!state) return;
+  void panel.webview.postMessage({ type: 'stateUpdate', state });
+}
+
+async function handleWebviewRequest(message: unknown): Promise<void> {
+  if (!panel || !panelDeps) return;
+  try {
+    if (!isWebviewRequest(message)) {
+      panelDeps.output.appendLine(`[${new Date().toISOString()}] webview: ignored malformed message`);
+      return;
+    }
+
+    const store = panelDeps.openStoreForCurrentWorkspace();
+    if (!store) {
+      const response: WebviewResponse = { id: message.id, ok: false, error: 'Ariadne needs an open folder/workspace.' };
+      void panel.webview.postMessage(response);
+      return;
+    }
+
+    const response = handleWebviewMessage(
+      {
+        store,
+        currentTaskId: panelDeps.getCurrentTaskId(),
+        workspaceRoot: panelDeps.resolveWorkspaceRoot(),
+        setCurrentTaskId: panelDeps.setCurrentTask,
+        sync: {
+          push: () => {
+            const workspaceRoot = panelDeps.resolveWorkspaceRoot();
+            if (!workspaceRoot) throw new Error('Ariadne needs an open folder/workspace for sync push.');
+            return syncPush({ cwd: workspaceRoot });
+          },
+          pull: (options) => {
+            const workspaceRoot = panelDeps.resolveWorkspaceRoot();
+            if (!workspaceRoot) throw new Error('Ariadne needs an open folder/workspace for sync pull.');
+            return syncPull({
+              cwd: workspaceRoot,
+              ...(options?.importNew !== undefined ? { importNew: options.importNew } : {}),
+              ...(options?.onConflict ? { onConflict: options.onConflict } : {}),
+            });
+          },
+          listRemote: () => {
+            const workspaceRoot = panelDeps.resolveWorkspaceRoot();
+            if (!workspaceRoot) throw new Error('Ariadne needs an open folder/workspace for sync list-remote.');
+            return syncListRemote({ cwd: workspaceRoot });
+          },
+        },
+        writeExport: writeExportMarkdown,
+      },
+      message,
+    );
+
+    if (response.ok && response.state) {
+      postStateUpdate();
+    }
+    void panel.webview.postMessage(response);
+    if (response.ok && response.state) {
+      panelDeps.refreshHost();
+      if (message.type === WebviewRequestTypes.ExportMarkdown) {
+        const data = isRecord(response.data) ? response.data : undefined;
+        const filePath = typeof data?.path === 'string' ? data.path : undefined;
+        if (filePath) {
+          await panelDeps.openExportedMarkdown(filePath);
+        }
+      }
+    }
+  } catch (err) {
+    panelDeps.logError('webview panel request', err);
+  }
+}
+
+export function openAriadnePanel(context: vscode.ExtensionContext, deps: AriadnePanelDeps): void {
+  panelDeps = deps;
+
+  if (panel) {
+    panel.reveal(vscode.ViewColumn.One);
+    postStateUpdate();
+    return;
+  }
+
+  panel = vscode.window.createWebviewPanel('ariadnePanel', 'Ariadne', vscode.ViewColumn.One, {
+    enableScripts: true,
+    localResourceRoots: [vscode.Uri.joinPath(context.extensionUri, 'dist', 'webview')],
+  });
+
+  panel.webview.html = buildPanelHtml(panel.webview, context);
+  panel.webview.onDidReceiveMessage((message) => void handleWebviewRequest(message));
+  panel.onDidDispose(() => {
+    panel = undefined;
+    panelDeps = undefined;
+  });
+
+  postStateUpdate();
+}
+
+export function refreshAriadnePanel(): void {
+  if (!panel || !panelDeps) return;
+  postStateUpdate();
+}
