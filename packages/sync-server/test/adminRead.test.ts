@@ -5,6 +5,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../src/app.js';
 import { ADMIN_SESSION_COOKIE_NAME } from '../src/adminSessions.js';
 import { createOperationsStore } from '../src/operationsStore.js';
+import type { OperatorQuery } from '../src/operatorQueryClient.js';
 import { createPool } from '../src/db.js';
 import { runMigrations } from '../src/migrate.js';
 import { TEST_DATABASE_URL, TEST_JWT_SECRET } from './testConfig.js';
@@ -18,6 +19,7 @@ describe('sync-server: admin dashboard read APIs', () => {
   let app: Express;
   let adminId: string;
   let teamId: string;
+  let queryRequests: OperatorQuery[];
 
   beforeAll(async () => {
     pool = createPool(TEST_DATABASE_URL);
@@ -25,6 +27,52 @@ describe('sync-server: admin dashboard read APIs', () => {
     app = createApp(pool, TEST_JWT_SECRET, {
       encryptionKeyring: createTestEncryptionKeyring(),
       operatorClient: { submit: async () => ({ accepted: true, operationId: 'unused' }) },
+      operatorQueryClient: {
+        query: async (request) => {
+          queryRequests.push(request);
+          switch (request.type) {
+            case 'host_metrics':
+              return {
+                cpuPercent: 12.5,
+                memoryUsedBytes: 10,
+                memoryTotalBytes: 20,
+                filesystemUsedBytes: 30,
+                filesystemTotalBytes: 40,
+              };
+            case 'service_status':
+              return {
+                services: [
+                  { name: 'sync-server', state: 'running', detail: 'Serving requests' },
+                  { name: 'operator', state: 'running', detail: 'Socket ready' },
+                  { name: 'postgres', state: 'running', detail: 'Primary database available' },
+                ],
+              };
+            case 'deployment_status':
+              return {
+                currentRevision: 'a'.repeat(40),
+                rollbackRevision: null,
+                schemaVersion: 8,
+                candidates: [],
+              };
+            case 'logs_read':
+              return {
+                entries: [
+                  {
+                    sequence: 1,
+                    timestamp: '2026-09-23T01:00:00.000Z',
+                    severity: 'info',
+                    message: 'backup output',
+                    redacted: false,
+                  },
+                ],
+                nextCursor: null,
+              };
+          }
+        },
+        downloadBackup: async () => {
+          throw new Error('downloadBackup not used in this suite');
+        },
+      },
     });
   });
 
@@ -34,6 +82,7 @@ describe('sync-server: admin dashboard read APIs', () => {
 
   beforeEach(async () => {
     await truncateFixtureTables(pool, CORE_FIXTURE_TABLES);
+    queryRequests = [];
     const registration = await request(app)
       .post('/api/v1/auth/register')
       .send({ username: 'dashboard-admin', password: PASSWORD })
@@ -79,9 +128,20 @@ describe('sync-server: admin dashboard read APIs', () => {
     expect(response.body).toMatchObject({
       generatedAt: expect.any(String),
       database: { healthy: true, latencyMs: expect.any(Number) },
+      host: {
+        cpuPercent: 12.5,
+        memoryUsedBytes: 10,
+        memoryTotalBytes: 20,
+        filesystemUsedBytes: 30,
+        filesystemTotalBytes: 40,
+      },
       tasks: { total: 1, active: 1, updatedLast24h: 1 },
       backup: { latestAt: null, latestVerifiedAt: null, status: 'unavailable' },
       operations: { running: 0, failedLast24h: 0 },
+      components: {
+        database: { healthy: true },
+        operator: { healthy: true },
+      },
     });
   });
 
@@ -112,42 +172,26 @@ describe('sync-server: admin dashboard read APIs', () => {
     expect(invalid.body.error.code).toBe('invalid_request');
   });
 
-  it('returns only persisted application operation logs by fixed source', async () => {
-    const store = createOperationsStore(pool);
-    await store.createOperation({
-      id: 'backup-op',
-      requestedBy: adminId,
-      type: 'backup_create',
-      summary: 'Create database backup',
-      source: 'test',
-    });
-    await store.transitionOperation({
-      id: 'backup-op',
-      nextState: 'running',
-      source: 'test',
-      output: 'backup output',
-    });
-    await store.transitionOperation({
-      id: 'backup-op',
-      nextState: 'succeeded',
-      source: 'test',
-      output: 'backup output',
-    });
+  it('returns bounded operator logs by fixed source', async () => {
     const headers = await session();
     const response = await request(app)
       .get('/api/v1/admin/logs?source=backup&limit=10')
       .set(headers)
       .expect(200);
     expect(response.body.entries).toEqual([
-      expect.objectContaining({
-        id: 'backup-op',
-        source: 'backup',
+      {
+        sequence: 1,
+        timestamp: '2026-09-23T01:00:00.000Z',
         severity: 'info',
         message: 'backup output',
-        createdAt: expect.any(String),
-      }),
+        redacted: false,
+      },
     ]);
-    expect(response.body.entries[0].path).toBeUndefined();
+    expect(queryRequests.at(-1)).toEqual({
+      type: 'logs_read',
+      source: 'backup',
+      limit: 10,
+    });
   });
 
   it('reports database and operator service facts without claiming systemd state', async () => {
@@ -157,17 +201,17 @@ describe('sync-server: admin dashboard read APIs', () => {
       {
         name: 'sync-server',
         state: 'running',
-        detail: 'The sync server is serving this request',
-      },
-      {
-        name: 'database',
-        state: 'available',
-        detail: expect.stringContaining('Database query succeeded'),
+        detail: 'Serving requests',
       },
       {
         name: 'operator',
-        state: 'available',
-        detail: 'The operator client is configured',
+        state: 'running',
+        detail: 'Socket ready',
+      },
+      {
+        name: 'postgres',
+        state: 'running',
+        detail: 'Primary database available',
       },
     ]);
   });

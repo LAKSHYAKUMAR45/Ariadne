@@ -42,6 +42,28 @@ describe('test-only fixture cleanup helper', () => {
     expect(remainingAudit.rowCount).toBe(0);
   });
 
+  it('also clears standalone backup metadata rows from the core fixture set', async () => {
+    await pool.query(
+      `INSERT INTO backup_records (
+         filename, sha256, size_bytes, status, created_at, verified_at
+       )
+       VALUES (
+         'ariadne-20260923T032200Z.dump',
+         $1,
+         12,
+         'verified',
+         '2026-09-23T03:22:00.000Z',
+         '2026-09-23T03:23:00.000Z'
+       )`,
+      ['a'.repeat(64)],
+    );
+
+    await truncateFixtureTables(pool, CORE_FIXTURE_TABLES);
+
+    const remainingBackups = await pool.query('SELECT 1 FROM backup_records');
+    expect(remainingBackups.rowCount).toBe(0);
+  });
+
   it('re-enables the append-only truncate trigger after a successful cleanup', async () => {
     await truncateFixtureTables(pool, CORE_FIXTURE_TABLES);
 

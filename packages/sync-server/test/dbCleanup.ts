@@ -21,6 +21,7 @@ export const AUDIT_TRUNCATE_TRIGGER_NAME = 'trg_admin_audit_events_append_only_t
 
 /** Tables shared by most fixture suites; `CASCADE` reaches the rest. */
 export const CORE_FIXTURE_TABLES = [
+  'backup_records',
   'todos',
   'decisions',
   'errors',

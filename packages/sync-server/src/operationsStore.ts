@@ -107,11 +107,19 @@ export interface UpsertBackupRecordInput {
 export interface OperationsStore {
   createOperation(input: CreateAdminOperationInput): Promise<AdminOperation>;
   getOperation(id: string): Promise<AdminOperation | null>;
-  listOperations(limit?: number): Promise<AdminOperation[]>;
+  listOperations(input: {
+    afterCreatedAt?: string;
+    limit: number;
+  }): Promise<{ operations: AdminOperation[]; nextCursor: string | null }>;
   transitionOperation(input: TransitionAdminOperationInput): Promise<AdminOperation>;
   listOperationEvents(operationId: string): Promise<AdminOperationEvent[]>;
   recordAuditEvent(input: RecordAdminAuditEventInput): Promise<AdminAuditEvent>;
-  listAuditEvents(limit?: number): Promise<AdminAuditEvent[]>;
+  listAuditEvents(input: {
+    afterId?: number;
+    limit: number;
+    action?: string;
+    outcome?: string;
+  }): Promise<{ events: AdminAuditEvent[]; nextCursor: string | null }>;
   upsertBackupRecord(input: UpsertBackupRecordInput): Promise<BackupRecord>;
   listBackupRecords(limit?: number): Promise<BackupRecord[]>;
 }
@@ -394,6 +402,39 @@ function mapBackupRecord(row: BackupRecordRow): BackupRecord {
   };
 }
 
+interface OperationListCursor {
+  createdAt: string;
+  id: string;
+}
+
+function encodeOperationCursor(operation: AdminOperation): string {
+  return Buffer.from(
+    JSON.stringify({ createdAt: operation.createdAt, id: operation.id } satisfies OperationListCursor),
+    'utf8',
+  ).toString('base64url');
+}
+
+function decodeOperationCursor(cursor: string | undefined): OperationListCursor | null {
+  if (!cursor) {
+    return null;
+  }
+
+  const parsed = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8')) as Partial<OperationListCursor>;
+  if (
+    typeof parsed.createdAt !== 'string' ||
+    parsed.createdAt.length === 0 ||
+    typeof parsed.id !== 'string' ||
+    parsed.id.length === 0
+  ) {
+    throw new Error('invalid operation cursor');
+  }
+
+  return {
+    createdAt: parsed.createdAt,
+    id: parsed.id,
+  };
+}
+
 async function withTransaction<T>(pool: Pool, run: (client: PoolClient) => Promise<T>): Promise<T> {
   const client = await pool.connect();
   try {
@@ -581,7 +622,11 @@ export function createOperationsStore(pool: Pool): OperationsStore {
       return rows[0] ? mapOperation(rows[0]) : null;
     },
 
-    async listOperations(limit = 50): Promise<AdminOperation[]> {
+    async listOperations(input: {
+      afterCreatedAt?: string;
+      limit: number;
+    }): Promise<{ operations: AdminOperation[]; nextCursor: string | null }> {
+      const cursor = decodeOperationCursor(input.afterCreatedAt);
       const { rows } = await pool.query<AdminOperationRow>(
         `SELECT
            id,
@@ -594,11 +639,22 @@ export function createOperationsStore(pool: Pool): OperationsStore {
            completed_at,
            created_at
          FROM admin_operations
+         WHERE (
+           $1::timestamptz IS NULL
+           OR (created_at, id) < ($1::timestamptz, $2::text)
+         )
          ORDER BY created_at DESC, id DESC
-         LIMIT $1`,
-        [limit],
+         LIMIT $3`,
+        [cursor?.createdAt ?? null, cursor?.id ?? null, input.limit + 1],
       );
-      return rows.map(mapOperation);
+      const operations = rows.slice(0, input.limit).map(mapOperation);
+      return {
+        operations,
+        nextCursor:
+          rows.length > input.limit && operations.length > 0
+            ? encodeOperationCursor(operations.at(-1)!)
+            : null,
+      };
     },
 
     async transitionOperation(input: TransitionAdminOperationInput): Promise<AdminOperation> {
@@ -714,7 +770,12 @@ export function createOperationsStore(pool: Pool): OperationsStore {
       return withTransaction(pool, async (client) => insertAuditEvent(client, input));
     },
 
-    async listAuditEvents(limit = 50): Promise<AdminAuditEvent[]> {
+    async listAuditEvents(input: {
+      afterId?: number;
+      limit: number;
+      action?: string;
+      outcome?: string;
+    }): Promise<{ events: AdminAuditEvent[]; nextCursor: string | null }> {
       const { rows } = await pool.query<AdminAuditEventRow>(
         `SELECT
            id,
@@ -725,11 +786,19 @@ export function createOperationsStore(pool: Pool): OperationsStore {
            metadata,
            created_at
          FROM admin_audit_events
+         WHERE ($1::bigint IS NULL OR id < $1)
+           AND ($2::text IS NULL OR action = $2)
+           AND ($3::text IS NULL OR outcome = $3)
          ORDER BY created_at DESC, id DESC
-         LIMIT $1`,
-        [limit],
+         LIMIT $4`,
+        [input.afterId ?? null, input.action ?? null, input.outcome ?? null, input.limit + 1],
       );
-      return rows.map(mapAuditEvent);
+      const events = rows.slice(0, input.limit).map(mapAuditEvent);
+      return {
+        events,
+        nextCursor:
+          rows.length > input.limit && events.length > 0 ? String(events.at(-1)!.id) : null,
+      };
     },
 
     async upsertBackupRecord(input: UpsertBackupRecordInput): Promise<BackupRecord> {

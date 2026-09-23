@@ -14,12 +14,18 @@ import {
 } from './middleware.js';
 import { createOperationsStore } from './operationsStore.js';
 import type { OperatorClient } from './operatorClient.js';
+import type { OperatorQueryClient } from './operatorQueryClient.js';
 import {
   createAdminOperationsRouter,
   createOperatorCallbackRouter,
 } from './routes/adminOperations.js';
+import { createAdminAuditRouter } from './routes/adminAudit.js';
 import { createAdminTasksRouter } from './routes/adminTasks.js';
 import { createAdminAuthRouter } from './routes/adminAuth.js';
+import { createAdminBackupsRouter } from './routes/adminBackups.js';
+import { createAdminDeploymentsRouter } from './routes/adminDeployments.js';
+import { createAdminLogsRouter } from './routes/adminLogs.js';
+import { createAdminMembersRouter } from './routes/adminMembers.js';
 import { createAdminReadRouter } from './routes/adminRead.js';
 import { createAuthRouter } from './routes/auth.js';
 import { createSyncRouter } from './routes/sync.js';
@@ -31,6 +37,8 @@ export interface CreateAppOptions {
   encryptionKeyring: EncryptionKeyring;
   /** Omitted or `null` when no privileged operator socket is configured. */
   operatorClient?: OperatorClient | null;
+  /** Omitted or `null` when no read-only operator query client is configured. */
+  operatorQueryClient?: OperatorQueryClient | null;
   /**
    * Absolute path of the root-created operator callback credential. When it is
    * omitted the callback route is not mounted at all.
@@ -148,6 +156,7 @@ export function createApp(pool: Pool, jwtSecret: string, options: CreateAppOptio
     requireCsrf({ allowedOrigin: adminPublicOrigin }),
   ];
 
+  app.use('/api/v1/admin', ...adminSession, createAdminMembersRouter(pool));
   app.use('/api/v1/admin', ...adminSession, createMembersRouter(pool));
   app.use('/api/v1/admin', ...adminSession, createAdminTasksRouter(pool, taskHistoryStore));
   app.use(
@@ -155,7 +164,36 @@ export function createApp(pool: Pool, jwtSecret: string, options: CreateAppOptio
     ...adminSession,
     createAdminReadRouter(pool, {
       operationsStore,
-      operatorClient: options?.operatorClient ?? null,
+      operatorQueryClient: options?.operatorQueryClient ?? null,
+    }),
+  );
+  app.use(
+    '/api/v1/admin',
+    ...adminSession,
+    createAdminBackupsRouter(pool, {
+      operationsStore,
+      operatorQueryClient: options?.operatorQueryClient ?? null,
+    }),
+  );
+  app.use(
+    '/api/v1/admin',
+    ...adminSession,
+    createAdminDeploymentsRouter({
+      operatorQueryClient: options?.operatorQueryClient ?? null,
+    }),
+  );
+  app.use(
+    '/api/v1/admin',
+    ...adminSession,
+    createAdminLogsRouter({
+      operatorQueryClient: options?.operatorQueryClient ?? null,
+    }),
+  );
+  app.use(
+    '/api/v1/admin',
+    ...adminSession,
+    createAdminAuditRouter({
+      operationsStore,
     }),
   );
   app.use(

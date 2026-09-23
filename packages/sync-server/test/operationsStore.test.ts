@@ -97,7 +97,7 @@ describe('operationsStore', () => {
       metadata: { phase: 'queued' },
     });
 
-    const audits = await store.listAuditEvents();
+    const { events: audits } = await store.listAuditEvents({ limit: 50 });
     expect(audits).toHaveLength(1);
     expect(audits[0]).toMatchObject({
       actorUserId: adminUserId,
@@ -250,7 +250,7 @@ line-two-private-key
     expect(failed.output).toContain('password=***');
     expect(failed.output).toContain(OUTPUT_TRUNCATION_MARKER);
 
-    const audits = await store.listAuditEvents();
+    const { events: audits } = await store.listAuditEvents({ limit: 50 });
     expect(audits[0].metadata).toMatchObject({
       command: 'PGPASSWORD=*** pg_restore --dbname=postgres',
       token: '***',
@@ -290,7 +290,7 @@ line-two-private-key
       occurredAt: '2026-09-21T04:30:05.000Z',
     });
 
-    const audits = await store.listAuditEvents();
+    const { events: audits } = await store.listAuditEvents({ limit: 50 });
     expect(audits).toHaveLength(2);
     expect(audits[1].metadata).toEqual({
       operationId: 'op-metadata-1',
@@ -337,7 +337,7 @@ line-two-private-key
       createdAt: '2026-09-21T05:00:01.000Z',
     });
 
-    const operations = await store.listOperations();
+    const { operations } = await store.listOperations({ limit: 50 });
     expect(operations.map((operation) => operation.id)).toEqual(['op-list-2', 'op-list-1']);
   });
 
@@ -502,7 +502,7 @@ line-two-private-key
       },
     ]);
 
-    const audits = await store.listAuditEvents();
+    const { events: audits } = await store.listAuditEvents({ limit: 50 });
     expect(audits[0]).toMatchObject({
       actorUserId: null,
       action: 'admin.login.failed',

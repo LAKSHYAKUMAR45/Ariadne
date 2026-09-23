@@ -2693,7 +2693,7 @@ describe('sync-server: admin operator operations', () => {
     const events = await store.listOperationEvents(operationId);
     expect(events.map((event) => event.state)).toEqual(['queued']);
 
-    const audit = await store.listAuditEvents();
+    const { events: audit } = await store.listAuditEvents({ limit: 50 });
     expect(audit.some((event) => event.action === 'admin_operation.created')).toBe(true);
   });
 
@@ -2752,7 +2752,7 @@ describe('sync-server: admin operator operations', () => {
     expect(res.status).toBe(403);
     expect(res.body.error.code).toBe('reauthentication_required');
     expect(operator.requests).toHaveLength(0);
-    expect(await store.listOperations()).toEqual([]);
+    expect((await store.listOperations({ limit: 50 })).operations).toEqual([]);
   });
 
   it('refuses a member bearer token instead of authorizing it as a dashboard session', async () => {
@@ -2764,7 +2764,7 @@ describe('sync-server: admin operator operations', () => {
     expect(res.status).toBe(401);
     expect(res.body.error.code).toBe('missing_session');
     expect(operator.requests).toHaveLength(0);
-    expect(await store.listOperations()).toEqual([]);
+    expect((await store.listOperations({ limit: 50 })).operations).toEqual([]);
   });
 
   it('denies a reauthenticated session whose admin membership was revoked', async () => {
@@ -2780,7 +2780,7 @@ describe('sync-server: admin operator operations', () => {
     expect(res.status).toBe(403);
     expect(res.body.error.code).toBe('admin_required');
     expect(operator.requests).toHaveLength(0);
-    expect(await store.listOperations()).toEqual([]);
+    expect((await store.listOperations({ limit: 50 })).operations).toEqual([]);
   });
 
   it('rejects a privileged operation that carries no CSRF token', async () => {
@@ -2792,7 +2792,7 @@ describe('sync-server: admin operator operations', () => {
     expect(res.status).toBe(403);
     expect(res.body.error.code).toBe('csrf_failed');
     expect(operator.requests).toHaveLength(0);
-    expect(await store.listOperations()).toEqual([]);
+    expect((await store.listOperations({ limit: 50 })).operations).toEqual([]);
   });
 
   it('rejects a privileged operation sent from a foreign origin', async () => {
@@ -2805,7 +2805,7 @@ describe('sync-server: admin operator operations', () => {
     expect(res.status).toBe(403);
     expect(res.body.error.code).toBe('origin_not_allowed');
     expect(operator.requests).toHaveLength(0);
-    expect(await store.listOperations()).toEqual([]);
+    expect((await store.listOperations({ limit: 50 })).operations).toEqual([]);
   });
 
   it('requires authentication', async () => {
@@ -2850,7 +2850,7 @@ describe('sync-server: admin operator operations', () => {
     expect(dotSegment.status).toBe(404);
 
     expect(operator.requests).toHaveLength(0);
-    expect(await store.listOperations()).toEqual([]);
+    expect((await store.listOperations({ limit: 50 })).operations).toEqual([]);
   });
 
   it('submits deploy and backup verify/restore with the operator wire shape', async () => {
@@ -2907,10 +2907,10 @@ describe('sync-server: admin operator operations', () => {
     expect(res.body.error.message).not.toContain('absent.sock');
     expect(res.body.error.message).not.toContain(operator.dir);
 
-    const operations = await store.listOperations();
+    const { operations } = await store.listOperations({ limit: 50 });
     expect(operations).toHaveLength(1);
     expect(operations[0].state).toBe('failed');
-    const audit = await store.listAuditEvents();
+    const { events: audit } = await store.listAuditEvents({ limit: 50 });
     expect(
       audit.some(
         (event) =>
@@ -2941,7 +2941,7 @@ describe('sync-server: admin operator operations', () => {
     expect(res.status).toBe(503);
     expect(res.body.error.code).toBe('operator_connect_failed');
 
-    const operations = await store.listOperations();
+    const { operations } = await store.listOperations({ limit: 50 });
     expect(operations).toHaveLength(1);
     expect(operations[0].state).toBe('failed');
   });
@@ -2957,10 +2957,10 @@ describe('sync-server: admin operator operations', () => {
     expect(res.status).toBe(503);
     expect(res.body.error.code).toBe('operator_unavailable');
 
-    const operations = await store.listOperations();
+    const { operations } = await store.listOperations({ limit: 50 });
     expect(operations).toHaveLength(1);
     expect(operations[0].state).toBe('queued');
-    const audit = await store.listAuditEvents();
+    const { events: audit } = await store.listAuditEvents({ limit: 50 });
     expect(
       audit.some(
         (event) =>
@@ -3003,7 +3003,7 @@ describe('sync-server: admin operator operations', () => {
 
     expect(res.status).toBe(503);
     expect(res.body.error.code).toBe('operator_unavailable');
-    const operations = await store.listOperations();
+    const { operations } = await store.listOperations({ limit: 50 });
     expect(operations).toHaveLength(1);
     expect(operations[0].state).toBe('failed');
   });
@@ -3018,9 +3018,9 @@ describe('sync-server: admin operator operations', () => {
 
     expect(res.status).toBe(504);
     expect(res.body.error.code).toBe('operator_timeout');
-    const operations = await store.listOperations();
+    const { operations } = await store.listOperations({ limit: 50 });
     expect(operations[0].state).toBe('queued');
-    const audit = await store.listAuditEvents();
+    const { events: audit } = await store.listAuditEvents({ limit: 50 });
     expect(
       audit.some(
         (event) =>
@@ -3064,11 +3064,11 @@ describe('sync-server: admin operator operations', () => {
     // A malformed or oversized acceptance body can be produced *after* the
     // operator already admitted the operation, so the submission is uncertain
     // rather than failed: the operation stays queued and awaits the callback.
-    const operations = await store.listOperations();
+    const { operations } = await store.listOperations({ limit: 50 });
     expect(operations).toHaveLength(1);
     expect(operations[0].state).toBe('queued');
 
-    const audit = await store.listAuditEvents();
+    const { events: audit } = await store.listAuditEvents({ limit: 50 });
     expect(
       audit.some(
         (event) =>
@@ -3107,7 +3107,7 @@ describe('sync-server: admin operator operations', () => {
 
     expect(res.status).toBe(409);
     expect(res.body.error.code).toBe('operator_busy');
-    const operations = await store.listOperations();
+    const { operations } = await store.listOperations({ limit: 50 });
     expect(operations[0].state).toBe('failed');
   });
 
@@ -3228,9 +3228,9 @@ describe('sync-server: admin operator operations', () => {
       .send({ service: 'sync-server', password: 'super-secret-value' })
       .expect(503);
 
-    const operations = await store.listOperations();
+    const { operations } = await store.listOperations({ limit: 50 });
     const events = await store.listOperationEvents(operations[0].id);
-    const audit = await store.listAuditEvents();
+    const { events: audit } = await store.listAuditEvents({ limit: 50 });
     const serialized = JSON.stringify({ operations, events, audit });
     expect(serialized).not.toContain('super-secret-value');
     expect(serialized).not.toContain(operator.dir);
@@ -3330,7 +3330,7 @@ describe('sync-server: admin operator operations', () => {
       const events = await store.listOperationEvents(operationId);
       expect(events.map((event) => event.state)).toEqual(['queued', 'running', 'succeeded']);
 
-      const audit = await store.listAuditEvents();
+      const { events: audit } = await store.listAuditEvents({ limit: 50 });
       expect(
         audit.some(
           (event) =>

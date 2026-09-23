@@ -274,7 +274,7 @@ export function createAdminOperationsRouter(
     asyncHandler(async (req: ReauthenticatedAdminRequest, res) => {
       await requireReauthenticatedAdmin(req);
       const limit = parseListLimit((req.query as Record<string, unknown>).limit);
-      const operations = await store.listOperations(limit);
+      const { operations } = await store.listOperations({ limit });
       noStore(res);
       res.status(200).json({ operations: operations.map(serializeOperation) });
     }),
