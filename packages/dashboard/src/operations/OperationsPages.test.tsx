@@ -586,7 +586,9 @@ describe('operations pages', () => {
     await user.click(screen.getByRole('button', { name: 'Continue operation' }));
 
     expect(await screen.findByLabelText('Administrator password')).toBeVisible();
-    expect(screen.getByDisplayValue('RESTORE ariadne-20260923T032200Z.dump')).toBeVisible();
+    expect(
+      await screen.findByDisplayValue('RESTORE ariadne-20260923T032200Z.dump'),
+    ).toBeVisible();
 
     await user.type(screen.getByLabelText('Administrator password'), 'correct horse battery staple');
     await user.click(screen.getByRole('button', { name: 'Continue operation' }));
@@ -654,7 +656,7 @@ describe('operations pages', () => {
     await user.click(screen.getByRole('button', { name: 'Continue operation' }));
 
     expect(await screen.findByLabelText('Administrator password')).toBeVisible();
-    expect(screen.getByDisplayValue('RESTART postgres')).toBeVisible();
+    expect(await screen.findByDisplayValue('RESTART postgres')).toBeVisible();
 
     await user.type(screen.getByLabelText('Administrator password'), 'correct horse battery staple');
     await user.click(screen.getByRole('button', { name: 'Continue operation' }));
