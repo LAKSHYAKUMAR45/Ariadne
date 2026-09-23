@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { AdminApiError } from '../api/client';
 import {
   isAdminOperationCompleteEvent,
   isAdminOperationEvent,
@@ -32,6 +33,10 @@ function isTerminal(operation: AdminOperation | null): boolean {
   return operation?.state === 'succeeded' || operation?.state === 'failed';
 }
 
+function invalidResponseError(): AdminApiError {
+  return new AdminApiError(200, 'invalid_response', 'The server returned an invalid response.');
+}
+
 function parseEventBlock(block: string): { event: string; data: unknown } | null {
   const lines = block.replace(/\r/g, '').split('\n');
   let event = 'message';
@@ -60,7 +65,7 @@ function parseEventBlock(block: string): { event: string; data: unknown } | null
       data: JSON.parse(dataLines.join('\n')) as unknown,
     };
   } catch {
-    return null;
+    throw invalidResponseError();
   }
 }
 
@@ -169,6 +174,11 @@ export function useOperation({
         let buffer = '';
         let completed = false;
 
+        async function failInvalidResponse(): Promise<never> {
+          await reader.cancel().catch(() => undefined);
+          throw invalidResponseError();
+        }
+
         while (!disposed) {
           const { value, done } = await reader.read();
           if (done) {
@@ -187,7 +197,11 @@ export function useOperation({
 
             const eventData = parsed.data;
 
-            if (parsed.event === 'operation_event' && isAdminOperationEvent(eventData)) {
+            if (parsed.event === 'operation_event') {
+              if (!isAdminOperationEvent(eventData)) {
+                await failInvalidResponse();
+              }
+
               setLatestEvent(eventData);
               setOperation((current) =>
                 current
@@ -197,13 +211,20 @@ export function useOperation({
                     }
                   : current,
               );
+              continue;
             }
 
-            if (parsed.event === 'complete' && isAdminOperationCompleteEvent(eventData)) {
+            if (parsed.event === 'complete') {
+              if (!isAdminOperationCompleteEvent(eventData)) {
+                await failInvalidResponse();
+              }
+
               completed = true;
               await handleTerminalEvent(eventData);
               return;
             }
+
+            await failInvalidResponse();
           }
         }
 
@@ -214,6 +235,13 @@ export function useOperation({
         }
       } catch (streamError: unknown) {
         if (controller.signal.aborted || disposed) {
+          return;
+        }
+        if (streamError instanceof AdminApiError && streamError.code === 'invalid_response') {
+          setLive(false);
+          setPolling(false);
+          setError(streamError.message);
+          controller.abort();
           return;
         }
         setLive(false);

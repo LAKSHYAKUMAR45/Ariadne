@@ -159,4 +159,135 @@ describe('Ariadne operations console', () => {
     expect(await screen.findByText('Create database backup')).toBeVisible();
     expect(screen.getByText('succeeded')).toBeVisible();
   });
+
+  it('surfaces malformed SSE JSON as an invalid response without falling back to polling', async () => {
+    const fetchMock = vi.fn().mockImplementation((input: RequestInfo | URL) => {
+      if (String(input) === '/api/v1/admin/operations/op-1/events') {
+        const stream = new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(
+              new TextEncoder().encode('event: operation_event\ndata: {"id":1\n\n'),
+            );
+            controller.close();
+          },
+        });
+        return Promise.resolve(
+          new Response(stream, {
+            status: 200,
+            headers: { 'Content-Type': 'text/event-stream; charset=utf-8' },
+          }),
+        );
+      }
+      return Promise.resolve(new Response(null, { status: 404 }));
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const api: AdminApiClient = {
+      get: vi.fn(),
+      mutate: vi.fn(),
+      download: vi.fn(),
+    };
+
+    render(<OperationProgress api={api} operationId="op-1" />);
+
+    expect(
+      await screen.findByRole('alert', { name: '' }).catch(async () => screen.findByRole('alert')),
+    ).toHaveTextContent('The server returned an invalid response.');
+    expect(api.get).not.toHaveBeenCalled();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(screen.getByText('Waiting for the persisted operation state.')).toBeVisible();
+  });
+
+  it('surfaces structurally invalid operation events as an invalid response and aborts the stream', async () => {
+    let streamSignal: AbortSignal | undefined;
+    const fetchMock = vi.fn().mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input) === '/api/v1/admin/operations/op-1/events') {
+        streamSignal = init?.signal;
+        const stream = new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(
+              new TextEncoder().encode(
+                'event: operation_event\ndata: {"id":"bad","operationId":"op-1","state":"running","message":"Operation started","metadata":{},"createdAt":"2026-09-23T08:00:00.000Z"}\n\n',
+              ),
+            );
+            controller.close();
+          },
+        });
+        return Promise.resolve(
+          new Response(stream, {
+            status: 200,
+            headers: { 'Content-Type': 'text/event-stream; charset=utf-8' },
+          }),
+        );
+      }
+      return Promise.resolve(new Response(null, { status: 404 }));
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const api: AdminApiClient = {
+      get: vi.fn(),
+      mutate: vi.fn(),
+      download: vi.fn(),
+    };
+
+    render(<OperationProgress api={api} operationId="op-1" />);
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('The server returned an invalid response.');
+    expect(api.get).not.toHaveBeenCalled();
+    expect(streamSignal?.aborted).toBe(true);
+    expect(screen.queryByText('Operation started')).not.toBeInTheDocument();
+  });
+
+  it('surfaces structurally invalid complete events as an invalid response instead of terminal success', async () => {
+    const fetchMock = vi.fn().mockImplementation((input: RequestInfo | URL) => {
+      if (String(input) === '/api/v1/admin/operations/op-1/events') {
+        const stream = new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(
+              new TextEncoder().encode(
+                'event: complete\ndata: {"operationId":"op-1","state":"running"}\n\n',
+              ),
+            );
+            controller.close();
+          },
+        });
+        return Promise.resolve(
+          new Response(stream, {
+            status: 200,
+            headers: { 'Content-Type': 'text/event-stream; charset=utf-8' },
+          }),
+        );
+      }
+      return Promise.resolve(new Response(null, { status: 404 }));
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const api: AdminApiClient = {
+      get: vi.fn(),
+      mutate: vi.fn(),
+      download: vi.fn(),
+    };
+
+    render(
+      <OperationProgress
+        api={api}
+        operationId="op-1"
+        initialOperation={{
+          id: 'op-1',
+          requestedBy: 'admin-id',
+          type: 'backup_create',
+          state: 'queued',
+          summary: 'Create database backup',
+          output: null,
+          startedAt: null,
+          completedAt: null,
+          createdAt: '2026-09-23T08:00:00.000Z',
+        }}
+      />,
+    );
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('The server returned an invalid response.');
+    expect(api.get).not.toHaveBeenCalled();
+    expect(screen.getByText('queued')).toBeVisible();
+  });
 });
