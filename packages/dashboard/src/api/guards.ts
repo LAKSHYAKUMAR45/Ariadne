@@ -16,6 +16,7 @@ import type {
   HostMetrics,
   LogEntry,
   LogsResponse,
+  MemberMutationResponse,
   MembersResponse,
   OperationListResponse,
   OperationResponse,
@@ -150,6 +151,10 @@ function isTeamMember(value: unknown): value is TeamMember {
 
 export function isMembersResponse(value: unknown): value is MembersResponse {
   return isRecord(value) && isArrayOf(value.members, isTeamMember);
+}
+
+export function isMemberMutationResponse(value: unknown): value is MemberMutationResponse {
+  return isRecord(value) && isTeamMember(value.member);
 }
 
 function isTaskSummary(value: unknown): value is TaskSummary {

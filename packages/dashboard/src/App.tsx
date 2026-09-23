@@ -1,9 +1,10 @@
 import { useState } from 'react';
 import { AuthProvider, useAuth } from './auth/AuthProvider';
 import { LoginPage } from './auth/LoginPage';
+import { MembersPage } from './members/MembersPage';
 import { BackupsPage } from './operations/BackupsPage';
 import { LogsPage } from './operations/LogsPage';
-import { OverviewPage } from './operations/OverviewPage';
+import { OverviewPage } from './overview/OverviewPage';
 import { ServicesPage } from './operations/ServicesPage';
 import { TasksPage } from './tasks/TasksPage';
 
@@ -108,13 +109,7 @@ function ConsoleShell() {
       <main id="main-content" className="main-content">
         {error ? <div className="notice notice--error" role="alert">{error}</div> : null}
         {section === 'overview' ? <OverviewPage /> : null}
-        {section === 'members' ? (
-          <PlaceholderPage
-            eyebrow="Access"
-            title="Members"
-            message="Member management ships in the next dashboard task."
-          />
-        ) : null}
+        {section === 'members' ? <MembersPage /> : null}
         {section === 'tasks' ? <TasksPage /> : null}
         {section === 'backups' ? <BackupsPage /> : null}
         {section === 'services' ? <ServicesPage /> : null}

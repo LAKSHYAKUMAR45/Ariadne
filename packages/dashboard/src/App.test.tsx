@@ -34,14 +34,60 @@ describe('Ariadne operations console', () => {
   it('renders the operational shell and switches sections for an active session', async () => {
     vi.stubGlobal(
       'fetch',
-      vi.fn().mockResolvedValue(
-        json({
-          userId: 'admin-id',
-          username: 'admin',
-          reauthenticatedUntil: null,
-          csrfToken: 'csrf-token',
-        }),
-      ),
+      vi.fn((input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url === '/api/v1/admin/session') {
+          return Promise.resolve(
+            json({
+              userId: 'admin-id',
+              username: 'admin',
+              reauthenticatedUntil: null,
+              csrfToken: 'csrf-token',
+            }),
+          );
+        }
+        if (url === '/api/v1/admin/overview') {
+          return Promise.resolve(
+            json({
+              generatedAt: '2026-09-23T08:00:00.000Z',
+              database: { status: 'healthy', healthy: true, latencyMs: 4 },
+              host: null,
+              databaseSizeBytes: 512,
+              tasks: { total: 0, active: 0, updatedLast24h: 0 },
+              members: { total: 2, active: 1, inactive: 1, admins: 1, members: 1 },
+              sync: { lastPushAt: null, lastPullAt: null },
+              backup: { latestAt: null, latestVerifiedAt: null, status: 'unavailable' },
+              operations: { running: 0, failedLast24h: 0 },
+              components: { database: { healthy: true }, operator: { healthy: true } },
+            }),
+          );
+        }
+        if (url === '/api/v1/admin/members') {
+          return Promise.resolve(
+            json({
+              members: [
+                {
+                  userId: 'admin-id',
+                  username: 'admin',
+                  role: 'admin',
+                  active: true,
+                  createdAt: '2026-09-22T08:00:00.000Z',
+                  immutable: true,
+                },
+                {
+                  userId: 'member-1',
+                  username: 'ops-member',
+                  role: 'member',
+                  active: false,
+                  createdAt: '2026-09-22T09:00:00.000Z',
+                  immutable: false,
+                },
+              ],
+            }),
+          );
+        }
+        return Promise.resolve(new Response(null, { status: 404 }));
+      }),
     );
     const user = userEvent.setup();
 
@@ -57,12 +103,10 @@ describe('Ariadne operations console', () => {
     await user.click(screen.getByRole('button', { name: 'Tasks' }));
     expect(screen.getByRole('heading', { name: 'Task history' })).toBeVisible();
     expect(screen.getByText('Select a task to inspect its timeline and captured files.')).toBeVisible();
-
     await user.click(screen.getByRole('button', { name: 'Members' }));
     expect(screen.getByRole('heading', { name: 'Members' })).toBeVisible();
-    expect(
-      screen.getAllByText('Member management ships in the next dashboard task.').length,
-    ).toBeGreaterThan(0);
+    expect(await screen.findByText('ops-member')).toBeVisible();
+    expect(screen.getByText('Activate ops-member')).toBeVisible();
   });
 
   it('logs out from the console and returns to the login screen', async () => {
@@ -202,7 +246,7 @@ describe('Ariadne operations console', () => {
     let streamSignal: AbortSignal | undefined;
     const fetchMock = vi.fn().mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
       if (String(input) === '/api/v1/admin/operations/op-1/events') {
-        streamSignal = init?.signal;
+        streamSignal = init?.signal ?? undefined;
         const stream = new ReadableStream<Uint8Array>({
           start(controller) {
             controller.enqueue(

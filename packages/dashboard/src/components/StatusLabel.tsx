@@ -9,11 +9,18 @@ function toneForStatus(status: string): 'good' | 'warning' | 'bad' | 'neutral' {
     case 'running':
     case 'available':
     case 'healthy':
+    case 'active':
+    case 'operational':
       return 'good';
+    case 'stale':
+    case 'degraded':
+    case 'review':
+      return 'warning';
     case 'failed':
     case 'restore_failed':
     case 'verify_failed':
     case 'unavailable':
+    case 'inactive':
       return 'bad';
     case 'queued':
     case 'created':
@@ -34,6 +41,10 @@ export function StatusLabel({ status }: StatusLabelProps) {
   const pillClassName =
     tone === 'good'
       ? 'status-pill status-pill--good'
+      : tone === 'warning'
+        ? 'status-pill status-pill--warning'
+        : tone === 'bad'
+          ? 'status-pill status-pill--bad'
       : 'status-pill status-pill--neutral';
 
   return (

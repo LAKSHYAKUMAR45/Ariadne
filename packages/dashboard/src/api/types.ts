@@ -108,6 +108,10 @@ export interface MembersResponse {
   members: TeamMember[];
 }
 
+export interface MemberMutationResponse {
+  member: TeamMember;
+}
+
 export interface TaskSummary {
   taskId: string;
   localId: string;

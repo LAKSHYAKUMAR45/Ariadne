@@ -195,19 +195,20 @@ export function useOperation({
               continue;
             }
 
-            const eventData = parsed.data;
+            const eventData: unknown = parsed.data;
 
             if (parsed.event === 'operation_event') {
               if (!isAdminOperationEvent(eventData)) {
                 await failInvalidResponse();
               }
 
-              setLatestEvent(eventData);
+              const operationEvent = eventData as AdminOperationEvent;
+              setLatestEvent(operationEvent);
               setOperation((current) =>
                 current
                   ? {
                       ...current,
-                      state: eventData.state,
+                      state: operationEvent.state,
                     }
                   : current,
               );
@@ -219,8 +220,9 @@ export function useOperation({
                 await failInvalidResponse();
               }
 
+              const completeEvent = eventData as AdminOperationCompleteEvent;
               completed = true;
-              await handleTerminalEvent(eventData);
+              await handleTerminalEvent(completeEvent);
               return;
             }
 
