@@ -182,16 +182,21 @@ async function handleWebviewRequest(message: unknown): Promise<void> {
     void panel.webview.postMessage(response);
     if (response.ok && response.state) {
       panelDeps.refreshHost();
-      if (message.type === WebviewRequestTypes.ExportMarkdown) {
-        const data = isRecord(response.data) ? response.data : undefined;
-        const filePath = typeof data?.path === 'string' ? data.path : undefined;
-        if (filePath) {
-          await panelDeps.openExportedMarkdown(filePath);
-        }
+    }
+    if (response.ok && message.type === WebviewRequestTypes.ExportMarkdown) {
+      const data = isRecord(response.data) ? response.data : undefined;
+      const filePath = typeof data?.path === 'string' ? data.path : undefined;
+      if (filePath) {
+        await panelDeps.openExportedMarkdown(filePath);
       }
     }
   } catch (err) {
-    panelDeps.logError('webview panel request', err);
+    if (isWebviewRequest(message)) {
+      const error = panelDeps.logError('webview panel request', err);
+      void panel.webview.postMessage({ id: message.id, ok: false, error });
+    } else {
+      panelDeps.logError('webview panel request', err);
+    }
   }
 }
 

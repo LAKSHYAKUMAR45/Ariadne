@@ -32,7 +32,9 @@
     "ai agent",
     "productivity"
   ],
-  "activationEvents": [],
+  "activationEvents": [
+    "onCommand:ariadne.openPanel"
+  ],
   "main": "./dist/native-bootstrap.js",
   "contributes": {
     "chatParticipants": [
