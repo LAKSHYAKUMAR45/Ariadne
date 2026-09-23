@@ -108,15 +108,23 @@ the root-owned mode `0755` installed copy current. Then, on nodem2 as root:
 ```
 
 `import-release` accepts only a full lowercase SHA and fixed production
-worktree/root paths. It rejects unsafe ownership or modes, invalid bundles,
-archives that do not identify the same commit, path traversal, links, dirty
-destination state, and any staged content or mode that differs from the
-imported commit. It stages under `/opt/ariadne`, protects `.git`, imports bundle
-objects without changing remote refs, synchronizes only the reviewed worktree
-contents, and lets Git remove only files that were tracked by the previous
-release but are absent from the imported commit. It preserves `.git`, ignored
-local state, and unrelated paths, detaches HEAD at the reviewed SHA, requires a
-clean status, and only then updates `refs/ariadne/deploy`. It makes no Docker
+worktree/root paths. It rejects unsafe ownership or modes, artifacts larger
+than 2 GiB, invalid bundles, archives that do not identify the same commit,
+path traversal, links, dirty destination state, and any staged content or mode
+that differs from the imported commit. It first copies both caller-owned
+artifacts through no-follow reads into a root-owned mode `0700` staging
+directory, fails if either source changes during its copy, and performs every
+subsequent validation, listing, extraction, and bundle import only from those
+private snapshots.
+
+Before worktree mutation, the importer enumerates ignored paths and rejects any
+exact, ancestor, or descendant conflict with the target tracked tree. It then
+protects `.git`, imports bundle objects without changing remote refs,
+synchronizes only the reviewed worktree contents, and lets Git remove only
+files that were tracked by the previous release but are absent from the
+imported commit. Non-conflicting ignored local state and unrelated paths are
+preserved. The script detaches HEAD at the reviewed SHA, requires a clean
+tracked result, and only then updates `refs/ariadne/deploy`. It makes no Docker
 or systemd changes.
 
 The deploy script performs no fetch, clone, pull, push, or other Git network

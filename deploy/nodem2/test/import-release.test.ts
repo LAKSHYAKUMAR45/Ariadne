@@ -60,17 +60,39 @@ function createReleaseFixture(): ReleaseFixture {
   return { root, source, prefix, worktree, bundle, archive, sha };
 }
 
-function runImport(fixture: ReleaseFixture, args = [fixture.sha, fixture.bundle, fixture.archive]) {
+function runImport(
+  fixture: ReleaseFixture,
+  args = [fixture.sha, fixture.bundle, fixture.archive],
+  env: Record<string, string> = {},
+) {
   return spawnSync(importScript, args, {
     env: {
       ...process.env,
       ARIADNE_IMPORT_SELFTEST: '1',
       ARIADNE_IMPORT_PREFIX: fixture.prefix,
       ARIADNE_IMPORT_OWNER_UID: String(process.getuid?.() ?? 0),
+      ...env,
     },
     encoding: 'utf8',
     timeout: 20_000,
   });
+}
+
+function createNextRelease(
+  fixture: ReleaseFixture,
+  changes: (source: string) => void,
+): { sha: string; bundle: string; archive: string } {
+  changes(fixture.source);
+  run('git', ['add', '-A'], fixture.source);
+  run('git', ['commit', '--quiet', '-m', 'test: next release'], fixture.source);
+  const sha = run('git', ['rev-parse', 'HEAD'], fixture.source);
+  const bundle = path.join(fixture.root, `release-${sha}.bundle`);
+  const archive = path.join(fixture.root, `release-${sha}.tar`);
+  run('git', ['archive', '--format=tar', '--output', archive, sha], fixture.source);
+  run('git', ['bundle', 'create', bundle, 'HEAD'], fixture.source);
+  fs.chmodSync(bundle, 0o600);
+  fs.chmodSync(archive, 0o600);
+  return { sha, bundle, archive };
 }
 
 function output(result: { stdout: string; stderr: string }): string {
@@ -181,6 +203,111 @@ describe('release import script', () => {
 
     expect(result.status).not.toBe(0);
     expect(output(result).toLowerCase()).toMatch(/complete|prerequisite|history/);
+  });
+
+  it('consumes only staged snapshots when caller-owned artifacts are replaced after staging', () => {
+    const fixture = createReleaseFixture();
+    const replacement = createNextRelease(fixture, (source) => {
+      fs.writeFileSync(path.join(source, 'README.md'), 'attacker replacement\n');
+    });
+    const hook = path.join(fixture.root, 'replace-artifacts');
+    const marker = path.join(fixture.root, 'snapshot-hook-ran');
+    fs.writeFileSync(
+      hook,
+      `#!/bin/sh
+cp -- "${replacement.bundle}" "$ARIADNE_TEST_SOURCE_BUNDLE"
+cp -- "${replacement.archive}" "$ARIADNE_TEST_SOURCE_ARCHIVE"
+printf 'ran\\n' > "${marker}"
+`,
+      { mode: 0o700 },
+    );
+
+    const result = runImport(fixture, undefined, {
+      ARIADNE_IMPORT_SNAPSHOT_HOOK: hook,
+      ARIADNE_TEST_SOURCE_BUNDLE: fixture.bundle,
+      ARIADNE_TEST_SOURCE_ARCHIVE: fixture.archive,
+    });
+
+    expect(result.status, output(result)).toBe(0);
+    expect(fs.readFileSync(marker, 'utf8')).toBe('ran\n');
+    expect(
+      run('sh', ['-c', 'git get-tar-commit-id < "$1"', 'sh', fixture.archive]),
+    ).toBe(replacement.sha);
+    expect(run('git', ['rev-parse', 'HEAD'], fixture.worktree)).toBe(fixture.sha);
+    expect(fs.readFileSync(path.join(fixture.worktree, 'README.md'), 'utf8')).toBe(
+      'reviewed release\n',
+    );
+  });
+
+  it('fails closed when an artifact changes while its staged snapshot is being copied', () => {
+    const fixture = createReleaseFixture();
+    const fakeBin = path.join(fixture.root, 'fake-bin');
+    const fakeDd = path.join(fakeBin, 'dd');
+    fs.mkdirSync(fakeBin);
+    fs.writeFileSync(
+      fakeDd,
+      `#!/bin/sh
+/usr/bin/dd "$@"
+if [ -n "\${ARIADNE_TEST_MUTATE_SOURCE:-}" ]; then
+  printf 'mutation\\n' >> "$ARIADNE_TEST_MUTATE_SOURCE"
+  unset ARIADNE_TEST_MUTATE_SOURCE
+fi
+`,
+      { mode: 0o700 },
+    );
+
+    const result = runImport(fixture, undefined, {
+      PATH: `${fakeBin}:${process.env.PATH ?? ''}`,
+      ARIADNE_TEST_MUTATE_SOURCE: fixture.bundle,
+    });
+
+    expect(result.status).not.toBe(0);
+    expect(output(result).toLowerCase()).toMatch(/changed while.*copied|snapshot size changed/);
+    expect(run('git', ['rev-parse', 'HEAD'], fixture.worktree)).toBe(fixture.sha);
+  });
+
+  it('rejects an ignored file that exactly conflicts with a target tracked path', () => {
+    const fixture = createReleaseFixture();
+    const release = createNextRelease(fixture, (source) => {
+      fs.writeFileSync(path.join(source, 'ignored.txt'), 'reviewed\n');
+    });
+    fs.appendFileSync(path.join(fixture.worktree, '.git', 'info', 'exclude'), 'ignored.txt\n');
+    fs.writeFileSync(path.join(fixture.worktree, 'ignored.txt'), 'local state\n');
+
+    const result = runImport(fixture, [release.sha, release.bundle, release.archive]);
+
+    expect(result.status).not.toBe(0);
+    expect(output(result).toLowerCase()).toMatch(/ignored.*conflict/);
+    expect(fs.readFileSync(path.join(fixture.worktree, 'ignored.txt'), 'utf8')).toBe(
+      'local state\n',
+    );
+    expect(run('git', ['rev-parse', 'HEAD'], fixture.worktree)).toBe(fixture.sha);
+  });
+
+  it('rejects ignored directory and file topology that blocks target tracked paths', () => {
+    const fixture = createReleaseFixture();
+    const release = createNextRelease(fixture, (source) => {
+      fs.writeFileSync(path.join(source, 'blocked'), 'reviewed file\n');
+      fs.mkdirSync(path.join(source, 'parent'));
+      fs.writeFileSync(path.join(source, 'parent', 'child.txt'), 'reviewed child\n');
+    });
+    fs.appendFileSync(
+      path.join(fixture.worktree, '.git', 'info', 'exclude'),
+      'blocked/\nparent\n',
+    );
+    fs.mkdirSync(path.join(fixture.worktree, 'blocked'));
+    fs.writeFileSync(path.join(fixture.worktree, 'blocked', 'keep.txt'), 'local directory\n');
+    fs.writeFileSync(path.join(fixture.worktree, 'parent'), 'local file\n');
+
+    const result = runImport(fixture, [release.sha, release.bundle, release.archive]);
+
+    expect(result.status).not.toBe(0);
+    expect(output(result).toLowerCase()).toMatch(/ignored.*conflict/);
+    expect(fs.readFileSync(path.join(fixture.worktree, 'blocked', 'keep.txt'), 'utf8')).toBe(
+      'local directory\n',
+    );
+    expect(fs.readFileSync(path.join(fixture.worktree, 'parent'), 'utf8')).toBe('local file\n');
+    expect(run('git', ['rev-parse', 'HEAD'], fixture.worktree)).toBe(fixture.sha);
   });
 
   it('rejects archive path traversal and symlink entries', () => {

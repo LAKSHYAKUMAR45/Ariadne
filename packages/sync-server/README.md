@@ -241,19 +241,26 @@ GitHub. As root, import the copied artifacts before requesting deployment:
 /opt/ariadne/worktree/deploy/nodem2/scripts/deploy <40-char-commit-sha>
 ```
 
-`import-release` validates the bundle, archive commit identity, archive paths
-and entry types, exact file content/modes, fixed destination ownership, and
-clean result before updating the root-managed local
-`refs/ariadne/deploy`. The deploy script has no fetch or other Git network
-dependency. It requires all secret/key files before touching Compose, rejects a
-dirty worktree and any revision that is not known locally and reachable from
-that fixed ref, validates `docker compose config --quiet` before building,
-builds the immutable candidate tag `ariadne-sync-server:<sha>` from the
-`build.context` declared for `sync-server`/`migrate` (the checked-out worktree
-root), runs migrations as a one-shot `migrate` service *before* replacing the
-app, polls `http://127.0.0.1:4300/healthz`, and rolls the `sync-server` service
-back to the previously deployed image when health verification fails. It never
-prints secret values.
+`import-release` snapshots both caller-owned artifacts with no-follow reads
+into a root-owned private staging directory, rejects in-copy mutation and
+artifacts larger than 2 GiB, and consumes only those snapshots afterward. It
+validates the bundle, archive commit identity, archive paths and entry types,
+exact file content/modes, fixed destination ownership, and clean result. Before
+worktree mutation it rejects any exact or parent/child conflict between an
+ignored path and the target tracked tree, preserving all non-conflicting
+ignored state. Only then does it update the root-managed local
+`refs/ariadne/deploy`.
+
+The deploy script has no fetch or other Git network dependency. It requires all
+secret/key files before touching Compose, rejects a dirty worktree and any
+revision that is not known locally and reachable from that fixed ref, validates
+`docker compose config --quiet` before building, builds the immutable candidate
+tag `ariadne-sync-server:<sha>` from the `build.context` declared for
+`sync-server`/`migrate` (the checked-out worktree root), runs migrations as a
+one-shot `migrate` service *before* replacing the app, polls
+`http://127.0.0.1:4300/healthz`, and rolls the `sync-server` service back to the
+previously deployed image when health verification fails. It never prints
+secret values.
 
 Caution: plain `docker compose config` renders every `env_file` value into its
 output. Only `docker compose config --quiet` is safe to run where output may be

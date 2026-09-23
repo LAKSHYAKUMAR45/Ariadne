@@ -9,6 +9,7 @@ ARIADNE_LOG_TAG=ariadne-import-release
 ARIADNE_PRODUCTION_ROOT=/opt/ariadne
 ARIADNE_INSTALLED_LIB_DIR=/usr/local/lib/ariadne
 ARIADNE_TRUSTED_REF=refs/ariadne/deploy
+ARIADNE_MAX_ARTIFACT_BYTES=2147483648
 ARIADNE_STAGE_DIR=
 
 log() {
@@ -57,7 +58,8 @@ if [ "${ARIADNE_IMPORT_SELFTEST:-}" = "1" ]; then
 elif [ -n "${ARIADNE_IMPORT_SELFTEST:-}" ]; then
     fail "ARIADNE_IMPORT_SELFTEST must not be set for a privileged invocation"
 else
-    for ariadne_override in ARIADNE_IMPORT_PREFIX ARIADNE_IMPORT_OWNER_UID; do
+    for ariadne_override in ARIADNE_IMPORT_PREFIX ARIADNE_IMPORT_OWNER_UID \
+        ARIADNE_IMPORT_SNAPSHOT_HOOK; do
         eval "ariadne_override_value=\${$ariadne_override:-}"
         [ -z "$ariadne_override_value" ] ||
             fail "$ariadne_override must not be set: release import uses fixed production paths"
@@ -74,18 +76,18 @@ fi
 [ "$#" -eq 3 ] || fail "usage: import-release <40-character-commit-sha> <bundle> <archive>"
 
 ARIADNE_REVISION=$1
-ARIADNE_BUNDLE=$2
-ARIADNE_ARCHIVE=$3
+ARIADNE_SOURCE_BUNDLE=$2
+ARIADNE_SOURCE_ARCHIVE=$3
 case "$ARIADNE_REVISION" in
     "" | *[!0-9a-f]*) fail "revision must be a full 40-character lowercase hex commit sha" ;;
 esac
 [ "${#ARIADNE_REVISION}" -eq 40 ] ||
     fail "revision must be a full 40-character lowercase hex commit sha"
-case "$ARIADNE_BUNDLE" in
+case "$ARIADNE_SOURCE_BUNDLE" in
     /*) ;;
     *) fail "release bundle path must be absolute" ;;
 esac
-case "$ARIADNE_ARCHIVE" in
+case "$ARIADNE_SOURCE_ARCHIVE" in
     /*) ;;
     *) fail "release archive path must be absolute" ;;
 esac
@@ -122,11 +124,79 @@ require_safe_directory() {
 
 require_safe_directory "$ARIADNE_DEPLOY_ROOT" "deployment root"
 require_safe_directory "$ARIADNE_WORKTREE" "deployment worktree"
-require_safe_file "$ARIADNE_BUNDLE" "release bundle"
-require_safe_file "$ARIADNE_ARCHIVE" "release archive"
+require_safe_file "$ARIADNE_SOURCE_BUNDLE" "release bundle"
+require_safe_file "$ARIADNE_SOURCE_ARCHIVE" "release archive"
 
 [ -z "$(git -C "$ARIADNE_WORKTREE" status --porcelain --untracked-files=all)" ] ||
     fail "deployment worktree is dirty; refusing to import over local files"
+
+ARIADNE_STAGE_DIR=$(mktemp -d "$ARIADNE_DEPLOY_ROOT/.release-import.XXXXXX") ||
+    fail "failed to create release staging directory"
+trap cleanup EXIT
+trap 'exit 1' HUP INT TERM
+chmod 0700 "$ARIADNE_STAGE_DIR" || fail "failed to secure release staging directory"
+ARIADNE_BUNDLE="$ARIADNE_STAGE_DIR/release.bundle"
+ARIADNE_ARCHIVE="$ARIADNE_STAGE_DIR/release.tar"
+ARIADNE_STAGE_FILES="$ARIADNE_STAGE_DIR/files"
+ARIADNE_EXPECTED_FILES="$ARIADNE_STAGE_DIR/expected"
+ARIADNE_ARCHIVE_LIST="$ARIADNE_STAGE_DIR/archive.list"
+ARIADNE_ARCHIVE_VERBOSE="$ARIADNE_STAGE_DIR/archive.verbose"
+ARIADNE_STAGE_MANIFEST="$ARIADNE_STAGE_DIR/stage.manifest"
+ARIADNE_EXPECTED_MANIFEST="$ARIADNE_STAGE_DIR/expected.manifest"
+ARIADNE_IGNORED_PATHS="$ARIADNE_STAGE_DIR/ignored.paths"
+ARIADNE_TARGET_PATHS="$ARIADNE_STAGE_DIR/target.paths"
+mkdir "$ARIADNE_STAGE_FILES" "$ARIADNE_EXPECTED_FILES" ||
+    fail "failed to create staged file directories"
+
+snapshot_artifact() {
+    ariadne_snapshot_source=$1
+    ariadne_snapshot_target=$2
+    ariadne_snapshot_label=$3
+    ariadne_snapshot_before=$(stat -c '%d:%i:%s:%Y:%Z' "$ariadne_snapshot_source") ||
+        fail "cannot inspect $ariadne_snapshot_label before snapshot"
+    ariadne_snapshot_size=$(stat -c '%s' "$ariadne_snapshot_source") ||
+        fail "cannot inspect $ariadne_snapshot_label size"
+    case "$ariadne_snapshot_size" in
+        "" | *[!0-9]*) fail "$ariadne_snapshot_label size is invalid" ;;
+    esac
+    [ "$ariadne_snapshot_size" -gt 0 ] ||
+        fail "$ariadne_snapshot_label must not be empty"
+    [ "$ariadne_snapshot_size" -le "$ARIADNE_MAX_ARTIFACT_BYTES" ] ||
+        fail "$ariadne_snapshot_label exceeds the 2 GiB import limit"
+
+    dd if="$ariadne_snapshot_source" of="$ariadne_snapshot_target.tmp" \
+        bs=1048576 iflag=nofollow,fullblock status=none ||
+        fail "failed to snapshot $ariadne_snapshot_label"
+    if [ ! -f "$ariadne_snapshot_target.tmp" ] || [ -L "$ariadne_snapshot_target.tmp" ]; then
+        fail "$ariadne_snapshot_label snapshot is not a regular file"
+    fi
+    ariadne_snapshot_after=$(stat -c '%d:%i:%s:%Y:%Z' "$ariadne_snapshot_source") ||
+        fail "cannot inspect $ariadne_snapshot_label after snapshot"
+    [ "$ariadne_snapshot_before" = "$ariadne_snapshot_after" ] ||
+        fail "$ariadne_snapshot_label changed while it was being copied"
+    [ "$(stat -c '%s' "$ariadne_snapshot_target.tmp")" = "$ariadne_snapshot_size" ] ||
+        fail "$ariadne_snapshot_label snapshot size changed during copy"
+    chmod 0600 "$ariadne_snapshot_target.tmp" ||
+        fail "failed to secure $ariadne_snapshot_label snapshot"
+    mv "$ariadne_snapshot_target.tmp" "$ariadne_snapshot_target" ||
+        fail "failed to publish $ariadne_snapshot_label snapshot"
+    unset ariadne_snapshot_source ariadne_snapshot_target ariadne_snapshot_label \
+        ariadne_snapshot_before ariadne_snapshot_after ariadne_snapshot_size
+}
+
+snapshot_artifact "$ARIADNE_SOURCE_BUNDLE" "$ARIADNE_BUNDLE" "release bundle"
+snapshot_artifact "$ARIADNE_SOURCE_ARCHIVE" "$ARIADNE_ARCHIVE" "release archive"
+
+if [ -n "${ARIADNE_IMPORT_SNAPSHOT_HOOK:-}" ]; then
+    [ "${ARIADNE_IMPORT_SELFTEST:-}" = "1" ] ||
+        fail "ARIADNE_IMPORT_SNAPSHOT_HOOK is available only in self-test mode"
+    if [ ! -f "$ARIADNE_IMPORT_SNAPSHOT_HOOK" ] ||
+        [ -L "$ARIADNE_IMPORT_SNAPSHOT_HOOK" ] ||
+        [ ! -x "$ARIADNE_IMPORT_SNAPSHOT_HOOK" ]; then
+        fail "ARIADNE_IMPORT_SNAPSHOT_HOOK must be an executable regular file"
+    fi
+    "$ARIADNE_IMPORT_SNAPSHOT_HOOK" || fail "snapshot self-test hook failed"
+fi
 
 git -C "$ARIADNE_WORKTREE" bundle verify "$ARIADNE_BUNDLE" >/dev/null 2>&1 ||
     fail "release bundle is invalid or has unavailable prerequisites"
@@ -141,19 +211,6 @@ ARIADNE_ARCHIVE_REVISION=$(git get-tar-commit-id <"$ARIADNE_ARCHIVE" 2>/dev/null
 [ "$ARIADNE_ARCHIVE_REVISION" = "$ARIADNE_REVISION" ] ||
     fail "release archive does not identify the requested revision"
 tar -tf "$ARIADNE_ARCHIVE" >/dev/null 2>&1 || fail "release archive is invalid"
-
-ARIADNE_STAGE_DIR=$(mktemp -d "$ARIADNE_DEPLOY_ROOT/.release-import.XXXXXX") ||
-    fail "failed to create release staging directory"
-trap cleanup EXIT
-trap 'exit 1' HUP INT TERM
-ARIADNE_STAGE_FILES="$ARIADNE_STAGE_DIR/files"
-ARIADNE_EXPECTED_FILES="$ARIADNE_STAGE_DIR/expected"
-ARIADNE_ARCHIVE_LIST="$ARIADNE_STAGE_DIR/archive.list"
-ARIADNE_ARCHIVE_VERBOSE="$ARIADNE_STAGE_DIR/archive.verbose"
-ARIADNE_STAGE_MANIFEST="$ARIADNE_STAGE_DIR/stage.manifest"
-ARIADNE_EXPECTED_MANIFEST="$ARIADNE_STAGE_DIR/expected.manifest"
-mkdir "$ARIADNE_STAGE_FILES" "$ARIADNE_EXPECTED_FILES" ||
-    fail "failed to create staged file directories"
 
 tar -tf "$ARIADNE_ARCHIVE" >"$ARIADNE_ARCHIVE_LIST" ||
     fail "failed to inspect release archive paths"
@@ -197,6 +254,31 @@ find "$ARIADNE_EXPECTED_FILES" -mindepth 1 -printf '%P\t%y\t%m\n' |
     fail "failed to record requested revision metadata"
 cmp -s "$ARIADNE_STAGE_MANIFEST" "$ARIADNE_EXPECTED_MANIFEST" ||
     fail "release archive modes do not exactly match the requested revision"
+
+git -C "$ARIADNE_WORKTREE" ls-files --others -i --exclude-standard \
+    >"$ARIADNE_IGNORED_PATHS" ||
+    fail "failed to enumerate ignored worktree paths"
+git -C "$ARIADNE_WORKTREE" ls-tree -r --name-only "$ARIADNE_REVISION" \
+    >"$ARIADNE_TARGET_PATHS" ||
+    fail "failed to enumerate target tracked paths"
+if grep -Eq '^"' "$ARIADNE_IGNORED_PATHS" "$ARIADNE_TARGET_PATHS"; then
+    fail "quoted special-character paths are not supported during release import"
+fi
+awk '
+    NR == FNR { target[++count] = $0; next }
+    {
+        ignored = $0
+        for (i = 1; i <= count; i++) {
+            tracked = target[i]
+            if (ignored == tracked ||
+                index(tracked, ignored "/") == 1 ||
+                index(ignored, tracked "/") == 1) {
+                exit 1
+            }
+        }
+    }
+' "$ARIADNE_TARGET_PATHS" "$ARIADNE_IGNORED_PATHS" ||
+    fail "ignored worktree path conflicts with the target tracked tree"
 
 rsync --archive --exclude=/.git "$ARIADNE_STAGE_FILES/" "$ARIADNE_WORKTREE/" ||
     fail "failed to synchronize reviewed release files"
