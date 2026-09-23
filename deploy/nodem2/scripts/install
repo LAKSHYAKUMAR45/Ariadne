@@ -93,6 +93,7 @@ fi
 
 ARIADNE_ETC_DIR="$ARIADNE_PREFIX/etc/ariadne"
 ARIADNE_KEYS_DIR="$ARIADNE_ETC_DIR/keys"
+ARIADNE_PROXY_DIR="$ARIADNE_ETC_DIR/proxy"
 ARIADNE_LIB_DIR="$ARIADNE_PREFIX$ARIADNE_INSTALLED_LIB_DIR"
 ARIADNE_UNIT_DIR="$ARIADNE_PREFIX/etc/systemd/system"
 ARIADNE_TMPFILES_DIR="$ARIADNE_PREFIX/etc/tmpfiles.d"
@@ -183,11 +184,13 @@ unset ariadne_group_line
 # ---------------------------------------------------------------------------
 ariadne_require_safe_path "$ARIADNE_ETC_DIR"
 ariadne_require_safe_path "$ARIADNE_KEYS_DIR"
+ariadne_require_safe_path "$ARIADNE_PROXY_DIR"
 ariadne_require_safe_path "$ARIADNE_LIB_DIR"
 ariadne_require_safe_path "$ARIADNE_RUN_DIR"
 
 ariadne_install_dir "$ARIADNE_ETC_DIR" 0750
 ariadne_install_dir "$ARIADNE_KEYS_DIR" 0700
+ariadne_install_dir "$ARIADNE_PROXY_DIR" 0700
 ariadne_install_dir "$ARIADNE_LIB_DIR" 0755
 ariadne_install_dir "$ARIADNE_UNIT_DIR" 0755
 ariadne_install_dir "$ARIADNE_TMPFILES_DIR" 0755

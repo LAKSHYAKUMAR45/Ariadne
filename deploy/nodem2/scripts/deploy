@@ -19,11 +19,18 @@ CANDIDATE_IMAGE=""
 PREVIOUS_IMAGE=""
 PREVIOUS_REVISION=""
 APP_REPLACED=0
+OPERATOR_BUILD_STARTED=0
+PROXY_TOUCHED=0
 
 on_exit() {
     status=$?
     if [ "$status" -ne 0 ] && [ "$APP_REPLACED" -eq 1 ]; then
         rollback
+        status=1
+    fi
+    if [ "$status" -ne 0 ] &&
+        { [ "$OPERATOR_BUILD_STARTED" -eq 1 ] || [ "$PROXY_TOUCHED" -eq 1 ]; }; then
+        restore_release_components || true
         status=1
     fi
     exit "$status"
@@ -42,6 +49,40 @@ rollback() {
     fi
 }
 
+restore_release_components() {
+    if [ -z "$PREVIOUS_REVISION" ] ||
+        ! ariadne_restore_worktree_revision "$PREVIOUS_REVISION"; then
+        log "release component rollback failed: previous worktree revision is unavailable"
+        return 1
+    fi
+
+    if [ "$OPERATOR_BUILD_STARTED" -eq 1 ]; then
+        log "restoring operator build for the previous revision"
+        if ! (
+            cd "$ARIADNE_WORKTREE"
+            pnpm --filter @ariadne-dev/operator build
+        ) || ! systemctl restart ariadne-operator.service; then
+            log "operator rollback failed; operator requires manual recovery"
+            return 1
+        fi
+    fi
+
+    if [ "$PROXY_TOUCHED" -eq 1 ]; then
+        if grep -Eq '^  proxy:$' "$ARIADNE_COMPOSE_FILE"; then
+            log "restoring the previous Ariadne HTTPS proxy"
+            if ! SYNC_SERVER_IMAGE="$PREVIOUS_IMAGE" \
+                ariadne_compose up -d --no-deps --wait proxy; then
+                log "proxy rollback failed; proxy requires manual recovery"
+                return 1
+            fi
+        else
+            log "removing the candidate-only Ariadne HTTPS proxy"
+            docker rm -f ariadne-nodem2-proxy-1 >/dev/null 2>&1 || true
+        fi
+    fi
+    return 0
+}
+
 [ "$#" -eq 1 ] || fail "usage: deploy <40-character-commit-sha>"
 REVISION=$1
 case "$REVISION" in
@@ -50,6 +91,8 @@ esac
 [ "${#REVISION}" -eq 40 ] || fail "revision must be a full 40-character lowercase hex commit sha"
 
 require_deployment_inputs
+require_file "$ARIADNE_PROXY_CERT"
+require_file "$ARIADNE_PROXY_KEY"
 [ -d "$ARIADNE_WORKTREE/.git" ] || [ -f "$ARIADNE_WORKTREE/.git" ] ||
     fail "deployment worktree is missing: $ARIADNE_WORKTREE"
 mkdir -p "$ARIADNE_STATE_DIR"
@@ -127,7 +170,22 @@ if [ "$healthy" -ne 1 ]; then
     fail "health verification failed; starting rollback"
 fi
 
-APP_REPLACED=0
+log "starting Ariadne HTTPS proxy"
+PROXY_TOUCHED=1
+SYNC_SERVER_IMAGE="$CANDIDATE_IMAGE" ariadne_compose up -d --no-deps --wait proxy ||
+    fail "Ariadne HTTPS proxy failed to become healthy"
+
+log "building tracked operator"
+OPERATOR_BUILD_STARTED=1
+(
+    cd "$ARIADNE_WORKTREE"
+    pnpm --filter @ariadne-dev/operator build
+) || fail "operator build failed"
+
+log "restarting operator with the reviewed build"
+systemctl restart ariadne-operator.service ||
+    fail "operator restart failed"
+
 docker tag "$CANDIDATE_IMAGE" "$ARIADNE_CURRENT_TAG" ||
     fail "failed to update the $ARIADNE_CURRENT_TAG rollback pointer"
 
@@ -143,4 +201,7 @@ if [ -n "$PREVIOUS_REVISION" ] && [ "$PREVIOUS_REVISION" != "$REVISION" ]; then
 else
     rm -f "$ARIADNE_STATE_DIR/rollback-revision"
 fi
+APP_REPLACED=0
+OPERATOR_BUILD_STARTED=0
+PROXY_TOUCHED=0
 log "deployment of revision $REVISION succeeded"

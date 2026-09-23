@@ -38,6 +38,9 @@ interface Harness {
   dockerLog: string;
   gitLog: string;
   curlLog: string;
+  pnpmLog: string;
+  systemctlLog: string;
+  eventLog: string;
   gitHeadFile: string;
 }
 
@@ -69,6 +72,9 @@ function createHarness(): Harness {
   );
   fs.writeFileSync(path.join(keysDir, 'active-key-id'), 'primary\n', { mode: 0o600 });
   fs.writeFileSync(path.join(keysDir, 'primary.key'), `${KEY_MATERIAL_VALUE}\n`, { mode: 0o600 });
+  fs.mkdirSync(path.join(etcDir, 'proxy'), { mode: 0o700 });
+  fs.writeFileSync(path.join(etcDir, 'proxy', 'tls.crt'), 'test certificate\n', { mode: 0o644 });
+  fs.writeFileSync(path.join(etcDir, 'proxy', 'tls.key'), 'test private key\n', { mode: 0o600 });
 
   const composeFile = path.join(worktreeDeployDir, 'compose.yaml');
   fs.writeFileSync(
@@ -79,6 +85,9 @@ function createHarness(): Harness {
   const dockerLog = path.join(root, 'docker.log');
   const gitLog = path.join(root, 'git.log');
   const curlLog = path.join(root, 'curl.log');
+  const pnpmLog = path.join(root, 'pnpm.log');
+  const systemctlLog = path.join(root, 'systemctl.log');
+  const eventLog = path.join(root, 'events.log');
   const gitHeadFile = path.join(root, 'git-head');
   fs.writeFileSync(gitHeadFile, `${VALID_SHA}\n`, { mode: 0o600 });
 
@@ -86,6 +95,7 @@ function createHarness(): Harness {
     path.join(binDir, 'docker'),
     `#!/bin/sh
 printf '%s\\n' "SYNC_SERVER_IMAGE=\${SYNC_SERVER_IMAGE:-} :: $*" >> "$FAKE_DOCKER_LOG"
+printf '%s\\n' "docker $*" >> "$FAKE_EVENT_LOG"
 if [ "\${1:-}" = image ] && [ "\${2:-}" = inspect ]; then
   if [ "\${FAKE_DOCKER_NO_CURRENT:-0}" = 1 ]; then
     echo "Error: No such image" >&2
@@ -155,6 +165,24 @@ exit "\${FAKE_CURL_EXIT:-0}"
 `,
   );
 
+  writeExecutable(
+    path.join(binDir, 'pnpm'),
+    `#!/bin/sh
+printf '%s\n' "$*" >> "$FAKE_PNPM_LOG"
+printf '%s\n' "pnpm $*" >> "$FAKE_EVENT_LOG"
+exit "\${FAKE_PNPM_EXIT:-0}"
+`,
+  );
+
+  writeExecutable(
+    path.join(binDir, 'systemctl'),
+    `#!/bin/sh
+printf '%s\n' "$*" >> "$FAKE_SYSTEMCTL_LOG"
+printf '%s\n' "systemctl $*" >> "$FAKE_EVENT_LOG"
+exit "\${FAKE_SYSTEMCTL_EXIT:-0}"
+`,
+  );
+
   // Lets a test claim to be uid 0 without actually being root.
   writeExecutable(
     path.join(binDir, 'id'),
@@ -178,6 +206,9 @@ exec /usr/bin/id "$@"
     dockerLog,
     gitLog,
     curlLog,
+    pnpmLog,
+    systemctlLog,
+    eventLog,
     gitHeadFile,
   };
 }
@@ -200,6 +231,9 @@ function runScript(harness: Harness, script: string, options: RunOptions = {}) {
     FAKE_DOCKER_LOG: harness.dockerLog,
     FAKE_GIT_LOG: harness.gitLog,
     FAKE_CURL_LOG: harness.curlLog,
+    FAKE_PNPM_LOG: harness.pnpmLog,
+    FAKE_SYSTEMCTL_LOG: harness.systemctlLog,
+    FAKE_EVENT_LOG: harness.eventLog,
     FAKE_GIT_HEAD_FILE: harness.gitHeadFile,
     ...(selftest
       ? {
@@ -273,6 +307,48 @@ describe('deploy script', () => {
     const docker = readLog(harness.dockerLog);
     const buildLine = docker[indexOfMatch(docker, 'build sync-server')];
     expect(buildLine).toContain(`SYNC_SERVER_IMAGE=ariadne-sync-server:${VALID_SHA}`);
+  });
+
+  it('builds and restarts the tracked operator after the app and proxy are healthy', () => {
+    const harness = createHarness();
+    const result = runScript(harness, 'deploy', { args: [VALID_SHA] });
+
+    expect(result.status).toBe(0);
+    expect(readLog(harness.pnpmLog)).toEqual(['--filter @ariadne-dev/operator build']);
+    expect(readLog(harness.systemctlLog)).toEqual(['restart ariadne-operator.service']);
+    const events = readLog(harness.eventLog);
+    const appStart = indexOfMatch(events, 'up -d --no-deps sync-server');
+    const proxyStart = indexOfMatch(events, 'up -d --no-deps --wait proxy');
+    const operatorBuild = indexOfMatch(events, 'pnpm --filter @ariadne-dev/operator build');
+    const operatorRestart = indexOfMatch(events, 'systemctl restart ariadne-operator.service');
+    expect(proxyStart).toBeGreaterThan(appStart);
+    expect(operatorBuild).toBeGreaterThan(proxyStart);
+    expect(operatorRestart).toBeGreaterThan(operatorBuild);
+    expect(result.stdout).toMatch(
+      /building tracked operator[\s\S]*restarting operator with the reviewed build/,
+    );
+  });
+
+  it('restores the previous app, operator, worktree, and proxy after operator restart failure', () => {
+    const harness = createHarness();
+    fs.writeFileSync(path.join(harness.stateDir, 'current-revision'), `${ROLLBACK_SHA}\n`);
+
+    const result = runScript(harness, 'deploy', {
+      args: [VALID_SHA],
+      env: { FAKE_SYSTEMCTL_EXIT: '1' },
+    });
+
+    expect(result.status).not.toBe(0);
+    expect(readLog(harness.dockerLog).join('\n')).toContain(
+      `SYNC_SERVER_IMAGE=${PREVIOUS_IMAGE_ID}`,
+    );
+    expect(readLog(harness.gitLog).join('\n')).toContain(
+      `checkout --detach --force ${ROLLBACK_SHA}`,
+    );
+    expect(readLog(harness.pnpmLog)).toEqual([
+      '--filter @ariadne-dev/operator build',
+      '--filter @ariadne-dev/operator build',
+    ]);
   });
 
   it('uses fixed compose file, project name, and env files', () => {
@@ -734,13 +810,13 @@ describe('restart scripts', () => {
 describe('compose topology', () => {
   const compose = () => fs.readFileSync(composeSource, 'utf8');
 
-  it('binds every published port to loopback only', () => {
-    const ports = compose().match(/^\s*-\s*['"]?[^'"\s]+:\d+["']?\s*$/gm) ?? [];
-    expect(ports.length).toBeGreaterThan(0);
-    for (const port of ports) {
-      expect(port).toContain('127.0.0.1:');
-    }
-    expect(compose()).toContain('127.0.0.1:4300:4300');
+  it('keeps data services on loopback and exposes only the dedicated HTTPS proxy', () => {
+    const text = compose();
+    expect(text).toContain('127.0.0.1:4300:4300');
+    expect(text).toContain('127.0.0.1:${POSTGRES_MAINTENANCE_PORT:-15432}:5432');
+    expect(text).toContain(
+      '${ARIADNE_PROXY_BIND_ADDRESS:-0.0.0.0}:${ARIADNE_PROXY_PORT:-14300}:8443',
+    );
   });
 
   it('never mounts the Docker socket into a service', () => {
@@ -798,7 +874,11 @@ describe('compose topology', () => {
   });
 
   it('grants the sync-server only the capabilities the startup handoff needs', () => {
-    const syncServerBlock = compose().slice(compose().indexOf('  sync-server:'));
+    const syncServerStart = compose().indexOf('  sync-server:');
+    const syncServerBlock = compose().slice(
+      syncServerStart,
+      compose().indexOf('\n  proxy:', syncServerStart),
+    );
     const capAdd = syncServerBlock.slice(syncServerBlock.indexOf('cap_add:'));
     expect(capAdd).toContain('- CHOWN');
     expect(capAdd).toContain('- SETGID');

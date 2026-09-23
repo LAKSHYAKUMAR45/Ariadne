@@ -3,12 +3,21 @@
 The tracked Compose stack and root-owned operator provide the single-admin
 Operations Console. This directory is the supported production deployment
 path; do not substitute ad hoc Compose commands or grant the web tier a Docker
-socket. After `ariadne sync setup [username]` establishes the pinned SSH
-tunnel, the administrator opens:
+socket. With the optional Ariadne-owned HTTPS proxy configured, the
+administrator opens:
 
 ```text
-http://127.0.0.1:14300/admin
+https://<nodem2-address>:14300/admin
 ```
+
+The proxy belongs to the `ariadne-nodem2` Compose project and does not modify
+or restart unrelated nginx services. Its certificate and private key live at
+`/etc/ariadne/proxy/tls.crt` and `/etc/ariadne/proxy/tls.key`. A self-signed
+certificate requires a one-time browser trust exception. Set
+`ADMIN_PUBLIC_ORIGIN` to the exact HTTPS origin and set
+`ARIADNE_PROXY_BIND_ADDRESS`/`ARIADNE_PROXY_PORT` in
+`/etc/ariadne/compose.env` before deployment. The backend remains bound to
+`127.0.0.1:4300`.
 
 The console has eight sections: **Overview**, **Members**, **Tasks**,
 **Backups**, **Services**, **Deployments**, **Logs**, and **Audit**. It uses a

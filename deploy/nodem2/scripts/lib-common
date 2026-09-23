@@ -75,6 +75,9 @@ ARIADNE_COMPOSE_FILE="$ARIADNE_WORKTREE/deploy/nodem2/compose.yaml"
 ARIADNE_COMPOSE_ENV_FILE="$ARIADNE_ETC_DIR/compose.env"
 ARIADNE_SERVER_ENV_FILE="$ARIADNE_ETC_DIR/sync-server.env"
 ARIADNE_KEYS_DIR="$ARIADNE_ETC_DIR/keys"
+ARIADNE_PROXY_DIR="$ARIADNE_ETC_DIR/proxy"
+ARIADNE_PROXY_CERT="$ARIADNE_PROXY_DIR/tls.crt"
+ARIADNE_PROXY_KEY="$ARIADNE_PROXY_DIR/tls.key"
 ARIADNE_IMAGE_REPO=ariadne-sync-server
 ARIADNE_CURRENT_TAG="$ARIADNE_IMAGE_REPO:current"
 ARIADNE_HEALTH_URL="http://127.0.0.1:4300/healthz"
@@ -151,7 +154,6 @@ require_deployment_inputs() {
     require_file "$ARIADNE_SERVER_ENV_FILE"
     require_file "$ARIADNE_KEYS_DIR/active-key-id"
     require_file "$ARIADNE_COMPOSE_FILE"
-
     grep -Eq '^ADMIN_PUBLIC_ORIGIN=.+' "$ARIADNE_SERVER_ENV_FILE" ||
         fail "ADMIN_PUBLIC_ORIGIN is missing from $ARIADNE_SERVER_ENV_FILE"
 

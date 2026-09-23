@@ -15,6 +15,7 @@ const repoRoot = path.resolve(__dirname, '..', '..', '..');
 const deployDir = path.join(repoRoot, 'deploy', 'nodem2');
 const composePath = path.join(deployDir, 'compose.yaml');
 const tmpfilesPath = path.join(deployDir, 'tmpfiles', 'ariadne.conf');
+const proxyConfigPath = path.join(deployDir, 'proxy', 'nginx.conf');
 
 // Host runtime directory owned by the operator, and the distinct container
 // path it is mounted at: the container's own tmpfs already uses /run/ariadne
@@ -146,5 +147,33 @@ describe('operator runtime directory at boot', () => {
     // already mounted, and so the shared directory inode survives.
     expect(unit).toContain('RuntimeDirectoryPreserve=yes');
     expect(unit).toContain('Group=ariadne-web');
+  });
+});
+
+describe('Ariadne HTTPS proxy', () => {
+  it('uses a dedicated hardened proxy without changing the loopback backend', () => {
+    const proxy = serviceBlock('proxy');
+    const syncServer = serviceBlock('sync-server');
+
+    expect(proxy).toContain('nginx:1.27-alpine');
+    expect(proxy).toContain('${ARIADNE_PROXY_BIND_ADDRESS:-0.0.0.0}');
+    expect(proxy).toContain('${ARIADNE_PROXY_PORT:-14300}:8443');
+    expect(proxy).toContain('/etc/ariadne/proxy/tls.crt:/etc/nginx/tls/tls.crt:ro');
+    expect(proxy).toContain('/etc/ariadne/proxy/tls.key:/etc/nginx/tls/tls.key:ro');
+    expect(proxy).toContain('read_only: true');
+    expect(proxy).toContain('no-new-privileges:true');
+    expect(proxy).toContain('cap_drop:');
+    expect(syncServer).toContain('127.0.0.1:4300:4300');
+  });
+
+  it('proxies HTTPS and streaming responses to the private sync-server service', () => {
+    const config = fs.readFileSync(proxyConfigPath, 'utf8');
+
+    expect(config).toContain('listen 8443 ssl');
+    expect(config).toContain('proxy_pass http://sync-server:4300');
+    expect(config).toContain('proxy_buffering off');
+    expect(config).toContain('proxy_request_buffering off');
+    expect(config).toContain('client_max_body_size 40m');
+    expect(config).toContain('ssl_protocols TLSv1.2 TLSv1.3');
   });
 });
