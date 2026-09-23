@@ -62,7 +62,7 @@ describe('runMigrations', () => {
     const version = await pool.query<{ value: string }>(
       `SELECT value FROM schema_meta WHERE key = 'schema_version'`,
     );
-    expect(version.rows[0].value).toBe('8');
+    expect(version.rows[0].value).toBe('9');
 
     const dedupIndex = await pool.query<{ indexdef: string }>(
       `SELECT indexdef FROM pg_indexes
@@ -199,6 +199,7 @@ describe('runMigrations', () => {
         '0006_single_team_authorization.sql',
         '0007_encrypted_task_history.sql',
         '0008_admin_operations.sql',
+        '0009_admin_sessions.sql',
       ]);
 
       const secondRun = await runMigrations(pool);
@@ -213,7 +214,7 @@ describe('runMigrations', () => {
         `SELECT value FROM schema_meta WHERE key = 'schema_version'`,
       );
       expect(schemaVersion.rows).toHaveLength(1);
-      expect(schemaVersion.rows[0].value).toBe('8');
+      expect(schemaVersion.rows[0].value).toBe('9');
 
       const memberships = await pool.query(
         `SELECT u.username, m.role, m.active
@@ -289,7 +290,7 @@ describe('runMigrations', () => {
     const version = await pool.query<{ value: string }>(
       `SELECT value FROM schema_meta WHERE key = 'schema_version'`,
     );
-    expect(version.rows[0].value).toBe('8');
+    expect(version.rows[0].value).toBe('9');
 
     const operationChecks = await pool.query<{ definition: string }>(
       `SELECT pg_get_constraintdef(oid) AS definition
@@ -354,5 +355,49 @@ describe('runMigrations', () => {
        )`,
     );
     expect(descendingIndexes.rows.map((row) => row.indexdef).join(' | ')).toContain('DESC');
+  });
+
+  it('stores admin dashboard sessions as hashes with an expiry index', async () => {
+    if (!pool) {
+      pool = createPool(TEST_DATABASE_URL);
+    }
+    await pool.query('DROP SCHEMA public CASCADE; CREATE SCHEMA public;');
+    await runMigrations(pool);
+
+    const columns = await pool.query<{ column_name: string; is_nullable: string }>(
+      `SELECT column_name, is_nullable
+         FROM information_schema.columns
+        WHERE table_name = 'admin_sessions'
+        ORDER BY column_name ASC`,
+    );
+    expect(columns.rows.map((column) => column.column_name)).toEqual([
+      'created_at',
+      'csrf_hash',
+      'expires_at',
+      'id',
+      'last_seen_at',
+      'reauthenticated_until',
+      'revoked_at',
+      'token_hash',
+      'user_id',
+    ]);
+    // No column may hold a raw token: only the two hex digests exist.
+    expect(columns.rows.map((column) => column.column_name)).not.toContain('token');
+    expect(columns.rows.map((column) => column.column_name)).not.toContain('csrf_token');
+
+    const hashChecks = await pool.query<{ definition: string }>(
+      `SELECT pg_get_constraintdef(oid) AS definition
+         FROM pg_constraint
+        WHERE conrelid = 'admin_sessions'::regclass AND contype = 'c'`,
+    );
+    const definitions = hashChecks.rows.map((row) => row.definition).join(' | ');
+    expect(definitions).toContain("'^[0-9a-f]{64}$'");
+
+    const indexes = await pool.query<{ indexdef: string }>(
+      `SELECT indexdef FROM pg_indexes WHERE tablename = 'admin_sessions'`,
+    );
+    const indexDefs = indexes.rows.map((row) => row.indexdef).join(' | ');
+    expect(indexDefs).toContain('expires_at');
+    expect(indexDefs).toContain('UNIQUE');
   });
 });

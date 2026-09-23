@@ -28,6 +28,8 @@ async function main(): Promise<void> {
     encryptionKeyring,
     operatorClient,
     operatorCallbackTokenPath: config.operatorCallbackTokenPath,
+    adminPublicOrigin: config.adminPublicOrigin,
+    adminCookieSecure: config.adminCookieSecure,
   });
   app.listen(config.port, config.host, () => {
     console.log(`ariadne-sync-server listening on ${config.host}:${config.port}`);

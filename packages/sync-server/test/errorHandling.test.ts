@@ -1,7 +1,9 @@
+import { createHash } from 'node:crypto';
 import type { Pool, PoolClient } from 'pg';
 import request from 'supertest';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createApp } from '../src/app.js';
+import { ADMIN_SESSION_COOKIE_NAME } from '../src/adminSessions.js';
 import { signToken } from '../src/auth.js';
 import { TEST_JWT_SECRET } from './testConfig.js';
 import { createTestEncryptionKeyring } from './testKeyring.js';
@@ -105,8 +107,27 @@ describe('sync-server: unexpected error handling', () => {
 
   it('returns 404 member_not_found when the member disappears mid-update', async () => {
     const logSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const sessionToken = 'a'.repeat(64);
+    const csrfToken = 'b'.repeat(64);
     const query = vi
       .fn<Pool['query']>()
+      // 1. dashboard session lookup, 2. session middleware's admin recheck,
+      // 3. the router's own admin check, 4. member read, 5. member update.
+      .mockResolvedValueOnce(
+        result([
+          {
+            id: 'session-1',
+            user_id: 'admin-1',
+            csrf_hash: createHash('sha256').update(csrfToken).digest('hex'),
+            expires_at: new Date('2126-09-21T00:00:00Z'),
+            reauthenticated_until: null,
+            revoked_at: null,
+            created_at: new Date('2026-09-21T00:00:00Z'),
+            last_seen_at: new Date('2026-09-21T00:00:00Z'),
+          },
+        ]),
+      )
+      .mockResolvedValueOnce(result([{ teamId: 'team-1', role: 'admin' as const }]))
       .mockResolvedValueOnce(result([{ teamId: 'team-1', role: 'admin' as const }]))
       .mockResolvedValueOnce(
         result([
@@ -124,11 +145,11 @@ describe('sync-server: unexpected error handling', () => {
     const app = createApp(pool, TEST_JWT_SECRET, {
       encryptionKeyring: createTestEncryptionKeyring(),
     });
-    const token = signToken({ sub: 'admin-1', username: 'admin' }, TEST_JWT_SECRET);
 
     const response = await request(app)
       .patch('/api/v1/admin/members/member-1')
-      .set('Authorization', `Bearer ${token}`)
+      .set('Cookie', `${ADMIN_SESSION_COOKIE_NAME}=${sessionToken}`)
+      .set('X-CSRF-Token', csrfToken)
       .send({ active: false });
 
     expect(response.status).toBe(404);

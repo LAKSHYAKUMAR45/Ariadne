@@ -431,10 +431,11 @@ What to know:
   existed (a bare `serverUrl`/`token`/`username` at the top level of
   `sync-config.json`) are read transparently as an implicit `"default"`
   profile — no manual migration needed.
-- **Admin member management is temporary bearer auth:** the
-  `/api/v1/admin/*` routes currently use the same bearer JWT as the sync
-  API. That surface is only for operator/admin member management and will
-  move to browser-session auth in the later dashboard rollout.
+- **Admin routes use a browser session, not the sync token:** the
+  `/api/v1/admin/*` dashboard routes authenticate with an `HttpOnly`
+  session cookie obtained from `POST /api/v1/admin/session`, require a CSRF
+  token and the configured `ADMIN_PUBLIC_ORIGIN` on every state change, and
+  reject the sync bearer JWT outright. The sync CLI is unaffected.
 - The JWT and profile metadata are stored locally at
   `~/.ariadne/sync-config.json` with owner-only (`0600`) permissions.
 

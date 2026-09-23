@@ -18,6 +18,19 @@ export interface SyncServerConfig {
    * results. `null` disables the callback route entirely.
    */
   operatorCallbackTokenPath: string | null;
+  /**
+   * Exact origin the admin dashboard is served from, e.g.
+   * `https://ariadne.example.com` or the approved tunnelled
+   * `http://127.0.0.1:4300`. Required in production; `null` only in
+   * development, where non-browser clients are the sole callers.
+   */
+  adminPublicOrigin: string | null;
+  /**
+   * Whether the admin session cookie carries `Secure`. Derived from the public
+   * origin's transport rather than configured independently, so the two can
+   * never disagree.
+   */
+  adminCookieSecure: boolean;
 }
 
 export class SyncServerConfigError extends Error {
@@ -25,6 +38,66 @@ export class SyncServerConfigError extends Error {
     super(message);
     this.name = 'SyncServerConfigError';
   }
+}
+
+const LOOPBACK_HOSTNAMES = new Set(['127.0.0.1', '::1', '[::1]', 'localhost']);
+
+/**
+ * Validates `ADMIN_PUBLIC_ORIGIN` and derives the cookie's `Secure` flag from
+ * it.
+ *
+ * HTTPS origins always get `Secure`. Plain HTTP is accepted only for a
+ * loopback origin, which is exactly the approved deployment shape: the
+ * dashboard is reached through an SSH tunnel that terminates on the operator's
+ * machine, so the cleartext hop never leaves the host. Any other HTTP origin
+ * would put the session cookie on the wire in the clear and is refused.
+ */
+function resolveAdminOrigin(env: NodeJS.ProcessEnv): {
+  adminPublicOrigin: string | null;
+  adminCookieSecure: boolean;
+} {
+  const raw = env.ADMIN_PUBLIC_ORIGIN?.trim();
+  if (!raw) {
+    if (env.NODE_ENV === 'production') {
+      throw new SyncServerConfigError(
+        'ADMIN_PUBLIC_ORIGIN environment variable is required in production (e.g. https://ariadne.example.com)',
+      );
+    }
+    // Without a configured origin the server accepts no browser-issued
+    // state-changing request at all (see middleware.isAllowedOrigin), so a
+    // non-Secure cookie cannot be used for a cross-site attack here.
+    return { adminPublicOrigin: null, adminCookieSecure: false };
+  }
+
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    throw new SyncServerConfigError(
+      'ADMIN_PUBLIC_ORIGIN must be an absolute origin (e.g. https://ariadne.example.com)',
+    );
+  }
+
+  if (url.protocol !== 'https:' && url.protocol !== 'http:') {
+    throw new SyncServerConfigError('ADMIN_PUBLIC_ORIGIN must use http or https');
+  }
+  if (url.username || url.password) {
+    throw new SyncServerConfigError('ADMIN_PUBLIC_ORIGIN must not contain credentials');
+  }
+  if ((url.pathname !== '' && url.pathname !== '/') || url.search || url.hash) {
+    throw new SyncServerConfigError(
+      'ADMIN_PUBLIC_ORIGIN must be an origin only, without a path, query or fragment',
+    );
+  }
+
+  const isLoopback = LOOPBACK_HOSTNAMES.has(url.hostname);
+  if (url.protocol === 'http:' && !isLoopback) {
+    throw new SyncServerConfigError(
+      'ADMIN_PUBLIC_ORIGIN may only use http for a loopback host reached through the approved SSH tunnel',
+    );
+  }
+
+  return { adminPublicOrigin: url.origin, adminCookieSecure: url.protocol === 'https:' };
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): SyncServerConfig {
@@ -70,6 +143,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): SyncServerConf
     );
   }
 
+  const { adminPublicOrigin, adminCookieSecure } = resolveAdminOrigin(env);
+
   return {
     databaseUrl,
     encryptionKeyDir,
@@ -78,5 +153,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): SyncServerConf
     port,
     operatorSocketPath,
     operatorCallbackTokenPath,
+    adminPublicOrigin,
+    adminCookieSecure,
   };
 }

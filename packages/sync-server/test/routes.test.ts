@@ -11,9 +11,11 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../src/app.js';
 import {
   handleUnexpectedError,
+  requireAdminSession,
   requireAuth,
-  type AuthenticatedRequest,
+  requireCsrf,
 } from '../src/middleware.js';
+import { ADMIN_SESSION_COOKIE_NAME } from '../src/adminSessions.js';
 import { createOperatorClient, type OperatorClient } from '../src/operatorClient.js';
 import {
   createOperationsStore,
@@ -27,7 +29,7 @@ import {
 } from '../src/routes/adminOperations.js';
 import { createTaskHistoryRouter } from '../src/routes/taskHistory.js';
 import { createTaskHistoryStore } from '../src/taskHistoryStore.js';
-import { signToken } from '../src/auth.js';
+import { hashPassword, signToken } from '../src/auth.js';
 import { createPool } from '../src/db.js';
 import { runMigrations } from '../src/migrate.js';
 import { TEST_DATABASE_URL, TEST_JWT_SECRET } from './testConfig.js';
@@ -37,6 +39,59 @@ import {
   relaxSingletonTeamConstraints,
   restoreSingletonTeamConstraints,
 } from './singletonConstraints.js';
+
+
+/**
+ * The dashboard password shared by every admin fixture. The browser-facing
+ * admin API no longer accepts the sync bearer JWT, so these suites open a real
+ * database-backed session instead.
+ */
+const DASHBOARD_PASSWORD = 'dashboard-password-123456';
+
+/**
+ * Cookie plus CSRF header for an opened admin session. Both are sent on every
+ * request: the CSRF header is ignored on safe methods and required on every
+ * state change.
+ */
+interface AdminSessionHeaders {
+  Cookie: string;
+  'X-CSRF-Token': string;
+}
+
+async function openAdminSession(
+  target: Express,
+  username: string,
+  password: string = DASHBOARD_PASSWORD,
+): Promise<AdminSessionHeaders> {
+  const res = await request(target)
+    .post('/api/v1/admin/session')
+    .send({ username, password })
+    .expect(201);
+
+  const setCookieHeader = res.headers['set-cookie'];
+  const cookies = Array.isArray(setCookieHeader) ? setCookieHeader : [setCookieHeader ?? ''];
+  const cookie = cookies.find((value) => value.startsWith(`${ADMIN_SESSION_COOKIE_NAME}=`));
+  if (!cookie) {
+    throw new Error('admin login did not set a session cookie');
+  }
+
+  return {
+    Cookie: cookie.slice(0, cookie.indexOf(';')),
+    'X-CSRF-Token': res.body.csrfToken as string,
+  };
+}
+
+async function reauthenticateAdminSession(
+  target: Express,
+  headers: AdminSessionHeaders,
+  password: string = DASHBOARD_PASSWORD,
+): Promise<void> {
+  await request(target)
+    .post('/api/v1/admin/session/reauthenticate')
+    .set(headers)
+    .send({ password })
+    .expect(200);
+}
 
 describe('sync-server: auth + sync routes', () => {
   let pool: Pool;
@@ -75,12 +130,18 @@ describe('sync-server: auth + sync routes', () => {
     return rows[0].id;
   }
 
+  /**
+   * Creates a user directly. `password` is only needed for fixtures that open
+   * a dashboard session; sync-only fixtures keep the cheap placeholder hash.
+   */
   async function createDirectUser(
     username: string,
+    password?: string,
   ): Promise<{ userId: string; authHeader: { Authorization: string } }> {
+    const passwordHash = password ? await hashPassword(password) : `hash-${username}`;
     const { rows } = await pool.query<{ id: string }>(
       'INSERT INTO users (username, password_hash) VALUES ($1, $2) RETURNING id',
-      [username, `hash-${username}`],
+      [username, passwordHash],
     );
     const userId = rows[0].id;
     const token = signToken({ sub: userId, username }, TEST_JWT_SECRET);
@@ -173,13 +234,15 @@ describe('sync-server: auth + sync routes', () => {
   describe('admin member routes', () => {
     async function createAdminFixture() {
       const teamId = await createDirectTeam('Singleton Admin Team');
-      const admin = await createDirectUser('singleton-admin');
-      const member = await createDirectUser('teammate-member');
+      const admin = await createDirectUser('singleton-admin', DASHBOARD_PASSWORD);
+      const member = await createDirectUser('teammate-member', DASHBOARD_PASSWORD);
 
       await addMembership(teamId, admin.userId, 'admin');
       await addMembership(teamId, member.userId, 'member');
 
-      return { teamId, admin, member };
+      const session = await openAdminSession(app, 'singleton-admin');
+
+      return { teamId, admin: { ...admin, session }, member };
     }
 
     it('lists members and lets the singleton admin deactivate then reactivate a member', async () => {
@@ -187,7 +250,7 @@ describe('sync-server: auth + sync routes', () => {
 
       const listRes = await request(app)
         .get('/api/v1/admin/members')
-        .set(admin.authHeader);
+        .set(admin.session);
       expect(listRes.status).toBe(200);
       expect(listRes.body.members).toHaveLength(2);
 
@@ -211,7 +274,7 @@ describe('sync-server: auth + sync routes', () => {
 
       const deactivateRes = await request(app)
         .patch(`/api/v1/admin/members/${member.userId}`)
-        .set(admin.authHeader)
+        .set(admin.session)
         .send({ active: false });
       expect(deactivateRes.status).toBe(200);
       expect(deactivateRes.body.member).toMatchObject({
@@ -229,7 +292,7 @@ describe('sync-server: auth + sync routes', () => {
 
       const reactivateRes = await request(app)
         .patch(`/api/v1/admin/members/${member.userId}`)
-        .set(admin.authHeader)
+        .set(admin.session)
         .send({ active: true });
       expect(reactivateRes.status).toBe(200);
       expect(reactivateRes.body.member).toMatchObject({
@@ -246,31 +309,72 @@ describe('sync-server: auth + sync routes', () => {
       expect(reactivatedMembership.rows[0].active).toBe(true);
     });
 
-    it('returns 403 when a non-admin member calls admin member APIs', async () => {
+    it('refuses to open a dashboard session for a non-admin member', async () => {
+      await createAdminFixture();
+
+      const res = await request(app)
+        .post('/api/v1/admin/session')
+        .send({ username: 'teammate-member', password: DASHBOARD_PASSWORD });
+
+      expect(res.status).toBe(401);
+      expect(res.body.error.code).toBe('invalid_credentials');
+      expect(res.headers['set-cookie']).toBeUndefined();
+    });
+
+    it('rejects a member bearer token on admin member APIs instead of authorizing it', async () => {
       const { member } = await createAdminFixture();
 
       const listRes = await request(app)
         .get('/api/v1/admin/members')
         .set(member.authHeader);
-      expect(listRes.status).toBe(403);
+      expect(listRes.status).toBe(401);
+      expect(listRes.body.error.code).toBe('missing_session');
 
       const patchRes = await request(app)
         .patch(`/api/v1/admin/members/${member.userId}`)
         .set(member.authHeader)
         .send({ active: false });
-      expect(patchRes.status).toBe(403);
+      expect(patchRes.status).toBe(401);
+      expect(patchRes.body.error.code).toBe('missing_session');
     });
 
-    it('returns 403 for a non-admin member even when the patch body is malformed', async () => {
-      const { member } = await createAdminFixture();
+    it('returns 403 admin_required once the session holder loses admin rights', async () => {
+      const { admin, member } = await createAdminFixture();
+
+      await pool.query(`UPDATE team_memberships SET role = 'member' WHERE user_id = $1`, [
+        admin.userId,
+      ]);
+
+      const listRes = await request(app).get('/api/v1/admin/members').set(admin.session);
+      expect(listRes.status).toBe(403);
+      expect(listRes.body.error.code).toBe('admin_required');
+
+      // The membership check runs before any body validation, so a malformed
+      // patch from a demoted session still gets the authorization answer.
+      const patchRes = await request(app)
+        .patch(`/api/v1/admin/members/${member.userId}`)
+        .set(admin.session)
+        .send({ active: 'nope', role: 'admin' });
+      expect(patchRes.status).toBe(403);
+      expect(patchRes.body.error.code).toBe('admin_required');
+    });
+
+    it('rejects a member patch that carries no CSRF token', async () => {
+      const { admin, member } = await createAdminFixture();
 
       const res = await request(app)
         .patch(`/api/v1/admin/members/${member.userId}`)
-        .set(member.authHeader)
-        .send({ active: 'nope', role: 'admin' });
+        .set({ Cookie: admin.session.Cookie })
+        .send({ active: false });
 
       expect(res.status).toBe(403);
-      expect(res.body.error.code).toBe('admin_required');
+      expect(res.body.error.code).toBe('csrf_failed');
+
+      const membership = await pool.query<{ active: boolean }>(
+        'SELECT active FROM team_memberships WHERE user_id = $1',
+        [member.userId],
+      );
+      expect(membership.rows[0].active).toBe(true);
     });
 
     it('returns 404 when the singleton admin targets an unknown user', async () => {
@@ -278,7 +382,7 @@ describe('sync-server: auth + sync routes', () => {
 
       const res = await request(app)
         .patch('/api/v1/admin/members/00000000-0000-0000-0000-000000000099')
-        .set(admin.authHeader)
+        .set(admin.session)
         .send({ active: false });
 
       expect(res.status).toBe(404);
@@ -289,7 +393,7 @@ describe('sync-server: auth + sync routes', () => {
 
       const res = await request(app)
         .patch(`/api/v1/admin/members/${admin.userId}`)
-        .set(admin.authHeader)
+        .set(admin.session)
         .send({ active: false });
 
       expect(res.status).toBe(409);
@@ -307,7 +411,7 @@ describe('sync-server: auth + sync routes', () => {
 
       const res = await request(app)
         .patch(`/api/v1/admin/members/${member.userId}`)
-        .set(admin.authHeader)
+        .set(admin.session)
         .send({ active: false, role: 'admin' });
 
       expect(res.status).toBe(400);
@@ -341,16 +445,18 @@ describe('sync-server: auth + sync routes', () => {
       teamId: string;
     }> {
       const teamId = await createDirectTeam('Revocation Team');
-      const admin = await createDirectUser('revocation-admin');
+      const admin = await createDirectUser('revocation-admin', DASHBOARD_PASSWORD);
       const member = await createDirectUser('revocation-member');
       await addMembership(teamId, admin.userId, 'admin');
       await addMembership(teamId, member.userId, 'member');
+      const adminSession = await openAdminSession(app, 'revocation-admin');
 
       // The member token is minted while the membership is still active, then
-      // the admin deactivates them: the already-issued JWT must stop working.
+      // the admin deactivates them from the dashboard: the already-issued JWT
+      // must stop working.
       const deactivate = await request(app)
         .patch(`/api/v1/admin/members/${member.userId}`)
-        .set(admin.authHeader)
+        .set(adminSession)
         .send({ active: false });
       expect(deactivate.status).toBe(200);
 
@@ -1775,7 +1881,11 @@ describe('sync-server: auth + sync routes', () => {
     interface HistoryFixture {
       teamId: string;
       otherTeamId: string;
-      admin: { userId: string; authHeader: { Authorization: string } };
+      admin: {
+        userId: string;
+        authHeader: { Authorization: string };
+        session: AdminSessionHeaders;
+      };
       member: { userId: string; authHeader: { Authorization: string } };
       inactive: { userId: string; authHeader: { Authorization: string } };
       outsider: { userId: string; authHeader: { Authorization: string } };
@@ -1784,7 +1894,7 @@ describe('sync-server: auth + sync routes', () => {
     async function seedHistoryFixture(): Promise<HistoryFixture> {
       const teamId = await createDirectTeam('History team');
       const otherTeamId = await createDirectTeam('Other team');
-      const admin = await createDirectUser('history-admin');
+      const admin = await createDirectUser('history-admin', DASHBOARD_PASSWORD);
       const member = await createDirectUser('history-member');
       const inactive = await createDirectUser('history-inactive');
       const outsider = await createDirectUser('history-outsider');
@@ -1796,6 +1906,7 @@ describe('sync-server: auth + sync routes', () => {
         [teamId, inactive.userId],
       );
       await addMembership(otherTeamId, outsider.userId, 'admin');
+      const adminSession = await openAdminSession(app, 'history-admin');
 
       await createDirectTask({
         taskId: TASK_ID,
@@ -1812,7 +1923,14 @@ describe('sync-server: auth + sync routes', () => {
         title: 'Other team task',
       });
 
-      return { teamId, otherTeamId, admin, member, inactive, outsider };
+      return {
+        teamId,
+        otherTeamId,
+        admin: { ...admin, session: adminSession },
+        member,
+        inactive,
+        outsider,
+      };
     }
 
     function sha256(text: string): string {
@@ -2123,16 +2241,36 @@ describe('sync-server: auth + sync routes', () => {
       expect(res.body.error.code).toBe('invalid_request');
     });
 
-    it('restricts every admin audit route to the singleton admin', async () => {
+    it('restricts every admin audit route to a live singleton-admin session', async () => {
       const fixture = await seedHistoryFixture();
       await request(app).post(captureUrl(TASK_ID)).set(fixture.member.authHeader).send(captureBody()).expect(200);
 
-      for (const url of [
+      const auditUrls = [
         '/api/v1/admin/tasks',
         `/api/v1/admin/tasks/${TASK_ID}/timeline`,
         `/api/v1/admin/tasks/${TASK_ID}/file-captures/capture-1/files/src/a.ts`,
-      ]) {
+      ];
+
+      // A member's sync bearer token carries no dashboard authority at all.
+      for (const url of auditUrls) {
         const res = await request(app).get(url).set(fixture.member.authHeader);
+        expect(res.status).toBe(401);
+        expect(res.body.error.code).toBe('missing_session');
+      }
+
+      // Nor does an anonymous request.
+      for (const url of auditUrls) {
+        const res = await request(app).get(url);
+        expect(res.status).toBe(401);
+        expect(res.body.error.code).toBe('missing_session');
+      }
+
+      // A real session whose admin membership is gone is refused per request.
+      await pool.query(`UPDATE team_memberships SET role = 'member' WHERE user_id = $1`, [
+        fixture.admin.userId,
+      ]);
+      for (const url of auditUrls) {
+        const res = await request(app).get(url).set(fixture.admin.session);
         expect(res.status).toBe(403);
         expect(res.body.error.code).toBe('admin_required');
       }
@@ -2142,7 +2280,7 @@ describe('sync-server: auth + sync routes', () => {
       const fixture = await seedHistoryFixture();
       await request(app).post(captureUrl(TASK_ID)).set(fixture.member.authHeader).send(captureBody()).expect(200);
 
-      const res = await request(app).get('/api/v1/admin/tasks').set(fixture.admin.authHeader).expect(200);
+      const res = await request(app).get('/api/v1/admin/tasks').set(fixture.admin.session).expect(200);
       expect(res.body.tasks).toHaveLength(1);
       expect(res.body.tasks[0]).toMatchObject({
         taskId: TASK_ID,
@@ -2159,7 +2297,7 @@ describe('sync-server: auth + sync routes', () => {
 
       const res = await request(app)
         .get(`/api/v1/admin/tasks/${OTHER_TASK_ID}/timeline`)
-        .set(fixture.admin.authHeader);
+        .set(fixture.admin.session);
       expect(res.status).toBe(404);
       expect(res.body.error.code).toBe('task_not_found');
     });
@@ -2229,7 +2367,7 @@ describe('sync-server: auth + sync routes', () => {
 
       const res = await request(app)
         .get(`/api/v1/admin/tasks/${TASK_ID}/timeline`)
-        .set(fixture.admin.authHeader)
+        .set(fixture.admin.session)
         .expect(200);
       expect(res.headers['cache-control']).toBe('no-store');
       expect(res.body.taskId).toBe(TASK_ID);
@@ -2278,7 +2416,7 @@ describe('sync-server: auth + sync routes', () => {
 
       const res = await request(app)
         .get(`/api/v1/admin/tasks/${TASK_ID}/file-captures/capture-1/files/src/nested/answer.ts`)
-        .set(fixture.admin.authHeader)
+        .set(fixture.admin.session)
         .expect(200);
       expect(res.headers['cache-control']).toBe('no-store');
       expect(res.body).toEqual({
@@ -2297,7 +2435,7 @@ describe('sync-server: auth + sync routes', () => {
       for (const encodedPath of ['%2e%2e%2fsecret.txt', '..%2fsecret.txt', '%2Fetc%2Fpasswd', 'src%2f..%2f..%2fx.txt']) {
         const res = await request(app)
           .get(`/api/v1/admin/tasks/${TASK_ID}/file-captures/capture-1/files/${encodedPath}`)
-          .set(fixture.admin.authHeader);
+          .set(fixture.admin.session);
         expect(res.status).toBe(400);
         expect(res.body.error.code).toBe('invalid_request');
       }
@@ -2309,13 +2447,13 @@ describe('sync-server: auth + sync routes', () => {
 
       const unknownCapture = await request(app)
         .get(`/api/v1/admin/tasks/${TASK_ID}/file-captures/capture-missing/files/src/a.ts`)
-        .set(fixture.admin.authHeader);
+        .set(fixture.admin.session);
       expect(unknownCapture.status).toBe(404);
       expect(unknownCapture.body.error.code).toBe('capture_not_found');
 
       const unknownPath = await request(app)
         .get(`/api/v1/admin/tasks/${TASK_ID}/file-captures/capture-1/files/src/missing.ts`)
-        .set(fixture.admin.authHeader);
+        .set(fixture.admin.session);
       expect(unknownPath.status).toBe(404);
       expect(unknownPath.body.error.code).toBe('capture_file_not_found');
     });
@@ -2330,7 +2468,7 @@ describe('sync-server: auth + sync routes', () => {
 
       const res = await request(app)
         .get(`/api/v1/admin/tasks/${OTHER_TASK_ID}/file-captures/capture-1/files/src/a.ts`)
-        .set(fixture.admin.authHeader);
+        .set(fixture.admin.session);
       expect(res.status).toBe(404);
       expect(res.body.error.code).toBe('task_not_found');
     });
@@ -2428,7 +2566,13 @@ describe('sync-server: admin operator operations', () => {
     };
   }
 
-  function buildReauthenticatedApp(options: {
+  /**
+   * The operations router behind the real dashboard middleware: a database
+   * session, the CSRF/Origin check, and the reauthentication marker derived
+   * from the session's own five-minute window. Nothing here injects the marker
+   * by hand, so these tests exercise the shipped authorization path.
+   */
+  function buildAdminOperationsApp(options: {
     operatorClient: OperatorClient | null;
     heartbeatIntervalMs?: number;
     pollIntervalMs?: number;
@@ -2437,14 +2581,8 @@ describe('sync-server: admin operator operations', () => {
     testApp.use(express.json());
     testApp.use(
       '/api/v1/admin',
-      requireAuth(TEST_JWT_SECRET),
-      // Plan 04 supplies the real dashboard reauthentication middleware; the
-      // marker is injected here so Plan 03 never ships an HTTP bypass.
-      (req, _res, next) => {
-        (req as AuthenticatedRequest & { adminReauthenticated?: boolean }).adminReauthenticated =
-          true;
-        next();
-      },
+      requireAdminSession(pool),
+      requireCsrf({ allowedOrigin: null }),
       createAdminOperationsRouter(pool, {
         operationsStore: store,
         operatorClient: options.operatorClient,
@@ -2462,7 +2600,7 @@ describe('sync-server: admin operator operations', () => {
     store = createOperationsStore(pool);
     operator = await startFakeOperator();
     operatorBehaviour = { kind: 'accept' };
-    adminApp = buildReauthenticatedApp({
+    adminApp = buildAdminOperationsApp({
       operatorClient: createOperatorClient({
         socketPath: operator.socketPath,
         requestTimeoutMs: 400,
@@ -2480,8 +2618,9 @@ describe('sync-server: admin operator operations', () => {
     await pool.end();
   });
 
-  let adminToken: string;
   let adminUserId: string;
+  let adminSession: AdminSessionHeaders;
+  let staleSession: AdminSessionHeaders;
   let memberToken: string;
 
   beforeEach(async () => {
@@ -2491,13 +2630,8 @@ describe('sync-server: admin operator operations', () => {
 
     await request(failClosedApp)
       .post('/api/v1/auth/register')
-      .send({ username: 'ops-admin', password: 'hunter2hunter2' })
+      .send({ username: 'ops-admin', password: DASHBOARD_PASSWORD })
       .expect(201);
-    const adminLogin = await request(failClosedApp)
-      .post('/api/v1/auth/login')
-      .send({ username: 'ops-admin', password: 'hunter2hunter2' })
-      .expect(200);
-    adminToken = adminLogin.body.token as string;
     const adminRow = await pool.query<{ id: string }>('SELECT id FROM users WHERE username = $1', [
       'ops-admin',
     ]);
@@ -2505,17 +2639,29 @@ describe('sync-server: admin operator operations', () => {
 
     await request(failClosedApp)
       .post('/api/v1/auth/register')
-      .send({ username: 'ops-member', password: 'hunter2hunter2' })
+      .send({ username: 'ops-member', password: DASHBOARD_PASSWORD })
       .expect(201);
     const memberLogin = await request(failClosedApp)
       .post('/api/v1/auth/login')
-      .send({ username: 'ops-member', password: 'hunter2hunter2' })
+      .send({ username: 'ops-member', password: DASHBOARD_PASSWORD })
       .expect(200);
     memberToken = memberLogin.body.token as string;
+
+    // Two live sessions for the same admin: one that has just proved its
+    // password, and one that never did.
+    adminSession = await openAdminSession(failClosedApp, 'ops-admin');
+    await reauthenticateAdminSession(failClosedApp, adminSession);
+    staleSession = await openAdminSession(failClosedApp, 'ops-admin');
   });
 
-  function adminAuth(): { Authorization: string } {
-    return { Authorization: `Bearer ${adminToken}` };
+  /** A reauthenticated dashboard session, as every privileged action requires. */
+  function adminAuth(): AdminSessionHeaders {
+    return adminSession;
+  }
+
+  /** A valid session that has not reauthenticated within the last five minutes. */
+  function staleAuth(): AdminSessionHeaders {
+    return staleSession;
   }
 
   it('accepts a service restart, persisting the queued record before submission', async () => {
@@ -2597,10 +2743,10 @@ describe('sync-server: admin operator operations', () => {
     expect(operator.requests).toHaveLength(2);
   });
 
-  it('fails closed without the dashboard reauthentication marker', async () => {
+  it('fails closed for a session that has not reauthenticated', async () => {
     const res = await request(failClosedApp)
       .post('/api/v1/admin/operations/service-restart')
-      .set(adminAuth())
+      .set(staleAuth())
       .send({ service: 'sync-server' });
 
     expect(res.status).toBe(403);
@@ -2609,14 +2755,55 @@ describe('sync-server: admin operator operations', () => {
     expect(await store.listOperations()).toEqual([]);
   });
 
-  it('denies non-admin members even when reauthenticated', async () => {
+  it('refuses a member bearer token instead of authorizing it as a dashboard session', async () => {
     const res = await request(adminApp)
       .post('/api/v1/admin/operations/service-restart')
       .set({ Authorization: `Bearer ${memberToken}` })
       .send({ service: 'sync-server' });
 
+    expect(res.status).toBe(401);
+    expect(res.body.error.code).toBe('missing_session');
+    expect(operator.requests).toHaveLength(0);
+    expect(await store.listOperations()).toEqual([]);
+  });
+
+  it('denies a reauthenticated session whose admin membership was revoked', async () => {
+    await pool.query(`UPDATE team_memberships SET role = 'member' WHERE user_id = $1`, [
+      adminUserId,
+    ]);
+
+    const res = await request(adminApp)
+      .post('/api/v1/admin/operations/service-restart')
+      .set(adminAuth())
+      .send({ service: 'sync-server' });
+
     expect(res.status).toBe(403);
     expect(res.body.error.code).toBe('admin_required');
+    expect(operator.requests).toHaveLength(0);
+    expect(await store.listOperations()).toEqual([]);
+  });
+
+  it('rejects a privileged operation that carries no CSRF token', async () => {
+    const res = await request(adminApp)
+      .post('/api/v1/admin/operations/service-restart')
+      .set({ Cookie: adminAuth().Cookie })
+      .send({ service: 'sync-server' });
+
+    expect(res.status).toBe(403);
+    expect(res.body.error.code).toBe('csrf_failed');
+    expect(operator.requests).toHaveLength(0);
+    expect(await store.listOperations()).toEqual([]);
+  });
+
+  it('rejects a privileged operation sent from a foreign origin', async () => {
+    const res = await request(adminApp)
+      .post('/api/v1/admin/operations/service-restart')
+      .set(adminAuth())
+      .set('Origin', 'https://evil.example.test')
+      .send({ service: 'sync-server' });
+
+    expect(res.status).toBe(403);
+    expect(res.body.error.code).toBe('origin_not_allowed');
     expect(operator.requests).toHaveLength(0);
     expect(await store.listOperations()).toEqual([]);
   });
@@ -2703,7 +2890,7 @@ describe('sync-server: admin operator operations', () => {
   });
 
   it('fails the operation when the operator socket is absent before any acceptance is possible', async () => {
-    const unavailableApp = buildReauthenticatedApp({
+    const unavailableApp = buildAdminOperationsApp({
       operatorClient: createOperatorClient({
         socketPath: path.join(operator.dir, 'absent.sock'),
         requestTimeoutMs: 400,
@@ -2739,7 +2926,7 @@ describe('sync-server: admin operator operations', () => {
   it('fails the operation when the operator socket path refuses the connection', async () => {
     const closedOperator = await startFakeOperator();
     await closedOperator.close();
-    const refusedApp = buildReauthenticatedApp({
+    const refusedApp = buildAdminOperationsApp({
       operatorClient: createOperatorClient({
         socketPath: closedOperator.socketPath,
         requestTimeoutMs: 400,
@@ -2807,7 +2994,7 @@ describe('sync-server: admin operator operations', () => {
   });
 
   it('returns 503 and records a failure when no operator socket is configured', async () => {
-    const unconfiguredApp = buildReauthenticatedApp({ operatorClient: null });
+    const unconfiguredApp = buildAdminOperationsApp({ operatorClient: null });
 
     const res = await request(unconfiguredApp)
       .post('/api/v1/admin/operations/backups')
@@ -2932,7 +3119,7 @@ describe('sync-server: admin operator operations', () => {
       .expect(202);
     const operationId = created.body.operation.id as string;
 
-    const streamingApp = buildReauthenticatedApp({
+    const streamingApp = buildAdminOperationsApp({
       operatorClient: null,
       heartbeatIntervalMs: 40,
       pollIntervalMs: 25,
@@ -2949,7 +3136,7 @@ describe('sync-server: admin operator operations', () => {
               port,
               path: `/api/v1/admin/operations/${operationId}/events`,
               method: 'GET',
-              headers: { Authorization: `Bearer ${adminToken}`, Accept: 'text/event-stream' },
+              headers: { ...adminAuth(), Accept: 'text/event-stream' },
             },
             (response) => {
               response.setEncoding('utf8');
@@ -3017,19 +3204,19 @@ describe('sync-server: admin operator operations', () => {
 
     const withoutReauth = await request(failClosedApp)
       .get(`/api/v1/admin/operations/${created.body.operation.id}/events`)
-      .set(adminAuth());
+      .set(staleAuth());
     expect(withoutReauth.status).toBe(403);
     expect(withoutReauth.body.error.code).toBe('reauthentication_required');
 
     const asMember = await request(adminApp)
       .get(`/api/v1/admin/operations/${created.body.operation.id}/events`)
       .set({ Authorization: `Bearer ${memberToken}` });
-    expect(asMember.status).toBe(403);
-    expect(asMember.body.error.code).toBe('admin_required');
+    expect(asMember.status).toBe(401);
+    expect(asMember.body.error.code).toBe('missing_session');
   });
 
   it('never persists request secrets or OS paths in operation metadata', async () => {
-    const unavailableApp = buildReauthenticatedApp({
+    const unavailableApp = buildAdminOperationsApp({
       operatorClient: createOperatorClient({
         socketPath: path.join(operator.dir, 'absent.sock'),
         requestTimeoutMs: 400,
@@ -3457,6 +3644,7 @@ describe('sync-server: admin operator operations', () => {
         .post(`/api/v1/admin/operations/${operationId}/callback`)
         .set(adminAuth())
         .send({ operationId, state: 'running' });
+
 
       expect(res.status).toBe(403);
       expect((await store.getOperation(operationId))?.state).toBe('queued');

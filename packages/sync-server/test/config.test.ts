@@ -40,4 +40,63 @@ describe('sync server configuration', () => {
       'ENCRYPTION_KEY_DIR must be an absolute path',
     );
   });
+
+  describe('admin dashboard origin', () => {
+    it('requires ADMIN_PUBLIC_ORIGIN in production so the CSRF origin check can never be skipped', () => {
+      expect(() => loadConfig({ ...required, NODE_ENV: 'production' })).toThrow(
+        'ADMIN_PUBLIC_ORIGIN environment variable is required in production',
+      );
+    });
+
+    it('leaves the origin unset outside production, where no browser origin is trusted', () => {
+      expect(loadConfig(required)).toMatchObject({
+        adminPublicOrigin: null,
+        adminCookieSecure: false,
+      });
+    });
+
+    it('marks the session cookie Secure for an HTTPS dashboard origin', () => {
+      expect(
+        loadConfig({
+          ...required,
+          NODE_ENV: 'production',
+          ADMIN_PUBLIC_ORIGIN: 'https://ariadne.example.com',
+        }),
+      ).toMatchObject({
+        adminPublicOrigin: 'https://ariadne.example.com',
+        adminCookieSecure: true,
+      });
+    });
+
+    it('allows plain HTTP only for the approved tunnelled loopback origin', () => {
+      expect(
+        loadConfig({
+          ...required,
+          NODE_ENV: 'production',
+          ADMIN_PUBLIC_ORIGIN: 'http://127.0.0.1:4300',
+        }),
+      ).toMatchObject({
+        adminPublicOrigin: 'http://127.0.0.1:4300',
+        adminCookieSecure: false,
+      });
+    });
+
+    it('refuses plain HTTP for any non-loopback origin, which would expose the session cookie', () => {
+      expect(() =>
+        loadConfig({ ...required, ADMIN_PUBLIC_ORIGIN: 'http://ariadne.example.com' }),
+      ).toThrow('may only use http for a loopback host');
+    });
+
+    it('refuses an origin that is not a bare origin', () => {
+      expect(() =>
+        loadConfig({ ...required, ADMIN_PUBLIC_ORIGIN: 'https://ariadne.example.com/dashboard' }),
+      ).toThrow('must be an origin only');
+      expect(() => loadConfig({ ...required, ADMIN_PUBLIC_ORIGIN: 'ariadne.example.com' })).toThrow(
+        'must be an absolute origin',
+      );
+      expect(() =>
+        loadConfig({ ...required, ADMIN_PUBLIC_ORIGIN: 'https://user:pw@ariadne.example.com' }),
+      ).toThrow('must not contain credentials');
+    });
+  });
 });

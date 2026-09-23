@@ -3,9 +3,9 @@
 **Status: Phase 0/1 schema + API finalized and implemented for the
 singleton-team model; Phase 2 (sub-entity sync) is also implemented, and the
 former create-once limitation for decisions/errors/open_questions/commands is
-now closed — see §4.6.** The bearer-authenticated `/api/v1/admin/*` surface
-is temporary and will be replaced by browser-session auth in the later
-dashboard rollout. This is the concrete follow-on to
+now closed — see §4.6.** The `/api/v1/admin/*` surface is authenticated by a
+database-backed browser session cookie (see §4.7); the sync bearer JWT
+authorizes no admin route. This is the concrete follow-on to
 `docs/06-CLOUD-SYNC-DESIGN.md` v0.2 (all product/infra decisions locked
 there). This doc defines the actual Postgres schema and HTTP API for
 `packages/sync-server`.
@@ -292,10 +292,47 @@ except `/auth/register` and `/auth/login` require `Authorization: Bearer
   (internal-use tool — long-lived tokens are an acceptable tradeoff here;
   revisit if this is ever exposed beyond the current trusted deployment).
 
+**`POST /api/v1/admin/session`** — dashboard login (the only unauthenticated
+admin endpoint)
+```jsonc
+// Request
+{ "username": "alice", "password": "hunter2" }
+// Response 201
+{ "userId": "1f9c...", "username": "alice", "csrfToken": "<64 hex>",
+  "expiresAt": "2026-09-21T12:00:00.000Z", "reauthenticatedUntil": null }
+```
+- Only the single active admin can log in. Members, deactivated admins,
+  unknown usernames and wrong passwords all get the same
+  `401 invalid_credentials`.
+- Sets `ariadne_admin_session=<64 hex>` as an `HttpOnly`, `SameSite=Strict`
+  cookie scoped to `Path=/api/v1/admin` with a 12-hour `Max-Age`. `Secure` is
+  set whenever `ADMIN_PUBLIC_ORIGIN` is HTTPS, and omitted only for the
+  approved tunnelled loopback HTTP origin.
+- Session and CSRF tokens are 32 random bytes each and are stored only as
+  SHA-256 hashes.
+- `403 origin_not_allowed` when `Origin` does not exactly match
+  `ADMIN_PUBLIC_ORIGIN`, and `429 too_many_attempts` once the per
+  username + address attempt window is exhausted.
+
+**`GET /api/v1/admin/session`** — current session
+**`DELETE /api/v1/admin/session`** — logout; revokes the row and clears the
+cookie
+**`POST /api/v1/admin/session/reauthenticate`** body `{ password }` — opens a
+five-minute window, recorded in the database, that privileged operations
+require; a request without it gets `403 reauthentication_required`.
+
+Every other `/api/v1/admin/*` route requires the session cookie
+(`401 missing_session` / `401 invalid_session` otherwise) and re-checks active
+singleton-admin membership on every request (`403 admin_required`). Every
+state-changing admin request must additionally carry the exact allowed
+`Origin` and the `X-CSRF-Token` header (`403 origin_not_allowed` /
+`403 csrf_failed`). `POST /api/v1/admin/operations/:id/callback` is the sole
+exception: it is the root operator's callback, authenticated by its own
+credential and never cookie-dependent.
+
 **`GET /api/v1/admin/members`** / **`PATCH /api/v1/admin/members/:userId`**
-— temporary bearer-authenticated singleton-admin member management
-- Requires the same bearer JWT as the sync routes plus an active admin
-  membership.
+— singleton-admin member management
+- Requires an admin dashboard session; the sync bearer JWT is rejected.
 - `GET` lists the singleton team's members with `role` and `active` state.
 - `PATCH` toggles `active` for non-admin members only.
 - `403 Forbidden` if the caller is not the active singleton admin.

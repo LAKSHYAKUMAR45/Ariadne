@@ -24,6 +24,7 @@ Set via environment variables:
 | `SYNC_SERVER_JWT_SECRET`  | yes      | —       | Secret used to sign/verify auth JWTs          |
 | `HOST`                    | no       | `127.0.0.1` | Bind address; use `0.0.0.0` only behind a secured reverse proxy or firewall |
 | `PORT`                    | no       | `4300`  | Port the HTTP server listens on               |
+| `ADMIN_PUBLIC_ORIGIN`     | in production | — | Exact origin the admin dashboard is served from, e.g. `https://ariadne.example.com`. Drives the admin CSRF origin check and the session cookie's `Secure` flag. Plain `http://` is accepted only for a loopback host reached through the approved SSH tunnel. Unset outside production, where no browser origin is trusted at all |
 
 ## Running locally
 
