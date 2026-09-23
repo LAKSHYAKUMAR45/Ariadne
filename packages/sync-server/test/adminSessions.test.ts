@@ -603,7 +603,7 @@ describe('sync-server: admin dashboard sessions', () => {
       const beforeReauth = await request(app)
         .post('/api/v1/admin/operations/service-restart')
         .set(session.headers)
-        .send({ service: 'sync-server' });
+        .send({ service: 'sync-server', confirmation: 'RESTART sync-server' });
       expect(beforeReauth.status).toBe(403);
       expect(beforeReauth.body.error.code).toBe('reauthentication_required');
 
@@ -618,7 +618,7 @@ describe('sync-server: admin dashboard sessions', () => {
       const afterReauth = await request(app)
         .post('/api/v1/admin/operations/service-restart')
         .set(session.headers)
-        .send({ service: 'sync-server' });
+        .send({ service: 'sync-server', confirmation: 'RESTART sync-server' });
       expect(afterReauth.status).not.toBe(403);
 
       await pool.query(
@@ -630,7 +630,7 @@ describe('sync-server: admin dashboard sessions', () => {
       const afterWindow = await request(app)
         .post('/api/v1/admin/operations/service-restart')
         .set(session.headers)
-        .send({ service: 'sync-server' });
+        .send({ service: 'sync-server', confirmation: 'RESTART sync-server' });
       expect(afterWindow.status).toBe(403);
       expect(afterWindow.body.error.code).toBe('reauthentication_required');
     });

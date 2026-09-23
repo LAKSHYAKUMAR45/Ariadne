@@ -134,7 +134,7 @@ describe('sync-server: unexpected error handling', () => {
       .fn<Pool['query']>()
       // 1-2. first /api/v1/admin mount auth + admin recheck
       // 3-4. second /api/v1/admin mount auth + admin recheck
-      // 5. members router admin check, 6. member read, 7. member update.
+      // 5. members router admin check.
       .mockResolvedValueOnce(
         result([
           {
@@ -142,7 +142,7 @@ describe('sync-server: unexpected error handling', () => {
             user_id: 'admin-1',
             csrf_hash: createHash('sha256').update(csrfToken).digest('hex'),
             expires_at: new Date('2126-09-21T00:00:00Z'),
-            reauthenticated_until: null,
+            reauthenticated_until: new Date('2126-09-21T00:00:00Z'),
             revoked_at: null,
             created_at: new Date('2026-09-21T00:00:00Z'),
             last_seen_at: new Date('2026-09-21T00:00:00Z'),
@@ -157,7 +157,7 @@ describe('sync-server: unexpected error handling', () => {
             user_id: 'admin-1',
             csrf_hash: createHash('sha256').update(csrfToken).digest('hex'),
             expires_at: new Date('2126-09-21T00:00:00Z'),
-            reauthenticated_until: null,
+            reauthenticated_until: new Date('2126-09-21T00:00:00Z'),
             revoked_at: null,
             created_at: new Date('2026-09-21T00:00:00Z'),
             last_seen_at: new Date('2026-09-21T00:00:00Z'),
@@ -165,9 +165,13 @@ describe('sync-server: unexpected error handling', () => {
         ]),
       )
       .mockResolvedValueOnce(result([{ teamId: 'team-1', role: 'admin' as const }]))
-      .mockResolvedValueOnce(result([{ teamId: 'team-1', role: 'admin' as const }]))
-      .mockResolvedValueOnce(
-        result([
+      .mockResolvedValueOnce(result([{ teamId: 'team-1', role: 'admin' as const }]));
+    const clientQuery = vi.fn(async (statement: string) => {
+      if (statement === 'BEGIN' || statement === 'ROLLBACK') {
+        return result([]);
+      }
+      if (statement.includes('FOR UPDATE')) {
+        return result([
           {
             userId: 'member-1',
             username: 'member',
@@ -175,10 +179,18 @@ describe('sync-server: unexpected error handling', () => {
             active: true,
             createdAt: new Date('2026-09-21T00:00:00Z'),
           },
-        ]),
-      )
-      .mockResolvedValueOnce(result([]));
-    const pool = createPoolWithQuery(query);
+        ]);
+      }
+      if (statement.includes('WITH updated_membership')) {
+        return result([]);
+      }
+      throw new Error(`Unexpected transaction query: ${statement}`);
+    });
+    const client = {
+      query: clientQuery as unknown as PoolClient['query'],
+      release: vi.fn(),
+    } as unknown as PoolClient;
+    const pool = createPoolWithClient(query, client);
     const app = createApp(pool, TEST_JWT_SECRET, {
       encryptionKeyring: createTestEncryptionKeyring(),
     });
@@ -187,13 +199,13 @@ describe('sync-server: unexpected error handling', () => {
       .patch('/api/v1/admin/members/member-1')
       .set('Cookie', `${ADMIN_SESSION_COOKIE_NAME}=${sessionToken}`)
       .set('X-CSRF-Token', csrfToken)
-      .send({ active: false });
+      .send({ active: false, confirmation: 'DEACTIVATE member' });
 
     expect(response.status).toBe(404);
     expect(response.body).toEqual({
       error: {
         code: 'member_not_found',
-        message: 'No team member with userId member-1',
+        message: 'No such team member',
       },
     });
     expect(response.text).not.toContain('returned no row');
