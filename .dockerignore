@@ -1,0 +1,24 @@
+# Deny-by-default build context: only what deploy/nodem2/sync-server.Dockerfile
+# copies is allowed in. Everything else (secrets, other packages, git metadata,
+# worktrees, build output) never reaches the daemon.
+*
+**/.git
+**/node_modules
+**/dist
+**/*.env
+**/*.key
+**/*.pem
+**/.ariadne
+**/coverage
+
+!package.json
+!pnpm-lock.yaml
+!pnpm-workspace.yaml
+!tsconfig.base.json
+!packages/sync-server
+!deploy/nodem2/scripts/sync-server-entrypoint
+
+packages/sync-server/node_modules
+packages/sync-server/dist
+packages/sync-server/test
+packages/sync-server/vitest.config.ts

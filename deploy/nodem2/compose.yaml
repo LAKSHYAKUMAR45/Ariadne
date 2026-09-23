@@ -1,0 +1,120 @@
+# Tracked production Compose stack for nodem2.
+#
+# Fixed deployment location: /opt/ariadne/worktree/deploy/nodem2/compose.yaml
+# Fixed project name:        ariadne-nodem2
+#
+# Always drive this file through deploy/nodem2/scripts/deploy (or the restart
+# scripts); they pin the file, project name, and env files. Secrets live only in
+# /etc/ariadne/compose.env and /etc/ariadne/sync-server.env (root-owned, 0600)
+# and are never interpolated into this file, so `docker compose config` output
+# stays secret-free.
+name: ariadne-nodem2
+
+services:
+  postgres:
+    image: postgres:16-bookworm
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-ariadne_sync}
+      POSTGRES_USER: ${POSTGRES_USER:-ariadne}
+      PGDATA: /var/lib/postgresql/data/pgdata
+    env_file:
+      # POSTGRES_PASSWORD only; `required: false` keeps `config` usable in CI,
+      # while scripts/deploy refuses to run when the file is missing.
+      - path: /etc/ariadne/compose.env
+        required: false
+    ports:
+      # Optional maintenance access, loopback only.
+      - "127.0.0.1:${POSTGRES_MAINTENANCE_PORT:-15432}:5432"
+    volumes:
+      - ariadne-pgdata:/var/lib/postgresql/data
+    tmpfs:
+      - /tmp:mode=1777,size=64m
+      - /var/run/postgresql:mode=0755,size=16m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      # Required by the postgres entrypoint to prepare PGDATA and drop to the
+      # postgres account.
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+      - SETGID
+      - SETUID
+    init: true
+    healthcheck:
+      test:
+        ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-ariadne} -d ${POSTGRES_DB:-ariadne_sync}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  migrate:
+    # Same immutable candidate image as the app; one-shot, never restarted.
+    image: ${SYNC_SERVER_IMAGE:-ariadne-sync-server:current}
+    command: ["node", "/app/dist/migrate.js"]
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file:
+      - path: /etc/ariadne/sync-server.env
+        required: false
+    volumes:
+      - /etc/ariadne/keys:/etc/ariadne/keys:ro
+    read_only: true
+    tmpfs:
+      - /tmp:mode=1777,size=32m
+      - /run:mode=0755,size=8m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      # Entrypoint-only: copy root-owned keys into the tmpfs handoff and drop to
+      # UID/GID 10001 before node starts. The node process keeps no capability.
+      - CHOWN
+      - SETGID
+      - SETUID
+    init: true
+
+  sync-server:
+    image: ${SYNC_SERVER_IMAGE:-ariadne-sync-server:current}
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      # Binds inside the container namespace only; the published port below is
+      # loopback-only on the host.
+      HOST: 0.0.0.0
+      PORT: "4300"
+      OPERATOR_SOCKET_PATH: /run/ariadne-operator/operator.sock
+    env_file:
+      - path: /etc/ariadne/sync-server.env
+        required: false
+    ports:
+      - "127.0.0.1:4300:4300"
+    volumes:
+      - /etc/ariadne/keys:/etc/ariadne/keys:ro
+      - /run/ariadne/operator.sock:/run/ariadne-operator/operator.sock
+    read_only: true
+    tmpfs:
+      - /tmp:mode=1777,size=32m
+      - /run:mode=0755,size=8m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETGID
+      - SETUID
+    init: true
+
+volumes:
+  ariadne-pgdata:
+    name: ariadne-nodem2-pgdata

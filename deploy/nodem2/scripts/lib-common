@@ -1,0 +1,71 @@
+# Shared fixed configuration for the tracked nodem2 deployment scripts.
+# Sourced by ./deploy, ./restart-sync-server, and ./restart-postgres.
+# shellcheck shell=sh
+# shellcheck disable=SC2034  # values are consumed by the sourcing scripts
+
+# Production paths are fixed constants. They may only be redirected when
+# ARIADNE_DEPLOY_SELFTEST=1, which exists solely for the tracked contract tests
+# in deploy/nodem2/test/deploy.test.ts.
+if [ "${ARIADNE_DEPLOY_SELFTEST:-0}" = "1" ]; then
+    ARIADNE_DEPLOY_ROOT="${ARIADNE_DEPLOY_ROOT:?ARIADNE_DEPLOY_ROOT is required in self-test mode}"
+    ARIADNE_ETC_DIR="${ARIADNE_DEPLOY_ETC:?ARIADNE_DEPLOY_ETC is required in self-test mode}"
+    ARIADNE_STATE_DIR="${ARIADNE_DEPLOY_STATE:?ARIADNE_DEPLOY_STATE is required in self-test mode}"
+    ARIADNE_HEALTH_ATTEMPTS="${ARIADNE_DEPLOY_HEALTH_ATTEMPTS:-30}"
+    ARIADNE_HEALTH_INTERVAL="${ARIADNE_DEPLOY_HEALTH_INTERVAL:-2}"
+else
+    PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+    export PATH
+    ARIADNE_DEPLOY_ROOT=/opt/ariadne
+    ARIADNE_ETC_DIR=/etc/ariadne
+    ARIADNE_STATE_DIR=/var/lib/ariadne/deploy
+    ARIADNE_HEALTH_ATTEMPTS=30
+    ARIADNE_HEALTH_INTERVAL=2
+fi
+
+ARIADNE_COMPOSE_PROJECT=ariadne-nodem2
+ARIADNE_WORKTREE="$ARIADNE_DEPLOY_ROOT/worktree"
+ARIADNE_COMPOSE_FILE="$ARIADNE_WORKTREE/deploy/nodem2/compose.yaml"
+ARIADNE_COMPOSE_ENV_FILE="$ARIADNE_ETC_DIR/compose.env"
+ARIADNE_SERVER_ENV_FILE="$ARIADNE_ETC_DIR/sync-server.env"
+ARIADNE_KEYS_DIR="$ARIADNE_ETC_DIR/keys"
+ARIADNE_IMAGE_REPO=ariadne-sync-server
+ARIADNE_CURRENT_TAG="$ARIADNE_IMAGE_REPO:current"
+ARIADNE_HEALTH_URL="http://127.0.0.1:4300/healthz"
+
+# The only source a deployable revision may come from.
+ARIADNE_TRUSTED_REMOTE=origin
+ARIADNE_TRUSTED_BRANCH=main
+ARIADNE_TRUSTED_REF="refs/remotes/$ARIADNE_TRUSTED_REMOTE/$ARIADNE_TRUSTED_BRANCH"
+
+log() {
+    printf '[ariadne-deploy] %s\n' "$1"
+}
+
+fail() {
+    printf '[ariadne-deploy] error: %s\n' "$1" >&2
+    exit 1
+}
+
+# Every Compose invocation uses the same fixed file, project, and env file.
+ariadne_compose() {
+    docker compose \
+        -f "$ARIADNE_COMPOSE_FILE" \
+        -p "$ARIADNE_COMPOSE_PROJECT" \
+        --env-file "$ARIADNE_COMPOSE_ENV_FILE" \
+        "$@"
+}
+
+require_file() {
+    [ -f "$1" ] || fail "required file missing: $1"
+}
+
+require_deployment_inputs() {
+    require_file "$ARIADNE_COMPOSE_ENV_FILE"
+    require_file "$ARIADNE_SERVER_ENV_FILE"
+    require_file "$ARIADNE_KEYS_DIR/active-key-id"
+    require_file "$ARIADNE_COMPOSE_FILE"
+
+    key_count=$(find "$ARIADNE_KEYS_DIR" -maxdepth 1 -type f -name '*.key' 2>/dev/null | wc -l)
+    [ "$key_count" -ge 1 ] || fail "no encryption key files found in $ARIADNE_KEYS_DIR"
+    unset key_count
+}

@@ -1,0 +1,15 @@
+#!/bin/sh
+# Restarts only the sync-server service of the tracked nodem2 Compose project.
+set -eu
+umask 077
+
+SCRIPT_DIR=$(unset CDPATH; cd -- "$(dirname -- "$0")" && pwd)
+# shellcheck source=deploy/nodem2/scripts/lib-common
+. "$SCRIPT_DIR/lib-common"
+
+[ "$#" -eq 0 ] || fail "usage: restart-sync-server (takes no arguments)"
+
+require_file "$ARIADNE_COMPOSE_ENV_FILE"
+require_file "$ARIADNE_COMPOSE_FILE"
+
+ariadne_compose restart sync-server

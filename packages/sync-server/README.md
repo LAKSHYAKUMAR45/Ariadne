@@ -170,6 +170,79 @@ whole run; `routes.test.ts` also `TRUNCATE`s between individual tests), so
 the suite is safe to re-run repeatedly without manually resetting the
 container.
 
+## Production deployment (nodem2 Compose stack)
+
+The tracked production stack lives in `deploy/nodem2/` and is the only
+supported way to run this package in production:
+
+| Path | Purpose |
+| ---- | ------- |
+| `deploy/nodem2/compose.yaml` | `postgres`, one-shot `migrate`, and `sync-server` services (fixed project name `ariadne-nodem2`) |
+| `deploy/nodem2/sync-server.Dockerfile` | Multi-stage Node 20 image: build stage compiles TypeScript, runtime stage carries only `pnpm deploy --prod` output |
+| `deploy/nodem2/scripts/deploy` | Deploy one trusted revision, with migration, health verification, and rollback |
+| `deploy/nodem2/scripts/restart-sync-server` / `restart-postgres` | Restart exactly one service |
+| `deploy/nodem2/scripts/sync-server-entrypoint` | Container entrypoint that performs the key handoff and permanent privilege drop |
+| `deploy/nodem2/.env.example` | Variable **names** only — never values |
+
+Fixed host layout (the scripts never accept these as arguments):
+
+```text
+/opt/ariadne/worktree                      # detached deployment worktree
+/opt/ariadne/worktree/deploy/nodem2/compose.yaml
+/etc/ariadne/compose.env                   # root-owned 0600
+/etc/ariadne/sync-server.env               # root-owned 0600
+/etc/ariadne/keys/                         # root-owned 0700, keys 0600
+/var/lib/ariadne/deploy/rollback-image     # recorded rollback target
+```
+
+### Deploying
+
+```bash
+/opt/ariadne/worktree/deploy/nodem2/scripts/deploy <40-char-commit-sha>
+```
+
+The script requires all secret/key files before touching Compose, rejects a
+dirty worktree and any revision that is not reachable from the configured
+trusted ref (`origin/main`), validates `docker compose config` before building,
+builds the immutable candidate tag `ariadne-sync-server:<sha>`, runs migrations
+as a one-shot `migrate` service *before* replacing the app, polls
+`http://127.0.0.1:4300/healthz`, and rolls the `sync-server` service back to the
+previously deployed image when health verification fails. It never prints secret
+values.
+
+### Runtime hardening and the root-owned key handoff
+
+`sync-server` and `migrate` run with `read_only: true`, tmpfs `/tmp` and `/run`,
+`cap_drop: [ALL]`, `no-new-privileges:true`, and publish only
+`127.0.0.1:4300:4300`. No Docker socket is ever mounted.
+
+Canonical keys stay root-owned `0600` on the host and are mounted read-only at
+`/etc/ariadne/keys`. Because the keyring validates ownership against the
+effective uid (see above), the entrypoint starts as root *only* to copy the key
+bytes into the in-memory tmpfs directory `/run/ariadne/keys`, give it to
+UID/GID `10001`, and then `exec setpriv --reuid --regid --clear-groups
+--inh-caps=-all --no-new-privs` the Node process. Host permissions are never
+weakened, and the listener never runs as root.
+
+That transition needs exactly three capabilities back (`CHOWN`, `SETGID`,
+`SETUID`) on top of `cap_drop: [ALL]`; they are consumed by the entrypoint
+before `exec` and are not retained. Verified in the built image:
+
+```text
+uid 10001 gid 10001 groups [ 10001 ]
+keydir uid 10001 mode 700 (active-key-id, primary.key both uid 10001 mode 600)
+CapInh: 0 | CapPrm: 0 | CapEff: 0 | NoNewPrivs: 1
+canReadCanonical EACCES   canWriteRootFs EROFS   keyring loaded
+```
+
+Deployment contract tests (fake `docker`/`git`/`curl`) live in
+`deploy/nodem2/test/deploy.test.ts`:
+
+```bash
+pnpm --filter @ariadne-dev/operator exec vitest run ../../deploy/nodem2/test/deploy.test.ts
+docker compose -f deploy/nodem2/compose.yaml --env-file deploy/nodem2/.env.example config --quiet
+```
+
 ## API surface
 
 Summary (full detail in `docs/07-CLOUD-SYNC-API-CONTRACT.md`):
