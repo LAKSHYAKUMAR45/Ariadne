@@ -36,10 +36,24 @@ For the nodem2 tunnel profile, open:
 http://127.0.0.1:14300/admin
 ```
 
-The MVP provides system status, task timelines, encrypted snapshot/diff
-inspection, backup creation and verification, sync-server restart, and bounded
-redacted operation logs. Sensitive actions ask for the administrator password
-again before they are submitted.
+The complete console provides **Overview**, **Members**, **Tasks**,
+**Backups**, **Services**, **Deployments**, **Logs**, and **Audit**. It uses a
+browser session plus CSRF token; it never accepts the sync JWT for an admin
+route. A password reauthentication is valid for five minutes. Guarded
+operations also require the exact confirmation phrase presented by the
+dashboard and reach a durable terminal operation state before they count as
+successful.
+
+The console is restricted to typed workflows: verified backup download and
+restore, `sync-server`/PostgreSQL restart, deploy of a listed trusted SHA,
+rollback to the recorded revision, and guarded capture deletion. Restore,
+deploy, and rollback create and verify a safety backup first. Logs are bounded
+and redacted and are available only for `sync-server`, `operator`,
+`deployment`, and `backup`. The web container has no Docker socket and no
+arbitrary shell, path, service, journal, or Git input. See
+[`deploy/nodem2/README.md`](../../deploy/nodem2/README.md) for the operator
+runbook and [`docs/07-CLOUD-SYNC-API-CONTRACT.md`](../../docs/07-CLOUD-SYNC-API-CONTRACT.md)
+for route details.
 
 ## Running locally
 

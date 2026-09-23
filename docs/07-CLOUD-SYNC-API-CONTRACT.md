@@ -818,6 +818,65 @@ the single endpoint that decrypts captured file content
   nosniff`; decrypted text is returned as JSON data and is never interpreted
   as HTML.
 
+### 4.9 Admin — completed operations console
+
+Every `/api/v1/admin/*` endpoint below is session-authenticated as described
+in §4.1. Reads use `Cache-Control: no-store`; mutations require the configured
+exact `Origin` and `X-CSRF-Token`. A sync bearer JWT is not accepted. Only the
+active singleton admin can use this surface.
+
+The dashboard at `/admin` has eight sections: Overview, Members, Tasks,
+Backups, Services, Deployments, Logs, and Audit. Its supported routes are:
+
+- `GET /overview` returns database health/latency and size, host metrics,
+  component state, task/member/sync/backup/operation summaries, and an
+  explicit operator component error when an optional operator query fails.
+- `GET /members` and `PATCH /members/:userId` list and toggle non-admin member
+  activity. The single admin is immutable.
+- `GET /tasks`, task timeline/file-capture reads, and guarded capture deletion
+  expose team-scoped task history. Decrypted content is returned only for the
+  selected capture file, as JSON with `no-store`.
+- `GET /backups` lists recorded artifacts. `GET /backups/:name/download`
+  streams only a currently verified recorded backup with an attachment name
+  and checksum header. An unverified artifact cannot be downloaded or
+  restored.
+- `GET /services` and `GET /deployments` obtain typed state through the
+  operator. The latter exposes current/rollback revisions, schema version,
+  and only candidate revisions reachable from the configured trusted ref.
+- `GET /logs` accepts only `source` in `sync-server`, `operator`,
+  `deployment`, or `backup`, plus bounded pagination, severity, and timestamp
+  filters. It accepts no unit name, path, journal expression, or output field.
+- `GET /audit` lists append-only sanitized audit events with bounded cursor
+  pagination and optional action/outcome filters.
+
+Privileged mutations create a durable operation before the operator is
+contacted: backup create/verify/restore, `sync-server` or PostgreSQL restart,
+deployment apply/rollback, and file-capture deletion. The dashboard reconnects
+with `GET /operations/:operationId` and its bounded SSE event stream. A queued
+or running response is not success; only the terminal `succeeded` or `failed`
+state is authoritative.
+
+Every privileged mutation requires password reauthentication no more than five
+minutes old. Destructive mutations also require the exact confirmation phrase
+computed for that operation, enforced server-side. Restore accepts only a
+currently verified recorded backup; deployment accepts only a currently listed
+candidate SHA; rollback accepts only the recorded eligible rollback SHA. The
+operator independently repeats its allowlist validation, creates and verifies
+a fresh safety backup before restore/deploy/rollback, and reports a sanitized
+terminal result. The web tier has no arbitrary shell, Docker socket, path,
+service, journal, or revision input.
+
+### 4.10 Operator protocol boundary
+
+The web tier reaches the root-owned operator over its private Unix socket.
+Operator reads use `POST /v1/queries`; mutations use `POST /v1/operations`.
+Both protocols accept strict typed schemas only. Query types are host metrics,
+service status, deployment status, verified backup streaming, and fixed-source
+log reads. Mutation types are backup create/verify/restore, approved service
+restart, deployment apply, and deployment rollback. The socket never accepts
+an arbitrary command, Docker request, file path, service name, or Git
+expression.
+
 ## 5. Error format
 
 All error responses share one shape:

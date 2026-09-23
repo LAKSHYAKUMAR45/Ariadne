@@ -98,6 +98,26 @@ describe('generateAriadneSkillAndAgent', () => {
     expect(generatedConfig.sshHostKey).toMatch(/^SHA256:/);
   });
 
+  it('guides operators through the guarded operations console', () => {
+    const skill = buildSkillMarkdown();
+    const agent = buildAgentMarkdown();
+
+    expect(skill).toContain('http://127.0.0.1:14300/admin');
+    expect(skill).toContain('ariadne sync setup');
+    expect(skill).toMatch(
+      /backup, restore, service restart, deployment,\s+rollback, and file-capture deletion/,
+    );
+    expect(skill).toMatch(/fresh safety backup before changing\s+production state/);
+    expect(skill).toContain('Never display passwords, secrets, tokens, or private keys');
+    expect(skill).toContain('Never use arbitrary shell commands');
+    expect(agent).toContain('http://127.0.0.1:14300/admin');
+    expect(agent).toContain('Never display passwords, secrets, tokens, or private keys');
+    expect(agent).toContain('Never use arbitrary shell commands');
+    expect(agent).toMatch(
+      /backup, restore, service restart, deployment,\s+rollback, and file-capture deletion/,
+    );
+  });
+
   it('template builders produce non-empty, well-formed markdown', () => {
     expect(buildSkillMarkdown().length).toBeGreaterThan(100);
     expect(buildAgentMarkdown().length).toBeGreaterThan(100);

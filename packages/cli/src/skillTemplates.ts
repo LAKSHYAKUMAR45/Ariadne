@@ -126,6 +126,31 @@ ariadne sync pull [--import-new]
   \`ariadne sync pull --import-new\` when adopting remote tasks on a new
   workspace.
 
+## Operations console
+
+- After \`ariadne sync setup\` starts the nodem2 tunnel, the single administrator
+  can sign in at \`http://127.0.0.1:14300/admin\`. Do not expose the dashboard
+  directly or substitute a different origin.
+- The console has **Overview**, **Members**, **Tasks**, **Backups**,
+  **Services**, **Deployments**, **Logs**, and **Audit** sections. Use it for
+  operational reads and approved changes rather than reaching into the host.
+- The guarded operations are backup, restore, service restart, deployment,
+  rollback, and file-capture deletion. The server requires the administrator's
+  password to be freshly reauthenticated within five minutes, plus the exact
+  confirmation phrase shown by the console, for every guarded operation.
+- Verify a backup before restoring it. The tracked restore, deploy, and
+  rollback workflows create and verify a fresh safety backup before changing
+  production state; wait for their durable operation result and audit event
+  rather than treating submission as success.
+- Logs are limited to the fixed \`sync-server\`, \`operator\`, \`deployment\`, and
+  \`backup\` sources. Never use arbitrary shell commands, Docker socket access,
+  service names, filesystem paths, journal expressions, or Git revisions as a
+  substitute for console controls.
+- Never display passwords, secrets, tokens, or private keys in chat, generated
+  files, logs, or documentation. Use the secure prompt in \`ariadne sync setup\`,
+  the root-owned deployment environment files, and the documented rotation
+  workflow instead; describe retrieval or rotation without revealing values.
+
 ## Notes
 
 - All state is local SQLite (\`.ariadne/state.db\`) — no network calls unless
@@ -164,6 +189,17 @@ from a lost chat transcript.
   only record what the user or the session's real work established.
 - Never run destructive commands (\`ariadne restore\`, deleting a task's
   entries) without explicit user confirmation.
+- For the nodem2 operations console, use
+  \`http://127.0.0.1:14300/admin\` after \`ariadne sync setup\` establishes the
+  tunnel. Never display passwords, secrets, tokens, or private keys; explain
+  secure retrieval or rotation instead of requesting or printing values.
+- Never use arbitrary shell commands, Docker socket access, filesystem paths,
+  service names, journal expressions, or Git revisions to bypass console
+  controls. The console permits only its fixed guarded operations and fixed
+  log sources.
+- Its only guarded workflows are backup, restore, service restart, deployment,
+  rollback, and file-capture deletion. Follow the console's exact
+  confirmation and reauthentication flow instead of reproducing one manually.
 
 ## Approach
 

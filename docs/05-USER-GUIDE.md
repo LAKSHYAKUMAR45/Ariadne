@@ -15,6 +15,7 @@ package's own README.*
 [7. VS Code + Copilot Chat](#7-using-the-vs-code-extension-copilot-chat) ·
 [8. Cross-workspace](#8-working-across-multiple-workspaces) ·
 [9. Cloud sync](#9-cloud-sync-optional-self-hosted) ·
+[9.1. Operations console](#91-operations-console) ·
 [10. Data & privacy](#10-data-privacy) ·
 [11. Troubleshooting](#11-troubleshooting) ·
 [12. Project status](#12-project-status)
@@ -449,6 +450,49 @@ product decisions behind this, [`docs/07-CLOUD-SYNC-API-CONTRACT.md`](07-CLOUD-S
 for the schema/API contract, and
 [`packages/sync-server/README.md`](../packages/sync-server/README.md) for
 running your own server.
+
+## 9.1 Operations console
+
+The nodem2 deployment has one administrator account. After the project
+tunnel is running, open `http://127.0.0.1:14300/admin`; do not publish that
+loopback URL or replace it with a direct server address. The dashboard uses
+its own browser session and CSRF token, not the token used by `ariadne sync`.
+
+| Section | Use it for |
+| --- | --- |
+| **Overview** | Database, host, service, sync, task, member, backup, and operation summaries. An unavailable operator is shown as unavailable; it is not reported healthy. |
+| **Members** | Review membership and activate or deactivate non-admin members. The singleton admin cannot be changed through the network API. |
+| **Tasks** | Inspect the timeline and encrypted capture metadata, then view a selected snapshot or diff. Deleting a capture is guarded and records immutable file-history audit data. |
+| **Backups** | Create and verify backups, download only a verified artifact, and explain restore eligibility. A backup must be currently verified before it can be restored. |
+| **Services** | Inspect `sync-server`, `operator`, and PostgreSQL. Only `sync-server` and PostgreSQL can be restarted; the operator is deliberately outside browser restart control. |
+| **Deployments** | Inspect the current revision, rollback target, schema version, and trusted candidate SHAs. Deploy only a listed candidate and roll back only to the recorded target. |
+| **Logs** | Read paginated, redacted entries from only `sync-server`, `operator`, `deployment`, or `backup`, filtered by severity and time. |
+| **Audit** | Review append-only authentication, membership, file-history, backup, service, deployment, and restore events, including related operation IDs. |
+
+### Guarded changes
+
+Backup creation and verification, service restart, deployment, rollback,
+restore, and file-capture deletion create durable operations. The console
+asks for the administrator password when its five-minute reauthentication
+window is stale. For destructive actions it also displays an exact
+confirmation phrase; type that phrase exactly. The server enforces both
+requirements, so client-side controls are not a substitute.
+
+Wait for the operation's terminal `succeeded` or `failed` state and inspect
+the linked audit record after refresh or reconnect. Before restore, deploy,
+or rollback, the tracked workflow creates and verifies a fresh safety backup;
+restore additionally requires the selected recorded backup to be verified.
+Failed workflows retain their diagnostics and safety backup instead of
+reporting success.
+
+Use the console or the tracked scripts named in
+[`deploy/nodem2/README.md`](../deploy/nodem2/README.md). Do not request
+arbitrary commands, Docker socket access, service names, paths, journal
+expressions, or Git revisions: none is accepted by the web tier. Retrieve
+credentials only through the secure prompt or root-owned deployment files,
+and rotate them with the documented procedure. Never paste or display a
+password, secret, token, or private key in a terminal transcript, issue,
+chat, generated guidance, or documentation.
 
 ## 10. Data & privacy
 

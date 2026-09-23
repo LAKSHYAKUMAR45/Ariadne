@@ -282,6 +282,23 @@ remain local by design. Access is flat (any account on the server can
 read/write any synced task). Conflicts default to remote-wins and can be
 changed with `--on-conflict local-wins`.
 
+### Operations console
+
+The tracked nodem2 deployment also provides a single-admin operations console.
+After `ariadne sync setup [username]` creates the project-configured tunnel,
+open `http://127.0.0.1:14300/admin`. The console is the supported interface
+for its eight sections: **Overview**, **Members**, **Tasks**, **Backups**,
+**Services**, **Deployments**, **Logs**, and **Audit**.
+
+It uses a browser session and CSRF protection, not the sync JWT. Every guarded
+change requires fresh password reauthentication (within five minutes) and the
+exact confirmation text shown by the UI. It creates a durable operation and
+an audit event; submitting a request is not success. Use the console or
+tracked deployment scripts, never arbitrary shell commands or Docker socket
+access. See [`deploy/nodem2/README.md`](deploy/nodem2/README.md) for the
+operator runbook and [`docs/05-USER-GUIDE.md`](docs/05-USER-GUIDE.md) for
+page-by-page guidance.
+
 ### Using the MCP server
 
 ```bash
