@@ -436,6 +436,11 @@ What to know:
   session cookie obtained from `POST /api/v1/admin/session`, require a CSRF
   token and the configured `ADMIN_PUBLIC_ORIGIN` on every state change, and
   reject the sync bearer JWT outright. The sync CLI is unaffected.
+- **Operations dashboard:** after the configured nodem2 tunnel is active, open
+  `http://127.0.0.1:14300/admin`. The initial MVP shows system status, task
+  timelines and captured file snapshots/diffs, backups, service state, and
+  bounded redacted operation logs. Backup creation/verification and sync-server
+  restart require a fresh administrator password confirmation.
 - The JWT and profile metadata are stored locally at
   `~/.ariadne/sync-config.json` with owner-only (`0600`) permissions.
 
