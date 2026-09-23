@@ -106,10 +106,13 @@ services:
       # loopback-only on the host.
       HOST: 0.0.0.0
       PORT: "4300"
+      # Both live in the operator's runtime directory, which is bind-mounted as
+      # a directory below. Mounting the socket and the token individually would
+      # let Docker fabricate them as directories whenever a container starts
+      # before the operator has created them (every fresh boot, since /run is
+      # tmpfs), permanently shadowing the real files.
       OPERATOR_SOCKET_PATH: /run/ariadne-operator/operator.sock
-      # Root-created on the host (0640 root:ariadne-web) and mounted read-only;
-      # the service account shares gid 10001 with ariadne-web so it can read it.
-      OPERATOR_CALLBACK_TOKEN_PATH: /run/ariadne-operator/callback-token
+      OPERATOR_CALLBACK_TOKEN_PATH: /run/ariadne-operator/operator-callback-token
     env_file:
       - path: /etc/ariadne/sync-server.env
         required: false
@@ -117,8 +120,14 @@ services:
       - "127.0.0.1:4300:4300"
     volumes:
       - /etc/ariadne/keys:/etc/ariadne/keys:ro
-      - /run/ariadne/operator.sock:/run/ariadne-operator/operator.sock
-      - /run/ariadne/operator-callback-token:/run/ariadne-operator/callback-token:ro
+      # Host /run/ariadne is 0750 root:ariadne-web (gid 10001, the uid/gid this
+      # container runs as) and is created by /etc/tmpfiles.d/ariadne.conf before
+      # Docker starts, then re-asserted by the operator unit's RuntimeDirectory.
+      # Read-only: the container only connects to the socket and reads the
+      # token, and a read-only bind still permits connect() on a Unix socket.
+      # Mounted at a distinct path because the container's own tmpfs uses
+      # /run/ariadne/keys for the decrypted key handoff.
+      - /run/ariadne:/run/ariadne-operator:ro
     read_only: true
     tmpfs:
       - /tmp:mode=1777,size=32m

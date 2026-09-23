@@ -55,12 +55,14 @@ interface Harness {
   keysDir: string;
   libDir: string;
   unitDir: string;
+  tmpfilesDir: string;
   runDir: string;
   backupDir: string;
   stateDir: string;
   binDir: string;
   chownLog: string;
   systemctlLog: string;
+  tmpfilesLog: string;
   groupaddLog: string;
   dockerLog: string;
   dockerStdin: string;
@@ -79,6 +81,7 @@ function createHarness(): Harness {
 
   const chownLog = path.join(prefix, 'chown.log');
   const systemctlLog = path.join(prefix, 'systemctl.log');
+  const tmpfilesLog = path.join(prefix, 'tmpfiles.log');
   const groupaddLog = path.join(prefix, 'groupadd.log');
   const dockerLog = path.join(prefix, 'docker.log');
   const dockerStdin = path.join(prefix, 'docker.stdin');
@@ -109,6 +112,14 @@ exit "\${FAKE_CHOWN_EXIT:-0}"
     `#!/bin/sh
 printf '%s\\n' "$*" >> "$FAKE_SYSTEMCTL_LOG"
 exit "\${FAKE_SYSTEMCTL_EXIT:-0}"
+`,
+  );
+
+  writeExecutable(
+    path.join(binDir, 'systemd-tmpfiles'),
+    `#!/bin/sh
+printf '%s\\n' "$*" >> "$FAKE_TMPFILES_LOG"
+exit "\${FAKE_TMPFILES_EXIT:-0}"
 `,
   );
 
@@ -146,12 +157,14 @@ exit "\${FAKE_DOCKER_EXIT:-0}"
     keysDir: path.join(prefix, 'etc', 'ariadne', 'keys'),
     libDir: path.join(prefix, 'usr', 'local', 'lib', 'ariadne'),
     unitDir: path.join(prefix, 'etc', 'systemd', 'system'),
+    tmpfilesDir: path.join(prefix, 'etc', 'tmpfiles.d'),
     runDir: path.join(prefix, 'run', 'ariadne'),
     backupDir: path.join(prefix, 'var', 'backups', 'ariadne'),
     stateDir: path.join(prefix, 'var', 'lib', 'ariadne', 'deploy'),
     binDir,
     chownLog,
     systemctlLog,
+    tmpfilesLog,
     groupaddLog,
     dockerLog,
     dockerStdin,
@@ -172,6 +185,7 @@ function runScript(harness: Harness, script: string, options: RunOptions = {}) {
     FAKE_ID_UID: '0',
     FAKE_CHOWN_LOG: harness.chownLog,
     FAKE_SYSTEMCTL_LOG: harness.systemctlLog,
+    FAKE_TMPFILES_LOG: harness.tmpfilesLog,
     FAKE_GROUPADD_LOG: harness.groupaddLog,
     FAKE_DOCKER_LOG: harness.dockerLog,
     FAKE_DOCKER_STDIN: harness.dockerStdin,
@@ -327,6 +341,20 @@ describe('install script', () => {
     expect(enabled).toContain('ariadne-backup-verify.timer');
     expect(enabled).not.toContain('--now');
     expect(enabled).not.toContain('start ');
+  });
+
+  it('installs the runtime-directory tmpfiles rule so a fresh boot cannot race Docker', () => {
+    const harness = createHarness();
+    expect(runScript(harness, 'install').status).toBe(0);
+
+    const installed = path.join(harness.tmpfilesDir, 'ariadne.conf');
+    expect(fs.readFileSync(installed, 'utf8')).toBe(
+      fs.readFileSync(path.join(deployDir, 'tmpfiles', 'ariadne.conf'), 'utf8'),
+    );
+    expect(modeOf(installed)).toBe('644');
+    // Applied immediately so the very first install needs no reboot, and the
+    // containers can only ever see the directory the operator owns.
+    expect(readLog(harness.tmpfilesLog).join('\n')).toContain('--create');
   });
 
   it('generates one encryption key when none exists and never prints key bytes', () => {
@@ -727,8 +755,11 @@ describe('ariadne-operator.service unit', () => {
     expect(text).toContain('RestrictSUIDSGID=true');
     expect(text).toContain('LockPersonality=true');
     expect(text).toContain('SystemCallArchitectures=native');
-    expect(text).toContain('IPAddressDeny=any');
-    expect(text).toContain('IPAddressAllow=localhost');
+    // The operator must refresh the trusted git ref before every deployment,
+    // so egress denial is incompatible with its required work and must not be
+    // reintroduced here.
+    expect(text).not.toContain('IPAddressDeny');
+    expect(text).not.toContain('IPAddressAllow');
     expect(text).toContain('RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6');
 
     const writablePaths = [...text.matchAll(/^ReadWritePaths=(.+)$/gm)].map((match) =>
@@ -763,13 +794,13 @@ describe('ariadne-operator.service unit', () => {
   });
 });
 
-describe('deploy under the operator network sandbox', () => {
-  it('continues with the locally known trusted ref when the fetch cannot reach the remote', () => {
+describe('deploy under the operator service', () => {
+  it('treats a failed trusted-ref refresh as fatal instead of deploying a stale ref', () => {
     const deployScript = fs.readFileSync(path.join(scriptsDir, 'deploy'), 'utf8');
-    // The operator denies non-loopback egress, so a fetch failure must degrade
-    // to the last fetched trusted ref rather than abort: reachability from
-    // origin/main is still enforced below.
-    expect(deployScript).toMatch(/fetch[\s\S]*?log "/);
+    const fetchLine = deployScript.slice(deployScript.indexOf('fetch --quiet'));
+    expect(fetchLine.slice(0, 400)).toMatch(/fail "/);
+    expect(deployScript).not.toMatch(/continuing with the last fetched/);
+    // Reachability from the trusted ref stays enforced on top of the refresh.
     expect(deployScript).toContain('merge-base --is-ancestor');
   });
 });

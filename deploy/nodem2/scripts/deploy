@@ -59,13 +59,13 @@ if [ -n "$(git -C "$ARIADNE_WORKTREE" status --porcelain)" ]; then
     fail "deployment worktree is dirty; refusing to deploy modified source"
 fi
 
-# The operator service denies non-loopback egress, so a refresh may legitimately
-# be impossible. That is not fatal: the ancestor check below still runs against
-# the last fetched trusted ref, so only a commit that was already reachable from
-# origin/main can be deployed.
+# The trusted ref must be refreshed before it is trusted: deploying against a
+# stale local ref would allow a revision that has since been removed from the
+# trusted branch. The operator service therefore keeps the egress it needs to
+# reach the git remote.
 git -C "$ARIADNE_WORKTREE" fetch --quiet --no-tags "$ARIADNE_TRUSTED_REMOTE" \
     "+refs/heads/$ARIADNE_TRUSTED_BRANCH:$ARIADNE_TRUSTED_REF" ||
-    log "could not refresh $ARIADNE_TRUSTED_REF; continuing with the last fetched trusted ref"
+    fail "could not fetch $ARIADNE_TRUSTED_REF from $ARIADNE_TRUSTED_REMOTE; refusing to deploy against a stale trusted ref"
 
 TRUSTED_TIP=$(git -C "$ARIADNE_WORKTREE" rev-parse --verify --quiet "$ARIADNE_TRUSTED_REF^{commit}") ||
     fail "trusted ref $ARIADNE_TRUSTED_REF is not available"

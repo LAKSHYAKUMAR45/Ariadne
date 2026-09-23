@@ -337,6 +337,35 @@ describe('deploy script', () => {
     expect(indexOfMatch(readLog(harness.dockerLog), 'build sync-server')).toBe(-1);
   });
 
+  it('aborts before touching Docker when the trusted ref cannot be refreshed', () => {
+    const harness = createHarness();
+    const result = runScript(harness, 'deploy', {
+      args: [VALID_SHA],
+      env: { FAKE_GIT_FETCH_EXIT: '1' },
+    });
+
+    // Deploying against a stale local ref would let a revision that has since
+    // been removed from the trusted branch reach production, so a failed fetch
+    // is fatal rather than a warning.
+    expect(result.status).not.toBe(0);
+    const text = `${result.stdout}${result.stderr}`.toLowerCase();
+    expect(text).toContain('fetch');
+    expect(text).not.toContain('continuing');
+    expect(readLog(harness.dockerLog)).toEqual([]);
+  });
+
+  it('refreshes the trusted ref before checking reachability or checking out', () => {
+    const harness = createHarness();
+    const result = runScript(harness, 'deploy', { args: [VALID_SHA] });
+
+    expect(result.status).toBe(0);
+    const git = readLog(harness.gitLog);
+    const fetchIndex = indexOfMatch(git, 'fetch');
+    expect(fetchIndex).toBeGreaterThanOrEqual(0);
+    expect(indexOfMatch(git, 'merge-base --is-ancestor')).toBeGreaterThan(fetchIndex);
+    expect(indexOfMatch(git, 'checkout')).toBeGreaterThan(fetchIndex);
+  });
+
   it('rejects a dirty deployment worktree', () => {
     const harness = createHarness();
     const result = runScript(harness, 'deploy', {
