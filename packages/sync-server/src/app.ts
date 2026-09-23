@@ -7,6 +7,7 @@ import type { EncryptionKeyring } from './encryption.js';
 import { createAdminAuthRateLimiter, type AdminAuthRateLimiter } from './adminSessions.js';
 import { createMembersRouter } from './routes/members.js';
 import {
+  adminNoStoreHeaders,
   handleUnexpectedError,
   requireAdminSession,
   requireAuth,
@@ -131,6 +132,8 @@ export function createApp(pool: Pool, jwtSecret: string, options: CreateAppOptio
       }),
     );
   }
+
+  app.use('/api/v1/admin', adminNoStoreHeaders());
 
   app.use(express.json());
 

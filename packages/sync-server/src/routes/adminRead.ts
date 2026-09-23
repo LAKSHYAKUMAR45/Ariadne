@@ -2,7 +2,13 @@ import { Router, type Response } from 'express';
 import type { Pool } from 'pg';
 import { requireSingletonAdmin } from '../adminAccess.js';
 import { ApiError } from '../errors.js';
-import { asyncHandler, type AuthenticatedRequest } from '../middleware.js';
+import {
+  asyncHandler,
+  createDatabaseUnavailableError,
+  isDatabaseError,
+  rethrowDatabaseUnavailable,
+  type AuthenticatedRequest,
+} from '../middleware.js';
 import { OperatorClientError } from '../operatorClient.js';
 import type {
   HostMetricsResult,
@@ -97,10 +103,6 @@ function mapBackup(record: BackupRecord | undefined): {
   };
 }
 
-function databaseUnavailable(): ApiError {
-  return new ApiError(503, 'database_unavailable', 'Database health check failed');
-}
-
 export function createAdminReadRouter(pool: Pool, options: AdminReadRouterOptions): Router {
   const router = Router();
   const operatorTimeoutMs = options.operatorTimeoutMs ?? 1_500;
@@ -113,19 +115,19 @@ export function createAdminReadRouter(pool: Pool, options: AdminReadRouterOption
   router.get(
     '/overview',
     asyncHandler(async (req: AuthenticatedRequest, res) => {
-      const membership = await requireSingletonAdmin(pool, req.userId!);
-      const database = await checkDatabase(pool);
-      if (!database.healthy) {
-        throw databaseUnavailable();
-      }
-
-      let taskSummary: TaskSummaryRow;
-      let memberSummary: MemberSummaryRow;
-      let operationSummary: OperationSummaryRow;
-      let latestBackup: BackupRecord | undefined;
-      let databaseSizeBytes = 0;
-
       try {
+        const membership = await requireSingletonAdmin(pool, req.userId!);
+        const database = await checkDatabase(pool);
+        if (!database.healthy) {
+          throw createDatabaseUnavailableError();
+        }
+
+        let taskSummary: TaskSummaryRow;
+        let memberSummary: MemberSummaryRow;
+        let operationSummary: OperationSummaryRow;
+        let latestBackup: BackupRecord | undefined;
+        let databaseSizeBytes = 0;
+
         const [tasks, members, operations, backups, databaseSize] = await Promise.all([
           pool.query<TaskSummaryRow>(
             `SELECT count(*)::text AS total,
@@ -165,65 +167,68 @@ export function createAdminReadRouter(pool: Pool, options: AdminReadRouterOption
         operationSummary = operations.rows[0];
         latestBackup = backups[0];
         databaseSizeBytes = Number(databaseSize.rows[0].sizeBytes);
-      } catch {
-        throw databaseUnavailable();
-      }
 
-      let host: HostMetricsResult | null = null;
-      let operatorComponent: { healthy: boolean; code?: string } = { healthy: true };
-      if (options.operatorQueryClient) {
-        try {
-          host = (await withTimeout(
-            options.operatorQueryClient.query({ type: 'host_metrics' }),
-            operatorTimeoutMs,
-          )) as HostMetricsResult;
-        } catch (error: unknown) {
+        let host: HostMetricsResult | null = null;
+        let operatorComponent: { healthy: boolean; code?: string } = { healthy: true };
+        if (options.operatorQueryClient) {
+          try {
+            host = (await withTimeout(
+              options.operatorQueryClient.query({ type: 'host_metrics' }),
+              operatorTimeoutMs,
+            )) as HostMetricsResult;
+          } catch (error: unknown) {
+            operatorComponent = {
+              healthy: false,
+              code:
+                error instanceof OperatorClientError ? error.code : 'operator_unavailable',
+            };
+          }
+        } else {
           operatorComponent = {
             healthy: false,
-            code:
-              error instanceof OperatorClientError ? error.code : 'operator_unavailable',
+            code: 'operator_unavailable',
           };
         }
-      } else {
-        operatorComponent = {
-          healthy: false,
-          code: 'operator_unavailable',
-        };
-      }
 
-      res.status(200).json({
-        generatedAt: new Date().toISOString(),
-        database,
-        host,
-        databaseSizeBytes,
-        tasks: {
-          total: Number(taskSummary.total),
-          active: Number(taskSummary.active),
-          updatedLast24h: Number(taskSummary.updated24h),
-        },
-        members: {
-          total: Number(memberSummary.total),
-          active: Number(memberSummary.active),
-          inactive: Number(memberSummary.inactive),
-          admins: Number(memberSummary.admins),
-          members: Number(memberSummary.members),
-        },
-        sync: {
-          lastPushAt: null,
-          lastPullAt: null,
-        },
-        backup: mapBackup(latestBackup),
-        operations: {
-          running: Number(operationSummary.running),
-          failedLast24h: Number(operationSummary.failed24h),
-        },
-        components: {
-          database: {
-            healthy: true,
+        res.status(200).json({
+          generatedAt: new Date().toISOString(),
+          database,
+          host,
+          databaseSizeBytes,
+          tasks: {
+            total: Number(taskSummary.total),
+            active: Number(taskSummary.active),
+            updatedLast24h: Number(taskSummary.updated24h),
           },
-          operator: operatorComponent,
-        },
-      });
+          members: {
+            total: Number(memberSummary.total),
+            active: Number(memberSummary.active),
+            inactive: Number(memberSummary.inactive),
+            admins: Number(memberSummary.admins),
+            members: Number(memberSummary.members),
+          },
+          sync: {
+            lastPushAt: null,
+            lastPullAt: null,
+          },
+          backup: mapBackup(latestBackup),
+          operations: {
+            running: Number(operationSummary.running),
+            failedLast24h: Number(operationSummary.failed24h),
+          },
+          components: {
+            database: {
+              healthy: true,
+            },
+            operator: operatorComponent,
+          },
+        });
+      } catch (error: unknown) {
+        if (isDatabaseError(error)) {
+          throw createDatabaseUnavailableError();
+        }
+        rethrowDatabaseUnavailable(error);
+      }
     }),
   );
 

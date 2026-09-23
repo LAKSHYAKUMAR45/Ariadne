@@ -1,7 +1,11 @@
 import { Router, type Response } from 'express';
 import { z } from 'zod';
 import { ApiError } from '../errors.js';
-import { asyncHandler, type AuthenticatedRequest } from '../middleware.js';
+import {
+  asyncHandler,
+  rethrowDatabaseUnavailable,
+  type AuthenticatedRequest,
+} from '../middleware.js';
 import type { OperationsStore } from '../operationsStore.js';
 
 const auditQuerySchema = z
@@ -33,12 +37,17 @@ export function createAdminAuditRouter(options: { operationsStore: OperationsSto
         throw new ApiError(400, 'invalid_request', parsed.error.message);
       }
 
-      const audit = await options.operationsStore.listAuditEvents({
-        afterId: parsed.data.cursor ? Number(parsed.data.cursor) : undefined,
-        limit: parsed.data.limit,
-        action: parsed.data.action,
-        outcome: parsed.data.outcome,
-      });
+      let audit;
+      try {
+        audit = await options.operationsStore.listAuditEvents({
+          afterId: parsed.data.cursor ? Number(parsed.data.cursor) : undefined,
+          limit: parsed.data.limit,
+          action: parsed.data.action,
+          outcome: parsed.data.outcome,
+        });
+      } catch (error: unknown) {
+        rethrowDatabaseUnavailable(error);
+      }
 
       res.status(200).json(audit);
     }),

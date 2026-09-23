@@ -126,6 +126,19 @@ describe('sync-server: complete admin read APIs', () => {
     return request(target).get(pathname).set(await session(target));
   }
 
+  function buildAppWithOperatorQueryClient(
+    operatorQueryClient: NonNullable<
+      Parameters<typeof createApp>[2]['operatorQueryClient']
+    >,
+    targetPool: Pool = pool,
+  ): Express {
+    return createApp(targetPool, TEST_JWT_SECRET, {
+      encryptionKeyring: createTestEncryptionKeyring(),
+      operatorClient: { submit: async () => ({ accepted: true, operationId: 'unused' }) },
+      operatorQueryClient,
+    });
+  }
+
   async function seedOverviewData(): Promise<void> {
     await pool.query(
       `INSERT INTO tasks (
@@ -267,6 +280,38 @@ describe('sync-server: complete admin read APIs', () => {
         immutable: false,
       }),
     ]);
+  });
+
+  it('marks admin rejection and error responses no-store', async () => {
+    const unauthenticated = await request(app).get('/api/v1/admin/overview');
+    expect(unauthenticated.status).toBe(401);
+    expect(unauthenticated.headers['cache-control']).toBe('no-store');
+
+    const headers = await session();
+    const csrfRejected = await request(app)
+      .patch(`/api/v1/admin/members/${memberId}`)
+      .set({ Cookie: headers.Cookie })
+      .send({ active: false });
+    expect(csrfRejected.status).toBe(403);
+    expect(csrfRejected.headers['cache-control']).toBe('no-store');
+
+    const invalid = await request(app)
+      .get('/api/v1/admin/logs?source=deployment&limit=501')
+      .set(headers);
+    expect(invalid.status).toBe(400);
+    expect(invalid.headers['cache-control']).toBe('no-store');
+
+    const explodingApp = buildAppWithOperatorQueryClient({
+      query: async () => {
+        throw new Error('unexpected operator query failure');
+      },
+      downloadBackup: async () => {
+        throw new Error('unexpected operator download failure');
+      },
+    });
+    const unexpected = await adminRequest('/api/v1/admin/services', explodingApp);
+    expect(unexpected.status).toBe(500);
+    expect(unexpected.headers['cache-control']).toBe('no-store');
   });
 
   it('downloads only verified backups with attachment headers and rejects oversized artifacts', async () => {
@@ -474,6 +519,60 @@ describe('sync-server: complete admin read APIs', () => {
     const invalid = await adminRequest('/api/v1/admin/logs?source=deployment&limit=501');
     expect(invalid.status).toBe(400);
     expect(invalid.body.error.code).toBe('invalid_request');
+  });
+
+  it('returns explicit 503 database_unavailable for member, backup, and audit read failures', async () => {
+    const membersApp = createApp(
+      createSelectiveFailurePool(pool, (queryText) => queryText.includes('SELECT tm.user_id AS "userId"')),
+      TEST_JWT_SECRET,
+      {
+        encryptionKeyring: createTestEncryptionKeyring(),
+        operatorClient: { submit: async () => ({ accepted: true, operationId: 'unused' }) },
+        operatorQueryClient: createOperatorQueryClient({
+          socketPath: operator.socketPath,
+          maxDownloadBytes: 1024,
+        }),
+      },
+    );
+    const backupsApp = createApp(
+      createSelectiveFailurePool(pool, (queryText) => queryText.includes('FROM backup_records')),
+      TEST_JWT_SECRET,
+      {
+        encryptionKeyring: createTestEncryptionKeyring(),
+        operatorClient: { submit: async () => ({ accepted: true, operationId: 'unused' }) },
+        operatorQueryClient: createOperatorQueryClient({
+          socketPath: operator.socketPath,
+          maxDownloadBytes: 1024,
+        }),
+      },
+    );
+    const auditApp = createApp(
+      createSelectiveFailurePool(pool, (queryText) => queryText.includes('FROM admin_audit_events')),
+      TEST_JWT_SECRET,
+      {
+        encryptionKeyring: createTestEncryptionKeyring(),
+        operatorClient: { submit: async () => ({ accepted: true, operationId: 'unused' }) },
+        operatorQueryClient: createOperatorQueryClient({
+          socketPath: operator.socketPath,
+          maxDownloadBytes: 1024,
+        }),
+      },
+    );
+
+    const memberResponse = await adminRequest('/api/v1/admin/members', membersApp);
+    expect(memberResponse.status).toBe(503);
+    expect(memberResponse.headers['cache-control']).toBe('no-store');
+    expect(memberResponse.body.error.code).toBe('database_unavailable');
+
+    const backupResponse = await adminRequest('/api/v1/admin/backups', backupsApp);
+    expect(backupResponse.status).toBe(503);
+    expect(backupResponse.headers['cache-control']).toBe('no-store');
+    expect(backupResponse.body.error.code).toBe('database_unavailable');
+
+    const auditResponse = await adminRequest('/api/v1/admin/audit', auditApp);
+    expect(auditResponse.status).toBe(503);
+    expect(auditResponse.headers['cache-control']).toBe('no-store');
+    expect(auditResponse.body.error.code).toBe('database_unavailable');
   });
 
   it('paginates and filters audit events while preserving operation linkage', async () => {
@@ -693,7 +792,11 @@ function createSelectiveFailurePool(
       if (property === 'query') {
         return async (text: string, values?: unknown[]) => {
           if (shouldFail(text)) {
-            throw new Error('forced database failure');
+            throw Object.assign(new Error('forced database failure'), {
+              code: '57P01',
+              severity: 'ERROR',
+              routine: 'ExecProcNode',
+            });
           }
           return target.query(text, values);
         };

@@ -32,6 +32,7 @@ export interface AdminSessionRequest extends AuthenticatedRequest {
 export const CSRF_HEADER = 'x-csrf-token';
 /** Methods that cannot change state, and so carry no CSRF requirement. */
 const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
+const POSTGRES_ERROR_CODE_PATTERN = /^[0-9A-Z]{5}$/;
 
 export function asyncHandler<TRequest extends Request = Request>(
   handler: (req: TRequest, res: Response, next: NextFunction) => Promise<void>,
@@ -119,8 +120,52 @@ export function isAllowedOrigin(req: Request, allowedOrigin: string | null): boo
   return origin === allowedOrigin;
 }
 
+export function applyAdminNoStore(res: Response): void {
+  res.setHeader('Cache-Control', 'no-store');
+}
+
+export function adminNoStoreHeaders(): RequestHandler {
+  return (_req: Request, res: Response, next: NextFunction): void => {
+    applyAdminNoStore(res);
+    next();
+  };
+}
+
+export function createDatabaseUnavailableError(): ApiError {
+  return new ApiError(503, 'database_unavailable', 'Database is unavailable');
+}
+
+export function isDatabaseError(error: unknown): boolean {
+  if (typeof error !== 'object' || error === null) {
+    return false;
+  }
+
+  const candidate = error as {
+    code?: unknown;
+    severity?: unknown;
+    routine?: unknown;
+  };
+
+  return (
+    typeof candidate.code === 'string' &&
+    POSTGRES_ERROR_CODE_PATTERN.test(candidate.code) &&
+    (typeof candidate.severity === 'string' || typeof candidate.routine === 'string')
+  );
+}
+
+export function rethrowDatabaseUnavailable(error: unknown): never {
+  if (error instanceof ApiError) {
+    throw error;
+  }
+  if (isDatabaseError(error)) {
+    throw createDatabaseUnavailableError();
+  }
+  throw error;
+}
+
 function rejectWith(res: Response, status: number, code: string, message: string): void {
   const err = new ApiError(status, code, message);
+  applyAdminNoStore(res);
   res.status(err.status).json(errorBody(err));
 }
 
@@ -157,15 +202,22 @@ export function requireAdminSession(pool: Pool): RequestHandler {
         await requireSingletonAdmin(pool, session.userId);
       } catch (error: unknown) {
         if (error instanceof ApiError) {
+          applyAdminNoStore(res);
           res.status(error.status).json(errorBody(error));
           return;
         }
-        throw error;
+        rethrowDatabaseUnavailable(error);
       }
 
       attachAdminSession(req, session);
       next();
-    })().catch(next);
+    })().catch((error: unknown) => {
+      try {
+        rethrowDatabaseUnavailable(error);
+      } catch (translated: unknown) {
+        next(translated);
+      }
+    });
   };
 }
 
@@ -243,6 +295,10 @@ export const handleUnexpectedError: ErrorRequestHandler = (error, req, res, next
   if (res.headersSent) {
     next(error);
     return;
+  }
+
+  if (req.originalUrl.startsWith('/api/v1/admin')) {
+    applyAdminNoStore(res);
   }
 
   if (error instanceof ApiError) {

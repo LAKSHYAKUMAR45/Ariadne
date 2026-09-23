@@ -57,6 +57,27 @@ function expectInvalidRequestResponse(response: request.Response): void {
   });
 }
 
+function activeAdminSessionRow(csrfToken: string) {
+  return {
+    id: 'session-1',
+    user_id: 'admin-1',
+    csrf_hash: createHash('sha256').update(csrfToken).digest('hex'),
+    expires_at: new Date('2126-09-21T00:00:00Z'),
+    reauthenticated_until: null,
+    revoked_at: null,
+    created_at: new Date('2026-09-21T00:00:00Z'),
+    last_seen_at: new Date('2026-09-21T00:00:00Z'),
+  };
+}
+
+function postgresFailure(message: string) {
+  return Object.assign(new Error(message), {
+    code: '57P01',
+    severity: 'ERROR',
+    routine: 'ExecProcNode',
+  });
+}
+
 describe('sync-server: unexpected error handling', () => {
   afterEach(() => {
     vi.restoreAllMocks();
@@ -111,8 +132,24 @@ describe('sync-server: unexpected error handling', () => {
     const csrfToken = 'b'.repeat(64);
     const query = vi
       .fn<Pool['query']>()
-      // 1. dashboard session lookup, 2. session middleware's admin recheck,
-      // 3. the router's own admin check, 4. member read, 5. member update.
+      // 1-2. first /api/v1/admin mount auth + admin recheck
+      // 3-4. second /api/v1/admin mount auth + admin recheck
+      // 5. members router admin check, 6. member read, 7. member update.
+      .mockResolvedValueOnce(
+        result([
+          {
+            id: 'session-1',
+            user_id: 'admin-1',
+            csrf_hash: createHash('sha256').update(csrfToken).digest('hex'),
+            expires_at: new Date('2126-09-21T00:00:00Z'),
+            reauthenticated_until: null,
+            revoked_at: null,
+            created_at: new Date('2026-09-21T00:00:00Z'),
+            last_seen_at: new Date('2026-09-21T00:00:00Z'),
+          },
+        ]),
+      )
+      .mockResolvedValueOnce(result([{ teamId: 'team-1', role: 'admin' as const }]))
       .mockResolvedValueOnce(
         result([
           {
@@ -200,5 +237,30 @@ describe('sync-server: unexpected error handling', () => {
     expect(loggedPayload).not.toContain('password');
     expect(loggedPayload).not.toContain(malformedBody);
     expect(loggedPayload).not.toContain('Unexpected token');
+  });
+
+  it('translates admin database failures to 503 database_unavailable with no-store', async () => {
+    const sessionToken = 'c'.repeat(64);
+    const csrfToken = 'd'.repeat(64);
+    const query = vi
+      .fn<Pool['query']>()
+      .mockRejectedValueOnce(postgresFailure('admin session lookup failed'));
+    const app = createApp(createPoolWithQuery(query), TEST_JWT_SECRET, {
+      encryptionKeyring: createTestEncryptionKeyring(),
+    });
+
+    const response = await request(app)
+      .get('/api/v1/admin/overview')
+      .set('Cookie', `${ADMIN_SESSION_COOKIE_NAME}=${sessionToken}`)
+      .set('X-CSRF-Token', csrfToken);
+
+    expect(response.status).toBe(503);
+    expect(response.headers['cache-control']).toBe('no-store');
+    expect(response.body).toEqual({
+      error: {
+        code: 'database_unavailable',
+        message: 'Database is unavailable',
+      },
+    });
   });
 });

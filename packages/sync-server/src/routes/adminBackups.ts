@@ -4,7 +4,11 @@ import type { Pool } from 'pg';
 import { z } from 'zod';
 import { requireSingletonAdmin } from '../adminAccess.js';
 import { ApiError } from '../errors.js';
-import { asyncHandler, type AuthenticatedRequest } from '../middleware.js';
+import {
+  asyncHandler,
+  rethrowDatabaseUnavailable,
+  type AuthenticatedRequest,
+} from '../middleware.js';
 import { OperatorClientError } from '../operatorClient.js';
 import type { OperatorQueryClient } from '../operatorQueryClient.js';
 import type { BackupRecordStatus, OperationsStore } from '../operationsStore.js';
@@ -56,45 +60,49 @@ export function createAdminBackupsRouter(
   router.get(
     '/backups',
     asyncHandler(async (req: AuthenticatedRequest, res) => {
-      await requireSingletonAdmin(pool, req.userId!);
-      const parsed = backupListQuerySchema.safeParse(req.query);
-      if (!parsed.success) {
-        throw new ApiError(400, 'invalid_request', parsed.error.message);
+      try {
+        await requireSingletonAdmin(pool, req.userId!);
+        const parsed = backupListQuerySchema.safeParse(req.query);
+        if (!parsed.success) {
+          throw new ApiError(400, 'invalid_request', parsed.error.message);
+        }
+        const backups = await options.operationsStore.listBackupRecords(parsed.data.limit);
+        res.status(200).json({ backups });
+      } catch (error: unknown) {
+        rethrowDatabaseUnavailable(error);
       }
-      const backups = await options.operationsStore.listBackupRecords(parsed.data.limit);
-      res.status(200).json({ backups });
     }),
   );
 
   router.get(
     '/backups/:name/download',
     asyncHandler(async (req: AuthenticatedRequest, res) => {
-      await requireSingletonAdmin(pool, req.userId!);
-      const params = backupNameParamSchema.safeParse(req.params);
-      if (!params.success) {
-        throw new ApiError(400, 'invalid_request', params.error.message);
-      }
-
-      const { rows } = await pool.query<BackupStatusRow>(
-        `SELECT filename, status
-           FROM backup_records
-          WHERE filename = $1
-          LIMIT 1`,
-        [params.data.name],
-      );
-      const backup = rows[0];
-      if (!backup) {
-        throw new ApiError(404, 'backup_not_found', 'No such backup artifact');
-      }
-      if (backup.status !== 'verified') {
-        throw new ApiError(
-          409,
-          'backup_not_verified',
-          'Only currently verified backups can be downloaded',
-        );
-      }
-
       try {
+        await requireSingletonAdmin(pool, req.userId!);
+        const params = backupNameParamSchema.safeParse(req.params);
+        if (!params.success) {
+          throw new ApiError(400, 'invalid_request', params.error.message);
+        }
+
+        const { rows } = await pool.query<BackupStatusRow>(
+          `SELECT filename, status
+             FROM backup_records
+            WHERE filename = $1
+            LIMIT 1`,
+          [params.data.name],
+        );
+        const backup = rows[0];
+        if (!backup) {
+          throw new ApiError(404, 'backup_not_found', 'No such backup artifact');
+        }
+        if (backup.status !== 'verified') {
+          throw new ApiError(
+            409,
+            'backup_not_verified',
+            'Only currently verified backups can be downloaded',
+          );
+        }
+
         const operatorQueryClient = requireOperatorQueryClient(options.operatorQueryClient);
         const abortController = new AbortController();
         req.on('aborted', () => abortController.abort());
@@ -130,7 +138,7 @@ export function createAdminBackupsRouter(
         if (error instanceof Error && error.name === 'AbortError') {
           return;
         }
-        throw error;
+        rethrowDatabaseUnavailable(error);
       }
     }),
   );
