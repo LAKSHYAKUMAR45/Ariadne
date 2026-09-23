@@ -29,7 +29,7 @@ fail() {
 
 # Artifacts that may be installed onto the host. `sync-server-entrypoint` is a
 # container-only script and this installer itself is never copied.
-ARIADNE_INSTALL_EXECUTABLES="backup deploy prune-backups restart-postgres restart-sync-server restore-backup rotate-encryption-key transfer-admin verify-backup"
+ARIADNE_INSTALL_EXECUTABLES="backup deployment-status deploy prune-backups restart-postgres restart-sync-server restore-backup rotate-encryption-key status transfer-admin verify-backup"
 ARIADNE_INSTALL_LIBRARIES="lib-common"
 ARIADNE_INSTALL_TMPFILES="ariadne.conf"
 ARIADNE_INSTALL_UNITS="ariadne-operator.service ariadne-backup.service ariadne-backup.timer ariadne-backup-verify.service ariadne-backup-verify.timer"

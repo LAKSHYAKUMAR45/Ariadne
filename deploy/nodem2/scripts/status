@@ -1,0 +1,94 @@
+#!/bin/bash
+set -euo pipefail
+
+SCRIPT_DIR=$(unset CDPATH; cd -- "$(dirname -- "$0")" && pwd)
+
+if [ "${ARIADNE_ADMIN_SELFTEST:-}" = "1" ]; then
+    [ -n "${ARIADNE_ADMIN_PREFIX:-}" ] || {
+        printf '[ariadne-status] error: ARIADNE_ADMIN_PREFIX is required in self-test mode\n' >&2
+        exit 1
+    }
+    export ARIADNE_DEPLOY_SELFTEST=1
+    export ARIADNE_DEPLOY_ROOT="$ARIADNE_ADMIN_PREFIX/opt/ariadne"
+    export ARIADNE_DEPLOY_ETC="$ARIADNE_ADMIN_PREFIX/etc/ariadne"
+    export ARIADNE_DEPLOY_STATE="$ARIADNE_ADMIN_PREFIX/var/lib/ariadne/deploy"
+fi
+
+# shellcheck source=deploy/nodem2/scripts/lib-common
+. "$SCRIPT_DIR/lib-common"
+ARIADNE_LOG_TAG=ariadne-status
+
+json_escape() {
+    local value=${1-}
+    value=${value//\\/\\\\}
+    value=${value//\"/\\\"}
+    value=${value//$'\n'/\\n}
+    value=${value//$'\r'/\\r}
+    value=${value//$'\t'/\\t}
+    printf '"%s"' "$value"
+}
+
+operator_service_json() {
+    local lines active_state sub_state result
+    lines=$(systemctl show --property=ActiveState,SubState,Result --value ariadne-operator.service) ||
+        fail "operator status is unavailable"
+    active_state=$(printf '%s\n' "$lines" | sed -n '1p')
+    sub_state=$(printf '%s\n' "$lines" | sed -n '2p')
+    result=$(printf '%s\n' "$lines" | sed -n '3p')
+
+    case "$active_state/$sub_state/$result" in
+        active/running/*)
+            printf '{"name":"operator","state":"running"}'
+            ;;
+        failed/*/* | */*/failed)
+            printf '{"name":"operator","state":"failed"}'
+            ;;
+        inactive/dead/* | inactive/exited/*)
+            printf '{"name":"operator","state":"stopped"}'
+            ;;
+        *)
+            printf '{"name":"operator","state":"unavailable","detail":%s}' \
+                "$(json_escape "${active_state}/${sub_state}")"
+            ;;
+    esac
+}
+
+compose_service_json() {
+    local service=$1
+    local state=${2-}
+    case "$state" in
+        running)
+            printf '{"name":"%s","state":"running"}' "$service"
+            ;;
+        exited | dead)
+            printf '{"name":"%s","state":"stopped"}' "$service"
+            ;;
+        failed)
+            printf '{"name":"%s","state":"failed"}' "$service"
+            ;;
+        "")
+            printf '{"name":"%s","state":"unavailable"}' "$service"
+            ;;
+        *)
+            printf '{"name":"%s","state":"unavailable","detail":%s}' \
+                "$service" "$(json_escape "$state")"
+            ;;
+    esac
+}
+
+[ "$#" -eq 0 ] || fail "usage: status (takes no arguments)"
+require_deployment_inputs
+
+sync_server_state=
+postgres_state=
+while IFS=' ' read -r service state _rest; do
+    case "$service" in
+        sync-server) sync_server_state=${state:-} ;;
+        postgres) postgres_state=${state:-} ;;
+    esac
+done < <(ariadne_compose ps --format '{{.Service}} {{.State}}' sync-server postgres)
+
+printf '{"services":[%s,%s,%s]}\n' \
+    "$(compose_service_json sync-server "$sync_server_state")" \
+    "$(operator_service_json)" \
+    "$(compose_service_json postgres "$postgres_state")"

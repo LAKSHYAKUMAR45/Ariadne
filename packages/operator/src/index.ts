@@ -37,6 +37,41 @@ export {
 export type { AdmissionDecision, SerialQueue } from './admission.js';
 export { parseOperatorRequest, type OperatorAccepted, type OperatorRequest } from './protocol.js';
 export {
+  decodeOperatorLogCursor,
+  encodeOperatorLogCursor,
+  operatorQuerySchema,
+  parseOperatorQuery,
+} from './queryProtocol.js';
+export type {
+  BackupReadResult,
+  DeploymentStatusResult,
+  HostMetricsResult,
+  LogsReadResult,
+  OperatorLogCursor,
+  OperatorLogSeverity,
+  OperatorLogSource,
+  OperatorQuery,
+  OperatorQueryExecutor,
+  OperatorQueryResult,
+  ServiceStatusResult,
+} from './queryProtocol.js';
+export {
+  createOperatorQueryExecutor,
+  DEFAULT_LOG_LINE_BYTES,
+  DEFAULT_QUERY_ENV,
+  DEFAULT_QUERY_RESPONSE_BYTES,
+  DEFAULT_QUERY_TIMEOUT_MS,
+  OperatorQueryError,
+} from './queryExecutor.js';
+export type {
+  CreateOperatorQueryExecutorOptions,
+  QueryClock,
+  QueryFileSystem,
+  QuerySpawnImplementation,
+  QuerySpawnOptions,
+  QuerySpawnedProcess,
+} from './queryExecutor.js';
+export {
   CALLBACK_TOKEN_BYTES,
   CALLBACK_TOKEN_HEADER,
   DEFAULT_CALLBACK_MAX_ATTEMPTS,
@@ -57,6 +92,7 @@ export type {
   CallbackConfig,
   CreateCallbackReporterOptions,
   OperatorExecuteFn,
+  OperatorQueryFn,
   OperatorServer,
 } from './server.js';
 

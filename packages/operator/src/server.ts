@@ -2,7 +2,15 @@ import http, { type IncomingMessage, type ServerResponse } from 'node:http';
 import path from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { chmod, lstat, open, rm } from 'node:fs/promises';
+import type { Readable } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
 import { parseOperatorRequest, type OperatorAccepted, type OperatorRequest } from './protocol.js';
+import {
+  parseOperatorQuery,
+  type OperatorQuery,
+  type OperatorQueryExecutor,
+  type OperatorQueryResult,
+} from './queryProtocol.js';
 import {
   OperationAdmissionRegistry,
   createSerialQueue,
@@ -18,6 +26,10 @@ import {
   type OperatorProgressEvent,
   type OperatorResultEvent,
 } from './executor.js';
+import {
+  createOperatorQueryExecutor,
+  OperatorQueryError,
+} from './queryExecutor.js';
 
 export const MAX_OPERATOR_REQUEST_BODY_BYTES = 8 * 1024;
 export { DEFAULT_TERMINAL_CACHE_TTL_MS, DEFAULT_TERMINAL_CACHE_MAX_ENTRIES };
@@ -75,6 +87,7 @@ const CALLBACK_TOKEN_PATTERN = /^[0-9a-f]{64}$/;
 const LOOPBACK_HOSTNAMES = new Set(['127.0.0.1', 'localhost', '::1', '[::1]']);
 
 const OPERATOR_ROUTE_PATH = '/v1/operations';
+const OPERATOR_QUERY_ROUTE_PATH = '/v1/queries';
 
 interface JsonErrorResponse {
   error: string;
@@ -84,10 +97,12 @@ export type OperatorExecuteFn = (
   request: OperatorRequest,
   reporter: OperatorEventSink,
 ) => Promise<void>;
+export type OperatorQueryFn = (query: OperatorQuery) => Promise<OperatorQueryResult>;
 
 export interface CreateOperatorServerOptions {
   socketPath: string;
   executeOperation?: OperatorExecuteFn;
+  executeQuery?: OperatorQueryFn;
   reporter?: OperatorEventSink;
   requestBodyLimitBytes?: number;
   terminalCacheTtlMs?: number;
@@ -123,7 +138,7 @@ class OperatorServerConfigError extends Error {
 function writeJson(
   response: ServerResponse,
   statusCode: number,
-  payload: OperatorAccepted | JsonErrorResponse,
+  payload: OperatorAccepted | JsonErrorResponse | OperatorQueryResult,
 ): void {
   if (response.writableEnded || response.headersSent) {
     return;
@@ -688,9 +703,12 @@ export function createOperatorServer(options: CreateOperatorServerOptions): Oper
   const requestTimeoutMs = options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
   const reporter: OperatorEventSink = options.reporter ?? {};
   const defaultExecutor: OperatorExecutor = createOperatorExecutor({ reporter: options.reporter });
+  const defaultQueryExecutor: OperatorQueryExecutor = createOperatorQueryExecutor();
   const executeOperation: OperatorExecuteFn =
     options.executeOperation ??
     ((request, eventSink) => defaultExecutor.execute(request, eventSink));
+  const executeQuery: OperatorQueryFn =
+    options.executeQuery ?? ((query) => defaultQueryExecutor.execute(query));
 
   const admissions = new OperationAdmissionRegistry({
     ttlMs: options.terminalCacheTtlMs,
@@ -706,7 +724,8 @@ export function createOperatorServer(options: CreateOperatorServerOptions): Oper
   const server = http.createServer(
     { connectionsCheckingInterval: connectionsCheckingIntervalMs },
     async (request, response) => {
-    if ((request.url ?? '') !== OPERATOR_ROUTE_PATH) {
+    const requestPath = request.url ?? '';
+    if (requestPath !== OPERATOR_ROUTE_PATH && requestPath !== OPERATOR_QUERY_ROUTE_PATH) {
       writeJson(response, 404, { error: 'not_found' });
       return;
     }
@@ -732,6 +751,17 @@ export function createOperatorServer(options: CreateOperatorServerOptions): Oper
 
       // Validation happens before any reservation so a rejected request never
       // claims (or burns) its operation id.
+      if (requestPath === OPERATOR_QUERY_ROUTE_PATH) {
+        const operatorQuery = parseOperatorQuery(parsedBody);
+        const result = await executeQuery(operatorQuery);
+        if (result.type === 'backup_read') {
+          await streamBackupResponse(request, response, result);
+          return;
+        }
+        writeJson(response, 200, result);
+        return;
+      }
+
       const operatorRequest = parseOperatorRequest(parsedBody);
 
       // Reservation and dispatch run inside one serialized section, so two
@@ -759,6 +789,12 @@ export function createOperatorServer(options: CreateOperatorServerOptions): Oper
     } catch (error: unknown) {
       if (error instanceof Error && error.name === 'ZodError') {
         writeJson(response, 400, { error: 'invalid_request' });
+        return;
+      }
+      if (error instanceof OperatorQueryError) {
+        const statusCode = error.code === 'dependency_unavailable' ? 503 : 500;
+        const responseCode = error.code === 'dependency_unavailable' ? error.code : 'internal_error';
+        writeJson(response, statusCode, { error: responseCode });
         return;
       }
       writeJson(response, 500, { error: 'internal_error' });
@@ -847,5 +883,45 @@ async function runAcceptedOperation(
     // still becomes terminal so retries with the same id are never re-executed.
   } finally {
     markTerminal();
+  }
+}
+
+async function streamBackupResponse(
+  request: IncomingMessage,
+  response: ServerResponse,
+  result: Extract<OperatorQueryResult, { type: 'backup_read' }>,
+): Promise<void> {
+  if (response.writableEnded || response.headersSent) {
+    (result.value.stream as Readable).destroy?.();
+    return;
+  }
+
+  response.statusCode = 200;
+  response.setHeader('content-type', 'application/octet-stream');
+  response.setHeader('content-length', String(result.value.sizeBytes));
+  response.setHeader('x-ariadne-backup-sha256', result.value.sha256);
+  response.setHeader(
+    'content-disposition',
+    `attachment; filename="${result.value.filename.replace(/"/g, '')}"`,
+  );
+
+  const stream = result.value.stream as Readable;
+  const destroyStream = (): void => {
+    if (!stream.destroyed) {
+      stream.destroy();
+    }
+  };
+
+  request.on('aborted', destroyStream);
+  response.on('close', () => {
+    if (!response.writableFinished) {
+      destroyStream();
+    }
+  });
+
+  try {
+    await pipeline(stream, response);
+  } catch {
+    destroyStream();
   }
 }

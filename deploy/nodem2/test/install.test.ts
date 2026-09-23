@@ -29,12 +29,14 @@ const EXISTING_SERVER_ENV =
 
 const INSTALLED_EXECUTABLES = [
   'backup',
+  'deployment-status',
   'deploy',
   'prune-backups',
   'restart-postgres',
   'restart-sync-server',
   'restore-backup',
   'rotate-encryption-key',
+  'status',
   'transfer-admin',
   'verify-backup',
 ];
@@ -66,6 +68,8 @@ interface Harness {
   groupaddLog: string;
   dockerLog: string;
   dockerStdin: string;
+  gitLog: string;
+  psqlLog: string;
 }
 
 function writeExecutable(target: string, body: string): void {
@@ -85,6 +89,8 @@ function createHarness(): Harness {
   const groupaddLog = path.join(prefix, 'groupadd.log');
   const dockerLog = path.join(prefix, 'docker.log');
   const dockerStdin = path.join(prefix, 'docker.stdin');
+  const gitLog = path.join(prefix, 'git.log');
+  const psqlLog = path.join(prefix, 'psql.log');
 
   // Claims uid 0 without granting any privilege; the scripts must still refuse
   // to touch production paths because the self-test prefix is enforced.
@@ -111,6 +117,9 @@ exit "\${FAKE_CHOWN_EXIT:-0}"
     path.join(binDir, 'systemctl'),
     `#!/bin/sh
 printf '%s\\n' "$*" >> "$FAKE_SYSTEMCTL_LOG"
+if [ "\${1:-}" = show ]; then
+  printf '%s' "\${FAKE_SYSTEMCTL_SHOW_OUTPUT:-active\\nrunning\\nsuccess\\n}"
+fi
 exit "\${FAKE_SYSTEMCTL_EXIT:-0}"
 `,
   );
@@ -146,8 +155,46 @@ exit "\${FAKE_GROUPADD_EXIT:-0}"
     path.join(binDir, 'docker'),
     `#!/bin/sh
 printf '%s\\n' "$*" >> "$FAKE_DOCKER_LOG"
+case " $* " in
+  *" ps "*)
+  printf '%s' "\${FAKE_DOCKER_PS_OUTPUT:-}"
+    ;;
+esac
+case "$*" in
+  *"SELECT value FROM schema_meta"*)
+    printf '%s' "\${FAKE_DOCKER_PSQL_OUTPUT:-10\\n}"
+    ;;
+esac
 cat >> "$FAKE_DOCKER_STDIN"
 exit "\${FAKE_DOCKER_EXIT:-0}"
+`,
+  );
+
+  writeExecutable(
+    path.join(binDir, 'git'),
+    `#!/bin/sh
+printf '%s\\n' "$*" >> "$FAKE_GIT_LOG"
+if [ "\${1:-}" = -C ]; then shift 2; fi
+case "\${1:-}" in
+  rev-parse)
+    if printf '%s' "$*" | grep -q 'HEAD'; then
+      printf '%s\\n' "\${FAKE_GIT_HEAD:-${'a'.repeat(40)}}"
+    else
+      printf '%s\\n' "\${FAKE_GIT_TRUSTED_TIP:-${'b'.repeat(40)}}"
+    fi
+    ;;
+  log)
+    printf '%s' "\${FAKE_GIT_LOG_OUTPUT:-${'c'.repeat(40)}\t2026-09-23T10:20:00Z\tfeat: release candidate\\n}"
+    ;;
+esac
+`,
+  );
+
+  writeExecutable(
+    path.join(binDir, 'psql'),
+    `#!/bin/sh
+printf '%s\\n' "$*" >> "$FAKE_PSQL_LOG"
+printf '%s' "\${FAKE_PSQL_OUTPUT:-10\\n}"
 `,
   );
 
@@ -168,6 +215,8 @@ exit "\${FAKE_DOCKER_EXIT:-0}"
     groupaddLog,
     dockerLog,
     dockerStdin,
+    gitLog,
+    psqlLog,
   };
 }
 
@@ -189,6 +238,8 @@ function runScript(harness: Harness, script: string, options: RunOptions = {}) {
     FAKE_GROUPADD_LOG: harness.groupaddLog,
     FAKE_DOCKER_LOG: harness.dockerLog,
     FAKE_DOCKER_STDIN: harness.dockerStdin,
+    FAKE_GIT_LOG: harness.gitLog,
+    FAKE_PSQL_LOG: harness.psqlLog,
     ...(selftest
       ? {
           ARIADNE_ADMIN_SELFTEST: '1',
@@ -200,6 +251,37 @@ function runScript(harness: Harness, script: string, options: RunOptions = {}) {
   };
 
   return spawnSync(path.join(scriptsDir, script), options.args ?? [], {
+    env,
+    encoding: 'utf8',
+    timeout: 20_000,
+  });
+}
+
+function runInstalledScript(harness: Harness, script: string, options: RunOptions = {}) {
+  const selftest = options.selftest ?? true;
+  const env: Record<string, string> = {
+    PATH: `${harness.binDir}:${process.env.PATH ?? ''}`,
+    HOME: harness.prefix,
+    FAKE_ID_UID: String(process.getuid?.() ?? 0),
+    FAKE_CHOWN_LOG: harness.chownLog,
+    FAKE_SYSTEMCTL_LOG: harness.systemctlLog,
+    FAKE_TMPFILES_LOG: harness.tmpfilesLog,
+    FAKE_GROUPADD_LOG: harness.groupaddLog,
+    FAKE_DOCKER_LOG: harness.dockerLog,
+    FAKE_DOCKER_STDIN: harness.dockerStdin,
+    FAKE_GIT_LOG: harness.gitLog,
+    FAKE_PSQL_LOG: harness.psqlLog,
+    ...(selftest
+      ? {
+          ARIADNE_ADMIN_SELFTEST: '1',
+          ARIADNE_ADMIN_PREFIX: harness.prefix,
+          ARIADNE_ADMIN_OWNER_UID: String(process.getuid?.() ?? 0),
+        }
+      : {}),
+    ...options.env,
+  };
+
+  return spawnSync(path.join(harness.libDir, script), options.args ?? [], {
     env,
     encoding: 'utf8',
     timeout: 20_000,
@@ -244,6 +326,21 @@ function seedComposeStack(harness: Harness): void {
   const worktreeDeploy = path.join(harness.prefix, 'opt', 'ariadne', 'worktree', 'deploy', 'nodem2');
   fs.mkdirSync(worktreeDeploy, { recursive: true });
   fs.writeFileSync(path.join(worktreeDeploy, 'compose.yaml'), 'services: {}\n');
+}
+
+function seedDeploymentStatusInputs(harness: Harness): void {
+  seedComposeStack(harness);
+  for (const directory of [
+    path.join(harness.prefix, 'opt'),
+    path.join(harness.prefix, 'opt', 'ariadne'),
+    path.join(harness.prefix, 'opt', 'ariadne', 'worktree'),
+    path.join(harness.prefix, 'opt', 'ariadne', 'worktree', '.git'),
+  ]) {
+    fs.mkdirSync(directory, { recursive: true });
+    fs.chmodSync(directory, 0o755);
+  }
+  fs.mkdirSync(harness.stateDir, { recursive: true, mode: 0o700 });
+  fs.chmodSync(harness.stateDir, 0o700);
 }
 
 function listKeyFiles(harness: Harness): string[] {
@@ -355,6 +452,49 @@ describe('install script', () => {
     // Applied immediately so the very first install needs no reboot, and the
     // containers can only ever see the directory the operator owns.
     expect(readLog(harness.tmpfilesLog).join('\n')).toContain('--create');
+  });
+
+  it('installs and runs the tracked read scripts with strict JSON output', () => {
+    const harness = createHarness();
+    seedSecrets(harness);
+    seedKeys(harness);
+    seedDeploymentStatusInputs(harness);
+
+    expect(runScript(harness, 'install').status).toBe(0);
+    expect(modeOf(path.join(harness.libDir, 'status'))).toBe('755');
+    expect(modeOf(path.join(harness.libDir, 'deployment-status'))).toBe('755');
+
+    const statusResult = runInstalledScript(harness, 'status', {
+      env: {
+        FAKE_SYSTEMCTL_SHOW_OUTPUT: 'active\nrunning\nsuccess\n',
+        FAKE_DOCKER_PS_OUTPUT: 'sync-server running\npostgres running\n',
+      },
+    });
+    expect(statusResult.status).toBe(0);
+    const status = JSON.parse(statusResult.stdout) as unknown;
+    expect(status).toEqual({
+      services: [
+        { name: 'sync-server', state: 'running' },
+        { name: 'operator', state: 'running' },
+        { name: 'postgres', state: 'running' },
+      ],
+    });
+
+    const deploymentResult = runInstalledScript(harness, 'deployment-status', {
+      env: {
+        FAKE_GIT_HEAD: 'a'.repeat(40),
+        FAKE_GIT_LOG_OUTPUT: `${'c'.repeat(40)}\t2026-09-23T10:20:00Z\tfeat: release candidate\n`,
+        FAKE_DOCKER_PSQL_OUTPUT: '10\n',
+      },
+    });
+    expect(deploymentResult.status).toBe(0);
+    const deployment = JSON.parse(deploymentResult.stdout) as Record<string, unknown>;
+    expect(deployment).toMatchObject({
+      currentRevision: expect.stringMatching(/^[0-9a-f]{40}$/),
+      rollbackRevision: null,
+      schemaVersion: 10,
+      candidates: expect.any(Array),
+    });
   });
 
   it('generates one encryption key when none exists and never prints key bytes', () => {

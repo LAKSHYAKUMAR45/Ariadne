@@ -3,6 +3,7 @@ import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { access, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { PassThrough, Readable } from 'node:stream';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   CALLBACK_TOKEN_HEADER,
@@ -18,10 +19,12 @@ import {
   MAX_OPERATOR_REQUEST_BODY_BYTES,
 } from '../src/server.js';
 import { DEFAULT_OUTPUT_TAIL_BYTES } from '../src/executor.js';
+import { OperatorQueryError } from '../src/queryExecutor.js';
 
 interface HttpResponse {
   statusCode: number;
   body: string;
+  headers: http.IncomingHttpHeaders;
 }
 
 describe('createOperatorServer', () => {
@@ -69,6 +72,7 @@ describe('createOperatorServer', () => {
             resolve({
               statusCode: res.statusCode ?? 0,
               body: Buffer.concat(chunks).toString('utf8'),
+              headers: res.headers,
             });
           });
         },
@@ -185,6 +189,215 @@ describe('createOperatorServer', () => {
     });
     expect(bodyResponse.statusCode).toBe(413);
     expect(JSON.parse(bodyResponse.body)).toEqual({ error: 'request_too_large' });
+
+    await server.close();
+  });
+
+  it('returns typed JSON query results without reserving the mutation slot', async () => {
+    const directory = await createTempDirectory();
+    const socketPath = path.join(directory, 'operator.sock');
+    const executedOperations: string[] = [];
+    let releaseQuery: (() => void) | undefined;
+
+    const server = createOperatorServer({
+      socketPath,
+      executeOperation: async (operatorRequest) => {
+        executedOperations.push(operatorRequest.operationId);
+      },
+      executeQuery: async () => {
+        await new Promise<void>((resolve) => {
+          releaseQuery = resolve;
+        });
+        return {
+          type: 'host_metrics',
+          value: {
+            cpuPercent: 12.5,
+            memoryUsedBytes: 10,
+            memoryTotalBytes: 20,
+            filesystemUsedBytes: 30,
+            filesystemTotalBytes: 40,
+          },
+        };
+      },
+    });
+
+    await server.start();
+
+    const queryPromise = request(socketPath, {
+      path: '/v1/queries',
+      body: JSON.stringify({ type: 'host_metrics' }),
+    });
+
+    const operationResponse = await request(socketPath, {
+      body: JSON.stringify({ operationId: 'op-query-parallel', type: 'backup_create' }),
+    });
+    expect(operationResponse.statusCode).toBe(202);
+    expect(executedOperations).toEqual(['op-query-parallel']);
+
+    releaseQuery?.();
+    const queryResponse = await queryPromise;
+    expect(queryResponse.statusCode).toBe(200);
+    expect(JSON.parse(queryResponse.body)).toEqual({
+      type: 'host_metrics',
+      value: {
+        cpuPercent: 12.5,
+        memoryUsedBytes: 10,
+        memoryTotalBytes: 20,
+        filesystemUsedBytes: 30,
+        filesystemTotalBytes: 40,
+      },
+    });
+
+    await server.close();
+  });
+
+  it('streams backup queries with attachment headers', async () => {
+    const directory = await createTempDirectory();
+    const socketPath = path.join(directory, 'operator.sock');
+
+    const server = createOperatorServer({
+      socketPath,
+      executeQuery: async () => ({
+        type: 'backup_read',
+        value: {
+          filename: 'ariadne-20260923T032200Z.dump',
+          sha256: 'a'.repeat(64),
+          sizeBytes: 12,
+          stream: Readable.from(['backup-bytes']),
+        },
+      }),
+    });
+
+    await server.start();
+
+    const response = await request(socketPath, {
+      path: '/v1/queries',
+      body: JSON.stringify({
+        type: 'backup_read',
+        backupName: 'ariadne-20260923T032200Z.dump',
+      }),
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.body).toBe('backup-bytes');
+    expect(response.headers['content-type']).toBe('application/octet-stream');
+    expect(response.headers['content-length']).toBe('12');
+    expect(response.headers['x-ariadne-backup-sha256']).toBe('a'.repeat(64));
+    expect(String(response.headers['content-disposition'])).toContain(
+      'filename="ariadne-20260923T032200Z.dump"',
+    );
+
+    await server.close();
+  });
+
+  it('destroys the backup stream when the client aborts', async () => {
+    const directory = await createTempDirectory();
+    const socketPath = path.join(directory, 'operator.sock');
+    let destroyed = false;
+
+    const stream = new PassThrough({
+      destroy(error, callback) {
+        destroyed = true;
+        callback(error);
+      },
+    });
+
+    const server = createOperatorServer({
+      socketPath,
+      executeQuery: async () => ({
+        type: 'backup_read',
+        value: {
+          filename: 'ariadne-20260923T032200Z.dump',
+          sha256: 'b'.repeat(64),
+          sizeBytes: 1024,
+          stream,
+        },
+      }),
+    });
+
+    await server.start();
+
+    await new Promise<void>((resolve, reject) => {
+      const req = http.request(
+        {
+          socketPath,
+          method: 'POST',
+          path: '/v1/queries',
+          headers: {
+            'content-type': 'application/json',
+            'content-length': Buffer.byteLength(
+              JSON.stringify({
+                type: 'backup_read',
+                backupName: 'ariadne-20260923T032200Z.dump',
+              }),
+            ),
+          },
+        },
+        (res) => {
+          res.once('data', () => {
+            req.destroy();
+            resolve();
+          });
+        },
+      );
+
+      req.on('error', (error: NodeJS.ErrnoException) => {
+        if (error.code === 'ECONNRESET') {
+          return;
+        }
+        reject(error);
+      });
+
+      req.end(
+        JSON.stringify({
+          type: 'backup_read',
+          backupName: 'ariadne-20260923T032200Z.dump',
+        }),
+      );
+
+      stream.write(Buffer.alloc(128, 'x'));
+    });
+
+    for (let attempt = 0; attempt < 50 && !destroyed; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    expect(destroyed).toBe(true);
+
+    await server.close();
+  });
+
+  it('returns 400 for invalid queries, 404 for unknown paths, and 503 for unavailable query dependencies', async () => {
+    const directory = await createTempDirectory();
+    const socketPath = path.join(directory, 'operator.sock');
+    const server = createOperatorServer({
+      socketPath,
+      executeQuery: async () => {
+        throw new OperatorQueryError('dependency_unavailable', 'unavailable');
+      },
+    });
+
+    await server.start();
+
+    const invalid = await request(socketPath, {
+      path: '/v1/queries',
+      body: JSON.stringify({ type: 'logs_read', source: 'sync-server', limit: 0 }),
+    });
+    expect(invalid.statusCode).toBe(400);
+    expect(JSON.parse(invalid.body)).toEqual({ error: 'invalid_request' });
+
+    const missing = await request(socketPath, {
+      path: '/v1/not-here',
+      body: JSON.stringify({}),
+    });
+    expect(missing.statusCode).toBe(404);
+    expect(JSON.parse(missing.body)).toEqual({ error: 'not_found' });
+
+    const unavailable = await request(socketPath, {
+      path: '/v1/queries',
+      body: JSON.stringify({ type: 'host_metrics' }),
+    });
+    expect(unavailable.statusCode).toBe(503);
+    expect(JSON.parse(unavailable.body)).toEqual({ error: 'dependency_unavailable' });
 
     await server.close();
   });

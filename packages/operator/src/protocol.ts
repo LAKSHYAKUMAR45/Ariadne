@@ -5,7 +5,7 @@ const REVISION_PATTERN = /^[0-9a-f]{40}$/;
 
 const operatorIdSchema = z.string().min(1, 'operationId is required');
 
-function isBackupBasename(value: string): boolean {
+export function isBackupBasename(value: string): boolean {
   return (
     value.length > 0 &&
     value !== '.' &&
@@ -81,4 +81,3 @@ export interface OperatorAccepted {
 export function parseOperatorRequest(input: unknown): OperatorRequest {
   return operatorRequestSchema.parse(input);
 }
-

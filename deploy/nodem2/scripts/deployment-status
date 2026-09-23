@@ -1,0 +1,90 @@
+#!/bin/bash
+set -euo pipefail
+
+SCRIPT_DIR=$(unset CDPATH; cd -- "$(dirname -- "$0")" && pwd)
+
+if [ "${ARIADNE_ADMIN_SELFTEST:-}" = "1" ]; then
+    [ -n "${ARIADNE_ADMIN_PREFIX:-}" ] || {
+        printf '[ariadne-deployment-status] error: ARIADNE_ADMIN_PREFIX is required in self-test mode\n' >&2
+        exit 1
+    }
+    export ARIADNE_DEPLOY_SELFTEST=1
+    export ARIADNE_DEPLOY_ROOT="$ARIADNE_ADMIN_PREFIX/opt/ariadne"
+    export ARIADNE_DEPLOY_ETC="$ARIADNE_ADMIN_PREFIX/etc/ariadne"
+    export ARIADNE_DEPLOY_STATE="$ARIADNE_ADMIN_PREFIX/var/lib/ariadne/deploy"
+fi
+
+# shellcheck source=deploy/nodem2/scripts/lib-common
+. "$SCRIPT_DIR/lib-common"
+ARIADNE_LOG_TAG=ariadne-deployment-status
+
+json_escape() {
+    local value=${1-}
+    value=${value//\\/\\\\}
+    value=${value//\"/\\\"}
+    value=${value//$'\n'/\\n}
+    value=${value//$'\r'/\\r}
+    value=${value//$'\t'/\\t}
+    printf '"%s"' "$value"
+}
+
+require_sha() {
+    case "$1" in
+        "" | *[!0-9a-f]*)
+            fail "$2"
+            ;;
+    esac
+    [ "${#1}" -eq 40 ] || fail "$2"
+}
+
+[ "$#" -eq 0 ] || fail "usage: deployment-status (takes no arguments)"
+require_deployment_inputs
+[ -d "$ARIADNE_WORKTREE/.git" ] || [ -f "$ARIADNE_WORKTREE/.git" ] ||
+    fail "deployment worktree is missing: $ARIADNE_WORKTREE"
+
+current_revision=$(git -C "$ARIADNE_WORKTREE" rev-parse HEAD | tr -d ' \t\r\n') ||
+    fail "current revision is unavailable"
+require_sha "$current_revision" "current revision is unavailable"
+
+rollback_revision=null
+if [ -f "$ARIADNE_STATE_DIR/rollback-image" ]; then
+    rollback_candidate=$(head -n 1 "$ARIADNE_STATE_DIR/rollback-image" | tr -d ' \t\r\n')
+    case "$rollback_candidate" in
+        "" | *[!0-9a-f]*)
+            rollback_revision=null
+            ;;
+        *)
+            if [ "${#rollback_candidate}" -eq 40 ]; then
+                rollback_revision=$(json_escape "$rollback_candidate")
+            fi
+            ;;
+    esac
+fi
+
+schema_version=$(ariadne_psql "$ARIADNE_DB_NAME" \
+    "SELECT value FROM schema_meta WHERE key = 'schema_version'" |
+    tr -d ' \t\r\n') || fail "schema version is unavailable"
+case "$schema_version" in
+    "" | *[!0-9]*) fail "schema version is unavailable" ;;
+esac
+
+candidates_json=
+while IFS=$'\t' read -r revision committed_at subject; do
+    [ -n "${revision:-}" ] || continue
+    require_sha "$revision" "trusted candidate revision is unavailable"
+    case "$committed_at" in
+        ????-??-??T??:??:??*) ;;
+        *) fail "trusted candidate timestamp is unavailable" ;;
+    esac
+
+    candidate=$(printf '{"revision":"%s","committedAt":%s,"subject":%s}' \
+        "$revision" "$(json_escape "$committed_at")" "$(json_escape "$subject")")
+    if [ -z "$candidates_json" ]; then
+        candidates_json=$candidate
+    else
+        candidates_json="$candidates_json,$candidate"
+    fi
+done < <(git -C "$ARIADNE_WORKTREE" log "$ARIADNE_TRUSTED_REF" --format='%H	%cI	%s' -n 20)
+
+printf '{"currentRevision":"%s","rollbackRevision":%s,"schemaVersion":%s,"candidates":[%s]}\n' \
+    "$current_revision" "$rollback_revision" "$schema_version" "$candidates_json"
