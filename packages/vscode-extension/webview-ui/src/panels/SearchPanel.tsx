@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import type { FormEvent } from 'react';
 import type { SearchResult } from '@host/messages';
 import type { AriadneBridge } from '../bridge';
@@ -42,10 +42,6 @@ export default function SearchPanel({ bridge, initialResults, onNavigate }: Sear
   const [allWorkspaces, setAllWorkspaces] = useState(false);
   const [results, setResults] = useState<SearchResult[]>(initialResults);
   const [status, setStatus] = useState<string | null>(null);
-
-  useEffect(() => {
-    setResults(initialResults);
-  }, [initialResults]);
 
   const groupedHits = useMemo(() => {
     const hits = flattenResults(results);

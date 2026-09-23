@@ -273,6 +273,20 @@ describe('UtilityPanels', () => {
     expect(screen.getByText('src/App.tsx')).toBeInTheDocument();
   });
 
+  it('keeps explicit search results when a host state update provides empty initial results', async () => {
+    const harness = createBridge();
+    const { rerender } = render(<SearchPanel bridge={harness} initialResults={[]} />);
+
+    await userEvent.type(screen.getByRole('textbox', { name: /search query/i }), 'panel');
+    await userEvent.click(screen.getByRole('button', { name: 'Search' }));
+    await screen.findByText('Use a thin panel wrapper');
+
+    rerender(<SearchPanel bridge={harness} initialResults={[]} />);
+
+    expect(screen.getByText('Use a thin panel wrapper')).toBeInTheDocument();
+    expect(screen.getByText('src/App.tsx')).toBeInTheDocument();
+  });
+
   it('invokes onNavigate with the matching hit when a search result is clicked', async () => {
     const harness = createBridge();
     const onNavigate = vi.fn();
