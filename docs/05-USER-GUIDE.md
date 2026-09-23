@@ -438,10 +438,9 @@ What to know:
   token and the configured `ADMIN_PUBLIC_ORIGIN` on every state change, and
   reject the sync bearer JWT outright. The sync CLI is unaffected.
 - **Operations dashboard:** after the configured nodem2 tunnel is active, open
-  `http://127.0.0.1:14300/admin`. The initial MVP shows system status, task
-  timelines and captured file snapshots/diffs, backups, service state, and
-  bounded redacted operation logs. Backup creation/verification and sync-server
-  restart require a fresh administrator password confirmation.
+  `http://127.0.0.1:14300/admin`. The complete eight-section console and its
+  current reauthentication/exact-confirmation rules are documented in
+  [§9.1 Operations console](#91-operations-console).
 - The JWT and profile metadata are stored locally at
   `~/.ariadne/sync-config.json` with owner-only (`0600`) permissions.
 
@@ -471,12 +470,13 @@ its own browser session and CSRF token, not the token used by `ariadne sync`.
 
 ### Guarded changes
 
-Backup creation and verification, service restart, deployment, rollback,
-restore, and file-capture deletion create durable operations. The console
-asks for the administrator password when its five-minute reauthentication
-window is stale. For destructive actions it also displays an exact
-confirmation phrase; type that phrase exactly. The server enforces both
-requirements, so client-side controls are not a substitute.
+All privileged mutations, including member changes, backup creation and
+verification, service restart, deployment, rollback, restore, and file-capture
+deletion, require a password reauthentication no more than five minutes old.
+Exact phrases are additionally required for `ACTIVATE`/`DEACTIVATE` member,
+`DELETE` capture, `RESTORE` backup, `RESTART` service, `DEPLOY`, and
+`ROLLBACK`. Backup creation and verification do not require an exact phrase.
+The server enforces these rules, so client-side controls are not a substitute.
 
 Wait for the operation's terminal `succeeded` or `failed` state and inspect
 the linked audit record after refresh or reconnect. Before restore, deploy,

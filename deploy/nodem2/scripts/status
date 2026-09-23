@@ -81,14 +81,17 @@ require_deployment_inputs
 
 sync_server_state=
 postgres_state=
+compose_status=$(ariadne_compose ps --format '{{.Service}} {{.State}}' sync-server postgres) ||
+    fail "service status is unavailable"
 while IFS=' ' read -r service state _rest; do
     case "$service" in
         sync-server) sync_server_state=${state:-} ;;
         postgres) postgres_state=${state:-} ;;
     esac
-done < <(ariadne_compose ps --format '{{.Service}} {{.State}}' sync-server postgres)
+done <<< "$compose_status"
 
+operator_status=$(operator_service_json) || fail "operator status is unavailable"
 printf '{"services":[%s,%s,%s]}\n' \
     "$(compose_service_json sync-server "$sync_server_state")" \
-    "$(operator_service_json)" \
+    "$operator_status" \
     "$(compose_service_json postgres "$postgres_state")"

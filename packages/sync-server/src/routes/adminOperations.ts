@@ -5,7 +5,12 @@ import type { Pool } from 'pg';
 import { z } from 'zod';
 import { requireSingletonAdmin } from '../adminAccess.js';
 import { ApiError, isPayloadTooLargeError } from '../errors.js';
-import { asyncHandler, type AuthenticatedRequest } from '../middleware.js';
+import {
+  asyncHandler,
+  createDatabaseUnavailableError,
+  isDatabaseError,
+  type AuthenticatedRequest,
+} from '../middleware.js';
 import {
   OperatorClientError,
   type OperatorClientErrorCode,
@@ -212,6 +217,14 @@ export function createAdminOperationsRouter(
         reason,
         error,
       });
+      if (isDatabaseError(error)) {
+        throw createDatabaseUnavailableError();
+      }
+      throw new ApiError(
+        503,
+        'operation_state_uncertain',
+        'The operator submission failed, but its durable operation state could not be recorded',
+      );
     }
   }
 

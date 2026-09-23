@@ -7,7 +7,7 @@ import path from 'node:path';
 import express, { type Express } from 'express';
 import type { Pool } from 'pg';
 import request from 'supertest';
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createApp } from '../src/app.js';
 import {
   handleUnexpectedError,
@@ -2600,6 +2600,7 @@ describe('sync-server: admin operator operations', () => {
     operatorClient: OperatorClient | null;
     heartbeatIntervalMs?: number;
     pollIntervalMs?: number;
+    maxStreamDurationMs?: number;
   }): Express {
     const testApp = express();
     testApp.use(express.json());
@@ -2678,6 +2679,7 @@ describe('sync-server: admin operator operations', () => {
         },
         heartbeatIntervalMs: options.heartbeatIntervalMs,
         pollIntervalMs: options.pollIntervalMs,
+        maxStreamDurationMs: options.maxStreamDurationMs,
       }),
     );
     testApp.use(handleUnexpectedError);
@@ -3252,6 +3254,63 @@ describe('sync-server: admin operator operations', () => {
     expect(res.body.error.code).toBe('operator_busy');
     const { operations } = await store.listOperations({ limit: 50 });
     expect(operations[0].state).toBe('failed');
+  });
+
+  it('surfaces failed-state persistence uncertainty instead of returning an ordinary operator error', async () => {
+    const transitionSpy = vi
+      .spyOn(store, 'transitionOperation')
+      .mockRejectedValueOnce(
+        Object.assign(new Error('database write failed'), {
+          code: '57P01',
+          severity: 'ERROR',
+        }),
+      );
+    const logSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const unconfiguredApp = buildAdminOperationsApp({ operatorClient: null });
+
+    const res = await request(unconfiguredApp)
+      .post('/api/v1/admin/operations/backups')
+      .set(adminAuth())
+      .send({});
+
+    expect(res.status).toBe(503);
+    expect(res.body.error).toEqual({
+      code: 'database_unavailable',
+      message: 'Database is unavailable',
+    });
+    expect(logSpy).toHaveBeenCalledWith(
+      'Failed to record operator submission failure',
+      expect.objectContaining({ reason: 'operator_unavailable' }),
+    );
+    const { operations } = await store.listOperations({ limit: 50 });
+    expect(operations).toHaveLength(1);
+    expect(operations[0].state).toBe('queued');
+
+    transitionSpy.mockRestore();
+    logSpy.mockRestore();
+  });
+
+  it('emits a timeout event before closing a long-lived nonterminal stream', async () => {
+    const created = await request(adminApp)
+      .post('/api/v1/admin/operations/backups')
+      .set(adminAuth())
+      .send({})
+      .expect(202);
+    const operationId = created.body.operation.id as string;
+    const streamingApp = buildAdminOperationsApp({
+      operatorClient: null,
+      heartbeatIntervalMs: 100,
+      pollIntervalMs: 100,
+      maxStreamDurationMs: 20,
+    });
+
+    const stream = await request(streamingApp)
+      .get(`/api/v1/admin/operations/${operationId}/events`)
+      .set(adminAuth())
+      .expect(200);
+
+    expect(stream.text).toContain('event: timeout');
+    expect(stream.text).toContain(`"operationId":"${operationId}"`);
   });
 
   it('streams persisted events plus a heartbeat and closes on a terminal state', async () => {

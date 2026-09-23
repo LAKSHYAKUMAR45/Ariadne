@@ -393,6 +393,58 @@ describe('Ariadne operations console', () => {
     expect(screen.getByText('queued')).toBeVisible();
   });
 
+  it('treats the server timeout event as a normal disconnect and polls persisted state', async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.enqueue(
+                new TextEncoder().encode(
+                  'event: timeout\ndata: {"operationId":"op-timeout"}\n\n',
+                ),
+              );
+              controller.close();
+            },
+          }),
+          {
+            status: 200,
+            headers: { 'Content-Type': 'text/event-stream; charset=utf-8' },
+          },
+        ),
+      ),
+    );
+    const api: AdminApiClient = {
+      get: vi.fn().mockResolvedValue({
+        operation: {
+          id: 'op-timeout',
+          requestedBy: 'admin-id',
+          type: 'backup_create',
+          state: 'running',
+          summary: 'Create database backup',
+          output: null,
+          startedAt: '2026-09-23T08:00:00.000Z',
+          completedAt: null,
+          createdAt: '2026-09-23T08:00:00.000Z',
+        },
+      }),
+      mutate: vi.fn(),
+      download: vi.fn(),
+    };
+
+    render(<OperationProgress api={api} operationId="op-timeout" />);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_000);
+    });
+
+    expect(api.get).toHaveBeenCalledTimes(1);
+    expect(screen.getByText('Live updates disconnected; polling persisted status.')).toBeVisible();
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  });
+
   it('keeps polling beyond five attempts until the persisted operation becomes terminal and exposes a stable anchor target', async () => {
     vi.useFakeTimers();
 

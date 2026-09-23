@@ -185,9 +185,14 @@ case "\${1:-}" in
     fi
     ;;
   log)
-    printf '%s' "\${FAKE_GIT_LOG_OUTPUT:-${'c'.repeat(40)}\t2026-09-23T10:20:00Z\tfeat: release candidate\\n}"
+    if [ "\${FAKE_GIT_LOG_OUTPUT+x}" = x ]; then
+      printf '%s' "$FAKE_GIT_LOG_OUTPUT"
+    else
+      printf '%s' "${'c'.repeat(40)}\t2026-09-23T10:20:00Z\tfeat: release candidate\\n"
+    fi
     ;;
 esac
+exit "\${FAKE_GIT_EXIT:-0}"
 `,
   );
 
@@ -497,6 +502,73 @@ describe('install script', () => {
       schemaVersion: 10,
       candidates: expect.any(Array),
     });
+  });
+
+  it('fails status when service probes fail while preserving legitimate stopped states', () => {
+    const harness = createHarness();
+    seedSecrets(harness);
+    seedKeys(harness);
+    seedDeploymentStatusInputs(harness);
+    expect(runScript(harness, 'install').status).toBe(0);
+
+    const composeFailure = runInstalledScript(harness, 'status', {
+      env: { FAKE_DOCKER_EXIT: '1' },
+    });
+    expect(composeFailure.status).not.toBe(0);
+    expect(output(composeFailure)).toContain('service status is unavailable');
+
+    const systemctlFailure = runInstalledScript(harness, 'status', {
+      env: {
+        FAKE_DOCKER_PS_OUTPUT: 'sync-server exited\npostgres running\n',
+        FAKE_SYSTEMCTL_EXIT: '1',
+      },
+    });
+    expect(systemctlFailure.status).not.toBe(0);
+    expect(output(systemctlFailure)).toContain('operator status is unavailable');
+
+    const stopped = runInstalledScript(harness, 'status', {
+      env: {
+        FAKE_DOCKER_PS_OUTPUT: 'sync-server exited\npostgres dead\n',
+        FAKE_SYSTEMCTL_SHOW_OUTPUT: 'inactive\ndead\nsuccess\n',
+      },
+    });
+    expect(stopped.status).toBe(0);
+    expect(JSON.parse(stopped.stdout)).toEqual({
+      services: [
+        { name: 'sync-server', state: 'stopped' },
+        { name: 'operator', state: 'stopped' },
+        { name: 'postgres', state: 'stopped' },
+      ],
+    });
+  });
+
+  it('fails deployment status when rollback state is malformed or the trusted source is unavailable', () => {
+    const harness = createHarness();
+    seedSecrets(harness);
+    seedKeys(harness);
+    seedDeploymentStatusInputs(harness);
+    expect(runScript(harness, 'install').status).toBe(0);
+
+    fs.writeFileSync(path.join(harness.stateDir, 'rollback-revision'), 'not-a-sha\n');
+    const malformedRollback = runInstalledScript(harness, 'deployment-status', {
+      env: { FAKE_DOCKER_PSQL_OUTPUT: '10\n' },
+    });
+    expect(malformedRollback.status).not.toBe(0);
+    expect(output(malformedRollback)).toContain('rollback revision is invalid');
+
+    fs.rmSync(path.join(harness.stateDir, 'rollback-revision'));
+    fs.writeFileSync(path.join(harness.stateDir, 'current-revision'), `${'a'.repeat(40)}\n`);
+    const sourceFailure = runInstalledScript(harness, 'deployment-status', {
+      env: { FAKE_GIT_EXIT: '1', FAKE_DOCKER_PSQL_OUTPUT: '10\n' },
+    });
+    expect(sourceFailure.status).not.toBe(0);
+    expect(output(sourceFailure)).toContain('trusted candidate revisions are unavailable');
+
+    const emptyCandidates = runInstalledScript(harness, 'deployment-status', {
+      env: { FAKE_GIT_LOG_OUTPUT: '', FAKE_DOCKER_PSQL_OUTPUT: '10\n' },
+    });
+    expect(emptyCandidates.status).toBe(0);
+    expect(JSON.parse(emptyCandidates.stdout)).toMatchObject({ candidates: [] });
   });
 
   it('generates one encryption key when none exists and never prints key bytes', () => {

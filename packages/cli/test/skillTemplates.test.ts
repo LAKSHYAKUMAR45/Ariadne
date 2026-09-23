@@ -105,8 +105,12 @@ describe('generateAriadneSkillAndAgent', () => {
     expect(skill).toContain('http://127.0.0.1:14300/admin');
     expect(skill).toContain('ariadne sync setup');
     expect(skill).toMatch(
-      /backup, restore, service restart, deployment,\s+rollback, and file-capture deletion/,
+      /All privileged mutations require fresh password reauthentication within five\s+minutes/,
     );
+    expect(skill).toMatch(
+      /ACTIVATE\/DEACTIVATE member,\s+DELETE capture,\s+RESTORE backup,\s+RESTART service, DEPLOY, and ROLLBACK/,
+    );
+    expect(skill).toMatch(/Backup creation and verification do not use an exact phrase/);
     expect(skill).toMatch(/fresh safety backup before changing\s+production state/);
     expect(skill).toContain('Never display passwords, secrets, tokens, or private keys');
     expect(skill).toContain('Never use arbitrary shell commands');
@@ -114,8 +118,9 @@ describe('generateAriadneSkillAndAgent', () => {
     expect(agent).toContain('Never display passwords, secrets, tokens, or private keys');
     expect(agent).toContain('Never use arbitrary shell commands');
     expect(agent).toMatch(
-      /backup, restore, service restart, deployment,\s+rollback, and file-capture deletion/,
+      /ACTIVATE\/DEACTIVATE member,\s+DELETE capture,\s+RESTORE backup,\s+RESTART service, DEPLOY, and ROLLBACK/,
     );
+    expect(agent).toMatch(/Backup creation and\s+verification do not use an exact phrase/);
   });
 
   it('template builders produce non-empty, well-formed markdown', () => {

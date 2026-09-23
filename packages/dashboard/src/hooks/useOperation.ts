@@ -280,6 +280,20 @@ export function useOperation({
               return;
             }
 
+            if (parsed.event === 'timeout') {
+              if (
+                typeof eventData !== 'object' ||
+                eventData === null ||
+                !('operationId' in eventData) ||
+                eventData.operationId !== activeOperationId
+              ) {
+                await failInvalidResponse();
+              }
+              setLive(false);
+              void poll(INITIAL_POLL_INTERVAL_MS);
+              return;
+            }
+
             await failInvalidResponse();
           }
         }

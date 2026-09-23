@@ -113,10 +113,10 @@ ariadne sync pull [--import-new]
 - The console has **Overview**, **Members**, **Tasks**, **Backups**,
   **Services**, **Deployments**, **Logs**, and **Audit** sections. Use it for
   operational reads and approved changes rather than reaching into the host.
-- The guarded operations are backup, restore, service restart, deployment,
-  rollback, and file-capture deletion. The server requires the administrator's
-  password to be freshly reauthenticated within five minutes, plus the exact
-  confirmation phrase shown by the console, for every guarded operation.
+- All privileged mutations require fresh password reauthentication within five
+  minutes. Exact confirmation phrases apply to ACTIVATE/DEACTIVATE member,
+  DELETE capture, RESTORE backup, RESTART service, DEPLOY, and ROLLBACK.
+  Backup creation and verification do not use an exact phrase.
 - Verify a backup before restoring it. The tracked restore, deploy, and
   rollback workflows create and verify a fresh safety backup before changing
   production state; wait for their durable operation result and audit event
