@@ -74,6 +74,10 @@ ariadne_require_backup_inputs
 ariadne_require_backup_set "$ARIADNE_BACKUP_BASE"
 DUMP="$ARIADNE_BACKUP_DIR/$REQUESTED"
 
+# Identity first: a restore that fails part-way must still be attributable to
+# the backup it was asked to restore.
+ariadne_write_backup_result "$ARIADNE_BACKUP_BASE"
+
 log "validating $REQUESTED"
 ariadne_checksum_matches "$ARIADNE_BACKUP_BASE" ||
     fail "checksum mismatch for $REQUESTED; nothing was changed"
@@ -147,21 +151,12 @@ log "running migrations"
 ariadne_compose run --rm --no-deps migrate || fail "migrations failed after the restore"
 
 log "verifying health endpoint"
-attempt=1
-healthy=0
-while [ "$attempt" -le "$ARIADNE_HEALTH_ATTEMPTS" ]; do
-    if curl -fsS --max-time 5 -o /dev/null "$ARIADNE_HEALTH_URL"; then
-        healthy=1
-        break
-    fi
-    attempt=$((attempt + 1))
-    if [ "$ARIADNE_HEALTH_INTERVAL" -gt 0 ]; then
-        sleep "$ARIADNE_HEALTH_INTERVAL"
-    fi
-done
-[ "$healthy" -eq 1 ] || fail "the application did not become healthy after the restore"
+ariadne_wait_for_health || fail "the application did not become healthy after the restore"
 
 APP_STOPPED=0
+ariadne_write_backup_result "$ARIADNE_BACKUP_BASE" \
+    "restored; previous database retained under a timestamped name"
+
 log "restore of $REQUESTED complete"
 log "previous database retained as $RETIRED_DB"
 log "safety backup basename: $SAFETY_BACKUP.dump"

@@ -118,18 +118,10 @@ SYNC_SERVER_IMAGE="$CANDIDATE_IMAGE" ariadne_compose up -d --no-deps sync-server
     fail "candidate sync-server failed to start"
 
 log "verifying health endpoint"
-attempt=1
 healthy=0
-while [ "$attempt" -le "$ARIADNE_HEALTH_ATTEMPTS" ]; do
-    if curl -fsS --max-time 5 -o /dev/null "$ARIADNE_HEALTH_URL"; then
-        healthy=1
-        break
-    fi
-    attempt=$((attempt + 1))
-    if [ "$ARIADNE_HEALTH_INTERVAL" -gt 0 ]; then
-        sleep "$ARIADNE_HEALTH_INTERVAL"
-    fi
-done
+if ariadne_wait_for_health; then
+    healthy=1
+fi
 
 if [ "$healthy" -ne 1 ]; then
     if [ -z "$PREVIOUS_IMAGE" ]; then

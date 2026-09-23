@@ -10,12 +10,15 @@ import type { OperatorEventSink } from './executor.js';
 export {
   createOperatorExecutor,
   takeUtf8Tail,
+  BACKUP_RESULT_ENV_VAR,
   DEFAULT_DRAIN_GRACE_MS,
   DEFAULT_OUTPUT_TAIL_BYTES,
+  MAX_BACKUP_RESULT_BYTES,
   PROCESS_GROUPS_SUPPORTED,
 } from './executor.js';
 export type {
   KillImplementation,
+  OperatorBackupResult,
   OperatorEventSink,
   OperatorExecutor,
   OperatorProgressEvent,
@@ -36,6 +39,9 @@ export { parseOperatorRequest, type OperatorAccepted, type OperatorRequest } fro
 export {
   CALLBACK_TOKEN_BYTES,
   CALLBACK_TOKEN_HEADER,
+  DEFAULT_CALLBACK_MAX_ATTEMPTS,
+  DEFAULT_CALLBACK_RETRY_BASE_DELAY_MS,
+  DEFAULT_CALLBACK_RETRY_MAX_DELAY_MS,
   DEFAULT_CALLBACK_TOKEN_PATH,
   MAX_CALLBACK_REQUEST_BODY_BYTES,
   MAX_OPERATOR_REQUEST_BODY_BYTES,

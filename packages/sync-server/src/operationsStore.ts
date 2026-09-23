@@ -77,6 +77,12 @@ export interface TransitionAdminOperationInput {
   metadata?: JsonObject;
   output?: string | null;
   occurredAt?: string;
+  /**
+   * Backup artifact described by a terminal operator result. Written inside
+   * the same transaction as the state change, so an operation can never be
+   * recorded terminal without the backup row it reported (or vice versa).
+   */
+  backupRecord?: UpsertBackupRecordInput;
 }
 
 export interface RecordAdminAuditEventInput {
@@ -452,6 +458,61 @@ async function insertAuditEvent(
   return mapAuditEvent(rows[0]);
 }
 
+/**
+ * Upserts one backup artifact row.
+ *
+ * A backup is identified by its filename, and later reports about it (a
+ * verification, a restore) only ever refine what is already recorded. So the
+ * creation timestamp of an existing row is never rewritten, and an earlier
+ * successful verification timestamp is kept unless the caller supplies a newer
+ * one: those are historical facts about the artifact. The status and the
+ * human-readable message always describe the *latest* report, so both are
+ * replaced — a stale "verified cleanly" note must never survive a failure.
+ */
+async function upsertBackupRecordRow(
+  client: PoolClient,
+  input: UpsertBackupRecordInput,
+): Promise<BackupRecord> {
+  const { rows } = await client.query<BackupRecordRow>(
+    `INSERT INTO backup_records (
+       filename,
+       sha256,
+       size_bytes,
+       status,
+       created_at,
+       verified_at,
+       restore_verification_message
+     )
+     VALUES ($1, $2, $3, $4, $5::timestamptz, $6::timestamptz, $7)
+     ON CONFLICT (filename) DO UPDATE
+     SET
+       sha256 = EXCLUDED.sha256,
+       size_bytes = EXCLUDED.size_bytes,
+       status = EXCLUDED.status,
+       created_at = backup_records.created_at,
+       verified_at = COALESCE(EXCLUDED.verified_at, backup_records.verified_at),
+       restore_verification_message = EXCLUDED.restore_verification_message
+     RETURNING
+       filename,
+       sha256,
+       size_bytes,
+       status,
+       created_at,
+       verified_at,
+       restore_verification_message`,
+    [
+      input.filename,
+      input.sha256,
+      input.sizeBytes,
+      input.status,
+      input.createdAt,
+      input.verifiedAt ?? null,
+      input.restoreVerificationMessage ?? null,
+    ],
+  );
+  return mapBackupRecord(rows[0]);
+}
+
 export function createOperationsStore(pool: Pool): OperationsStore {
   return {
     async createOperation(input: CreateAdminOperationInput): Promise<AdminOperation> {
@@ -623,6 +684,10 @@ export function createOperationsStore(pool: Pool): OperationsStore {
           createdAt: occurredAt,
         });
 
+        if (input.backupRecord) {
+          await upsertBackupRecordRow(client, input.backupRecord);
+        }
+
         return mapOperation(rows[0]);
       });
     },
@@ -668,44 +733,12 @@ export function createOperationsStore(pool: Pool): OperationsStore {
     },
 
     async upsertBackupRecord(input: UpsertBackupRecordInput): Promise<BackupRecord> {
-      const { rows } = await pool.query<BackupRecordRow>(
-        `INSERT INTO backup_records (
-           filename,
-           sha256,
-           size_bytes,
-           status,
-           created_at,
-           verified_at,
-           restore_verification_message
-         )
-         VALUES ($1, $2, $3, $4, $5::timestamptz, $6::timestamptz, $7)
-         ON CONFLICT (filename) DO UPDATE
-         SET
-           sha256 = EXCLUDED.sha256,
-           size_bytes = EXCLUDED.size_bytes,
-           status = EXCLUDED.status,
-           created_at = EXCLUDED.created_at,
-           verified_at = EXCLUDED.verified_at,
-           restore_verification_message = EXCLUDED.restore_verification_message
-         RETURNING
-           filename,
-           sha256,
-           size_bytes,
-           status,
-           created_at,
-           verified_at,
-           restore_verification_message`,
-        [
-          input.filename,
-          input.sha256,
-          input.sizeBytes,
-          input.status,
-          input.createdAt,
-          input.verifiedAt ?? null,
-          input.restoreVerificationMessage ?? null,
-        ],
-      );
-      return mapBackupRecord(rows[0]);
+      const client = await pool.connect();
+      try {
+        return await upsertBackupRecordRow(client, input);
+      } finally {
+        client.release();
+      }
     },
 
     async listBackupRecords(limit = 50): Promise<BackupRecord[]> {

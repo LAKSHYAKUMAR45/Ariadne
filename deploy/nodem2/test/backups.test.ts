@@ -1019,6 +1019,150 @@ describe('prune-backups script', () => {
   });
 });
 
+describe('backup result metadata channel', () => {
+  interface BackupResult {
+    filename: string;
+    sha256: string;
+    sizeBytes: number;
+    createdAt: string;
+    message?: string;
+  }
+
+  function resultPath(harness: Harness): string {
+    return path.join(harness.root, 'result.json');
+  }
+
+  function readResult(harness: Harness): BackupResult {
+    return JSON.parse(fs.readFileSync(resultPath(harness), 'utf8')) as BackupResult;
+  }
+
+  function expectedDigest(harness: Harness, base: string): string {
+    return crypto
+      .createHash('sha256')
+      .update(fs.readFileSync(path.join(harness.backupDir, `${base}.dump`)))
+      .digest('hex');
+  }
+
+  it('describes a published backup with facts taken from its own sidecars', () => {
+    const harness = createHarness();
+    const result = runScript(harness, 'backup', {
+      env: { ARIADNE_RESULT_FILE: resultPath(harness) },
+    });
+
+    expect(result.status).toBe(0);
+    const base = `ariadne-${NOW_STAMP}`;
+    const described = readResult(harness);
+
+    expect(described.filename).toBe(`${base}.dump`);
+    expect(described.sha256).toBe(expectedDigest(harness, base));
+    expect(described.sizeBytes).toBe(
+      fs.statSync(path.join(harness.backupDir, `${base}.dump`)).size,
+    );
+    expect(described.createdAt).toBe('2026-04-01T02:15:00Z');
+    expect(mode(resultPath(harness))).toBe(0o600);
+  });
+
+  it('leaves no result file behind when a backup is never published', () => {
+    const harness = createHarness();
+    const result = runScript(harness, 'backup', {
+      env: { ARIADNE_RESULT_FILE: resultPath(harness), FAKE_DOCKER_FAIL: 'pg_dump' },
+    });
+
+    expect(result.status).not.toBe(0);
+    expect(fs.existsSync(resultPath(harness))).toBe(false);
+  });
+
+  it('describes a verified backup, including on the failure path', () => {
+    const harness = createHarness();
+    const base = seedBackup(harness, '20260331T010000Z');
+
+    const verified = runScript(harness, 'verify-backup', {
+      args: [`${base}.dump`],
+      env: { ARIADNE_RESULT_FILE: resultPath(harness) },
+    });
+    expect(verified.status).toBe(0);
+    const success = readResult(harness);
+    expect(success).toMatchObject({
+      filename: `${base}.dump`,
+      sha256: expectedDigest(harness, base),
+      createdAt: '2026-03-31T01:00:00Z',
+    });
+    expect(success.message).toContain('tables');
+
+    // A corrupted archive must still identify which backup failed.
+    fs.writeFileSync(path.join(harness.backupDir, `${base}.dump`), 'tampered\n', { mode: 0o600 });
+    fs.rmSync(resultPath(harness));
+    const failed = runScript(harness, 'verify-backup', {
+      args: [`${base}.dump`],
+      env: { ARIADNE_RESULT_FILE: resultPath(harness) },
+    });
+
+    expect(failed.status).not.toBe(0);
+    expect(readResult(harness).filename).toBe(`${base}.dump`);
+  });
+
+  it('describes the restored backup on both the success and failure paths', () => {
+    const harness = createHarness();
+    const base = seedBackup(harness, '20260330T040000Z');
+
+    const restored = runScript(harness, 'restore-backup', {
+      args: [`${base}.dump`],
+      env: {
+        ARIADNE_RESTORE_CONFIRM: `${base}.dump`,
+        ARIADNE_RESULT_FILE: resultPath(harness),
+      },
+    });
+    expect(restored.status).toBe(0);
+    const success = readResult(harness);
+    expect(success.filename).toBe(`${base}.dump`);
+    expect(success.message).toContain('restored');
+
+    fs.rmSync(resultPath(harness));
+    const failed = runScript(harness, 'restore-backup', {
+      args: [`${base}.dump`],
+      env: {
+        ARIADNE_RESTORE_CONFIRM: `${base}.dump`,
+        ARIADNE_RESULT_FILE: resultPath(harness),
+        FAKE_DOCKER_FAIL: 'stop sync-server',
+      },
+    });
+
+    expect(failed.status).not.toBe(0);
+    expect(readResult(harness).filename).toBe(`${base}.dump`);
+  });
+
+  it('never writes secrets, key material, or archive bytes into the result file', () => {
+    const harness = createHarness();
+    expect(
+      runScript(harness, 'backup', { env: { ARIADNE_RESULT_FILE: resultPath(harness) } }).status,
+    ).toBe(0);
+
+    const text = fs.readFileSync(resultPath(harness), 'utf8');
+    expect(text).not.toContain(JWT_SECRET_VALUE);
+    expect(text).not.toContain(POSTGRES_PASSWORD_VALUE);
+    expect(text).not.toContain(KEY_MATERIAL_VALUE);
+    expect(text).not.toContain('PGDMP');
+    expect(text).not.toContain(harness.backupDir);
+    expect(Buffer.byteLength(text, 'utf8')).toBeLessThanOrEqual(1024);
+  });
+
+  it('refuses a relative result path instead of writing outside the operator runtime', () => {
+    const harness = createHarness();
+    const result = runScript(harness, 'backup', {
+      env: { ARIADNE_RESULT_FILE: 'result.json' },
+    });
+
+    expect(result.status).not.toBe(0);
+    expect(output(result)).toContain('ARIADNE_RESULT_FILE');
+  });
+
+  it('keeps the scripts working when no result channel is configured', () => {
+    const harness = createHarness();
+    expect(runScript(harness, 'backup').status).toBe(0);
+    expect(listBackupDir(harness)).toContain(`ariadne-${NOW_STAMP}.dump`);
+  });
+});
+
 describe('backup scripts hygiene', () => {
   it('are executable POSIX shell scripts that fail fast', () => {
     for (const script of ['backup', 'restore-backup', 'verify-backup', 'prune-backups']) {

@@ -768,13 +768,20 @@ describe('operator callback channel', () => {
     status: number;
     /** Per-request status override, for exercising the 413 retry path. */
     statusFor?(recorded: RecordedCallback): number;
+    /** Destroys this many connections before answering, modelling a restart. */
+    destroyNextRequests: number;
   }
 
   async function startCallbackSink(): Promise<CallbackSink> {
     const received: RecordedCallback[] = [];
-    const sink: Partial<CallbackSink> & { received: RecordedCallback[]; status: number } = {
+    const sink: Partial<CallbackSink> & {
+      received: RecordedCallback[];
+      status: number;
+      destroyNextRequests: number;
+    } = {
       received,
       status: 200,
+      destroyNextRequests: 0,
     };
 
     const server = http.createServer((req, res) => {
@@ -795,6 +802,12 @@ describe('operator callback channel', () => {
           body: parsed,
           byteLength: Buffer.byteLength(text, 'utf8'),
         };
+        if (sink.destroyNextRequests > 0) {
+          sink.destroyNextRequests -= 1;
+          req.destroy();
+          res.destroy();
+          return;
+        }
         received.push(recorded);
         res.statusCode = sink.statusFor?.(recorded) ?? sink.status;
         res.setHeader('content-type', 'application/json');
@@ -1032,6 +1045,8 @@ describe('operator callback channel', () => {
     const reporter = createCallbackReporter({
       callbackUrl: sink.baseUrl,
       token,
+      maxAttempts: 2,
+      retryBaseDelayMs: 0,
       onError: (error) => errors.push(error),
     });
 
@@ -1043,6 +1058,220 @@ describe('operator callback channel', () => {
     for (const error of errors) {
       expect(error.message).not.toContain(token);
     }
+  });
+
+  it('retries a dropped connection until the terminal report is delivered', async () => {
+    const sink = await startCallbackSink();
+    sink.destroyNextRequests = 2;
+    const errors: Error[] = [];
+    const reporter = createCallbackReporter({
+      callbackUrl: sink.baseUrl,
+      token: '1'.repeat(64),
+      maxAttempts: 4,
+      retryBaseDelayMs: 0,
+      onError: (error) => errors.push(error),
+    });
+
+    await reporter.onResult?.({
+      operationId: 'op-retry-transport',
+      success: true,
+      output: 'done\n',
+      exitCode: 0,
+      signal: null,
+      truncated: false,
+    });
+
+    // Both dropped attempts were retried, and each state was ultimately
+    // delivered exactly once.
+    expect(sink.received.map((entry) => (entry.body as { state: string }).state)).toEqual([
+      'running',
+      'succeeded',
+    ]);
+    expect(errors.length).toBe(2);
+  });
+
+  it('retries a 5xx rejection and then reports the same terminal state once', async () => {
+    const sink = await startCallbackSink();
+    let terminalAttempts = 0;
+    sink.statusFor = (recorded) => {
+      const body = recorded.body as { state?: string };
+      if (body.state === 'running') {
+        return 200;
+      }
+      terminalAttempts += 1;
+      return terminalAttempts === 1 ? 503 : 200;
+    };
+    const reporter = createCallbackReporter({
+      callbackUrl: sink.baseUrl,
+      token: '2'.repeat(64),
+      maxAttempts: 4,
+      retryBaseDelayMs: 0,
+    });
+
+    await reporter.onResult?.({
+      operationId: 'op-retry-503',
+      success: false,
+      output: 'boom\n',
+      exitCode: 2,
+      signal: null,
+      truncated: false,
+    });
+
+    expect(terminalAttempts).toBe(2);
+    const terminalStates = sink.received
+      .map((entry) => (entry.body as { state: string }).state)
+      .filter((state) => state !== 'running');
+    expect(terminalStates).toEqual(['failed', 'failed']);
+  });
+
+  it('never retries a rejection the web tier will keep refusing', async () => {
+    const sink = await startCallbackSink();
+    sink.status = 400;
+    const errors: Error[] = [];
+    const reporter = createCallbackReporter({
+      callbackUrl: sink.baseUrl,
+      token: '3'.repeat(64),
+      maxAttempts: 5,
+      retryBaseDelayMs: 0,
+      onError: (error) => errors.push(error),
+    });
+
+    await reporter.onResult?.({
+      operationId: 'op-no-retry-400',
+      success: true,
+      output: '',
+      exitCode: 0,
+      signal: null,
+      truncated: false,
+    });
+
+    // One running attempt and one terminal attempt: neither is repeated.
+    expect(sink.received).toHaveLength(2);
+    expect(errors).toHaveLength(2);
+  });
+
+  it('gives up after the configured attempts without leaking the token', async () => {
+    const sink = await startCallbackSink();
+    sink.status = 503;
+    const token = '4'.repeat(64);
+    const errors: Error[] = [];
+    const reporter = createCallbackReporter({
+      callbackUrl: sink.baseUrl,
+      token,
+      maxAttempts: 3,
+      retryBaseDelayMs: 0,
+      onError: (error) => errors.push(error),
+    });
+
+    await expect(
+      reporter.onResult?.({
+        operationId: 'op-retry-exhausted',
+        success: true,
+        output: 'secret-free\n',
+        exitCode: 0,
+        signal: null,
+        truncated: false,
+      }),
+    ).resolves.toBeUndefined();
+
+    // Three bounded attempts for the running report and three for the result.
+    expect(sink.received).toHaveLength(6);
+    expect(errors).toHaveLength(6);
+    for (const error of errors) {
+      expect(error.message).not.toContain(token);
+      expect(error.message).not.toContain(sink.baseUrl);
+    }
+  });
+
+  it('applies bounded exponential backoff between attempts', async () => {
+    const sink = await startCallbackSink();
+    sink.status = 500;
+    const delays: number[] = [];
+    const reporter = createCallbackReporter({
+      callbackUrl: sink.baseUrl,
+      token: '5'.repeat(64),
+      maxAttempts: 5,
+      retryBaseDelayMs: 10,
+      retryMaxDelayMs: 25,
+      sleepImpl: async (delayMs) => {
+        delays.push(delayMs);
+      },
+    });
+
+    await reporter.onProgress?.({ operationId: 'op-backoff', stream: 'stdout', chunk: 'x' });
+
+    expect(delays).toEqual([10, 20, 25, 25]);
+  });
+
+  it('reports the validated backup description with a terminal result', async () => {
+    const sink = await startCallbackSink();
+    const reporter = createCallbackReporter({
+      callbackUrl: sink.baseUrl,
+      token: '6'.repeat(64),
+    });
+
+    await reporter.onResult?.({
+      operationId: 'op-backup-result',
+      success: true,
+      output: 'published\n',
+      exitCode: 0,
+      signal: null,
+      truncated: false,
+      backup: {
+        filename: 'ariadne-20260401T021500Z.dump',
+        sha256: 'a'.repeat(64),
+        sizeBytes: 4096,
+        createdAt: '2026-04-01T02:15:00Z',
+        message: 'backup published and checksummed',
+      },
+    });
+
+    expect(sink.received[1].body).toMatchObject({
+      state: 'succeeded',
+      backup: {
+        filename: 'ariadne-20260401T021500Z.dump',
+        sha256: 'a'.repeat(64),
+        sizeBytes: 4096,
+        createdAt: '2026-04-01T02:15:00Z',
+      },
+    });
+    // The running report carries no backup description.
+    expect(sink.received[0].body).not.toHaveProperty('backup');
+  });
+
+  it('keeps the backup description when the output has to be dropped for size', async () => {
+    const sink = await startCallbackSink();
+    sink.statusFor = (recorded) => {
+      const body = recorded.body as { state?: string; output?: unknown };
+      return body.state !== 'running' && typeof body.output === 'string' ? 413 : 200;
+    };
+    const reporter = createCallbackReporter({
+      callbackUrl: sink.baseUrl,
+      token: '7'.repeat(64),
+      retryBaseDelayMs: 0,
+    });
+
+    await reporter.onResult?.({
+      operationId: 'op-backup-413',
+      success: true,
+      output: 'x'.repeat(4096),
+      exitCode: 0,
+      signal: null,
+      truncated: true,
+      backup: {
+        filename: 'ariadne-20260401T021500Z.dump',
+        sha256: 'b'.repeat(64),
+        sizeBytes: 10,
+        createdAt: '2026-04-01T02:15:00Z',
+      },
+    });
+
+    const last = sink.received[sink.received.length - 1];
+    expect(last.body).toMatchObject({
+      state: 'succeeded',
+      output: null,
+      backup: { filename: 'ariadne-20260401T021500Z.dump' },
+    });
   });
 
   it('is disabled when no callback destination is configured', () => {

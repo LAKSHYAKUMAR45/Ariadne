@@ -341,6 +341,123 @@ line-two-private-key
     expect(operations.map((operation) => operation.id)).toEqual(['op-list-2', 'op-list-1']);
   });
 
+  it('writes a backup record in the same transaction as its terminal transition', async () => {
+    await store.createOperation({
+      id: 'op-backup-record',
+      requestedBy: adminUserId,
+      type: 'backup_create',
+      summary: 'Create database backup',
+      source: 'admin_api',
+    });
+    await store.transitionOperation({
+      id: 'op-backup-record',
+      nextState: 'running',
+      source: 'operator_callback',
+    });
+    await store.transitionOperation({
+      id: 'op-backup-record',
+      nextState: 'succeeded',
+      source: 'operator_callback',
+      output: 'published backup',
+      backupRecord: {
+        filename: 'ariadne-20260921T060000Z.dump',
+        sha256: 'c'.repeat(64),
+        sizeBytes: 2048,
+        status: 'created',
+        createdAt: '2026-09-21T06:00:00.000Z',
+      },
+    });
+
+    expect(await store.listBackupRecords()).toEqual([
+      {
+        filename: 'ariadne-20260921T060000Z.dump',
+        sha256: 'c'.repeat(64),
+        sizeBytes: 2048,
+        status: 'created',
+        createdAt: '2026-09-21T06:00:00.000Z',
+        verifiedAt: null,
+        restoreVerificationMessage: null,
+      },
+    ]);
+  });
+
+  it('records no backup row when the transition itself is rejected', async () => {
+    await store.createOperation({
+      id: 'op-backup-illegal',
+      requestedBy: adminUserId,
+      type: 'backup_verify',
+      summary: 'Verify backup',
+      source: 'admin_api',
+    });
+    await store.transitionOperation({
+      id: 'op-backup-illegal',
+      nextState: 'running',
+      source: 'operator_callback',
+    });
+    await store.transitionOperation({
+      id: 'op-backup-illegal',
+      nextState: 'succeeded',
+      source: 'operator_callback',
+    });
+
+    await expect(
+      store.transitionOperation({
+        id: 'op-backup-illegal',
+        nextState: 'failed',
+        source: 'operator_callback',
+        backupRecord: {
+          filename: 'ariadne-20260921T070000Z.dump',
+          sha256: 'd'.repeat(64),
+          sizeBytes: 64,
+          status: 'verify_failed',
+          createdAt: '2026-09-21T07:00:00.000Z',
+        },
+      }),
+    ).rejects.toBeInstanceOf(OperationTransitionError);
+
+    expect(await store.listBackupRecords()).toEqual([]);
+  });
+
+  it('keeps the original creation and verification facts across later updates', async () => {
+    await store.upsertBackupRecord({
+      filename: 'ariadne-20260921T080000Z.dump',
+      sha256: 'e'.repeat(64),
+      sizeBytes: 512,
+      status: 'created',
+      createdAt: '2026-09-21T08:00:00.000Z',
+    });
+    await store.upsertBackupRecord({
+      filename: 'ariadne-20260921T080000Z.dump',
+      sha256: 'e'.repeat(64),
+      sizeBytes: 512,
+      status: 'verified',
+      createdAt: '2026-09-21T08:00:00.000Z',
+      verifiedAt: '2026-09-21T08:05:00.000Z',
+      restoreVerificationMessage: 'verified: schema 0008, 12 tables',
+    });
+    // A later failure must not rewrite when the backup was made, nor erase
+    // the fact that it once verified cleanly.
+    await store.upsertBackupRecord({
+      filename: 'ariadne-20260921T080000Z.dump',
+      sha256: 'e'.repeat(64),
+      sizeBytes: 512,
+      status: 'verify_failed',
+      createdAt: '2026-09-25T00:00:00.000Z',
+    });
+
+    expect(await store.listBackupRecords()).toEqual([
+      {
+        filename: 'ariadne-20260921T080000Z.dump',
+        sha256: 'e'.repeat(64),
+        sizeBytes: 512,
+        status: 'verify_failed',
+        createdAt: '2026-09-21T08:00:00.000Z',
+        verifiedAt: '2026-09-21T08:05:00.000Z',
+        restoreVerificationMessage: null,
+      },
+    ]);
+  });
+
   it('stores immutable audit rows and upserts backup metadata records', async () => {
     await store.recordAuditEvent({
       actorUserId: null,

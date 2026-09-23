@@ -12,4 +12,13 @@ SCRIPT_DIR=$(unset CDPATH; cd -- "$(dirname -- "$0")" && pwd)
 require_file "$ARIADNE_COMPOSE_ENV_FILE"
 require_file "$ARIADNE_COMPOSE_FILE"
 
-ariadne_compose restart sync-server
+ariadne_compose restart sync-server || fail "failed to restart sync-server"
+
+# The restart is only complete once the service answers again: the operator
+# reports this operation terminal as soon as this script exits, and its
+# callback endpoint is served by the process being restarted.
+log "waiting for sync-server to become healthy"
+ariadne_wait_for_health ||
+    fail "sync-server did not become healthy within $ARIADNE_HEALTH_ATTEMPTS attempts after the restart"
+
+log "sync-server is healthy"

@@ -12,6 +12,7 @@ import {
 import {
   createOperatorExecutor,
   takeUtf8Tail,
+  type OperatorBackupResult,
   type OperatorEventSink,
   type OperatorExecutor,
   type OperatorProgressEvent,
@@ -38,6 +39,21 @@ export const CALLBACK_TOKEN_HEADER = 'x-ariadne-operator-token';
 export const CALLBACK_TOKEN_BYTES = 32;
 export const CALLBACK_TOKEN_MODE = 0o640;
 export const DEFAULT_CALLBACK_TIMEOUT_MS = 10 * 1000;
+
+/**
+ * Bounded redelivery for result reports.
+ *
+ * A restarted (or still-starting) web tier refuses connections for a short
+ * while, and the service restart operations *cause* exactly that outage while
+ * their own result is being reported. Without redelivery a completed
+ * privileged action would be stranded in `running` forever, so transport
+ * failures and 5xx rejections are retried with exponential backoff. Rejections
+ * the web tier will keep refusing (4xx) are never retried — apart from the
+ * 413 degradation below, which retries a different, smaller body.
+ */
+export const DEFAULT_CALLBACK_MAX_ATTEMPTS = 5;
+export const DEFAULT_CALLBACK_RETRY_BASE_DELAY_MS = 500;
+export const DEFAULT_CALLBACK_RETRY_MAX_DELAY_MS = 8 * 1000;
 
 /**
  * Hard ceiling on the serialized body of a single callback request.
@@ -375,6 +391,12 @@ export interface CreateCallbackReporterOptions {
   requestTimeoutMs?: number;
   /** Overridable only so tests can exercise the degradation path cheaply. */
   maxRequestBodyBytes?: number;
+  /** Total delivery attempts per report, including the first. */
+  maxAttempts?: number;
+  retryBaseDelayMs?: number;
+  retryMaxDelayMs?: number;
+  /** Injection point so tests need not wait out the backoff. */
+  sleepImpl?(delayMs: number): Promise<void>;
   onError?(error: Error): void;
 }
 
@@ -388,6 +410,8 @@ interface CallbackPayload {
   message: string;
   output?: string | null;
   metadata?: CallbackMetadata;
+  /** Present only on a terminal report for a backup operation. */
+  backup?: OperatorBackupResult;
 }
 
 /** Non-2xx callback response, carrying the status so 413 can be handled. */
@@ -473,7 +497,34 @@ export function createCallbackReporter(
   const callbackUrl = options.callbackUrl.replace(/\/+$/, '');
   const requestTimeoutMs = options.requestTimeoutMs ?? DEFAULT_CALLBACK_TIMEOUT_MS;
   const maxRequestBodyBytes = options.maxRequestBodyBytes ?? MAX_CALLBACK_REQUEST_BODY_BYTES;
+  const maxAttempts = Math.max(1, options.maxAttempts ?? DEFAULT_CALLBACK_MAX_ATTEMPTS);
+  const retryBaseDelayMs = Math.max(
+    0,
+    options.retryBaseDelayMs ?? DEFAULT_CALLBACK_RETRY_BASE_DELAY_MS,
+  );
+  const retryMaxDelayMs = Math.max(
+    retryBaseDelayMs,
+    options.retryMaxDelayMs ?? DEFAULT_CALLBACK_RETRY_MAX_DELAY_MS,
+  );
+  const sleep =
+    options.sleepImpl ??
+    ((delayMs: number) =>
+      new Promise<void>((resolve) => {
+        setTimeout(resolve, delayMs).unref?.();
+      }));
   const started = new Set<string>();
+
+  /** Only failures that a later attempt could plausibly survive are retried. */
+  function isRetryable(error: Error): boolean {
+    if (error instanceof CallbackRejectedError) {
+      return error.statusCode >= 500;
+    }
+    return true;
+  }
+
+  function delayForAttempt(attempt: number): number {
+    return Math.min(retryBaseDelayMs * 2 ** (attempt - 1), retryMaxDelayMs);
+  }
 
   async function post(payload: CallbackPayload): Promise<void> {
     const target = new URL(`${callbackUrl}/${encodeURIComponent(payload.operationId)}/callback`);
@@ -538,13 +589,20 @@ export function createCallbackReporter(
   }
 
   async function deliver(payload: CallbackPayload): Promise<void> {
-    try {
-      await post(payload);
-    } catch (error: unknown) {
-      const reported =
-        error instanceof Error ? error : new Error('Operator callback failed unexpectedly');
-      options.onError?.(reported);
-      throw reported;
+    for (let attempt = 1; ; attempt += 1) {
+      try {
+        await post(payload);
+        return;
+      } catch (error: unknown) {
+        const reported =
+          error instanceof Error ? error : new Error('Operator callback failed unexpectedly');
+        options.onError?.(reported);
+
+        if (attempt >= maxAttempts || !isRetryable(reported)) {
+          throw reported;
+        }
+        await sleep(delayForAttempt(attempt));
+      }
     }
   }
 
@@ -588,6 +646,9 @@ export function createCallbackReporter(
           signal: event.signal,
           truncated: event.truncated,
         },
+        // Only ever the executor's already-validated description; never
+        // anything derived from parsing command output.
+        ...(event.backup ? { backup: event.backup } : {}),
       };
 
       try {

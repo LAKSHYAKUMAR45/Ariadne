@@ -17,7 +17,9 @@ import {
   OperationTransitionError,
   type AdminOperation,
   type AdminOperationType,
+  type BackupRecordStatus,
   type OperationsStore,
+  type UpsertBackupRecordInput,
 } from '../operationsStore.js';
 
 /**
@@ -55,6 +57,8 @@ const UNCERTAIN_SUBMISSION_FAILURE_CODES = new Set<OperatorClientErrorCode>([
 const OPERATION_ID_PATTERN = /^[A-Za-z0-9_-]{1,200}$/;
 const REVISION_PATTERN = /^[0-9a-f]{40}$/;
 const BACKUP_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/;
+/** Exactly the artifact names deploy/nodem2/scripts publishes. */
+const BACKUP_ARTIFACT_PATTERN = /^ariadne-\d{8}T\d{6}Z\.dump$/;
 
 const serviceRestartBodySchema = z.object({
   service: z.enum(['sync-server', 'postgres']),
@@ -480,6 +484,28 @@ export function createAdminOperationsRouter(
 }
 
 
+/**
+ * Strict description of a backup artifact, mirroring the operator's own
+ * validated result schema (`@ariadne-dev/operator`). Every field is
+ * pattern-bounded, so this channel can only ever carry facts about a backup —
+ * never command output, a path, or free-form text. A callback that supplies
+ * anything else is rejected outright rather than partially recorded.
+ */
+const callbackBackupSchema = z
+  .object({
+    filename: z.string().regex(BACKUP_ARTIFACT_PATTERN),
+    sha256: z.string().regex(/^[0-9a-f]{64}$/),
+    sizeBytes: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
+    createdAt: z.string().regex(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/),
+    message: z
+      .string()
+      .min(1)
+      .max(200)
+      .regex(/^[A-Za-z0-9 ._:,;()-]+$/)
+      .optional(),
+  })
+  .strict();
+
 const callbackBodySchema = z
   .object({
     operationId: z.string().regex(OPERATION_ID_PATTERN),
@@ -487,8 +513,61 @@ const callbackBodySchema = z
     message: z.string().min(1).max(2000).optional(),
     output: z.string().nullable().optional(),
     metadata: z.record(z.union([z.string(), z.number(), z.boolean(), z.null()])).optional(),
+    backup: callbackBackupSchema.optional(),
   })
   .strict();
+
+type CallbackBackup = z.infer<typeof callbackBackupSchema>;
+
+/**
+ * Maps a terminal operator result onto the backup artifact status it implies.
+ *
+ * A failed `backup_create` has no artifact to record — nothing was published —
+ * while a failed verification or restore must still be attributed to the
+ * backup it acted on, which is why those failures produce a row.
+ */
+function backupRecordStatus(
+  type: AdminOperationType,
+  state: 'succeeded' | 'failed',
+): BackupRecordStatus | null {
+  switch (type) {
+    case 'backup_create':
+      return state === 'succeeded' ? 'created' : null;
+    case 'backup_verify':
+      return state === 'succeeded' ? 'verified' : 'verify_failed';
+    case 'backup_restore':
+      return state === 'succeeded' ? 'restored' : 'restore_failed';
+    default:
+      return null;
+  }
+}
+
+function buildBackupRecord(
+  type: AdminOperationType,
+  state: 'running' | 'succeeded' | 'failed',
+  backup: CallbackBackup | undefined,
+  observedAt: string,
+): UpsertBackupRecordInput | undefined {
+  if (!backup || state === 'running') {
+    return undefined;
+  }
+  const status = backupRecordStatus(type, state);
+  if (!status) {
+    return undefined;
+  }
+
+  return {
+    filename: backup.filename,
+    sha256: backup.sha256,
+    sizeBytes: backup.sizeBytes,
+    status,
+    createdAt: backup.createdAt,
+    // The operator reports identity, not clocks: a successful verification is
+    // timestamped when the web tier records it.
+    verifiedAt: status === 'verified' ? observedAt : null,
+    restoreVerificationMessage: backup.message ?? null,
+  };
+}
 
 export interface OperatorCallbackRouterOptions {
   operationsStore: OperationsStore;
@@ -625,11 +704,13 @@ export function createOperatorCallbackRouter(options: OperatorCallbackRouterOpti
         throw new ApiError(404, 'operation_not_found', 'No such admin operation');
       }
 
-      const { state, message, output, metadata } = parsed.data;
+      const { state, message, output, metadata, backup } = parsed.data;
 
-      // Repeating the start report is how the operator recovers from a dropped
-      // callback; it must not be an error, and it must not append an event.
-      if (state === 'running' && existing.state === 'running') {
+      // Repeating a report is how the operator recovers from a callback whose
+      // response never arrived, so redelivery of a state the operation already
+      // holds is success, not an error — and must not append a second event.
+      // A *different* terminal state still conflicts and is refused below.
+      if (state === existing.state) {
         noStore(res);
         res.status(200).json({ operation: serializeOperation(existing) });
         return;
@@ -657,6 +738,14 @@ export function createOperatorCallbackRouter(options: OperatorCallbackRouterOpti
           message: message ?? `Operation ${state}`,
           metadata: { ...(metadata ?? {}), reportedBy: 'operator' },
           output: output === undefined ? undefined : output,
+          // Written inside the transition's own transaction, so the artifact
+          // record and the terminal state are always recorded together.
+          backupRecord: buildBackupRecord(
+            existing.type,
+            state,
+            backup,
+            new Date().toISOString(),
+          ),
         });
 
         noStore(res);

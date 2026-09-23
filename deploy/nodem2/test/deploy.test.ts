@@ -496,9 +496,10 @@ describe('restart scripts', () => {
 
     expect(result.status).toBe(0);
     const docker = readLog(harness.dockerLog);
-    expect(docker.length).toBe(1);
     expect(docker[0]).toMatch(/restart postgres$/);
-    expect(docker[0]).not.toContain('sync-server');
+    // Only the restart itself plus the readiness probe touch Docker.
+    expect(docker.length).toBe(2);
+    expect(docker.join('\n')).not.toContain('sync-server');
   });
 
   it('rejects caller-supplied service arguments', () => {
@@ -508,6 +509,78 @@ describe('restart scripts', () => {
       expect(result.status).not.toBe(0);
     }
     expect(readLog(harness.dockerLog)).toEqual([]);
+  });
+
+  it('waits for the health endpoint after restarting sync-server', () => {
+    const harness = createHarness();
+    const result = runScript(harness, 'restart-sync-server');
+
+    expect(result.status).toBe(0);
+    const curl = readLog(harness.curlLog);
+    expect(curl.length).toBe(1);
+    expect(curl[0]).toContain('/healthz');
+  });
+
+  it('fails when sync-server never becomes healthy after a restart', () => {
+    const harness = createHarness();
+    const result = runScript(harness, 'restart-sync-server', {
+      env: { FAKE_CURL_EXIT: '1' },
+    });
+
+    expect(result.status).not.toBe(0);
+    expect(`${result.stdout}${result.stderr}`).toContain('did not become healthy');
+    // Bounded by the configured attempt count, never an unbounded wait.
+    expect(readLog(harness.curlLog).length).toBe(2);
+  });
+
+  it('waits for postgres readiness and then the health endpoint after restarting postgres', () => {
+    const harness = createHarness();
+    const result = runScript(harness, 'restart-postgres');
+
+    expect(result.status).toBe(0);
+    const docker = readLog(harness.dockerLog);
+    const restartIndex = indexOfMatch(docker, 'restart postgres');
+    const readyIndex = indexOfMatch(docker, 'pg_isready');
+    expect(restartIndex).toBeGreaterThanOrEqual(0);
+    expect(readyIndex).toBeGreaterThan(restartIndex);
+    expect(readLog(harness.curlLog).join('\n')).toContain('/healthz');
+  });
+
+  it('fails when postgres never accepts connections after a restart', () => {
+    const harness = createHarness();
+    const result = runScript(harness, 'restart-postgres', {
+      env: { FAKE_DOCKER_FAIL: 'pg_isready' },
+    });
+
+    expect(result.status).not.toBe(0);
+    expect(`${result.stdout}${result.stderr}`).toContain('did not accept connections');
+    expect(readLog(harness.curlLog)).toEqual([]);
+  });
+
+  it('fails when sync-server never becomes healthy after a postgres restart', () => {
+    const harness = createHarness();
+    const result = runScript(harness, 'restart-postgres', {
+      env: { FAKE_CURL_EXIT: '1' },
+    });
+
+    expect(result.status).not.toBe(0);
+    expect(`${result.stdout}${result.stderr}`).toContain('did not become healthy');
+    expect(readLog(harness.curlLog).length).toBe(2);
+  });
+
+  it('keeps secrets out of restart output on every failure path', () => {
+    const harness = createHarness();
+    const results = [
+      runScript(harness, 'restart-sync-server', { env: { FAKE_CURL_EXIT: '1' } }),
+      runScript(harness, 'restart-postgres', { env: { FAKE_DOCKER_FAIL: 'pg_isready' } }),
+    ];
+
+    for (const result of results) {
+      const output = `${result.stdout}${result.stderr}`;
+      expect(output).not.toContain(JWT_SECRET_VALUE);
+      expect(output).not.toContain(POSTGRES_PASSWORD_VALUE);
+      expect(output).not.toContain(KEY_MATERIAL_VALUE);
+    }
   });
 });
 

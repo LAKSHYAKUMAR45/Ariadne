@@ -1,5 +1,9 @@
 import { spawn } from 'node:child_process';
+import { mkdtemp, open, rm } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 import type { Readable } from 'node:stream';
+import { z } from 'zod';
 import type { OperatorRequest } from './protocol.js';
 
 export const DEFAULT_EXEC_TIMEOUT_MS = 15 * 60 * 1000;
@@ -34,6 +38,50 @@ const serviceRestartCommands = {
   postgres: ['/usr/local/lib/ariadne/restart-postgres'],
 } as const;
 
+/**
+ * Environment variable through which a backup script is handed a private path
+ * to describe the backup it acted on (see `ariadne_write_backup_result` in
+ * deploy/nodem2/scripts/lib-common). The path is created by this process, is
+ * never caller-controlled, and is removed once the result has been read.
+ */
+export const BACKUP_RESULT_ENV_VAR = 'ARIADNE_RESULT_FILE';
+
+/**
+ * Hard ceiling on the result file. The contract is a single small JSON object;
+ * anything larger is a bug or an attempt to smuggle command output (or worse)
+ * into the audit record, and is discarded rather than parsed.
+ */
+export const MAX_BACKUP_RESULT_BYTES = 4096;
+
+const BACKUP_RESULT_OPERATIONS = new Set<OperatorRequest['type']>([
+  'backup_create',
+  'backup_verify',
+  'backup_restore',
+]);
+
+/**
+ * Strict description of a backup, carrying only facts already published in the
+ * backup's own sidecars. Every field is pattern-bounded so no free-form text,
+ * path, or command output can reach the web tier through this channel, and the
+ * object is `strict()` so an unexpected field rejects the whole result.
+ */
+const backupResultSchema = z
+  .object({
+    filename: z.string().regex(/^ariadne-\d{8}T\d{6}Z\.dump$/),
+    sha256: z.string().regex(/^[0-9a-f]{64}$/),
+    sizeBytes: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
+    createdAt: z.string().regex(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/),
+    message: z
+      .string()
+      .min(1)
+      .max(200)
+      .regex(/^[A-Za-z0-9 ._:,;()-]+$/)
+      .optional(),
+  })
+  .strict();
+
+export type OperatorBackupResult = z.infer<typeof backupResultSchema>;
+
 export interface OperatorProgressEvent {
   operationId: string;
   stream: 'stdout' | 'stderr';
@@ -47,6 +95,12 @@ export interface OperatorResultEvent {
   exitCode: number | null;
   signal: NodeJS.Signals | null;
   truncated: boolean;
+  /**
+   * Structured description of the backup a backup operation acted on, read
+   * from the private result file the script was given. `null` for every other
+   * operation, and for any result the strict schema below rejects.
+   */
+  backup?: OperatorBackupResult | null;
 }
 
 export interface OperatorEventSink {
@@ -106,6 +160,60 @@ export interface CreateOperatorExecutorOptions {
   drainGraceMs?: number;
   outputTailBytes?: number;
   env?: NodeJS.ProcessEnv;
+  /**
+   * Parent directory for the per-operation result channel. Defaults to the
+   * process temporary directory, which the service unit makes private
+   * (`PrivateTmp=true`).
+   */
+  resultDirectory?: string;
+}
+
+/**
+ * Creates a private directory that only this process can read, into which the
+ * backup script writes its result. Returns `null` for operations that have no
+ * result channel, and on any failure to create the directory: a backup must
+ * still run (and be reported) when the optional channel is unavailable.
+ */
+async function createBackupResultChannel(
+  request: OperatorRequest,
+  parentDirectory: string,
+): Promise<{ directory: string; file: string } | null> {
+  if (!BACKUP_RESULT_OPERATIONS.has(request.type)) {
+    return null;
+  }
+  try {
+    const directory = await mkdtemp(path.join(parentDirectory, 'ariadne-operator-'));
+    return { directory, file: path.join(directory, 'result.json') };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Reads and validates the result file. Anything unreadable, oversized, or
+ * outside the strict schema yields `null`, so a malformed result degrades the
+ * operation to "no backup record" instead of persisting unvalidated data.
+ */
+async function readBackupResult(file: string): Promise<OperatorBackupResult | null> {
+  let handle;
+  try {
+    handle = await open(file, 'r');
+  } catch {
+    return null;
+  }
+
+  try {
+    const stats = await handle.stat();
+    if (!stats.isFile() || stats.size > MAX_BACKUP_RESULT_BYTES) {
+      return null;
+    }
+    const parsed = backupResultSchema.safeParse(JSON.parse(await handle.readFile('utf8')));
+    return parsed.success ? parsed.data : null;
+  } catch {
+    return null;
+  } finally {
+    await handle.close().catch(() => undefined);
+  }
 }
 
 class OperatorExecutionError extends Error {
@@ -221,11 +329,20 @@ function resolveCommand(request: OperatorRequest): [string, string[]] {
  * basename, so confirmation always comes from the operator service rather than
  * from anything a client can spell.
  */
-function resolveEnv(request: OperatorRequest, base: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-  if (request.type !== 'backup_restore') {
-    return base;
+function resolveEnv(
+  request: OperatorRequest,
+  base: NodeJS.ProcessEnv,
+  resultFile: string | null,
+): NodeJS.ProcessEnv {
+  const resolved: NodeJS.ProcessEnv =
+    request.type === 'backup_restore'
+      ? { ...base, ARIADNE_RESTORE_CONFIRM: request.backupName }
+      : base;
+
+  if (resultFile === null) {
+    return resolved;
   }
-  return { ...base, ARIADNE_RESTORE_CONFIRM: request.backupName };
+  return { ...resolved, [BACKUP_RESULT_ENV_VAR]: resultFile };
 }
 
 function defaultSpawn(
@@ -300,12 +417,14 @@ export function createOperatorExecutor(
   const drainGraceMs = options.drainGraceMs ?? DEFAULT_DRAIN_GRACE_MS;
   const outputTailBytes = options.outputTailBytes ?? DEFAULT_OUTPUT_TAIL_BYTES;
   const env = options.env ?? DEFAULT_EXEC_ENV;
+  const resultDirectory = options.resultDirectory ?? os.tmpdir();
 
   return {
     async execute(request: OperatorRequest, reporter?: OperatorEventSink): Promise<void> {
       const sink = reporter ?? defaultReporter;
       const [file, args] = resolveCommand(request);
       const tail = new BoundedOutputTail(outputTailBytes);
+      const resultChannel = await createBackupResultChannel(request, resultDirectory);
 
       let pendingProgress: Promise<void> = Promise.resolve();
       const forwardChunk = (stream: 'stdout' | 'stderr', chunk: Buffer): void => {
@@ -329,7 +448,7 @@ export function createOperatorExecutor(
         timedOut: boolean;
       }>((resolve) => {
         const child = spawnImpl(file, args, {
-          env: resolveEnv(request, env),
+          env: resolveEnv(request, env, resultChannel?.file ?? null),
           shell: false,
           windowsHide: true,
           stdio: ['ignore', 'pipe', 'pipe'],
@@ -451,6 +570,15 @@ export function createOperatorExecutor(
 
       await pendingProgress;
 
+      // The channel is read (and removed) before anything can throw, so a
+      // failed operation still reports the backup it acted on and no result
+      // file is ever left behind in the runtime directory.
+      let backup: OperatorBackupResult | null = null;
+      if (resultChannel) {
+        backup = await readBackupResult(resultChannel.file);
+        await rm(resultChannel.directory, { recursive: true, force: true }).catch(() => undefined);
+      }
+
       const success =
         outcome.spawnError === null && !outcome.timedOut && outcome.exitCode === 0;
       const result: OperatorResultEvent = {
@@ -460,6 +588,7 @@ export function createOperatorExecutor(
         exitCode: outcome.exitCode,
         signal: outcome.signal,
         truncated: tail.truncated,
+        backup,
       };
 
       if (sink?.onResult) {

@@ -180,7 +180,7 @@ supported way to run this package in production:
 | `deploy/nodem2/compose.yaml` | `postgres`, one-shot `migrate`, and `sync-server` services (fixed project name `ariadne-nodem2`) |
 | `deploy/nodem2/sync-server.Dockerfile` | Multi-stage Node 20 image: build stage compiles TypeScript, runtime stage carries only `pnpm deploy --prod` output |
 | `deploy/nodem2/scripts/deploy` | Deploy one trusted revision, with migration, health verification, and rollback |
-| `deploy/nodem2/scripts/restart-sync-server` / `restart-postgres` | Restart exactly one service |
+| `deploy/nodem2/scripts/restart-sync-server` / `restart-postgres` | Restart exactly one service, then wait (bounded) for `pg_isready` and `/healthz` before reporting success |
 | `deploy/nodem2/scripts/sync-server-entrypoint` | Container entrypoint that performs the key handoff and permanent privilege drop |
 | `deploy/nodem2/.env.example` | Variable **names** only — never values |
 
@@ -254,6 +254,31 @@ Deployment contract tests (fake `docker`/`git`/`curl`) live in
 pnpm --filter @ariadne-dev/operator exec vitest run ../../deploy/nodem2/test/deploy.test.ts
 docker compose -f deploy/nodem2/compose.yaml --env-file deploy/nodem2/.env.example config --quiet
 ```
+
+### Operation result reporting
+
+The privileged operator reports every operation it runs to
+`POST /api/v1/admin/operations/:id/callback` (root-created shared credential,
+loopback only). Because a `service_restart` operation takes that very endpoint
+down while its own result is being reported, two properties hold together:
+
+- the restart scripts do not exit until `/healthz` (and, for postgres,
+  `pg_isready`) answers again, within a fixed attempt/interval budget, and fail
+  the operation when it never does; and
+- the operator retries a report with bounded exponential backoff on transport
+  failures and 5xx rejections, never on a 4xx the web tier would keep refusing.
+  A redelivered report that matches the state already recorded is accepted as
+  success, so a retry can never append a duplicate event or reopen an
+  operation.
+
+Backup operations additionally hand the web tier one small, strictly validated
+description of the artifact they acted on — filename, checksum, size,
+timestamp, and a short sanitized message, all derived from the backup's own
+sidecars via a private result file (`ARIADNE_RESULT_FILE`). Command output is
+never parsed for this. The description is written to `backup_records` inside
+the same transaction as the terminal state change, so `backup_create`,
+`backup_verify`, and `backup_restore` outcomes (including failures of the
+latter two) are always recorded against the backup they examined.
 
 ## API surface
 

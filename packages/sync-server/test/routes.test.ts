@@ -15,7 +15,11 @@ import {
   type AuthenticatedRequest,
 } from '../src/middleware.js';
 import { createOperatorClient, type OperatorClient } from '../src/operatorClient.js';
-import { createOperationsStore, type OperationsStore } from '../src/operationsStore.js';
+import {
+  createOperationsStore,
+  type AdminOperationType,
+  type OperationsStore,
+} from '../src/operationsStore.js';
 import {
   ADMIN_OPERATION_SOURCE,
   createAdminOperationsRouter,
@@ -3076,17 +3080,28 @@ describe('sync-server: admin operator operations', () => {
       peerUid = null;
     });
 
-    async function queueOperation(id: string): Promise<string> {
+    async function queueOperation(
+      id: string,
+      type: AdminOperationType = 'backup_create',
+    ): Promise<string> {
       await store.createOperation({
         id,
         requestedBy: adminUserId,
-        type: 'backup_create',
-        summary: 'Create database backup',
+        type,
+        summary: `Operation ${type}`,
         source: ADMIN_OPERATION_SOURCE,
         metadata: {},
       });
       return id;
     }
+
+    const BACKUP_DESCRIPTION = {
+      filename: 'ariadne-20260401T021500Z.dump',
+      sha256: 'a'.repeat(64),
+      sizeBytes: 4096,
+      createdAt: '2026-04-01T02:15:00Z',
+      message: 'backup published and checksummed',
+    };
 
     function callback(operationId: string, body: unknown, token: string | null = OPERATOR_TOKEN) {
       const pending = request(callbackApp).post(
@@ -3174,6 +3189,189 @@ describe('sync-server: admin operator operations', () => {
       expect(reopened.status).toBe(409);
       expect(reopened.body.error.code).toBe('illegal_transition');
       expect((await store.getOperation(operationId))?.state).toBe('succeeded');
+    });
+
+    it('records a backup artifact reported by a terminal backup_create callback', async () => {
+      const operationId = await queueOperation('cb-backup-created', 'backup_create');
+
+      const finished = await callback(operationId, {
+        operationId,
+        state: 'succeeded',
+        message: 'Operation succeeded',
+        output: 'published backup ariadne-20260401T021500Z.dump',
+        backup: BACKUP_DESCRIPTION,
+      });
+      expect(finished.status).toBe(200);
+
+      const records = await store.listBackupRecords();
+      expect(records).toContainEqual({
+        filename: BACKUP_DESCRIPTION.filename,
+        sha256: BACKUP_DESCRIPTION.sha256,
+        sizeBytes: BACKUP_DESCRIPTION.sizeBytes,
+        status: 'created',
+        createdAt: '2026-04-01T02:15:00.000Z',
+        verifiedAt: null,
+        restoreVerificationMessage: BACKUP_DESCRIPTION.message,
+      });
+    });
+
+    it('records verification outcomes against the backup that was examined', async () => {
+      const verified = await queueOperation('cb-backup-verified', 'backup_verify');
+      await callback(verified, {
+        operationId: verified,
+        state: 'succeeded',
+        backup: { ...BACKUP_DESCRIPTION, message: 'verified: schema 0008, 12 tables' },
+      }).expect(200);
+
+      const afterSuccess = (await store.listBackupRecords()).find(
+        (record) => record.filename === BACKUP_DESCRIPTION.filename,
+      );
+      expect(afterSuccess).toMatchObject({
+        status: 'verified',
+        restoreVerificationMessage: 'verified: schema 0008, 12 tables',
+      });
+      expect(afterSuccess?.verifiedAt).not.toBeNull();
+
+      const failed = await queueOperation('cb-backup-verify-failed', 'backup_verify');
+      await callback(failed, {
+        operationId: failed,
+        state: 'failed',
+        backup: { ...BACKUP_DESCRIPTION, message: undefined },
+      }).expect(200);
+
+      const afterFailure = (await store.listBackupRecords()).find(
+        (record) => record.filename === BACKUP_DESCRIPTION.filename,
+      );
+      expect(afterFailure).toMatchObject({
+        status: 'verify_failed',
+        createdAt: '2026-04-01T02:15:00.000Z',
+      });
+      // The historical verification timestamp survives a later failure.
+      expect(afterFailure?.verifiedAt).toBe(afterSuccess?.verifiedAt);
+    });
+
+    it('records a restore outcome for the backup it restored', async () => {
+      const operationId = await queueOperation('cb-backup-restored', 'backup_restore');
+
+      await callback(operationId, {
+        operationId,
+        state: 'succeeded',
+        backup: {
+          ...BACKUP_DESCRIPTION,
+          message: 'restored; previous database retained under a timestamped name',
+        },
+      }).expect(200);
+
+      expect(
+        (await store.listBackupRecords()).find(
+          (record) => record.filename === BACKUP_DESCRIPTION.filename,
+        ),
+      ).toMatchObject({
+        status: 'restored',
+        restoreVerificationMessage: 'restored; previous database retained under a timestamped name',
+      });
+    });
+
+    it('writes no backup record for a failed backup_create or a non-backup operation', async () => {
+      const unpublished = { ...BACKUP_DESCRIPTION, filename: 'ariadne-20260402T021500Z.dump' };
+
+      const created = await queueOperation('cb-backup-create-failed', 'backup_create');
+      await callback(created, {
+        operationId: created,
+        state: 'failed',
+        backup: unpublished,
+      }).expect(200);
+
+      const restart = await queueOperation('cb-restart-with-backup', 'service_restart');
+      await callback(restart, {
+        operationId: restart,
+        state: 'succeeded',
+        backup: unpublished,
+      }).expect(200);
+
+      expect(
+        (await store.listBackupRecords()).some(
+          (record) => record.filename === unpublished.filename,
+        ),
+      ).toBe(false);
+    });
+
+    it('accepts a retried terminal callback as success without duplicating state', async () => {
+      const operationId = await queueOperation('cb-terminal-retry', 'backup_create');
+
+      const first = await callback(operationId, {
+        operationId,
+        state: 'succeeded',
+        output: 'published',
+        backup: BACKUP_DESCRIPTION,
+      });
+      expect(first.status).toBe(200);
+
+      const retried = await callback(operationId, {
+        operationId,
+        state: 'succeeded',
+        output: 'published',
+        backup: BACKUP_DESCRIPTION,
+      });
+      expect(retried.status).toBe(200);
+      expect(retried.body.operation.state).toBe('succeeded');
+
+      const events = await store.listOperationEvents(operationId);
+      expect(events.map((event) => event.state)).toEqual(['queued', 'running', 'succeeded']);
+      expect(
+        (await store.listBackupRecords()).filter(
+          (record) => record.filename === BACKUP_DESCRIPTION.filename,
+        ),
+      ).toHaveLength(1);
+    });
+
+    it('still refuses a terminal callback that contradicts the recorded outcome', async () => {
+      const operationId = await queueOperation('cb-terminal-conflict', 'backup_create');
+      await callback(operationId, { operationId, state: 'succeeded' }).expect(200);
+
+      const conflicting = await callback(operationId, { operationId, state: 'failed' });
+      expect(conflicting.status).toBe(409);
+      expect(conflicting.body.error.code).toBe('illegal_transition');
+      expect((await store.getOperation(operationId))?.state).toBe('succeeded');
+    });
+
+    it('rejects a backup description that is not a validated backup artifact', async () => {
+      const operationId = await queueOperation('cb-backup-invalid', 'backup_create');
+      const candidate = { ...BACKUP_DESCRIPTION, filename: 'ariadne-20260403T021500Z.dump' };
+
+      for (const backup of [
+        { ...candidate, filename: '../../etc/passwd' },
+        { ...candidate, sha256: 'not-a-digest' },
+        { ...candidate, sizeBytes: -1 },
+        { ...candidate, createdAt: 'yesterday' },
+        { ...candidate, message: 'x'.repeat(5000) },
+        { ...candidate, extra: 'field' },
+      ]) {
+        const res = await callback(operationId, { operationId, state: 'succeeded', backup });
+        expect(res.status, JSON.stringify(backup).slice(0, 60)).toBe(400);
+      }
+
+      expect(
+        (await store.listBackupRecords()).some(
+          (record) => record.filename === candidate.filename,
+        ),
+      ).toBe(false);
+      expect((await store.getOperation(operationId))?.state).toBe('queued');
+    });
+
+    it('never stores secrets or archive bytes in a backup record', async () => {
+      const operationId = await queueOperation('cb-backup-secrets', 'backup_create');
+
+      await callback(operationId, {
+        operationId,
+        state: 'succeeded',
+        output: 'POSTGRES_PASSWORD=super-secret-value\nPGDMP binary bytes',
+        backup: { ...BACKUP_DESCRIPTION, message: 'backup published and checksummed' },
+      }).expect(200);
+
+      const serialized = JSON.stringify(await store.listBackupRecords());
+      expect(serialized).not.toContain('super-secret-value');
+      expect(serialized).not.toContain('PGDMP');
     });
 
     it('rejects a missing or incorrect callback token', async () => {

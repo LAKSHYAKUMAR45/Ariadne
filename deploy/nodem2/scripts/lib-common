@@ -97,6 +97,56 @@ require_file() {
     [ -f "$1" ] || fail "required file missing: $1"
 }
 
+# ---------------------------------------------------------------------------
+# Readiness
+#
+# Every operation that restarts or replaces a service must observe the service
+# coming back before it exits: the operator reports an operation terminal as
+# soon as its command returns, and the web tier's callback endpoint lives
+# behind exactly this health endpoint. Returning early would report success
+# while the deployment is still unavailable — and, when the sync-server itself
+# was restarted, would race the very endpoint the result is reported to.
+#
+# Both waits are bounded by the fixed ARIADNE_HEALTH_ATTEMPTS /
+# ARIADNE_HEALTH_INTERVAL configuration, so an unhealthy service fails the
+# operation instead of hanging until the operator's execution timeout.
+# ---------------------------------------------------------------------------
+
+ariadne_wait_for_health() {
+    ariadne_health_attempt=1
+    while [ "$ariadne_health_attempt" -le "$ARIADNE_HEALTH_ATTEMPTS" ]; do
+        if curl -fsS --max-time 5 -o /dev/null "$ARIADNE_HEALTH_URL"; then
+            unset ariadne_health_attempt
+            return 0
+        fi
+        ariadne_health_attempt=$((ariadne_health_attempt + 1))
+        if [ "$ariadne_health_attempt" -le "$ARIADNE_HEALTH_ATTEMPTS" ] &&
+            [ "$ARIADNE_HEALTH_INTERVAL" -gt 0 ]; then
+            sleep "$ARIADNE_HEALTH_INTERVAL"
+        fi
+    done
+    unset ariadne_health_attempt
+    return 1
+}
+
+ariadne_wait_for_postgres() {
+    ariadne_pg_attempt=1
+    while [ "$ariadne_pg_attempt" -le "$ARIADNE_HEALTH_ATTEMPTS" ]; do
+        if ariadne_compose exec -T postgres pg_isready \
+            --username "$ARIADNE_DB_USER" --dbname "$ARIADNE_DB_NAME" >/dev/null 2>&1; then
+            unset ariadne_pg_attempt
+            return 0
+        fi
+        ariadne_pg_attempt=$((ariadne_pg_attempt + 1))
+        if [ "$ariadne_pg_attempt" -le "$ARIADNE_HEALTH_ATTEMPTS" ] &&
+            [ "$ARIADNE_HEALTH_INTERVAL" -gt 0 ]; then
+            sleep "$ARIADNE_HEALTH_INTERVAL"
+        fi
+    done
+    unset ariadne_pg_attempt
+    return 1
+}
+
 require_deployment_inputs() {
     require_file "$ARIADNE_COMPOSE_ENV_FILE"
     require_file "$ARIADNE_SERVER_ENV_FILE"
@@ -346,6 +396,91 @@ ariadne_create_backup() {
     log "published backup $ariadne_base.dump ($ariadne_bytes bytes)"
     unset ariadne_stamp ariadne_base ariadne_tmp_dump ariadne_tmp_sum ariadne_tmp_meta \
         ariadne_hash ariadne_bytes ariadne_image ariadne_schema
+}
+
+# ---------------------------------------------------------------------------
+# Machine-readable backup result channel
+#
+# When the privileged operator sets ARIADNE_RESULT_FILE it receives one small
+# JSON object describing *which* backup an operation acted on, so the web tier
+# can record it without parsing free-form log output. Only facts already
+# published in the backup's own sidecars are written: basename, the recorded
+# checksum, the archive size, and the timestamp encoded in the name. Archive
+# bytes, database contents, key material, and secrets are never included, and
+# the optional message is reduced to a short run of safe characters.
+#
+# The script never decides the record's status: it reports identity only, and
+# the operator derives the outcome from the exit code. That is what lets a
+# failed verification or restore still be attributed to the right backup.
+# ---------------------------------------------------------------------------
+
+ARIADNE_RESULT_MESSAGE_MAX=200
+
+ariadne_result_timestamp() {
+    printf '%s-%s-%sT%s:%s:%sZ\n' \
+        "$(printf '%s' "$1" | cut -c1-4)" \
+        "$(printf '%s' "$1" | cut -c5-6)" \
+        "$(printf '%s' "$1" | cut -c7-8)" \
+        "$(printf '%s' "$1" | cut -c10-11)" \
+        "$(printf '%s' "$1" | cut -c12-13)" \
+        "$(printf '%s' "$1" | cut -c14-15)"
+}
+
+ariadne_write_backup_result() {
+    [ -n "${ARIADNE_RESULT_FILE:-}" ] || return 0
+    case "$ARIADNE_RESULT_FILE" in
+        /*) ;;
+        *) fail "ARIADNE_RESULT_FILE must be an absolute path" ;;
+    esac
+
+    ariadne_result_base=$1
+    ariadne_result_stamp=${ariadne_result_base#ariadne-}
+    ariadne_validate_stamp "$ariadne_result_stamp"
+
+    ariadne_result_sum=$(cut -d' ' -f1 <"$ARIADNE_BACKUP_DIR/$ariadne_result_base.sha256") ||
+        fail "failed to read the checksum sidecar of $ariadne_result_base.dump"
+    case "$ariadne_result_sum" in
+        *[!0-9a-f]* | "") fail "the checksum sidecar of $ariadne_result_base.dump is not a digest" ;;
+    esac
+    [ "${#ariadne_result_sum}" -eq 64 ] ||
+        fail "the checksum sidecar of $ariadne_result_base.dump is not a digest"
+
+    ariadne_result_bytes=$(wc -c <"$ARIADNE_BACKUP_DIR/$ariadne_result_base.dump" | tr -d ' ') ||
+        fail "failed to measure $ariadne_result_base.dump"
+    case "$ariadne_result_bytes" in
+        "" | *[!0-9]*) fail "failed to measure $ariadne_result_base.dump" ;;
+    esac
+
+    ariadne_result_message=$(printf '%s' "${2:-}" |
+        tr -cd 'A-Za-z0-9 ._:,;()-' |
+        cut -c1-"$ARIADNE_RESULT_MESSAGE_MAX")
+
+    ariadne_result_tmp="$ARIADNE_RESULT_FILE.tmp"
+    rm -f "$ariadne_result_tmp"
+    if [ -n "$ariadne_result_message" ]; then
+        printf '{"filename":"%s","sha256":"%s","sizeBytes":%s,"createdAt":"%s","message":"%s"}\n' \
+            "$ariadne_result_base.dump" \
+            "$ariadne_result_sum" \
+            "$ariadne_result_bytes" \
+            "$(ariadne_result_timestamp "$ariadne_result_stamp")" \
+            "$ariadne_result_message" \
+            >"$ariadne_result_tmp" || fail "failed to write the operation result file"
+    else
+        printf '{"filename":"%s","sha256":"%s","sizeBytes":%s,"createdAt":"%s"}\n' \
+            "$ariadne_result_base.dump" \
+            "$ariadne_result_sum" \
+            "$ariadne_result_bytes" \
+            "$(ariadne_result_timestamp "$ariadne_result_stamp")" \
+            >"$ariadne_result_tmp" || fail "failed to write the operation result file"
+    fi
+
+    chmod 600 "$ariadne_result_tmp" || fail "failed to secure the operation result file"
+    mv "$ariadne_result_tmp" "$ARIADNE_RESULT_FILE" ||
+        fail "failed to publish the operation result file"
+
+    unset ariadne_result_base ariadne_result_stamp ariadne_result_sum ariadne_result_bytes \
+        ariadne_result_message ariadne_result_tmp
+    return 0
 }
 
 # Newest published backup basename, by validated filename only.
