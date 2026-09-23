@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { CSSProperties } from 'react';
-import type { Task, Checkpoint, Decision, OpenQuestion, TaskError, Todo, TaskFileCaptureWithEntries } from '@host/messages';
+import type { Task, TaskFileCaptureWithEntries } from '@host/messages';
 import type { AriadneBridge } from './bridge';
 import type { WebviewState } from '@host/messages';
+import { DecisionsPanel, ErrorsPanel, QuestionsPanel, TodosPanel } from './panels/EntityPanels';
 
 type TabId = 'overview' | 'todos' | 'decisions' | 'errors' | 'questions' | 'files';
 
@@ -168,38 +169,24 @@ export default function App({ bridge, initialState }: AppProps) {
           </>
         );
       case 'todos':
-        return <CategoryList items={state?.todos ?? []} emptyMessage="No todos for the current task." renderItem={(todo) => todo.text} />;
+        return <TodosPanel state={state} bridge={bridge} onBusy={setBusyLabel} onError={(message) => setBanner({ kind: 'error', message })} />;
       case 'decisions':
-        return (
-          <CategoryList
-            items={state?.decisions ?? []}
-            emptyMessage="No decisions for the current task."
-            renderItem={(decision) => (decision.rationale ? `${decision.text} (${decision.rationale})` : decision.text)}
-          />
-        );
+        return <DecisionsPanel state={state} bridge={bridge} onBusy={setBusyLabel} onError={(message) => setBanner({ kind: 'error', message })} />;
       case 'errors':
-        return (
-          <CategoryList
-            items={state?.errors ?? []}
-            emptyMessage="No errors recorded for the current task."
-            renderItem={(error) => `${error.resolved ? 'Resolved' : 'Open'}: ${error.message}`}
-          />
-        );
+        return <ErrorsPanel state={state} bridge={bridge} onBusy={setBusyLabel} onError={(message) => setBanner({ kind: 'error', message })} />;
       case 'questions':
-        return (
-          <CategoryList
-            items={state?.questions ?? []}
-            emptyMessage="No questions recorded for the current task."
-            renderItem={(question) => `${question.resolved ? 'Resolved' : 'Open'}: ${question.text}`}
-          />
-        );
+        return <QuestionsPanel state={state} bridge={bridge} onBusy={setBusyLabel} onError={(message) => setBanner({ kind: 'error', message })} />;
       case 'files':
         return (
-          <CategoryList
-            items={state?.fileCaptures ?? []}
-            emptyMessage="No file captures recorded for the current task."
-            renderItem={(capture) => `${capture.id} · ${capture.entries.length} file(s)`}
-          />
+          state?.fileCaptures.length ? (
+            <ul>
+              {state.fileCaptures.map((capture) => (
+                <li key={capture.id}>{`${capture.id} · ${capture.entries.length} file(s)`}</li>
+              ))}
+            </ul>
+          ) : (
+            <p>No file captures recorded for the current task.</p>
+          )
         );
       default:
         return null;
@@ -288,32 +275,16 @@ export default function App({ bridge, initialState }: AppProps) {
           </div>
 
           <section style={styles.panel}>
-            <h2 style={styles.sectionTitle}>{tabs.find((tab) => tab.id === activeTab)?.label}</h2>
+            {activeTab === 'overview' ? (
+              <h2 style={styles.sectionTitle}>{tabs.find((tab) => tab.id === activeTab)?.label}</h2>
+            ) : (
+              <div style={styles.sectionTitle}>{tabs.find((tab) => tab.id === activeTab)?.label}</div>
+            )}
             {tabContent}
           </section>
         </main>
       </div>
     </div>
-  );
-}
-
-interface CategoryListProps<T> {
-  items: T[];
-  emptyMessage: string;
-  renderItem: (item: T) => string;
-}
-
-function CategoryList<T>({ items, emptyMessage, renderItem }: CategoryListProps<T>) {
-  if (items.length === 0) {
-    return <p>{emptyMessage}</p>;
-  }
-
-  return (
-    <ul>
-      {items.map((item, index) => (
-        <li key={index}>{renderItem(item)}</li>
-      ))}
-    </ul>
   );
 }
 
