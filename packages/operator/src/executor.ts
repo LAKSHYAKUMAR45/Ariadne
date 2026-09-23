@@ -152,6 +152,19 @@ function resolveCommand(request: OperatorRequest): [string, string[]] {
   }
 }
 
+/**
+ * The restore script refuses to run unless the confirmation variable names the
+ * backup being restored. It is derived here from the already-validated
+ * basename, so confirmation always comes from the operator service rather than
+ * from anything a client can spell.
+ */
+function resolveEnv(request: OperatorRequest, base: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  if (request.type !== 'backup_restore') {
+    return base;
+  }
+  return { ...base, ARIADNE_RESTORE_CONFIRM: request.backupName };
+}
+
 function defaultSpawn(
   file: string,
   args: readonly string[],
@@ -198,7 +211,7 @@ export function createOperatorExecutor(
         timedOut: boolean;
       }>((resolve) => {
         const child = spawnImpl(file, args, {
-          env,
+          env: resolveEnv(request, env),
           shell: false,
           windowsHide: true,
           stdio: ['ignore', 'pipe', 'pipe'],

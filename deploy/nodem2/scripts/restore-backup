@@ -1,0 +1,134 @@
+#!/bin/sh
+# Restores one verified backup into the tracked nodem2 deployment.
+#
+#   ARIADNE_RESTORE_CONFIRM=<basename> restore-backup <basename>
+#
+# Only a validated basename is accepted; it is always resolved inside the fixed
+# backup root, so no caller can name a path. The confirmation environment is
+# supplied separately by the fixed operator service, never by the request body.
+#
+# Order of operations:
+#   1. validate the basename and its sidecars;
+#   2. verify the checksum and the pg_restore table of contents;
+#   3. create and verify a fresh safety backup of the current database;
+#   4. stop the application;
+#   5. restore into a new database and swap it in;
+#   6. start the application, migrate, and verify /healthz.
+#
+# Any failure after step 4 leaves the application stopped and prints the exact
+# command that restores the safety backup.
+set -eu
+umask 077
+
+SCRIPT_DIR=$(unset CDPATH; cd -- "$(dirname -- "$0")" && pwd)
+# shellcheck source=deploy/nodem2/scripts/lib-common
+. "$SCRIPT_DIR/lib-common"
+ARIADNE_LOG_TAG=ariadne-restore
+
+APP_STOPPED=0
+SAFETY_BACKUP=""
+
+on_exit() {
+    status=$?
+    ariadne_discard_partial "$ARIADNE_PARTIAL_BACKUP"
+    if [ "$status" -ne 0 ] && [ "$APP_STOPPED" -eq 1 ]; then
+        log "the application is stopped and was NOT restarted"
+        log "safety backup basename: $SAFETY_BACKUP.dump"
+        log "recover with: ARIADNE_RESTORE_CONFIRM=$SAFETY_BACKUP.dump $ARIADNE_RESTORE_COMMAND $SAFETY_BACKUP.dump"
+    fi
+    exit "$status"
+}
+
+[ "$#" -eq 1 ] || fail "usage: restore-backup <ariadne-YYYYMMDDTHHMMSSZ.dump>"
+
+ariadne_validate_backup_name "$1"
+REQUESTED="$ARIADNE_BACKUP_BASE.dump"
+
+[ -n "${ARIADNE_RESTORE_CONFIRM:-}" ] ||
+    fail "ARIADNE_RESTORE_CONFIRM must name the backup being restored"
+[ "$ARIADNE_RESTORE_CONFIRM" = "$REQUESTED" ] ||
+    fail "ARIADNE_RESTORE_CONFIRM does not match the requested backup"
+
+ariadne_require_backup_inputs
+ariadne_require_backup_set "$ARIADNE_BACKUP_BASE"
+DUMP="$ARIADNE_BACKUP_DIR/$REQUESTED"
+
+log "validating $REQUESTED"
+ariadne_checksum_matches "$ARIADNE_BACKUP_BASE" ||
+    fail "checksum mismatch for $REQUESTED; nothing was changed"
+ariadne_dump_is_readable "$DUMP" ||
+    fail "$REQUESTED could not be listed by pg_restore; nothing was changed"
+
+trap on_exit EXIT INT TERM
+
+log "creating a pre-restore safety backup"
+ariadne_create_backup
+SAFETY_BACKUP="$ARIADNE_CREATED_BACKUP"
+
+log "verifying the safety backup before touching the application"
+ariadne_checksum_matches "$SAFETY_BACKUP" ||
+    fail "the safety backup failed checksum verification; nothing was changed"
+ariadne_dump_is_readable "$ARIADNE_BACKUP_DIR/$SAFETY_BACKUP.dump" ||
+    fail "the safety backup could not be listed; nothing was changed"
+
+STAMP=${SAFETY_BACKUP#ariadne-}
+NEW_DB=$(printf '%s_restore_%s' "$ARIADNE_DB_NAME" "$STAMP" | tr 'TZ' 'tz')
+RETIRED_DB=$(printf '%s_prerestore_%s' "$ARIADNE_DB_NAME" "$STAMP" | tr 'TZ' 'tz')
+for generated in "$NEW_DB" "$RETIRED_DB"; do
+    case "$generated" in
+        *[!a-z0-9_]*) fail "refusing to use a generated database name that is not plain identifier text" ;;
+    esac
+done
+
+log "stopping the application"
+ariadne_compose stop sync-server || fail "failed to stop the application"
+APP_STOPPED=1
+
+log "restoring into a new database"
+ariadne_psql "$ARIADNE_MAINTENANCE_DB" "DROP DATABASE IF EXISTS $NEW_DB WITH (FORCE)" >/dev/null ||
+    fail "failed to clear a stale restore database"
+ariadne_psql "$ARIADNE_MAINTENANCE_DB" "CREATE DATABASE $NEW_DB" >/dev/null ||
+    fail "failed to create the restore database"
+ariadne_compose exec -T postgres pg_restore \
+    --no-owner --no-acl --exit-on-error \
+    --username "$ARIADNE_DB_USER" --dbname "$NEW_DB" <"$DUMP" ||
+    fail "restoring $REQUESTED into $NEW_DB failed; the production database is unchanged"
+
+log "swapping the restored database in"
+ariadne_psql "$ARIADNE_MAINTENANCE_DB" \
+    "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '$ARIADNE_DB_NAME'" \
+    >/dev/null || fail "failed to release connections to $ARIADNE_DB_NAME"
+# The previous database is renamed aside, never dropped, so the swap is
+# reversible without consulting a backup.
+ariadne_psql "$ARIADNE_MAINTENANCE_DB" \
+    "ALTER DATABASE $ARIADNE_DB_NAME RENAME TO $RETIRED_DB" >/dev/null ||
+    fail "failed to retire the previous database; the production database is unchanged"
+ariadne_psql "$ARIADNE_MAINTENANCE_DB" \
+    "ALTER DATABASE $NEW_DB RENAME TO $ARIADNE_DB_NAME" >/dev/null ||
+    fail "failed to promote the restored database; the previous database is retained as $RETIRED_DB"
+
+log "starting the application"
+ariadne_compose up -d --no-deps sync-server || fail "the application failed to start"
+
+log "running migrations"
+ariadne_compose run --rm --no-deps migrate || fail "migrations failed after the restore"
+
+log "verifying health endpoint"
+attempt=1
+healthy=0
+while [ "$attempt" -le "$ARIADNE_HEALTH_ATTEMPTS" ]; do
+    if curl -fsS --max-time 5 -o /dev/null "$ARIADNE_HEALTH_URL"; then
+        healthy=1
+        break
+    fi
+    attempt=$((attempt + 1))
+    if [ "$ARIADNE_HEALTH_INTERVAL" -gt 0 ]; then
+        sleep "$ARIADNE_HEALTH_INTERVAL"
+    fi
+done
+[ "$healthy" -eq 1 ] || fail "the application did not become healthy after the restore"
+
+APP_STOPPED=0
+log "restore of $REQUESTED complete"
+log "previous database retained as $RETIRED_DB"
+log "safety backup basename: $SAFETY_BACKUP.dump"

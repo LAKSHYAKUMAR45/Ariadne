@@ -1,14 +1,19 @@
 # Shared fixed configuration for the tracked nodem2 deployment scripts.
-# Sourced by ./deploy, ./restart-sync-server, and ./restart-postgres.
+# Sourced by ./deploy, ./restart-sync-server, ./restart-postgres, ./backup,
+# ./restore-backup, ./verify-backup, and ./prune-backups.
 # shellcheck shell=sh
 # shellcheck disable=SC2034  # values are consumed by the sourcing scripts
 
+# Fixed by this file, never by the environment; a sourcing script may narrow it
+# afterwards so journald entries identify the operation.
+ARIADNE_LOG_TAG=ariadne-deploy
+
 log() {
-    printf '[ariadne-deploy] %s\n' "$1"
+    printf '[%s] %s\n' "$ARIADNE_LOG_TAG" "$1"
 }
 
 fail() {
-    printf '[ariadne-deploy] error: %s\n' "$1" >&2
+    printf '[%s] error: %s\n' "$ARIADNE_LOG_TAG" "$1" >&2
     exit 1
 }
 
@@ -40,13 +45,14 @@ if [ "${ARIADNE_DEPLOY_SELFTEST:-}" = "1" ]; then
 
     ARIADNE_ETC_DIR="$ARIADNE_DEPLOY_ETC"
     ARIADNE_STATE_DIR="$ARIADNE_DEPLOY_STATE"
+    ARIADNE_BACKUP_DIR="${ARIADNE_DEPLOY_BACKUP_DIR:-$ARIADNE_DEPLOY_STATE/backups}"
     ARIADNE_HEALTH_ATTEMPTS="${ARIADNE_DEPLOY_HEALTH_ATTEMPTS:-30}"
     ARIADNE_HEALTH_INTERVAL="${ARIADNE_DEPLOY_HEALTH_INTERVAL:-2}"
 elif [ -n "${ARIADNE_DEPLOY_SELFTEST:-}" ]; then
     fail "ARIADNE_DEPLOY_SELFTEST must not be set for a deployment invocation"
 else
     for ariadne_override in ARIADNE_DEPLOY_ROOT ARIADNE_DEPLOY_ETC ARIADNE_DEPLOY_STATE \
-        ARIADNE_DEPLOY_HEALTH_ATTEMPTS ARIADNE_DEPLOY_HEALTH_INTERVAL; do
+        ARIADNE_DEPLOY_BACKUP_DIR ARIADNE_DEPLOY_HEALTH_ATTEMPTS ARIADNE_DEPLOY_HEALTH_INTERVAL; do
         eval "ariadne_override_value=\${$ariadne_override:-}"
         [ -z "$ariadne_override_value" ] ||
             fail "$ariadne_override must not be set: deployments use the fixed production paths"
@@ -58,6 +64,7 @@ else
     ARIADNE_DEPLOY_ROOT="$ARIADNE_PRODUCTION_ROOT"
     ARIADNE_ETC_DIR=/etc/ariadne
     ARIADNE_STATE_DIR=/var/lib/ariadne/deploy
+    ARIADNE_BACKUP_DIR=/var/backups/ariadne
     ARIADNE_HEALTH_ATTEMPTS=30
     ARIADNE_HEALTH_INTERVAL=2
 fi
@@ -99,4 +106,267 @@ require_deployment_inputs() {
     key_count=$(find "$ARIADNE_KEYS_DIR" -maxdepth 1 -type f -name '*.key' 2>/dev/null | wc -l)
     [ "$key_count" -ge 1 ] || fail "no encryption key files found in $ARIADNE_KEYS_DIR"
     unset key_count
+}
+
+# ---------------------------------------------------------------------------
+# Backup contract
+#
+# Backups live only in the fixed root above. A backup is a triplet published in
+# a fixed order (`.sha256`, then `.json`, then `.dump`), so the presence of a
+# `.dump` always implies its sidecars exist. The encryption key directory is
+# never an input: only key *identifiers* (filenames) are recorded so an
+# operator can tell which keys a restored database still needs.
+# ---------------------------------------------------------------------------
+
+# Must match the Compose defaults for POSTGRES_DB / POSTGRES_USER.
+ARIADNE_DB_NAME=ariadne_sync
+ARIADNE_DB_USER=ariadne
+ARIADNE_MAINTENANCE_DB=postgres
+ARIADNE_BACKUP_RETENTION_DAYS=30
+ARIADNE_BACKUP_TMP_RETENTION_DAYS=1
+ARIADNE_RESTORE_COMMAND=/usr/local/lib/ariadne/restore-backup
+
+# Basename of the most recent backup this process published, used by callers to
+# report the safety backup and to discard partial output.
+ARIADNE_CREATED_BACKUP=""
+ARIADNE_PARTIAL_BACKUP=""
+
+ariadne_require_backup_inputs() {
+    require_file "$ARIADNE_COMPOSE_ENV_FILE"
+    require_file "$ARIADNE_COMPOSE_FILE"
+}
+
+ariadne_backup_dir() {
+    mkdir -p "$ARIADNE_BACKUP_DIR" || fail "failed to create $ARIADNE_BACKUP_DIR"
+    chmod 700 "$ARIADNE_BACKUP_DIR" || fail "failed to secure $ARIADNE_BACKUP_DIR"
+}
+
+# Accepts exactly ariadne-YYYYMMDDTHHMMSSZ. Anything else - a path, a sidecar,
+# a temporary file - is refused before any filesystem or database access.
+ariadne_validate_stamp() {
+    case "$1" in
+        ????????T??????Z) ;;
+        *) fail "invalid backup timestamp" ;;
+    esac
+    case "$1" in
+        *[!0-9TZ]*) fail "invalid backup timestamp" ;;
+    esac
+}
+
+# Validates a caller-supplied basename and sets ARIADNE_BACKUP_BASE (no
+# extension). Never accepts separators, so the name can only resolve inside the
+# fixed backup root.
+ariadne_validate_backup_name() {
+    ariadne_backup_name=$1
+    case "$ariadne_backup_name" in
+        "" | . | ..) fail "backup name must be a validated basename" ;;
+        */* | *\\*) fail "backup name must be a basename without path separators" ;;
+        ariadne-*.dump) ;;
+        *) fail "backup name must look like ariadne-YYYYMMDDTHHMMSSZ.dump" ;;
+    esac
+
+    ariadne_backup_stamp=${ariadne_backup_name#ariadne-}
+    ariadne_backup_stamp=${ariadne_backup_stamp%.dump}
+    ariadne_validate_stamp "$ariadne_backup_stamp"
+    ARIADNE_BACKUP_BASE="ariadne-$ariadne_backup_stamp"
+    unset ariadne_backup_name ariadne_backup_stamp
+}
+
+ariadne_require_backup_set() {
+    require_file "$ARIADNE_BACKUP_DIR/$1.dump"
+    require_file "$ARIADNE_BACKUP_DIR/$1.sha256"
+    require_file "$ARIADNE_BACKUP_DIR/$1.json"
+}
+
+# Prints the SHA-256 of a file. Reads from stdin so the digest never depends on
+# how the path is spelled.
+ariadne_sha256_of() {
+    ariadne_sha_line=$(sha256sum <"$1") || return 1
+    ariadne_sha_value=${ariadne_sha_line%% *}
+    case "$ariadne_sha_value" in
+        *[!0-9a-f]* | "") return 1 ;;
+    esac
+    [ "${#ariadne_sha_value}" -eq 64 ] || return 1
+    printf '%s\n' "$ariadne_sha_value"
+    unset ariadne_sha_line ariadne_sha_value
+}
+
+# Recomputes the checksum of a published dump and compares it with its sidecar.
+ariadne_checksum_matches() {
+    ariadne_expected=$(cut -d' ' -f1 <"$ARIADNE_BACKUP_DIR/$1.sha256") || return 1
+    ariadne_actual=$(ariadne_sha256_of "$ARIADNE_BACKUP_DIR/$1.dump") || return 1
+    [ -n "$ariadne_expected" ] || return 1
+    [ "$ariadne_expected" = "$ariadne_actual" ] || return 1
+    unset ariadne_expected ariadne_actual
+}
+
+# Reads the archive table of contents. A dump that cannot be listed is never
+# used to mutate anything.
+ariadne_dump_is_readable() {
+    ariadne_compose exec -T postgres pg_restore --list <"$1" >/dev/null
+}
+
+ariadne_psql() {
+    ariadne_compose exec -T postgres psql \
+        --username "$ARIADNE_DB_USER" \
+        --dbname "$1" \
+        --no-psqlrc --quiet --tuples-only --no-align \
+        --set ON_ERROR_STOP=1 \
+        --command "$2" </dev/null
+}
+
+# Sanitises any value taken from the database before it reaches metadata so a
+# hostile string can never be embedded in JSON.
+ariadne_safe_token() {
+    case "${1:-}" in
+        "" | *[!A-Za-z0-9._:-]*) printf 'unknown\n' ;;
+        *) printf '%s\n' "$1" ;;
+    esac
+}
+
+# Key identifiers only: filenames are listed, file contents are never read.
+ariadne_key_ids_json() {
+    ariadne_ids=""
+    for ariadne_key_file in "$ARIADNE_KEYS_DIR"/*.key; do
+        [ -f "$ariadne_key_file" ] || continue
+        ariadne_key_id=$(basename "$ariadne_key_file" .key)
+        case "$ariadne_key_id" in
+            *[!A-Za-z0-9._-]*) continue ;;
+        esac
+        if [ -z "$ariadne_ids" ]; then
+            ariadne_ids="\"$ariadne_key_id\""
+        else
+            ariadne_ids="$ariadne_ids,\"$ariadne_key_id\""
+        fi
+    done
+    printf '[%s]\n' "$ariadne_ids"
+    unset ariadne_ids ariadne_key_file ariadne_key_id
+}
+
+ariadne_active_key_id() {
+    if [ -f "$ARIADNE_KEYS_DIR/active-key-id" ]; then
+        ariadne_active=$(head -n 1 "$ARIADNE_KEYS_DIR/active-key-id" | tr -d ' \t\r\n')
+        ariadne_safe_token "$ariadne_active"
+        unset ariadne_active
+    else
+        printf 'unknown\n'
+    fi
+}
+
+# Removes anything a failed or interrupted backup may have left behind. A
+# sidecar is only ever kept once its dump has been published.
+ariadne_discard_partial() {
+    [ -n "${1:-}" ] || return 0
+    rm -f "$ARIADNE_BACKUP_DIR/$1.dump.tmp" \
+        "$ARIADNE_BACKUP_DIR/$1.sha256.tmp" \
+        "$ARIADNE_BACKUP_DIR/$1.json.tmp"
+    if [ ! -f "$ARIADNE_BACKUP_DIR/$1.dump" ]; then
+        rm -f "$ARIADNE_BACKUP_DIR/$1.sha256" "$ARIADNE_BACKUP_DIR/$1.json"
+    fi
+    return 0
+}
+
+ariadne_fail_partial() {
+    ariadne_discard_partial "$ARIADNE_PARTIAL_BACKUP"
+    ARIADNE_PARTIAL_BACKUP=""
+    fail "$1"
+}
+
+# Creates one verified backup triplet and sets ARIADNE_CREATED_BACKUP to its
+# basename. Every intermediate file is written as `.tmp` and renamed only after
+# the dump has been listed, hashed, and described.
+ariadne_create_backup() {
+    ariadne_backup_dir
+
+    ariadne_stamp=$(date -u +%Y%m%dT%H%M%SZ) || fail "failed to read the clock"
+    ariadne_validate_stamp "$ariadne_stamp"
+    ariadne_base="ariadne-$ariadne_stamp"
+    [ ! -e "$ARIADNE_BACKUP_DIR/$ariadne_base.dump" ] ||
+        fail "a backup named $ariadne_base.dump already exists"
+
+    ARIADNE_PARTIAL_BACKUP="$ariadne_base"
+    ariadne_tmp_dump="$ARIADNE_BACKUP_DIR/$ariadne_base.dump.tmp"
+    ariadne_tmp_sum="$ARIADNE_BACKUP_DIR/$ariadne_base.sha256.tmp"
+    ariadne_tmp_meta="$ARIADNE_BACKUP_DIR/$ariadne_base.json.tmp"
+    rm -f "$ariadne_tmp_dump" "$ariadne_tmp_sum" "$ariadne_tmp_meta"
+
+    log "dumping $ARIADNE_DB_NAME to $ariadne_base.dump"
+    ariadne_compose exec -T postgres pg_dump \
+        --format=custom --no-owner --no-acl \
+        --username "$ARIADNE_DB_USER" --dbname "$ARIADNE_DB_NAME" \
+        >"$ariadne_tmp_dump" ||
+        ariadne_fail_partial "pg_dump failed; no backup was published"
+    [ -s "$ariadne_tmp_dump" ] || ariadne_fail_partial "pg_dump produced an empty archive"
+
+    ariadne_dump_is_readable "$ariadne_tmp_dump" ||
+        ariadne_fail_partial "the new archive could not be listed; no backup was published"
+
+    ariadne_hash=$(ariadne_sha256_of "$ariadne_tmp_dump") ||
+        ariadne_fail_partial "failed to checksum the new archive"
+    ariadne_bytes=$(wc -c <"$ariadne_tmp_dump" | tr -d ' ') ||
+        ariadne_fail_partial "failed to measure the new archive"
+
+    ariadne_image=$(docker image inspect --format '{{.Id}}' "$ARIADNE_CURRENT_TAG" 2>/dev/null || true)
+    ariadne_image=$(ariadne_safe_token "$ariadne_image")
+    ariadne_schema=$(ariadne_psql "$ARIADNE_DB_NAME" \
+        'SELECT max(filename) FROM migrations_applied' 2>/dev/null || true)
+    ariadne_schema=$(ariadne_safe_token "$(printf '%s' "$ariadne_schema" | tr -d ' \t\r\n')")
+
+    printf '%s  %s\n' "$ariadne_hash" "$ariadne_base.dump" >"$ariadne_tmp_sum" ||
+        ariadne_fail_partial "failed to write the checksum sidecar"
+
+    printf '{"basename":"%s","timestamp":"%s","database":"%s","image":"%s","schemaVersion":"%s","dumpBytes":%s,"sha256":"%s","activeKeyId":"%s","keyIds":%s,"format":"custom"}\n' \
+        "$ariadne_base.dump" \
+        "$ariadne_stamp" \
+        "$ARIADNE_DB_NAME" \
+        "$ariadne_image" \
+        "$ariadne_schema" \
+        "$ariadne_bytes" \
+        "$ariadne_hash" \
+        "$(ariadne_active_key_id)" \
+        "$(ariadne_key_ids_json)" \
+        >"$ariadne_tmp_meta" ||
+        ariadne_fail_partial "failed to write the metadata sidecar"
+
+    chmod 600 "$ariadne_tmp_dump" "$ariadne_tmp_sum" "$ariadne_tmp_meta" ||
+        ariadne_fail_partial "failed to secure the new backup files"
+    sync "$ariadne_tmp_dump" "$ariadne_tmp_sum" "$ariadne_tmp_meta" 2>/dev/null || sync || true
+
+    # Sidecars first: a visible `.dump` always has a complete set beside it.
+    mv "$ariadne_tmp_sum" "$ARIADNE_BACKUP_DIR/$ariadne_base.sha256" ||
+        ariadne_fail_partial "failed to publish the checksum sidecar"
+    mv "$ariadne_tmp_meta" "$ARIADNE_BACKUP_DIR/$ariadne_base.json" ||
+        ariadne_fail_partial "failed to publish the metadata sidecar"
+    mv "$ariadne_tmp_dump" "$ARIADNE_BACKUP_DIR/$ariadne_base.dump" ||
+        ariadne_fail_partial "failed to publish the archive"
+
+    ARIADNE_PARTIAL_BACKUP=""
+    ARIADNE_CREATED_BACKUP="$ariadne_base"
+    log "published backup $ariadne_base.dump ($ariadne_bytes bytes)"
+    unset ariadne_stamp ariadne_base ariadne_tmp_dump ariadne_tmp_sum ariadne_tmp_meta \
+        ariadne_hash ariadne_bytes ariadne_image ariadne_schema
+}
+
+# Newest published backup basename, by validated filename only.
+ariadne_newest_backup() {
+    ariadne_newest=""
+    for ariadne_candidate in "$ARIADNE_BACKUP_DIR"/ariadne-*.dump; do
+        [ -f "$ariadne_candidate" ] || continue
+        ariadne_candidate_base=$(basename "$ariadne_candidate" .dump)
+        ariadne_candidate_stamp=${ariadne_candidate_base#ariadne-}
+        case "$ariadne_candidate_stamp" in
+            ????????T??????Z) ;;
+            *) continue ;;
+        esac
+        case "$ariadne_candidate_stamp" in
+            *[!0-9TZ]*) continue ;;
+        esac
+        [ -f "$ARIADNE_BACKUP_DIR/$ariadne_candidate_base.sha256" ] || continue
+        [ -f "$ARIADNE_BACKUP_DIR/$ariadne_candidate_base.json" ] || continue
+        # Every name has the same fixed width and differs only in its digits, so
+        # the shell's sorted glob expansion is also chronological order.
+        ariadne_newest="$ariadne_candidate_base"
+    done
+    printf '%s\n' "$ariadne_newest"
+    unset ariadne_candidate ariadne_candidate_base ariadne_candidate_stamp ariadne_newest
 }

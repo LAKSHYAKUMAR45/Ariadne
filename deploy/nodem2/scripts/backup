@@ -1,0 +1,35 @@
+#!/bin/sh
+# Creates one verified PostgreSQL backup of the tracked nodem2 deployment.
+#
+#   backup
+#
+# The backup is written to the fixed backup root as a `.dump` (PostgreSQL
+# custom format), a `.sha256` checksum, and a `.json` metadata sidecar. Every
+# file is written as `.tmp` first and renamed only after the archive has been
+# listed, hashed, and described, so an interrupted run never publishes an
+# incomplete set. Expired backups are pruned afterwards.
+set -eu
+umask 077
+
+SCRIPT_DIR=$(unset CDPATH; cd -- "$(dirname -- "$0")" && pwd)
+# shellcheck source=deploy/nodem2/scripts/lib-common
+. "$SCRIPT_DIR/lib-common"
+ARIADNE_LOG_TAG=ariadne-backup
+
+on_exit() {
+    status=$?
+    ariadne_discard_partial "$ARIADNE_PARTIAL_BACKUP"
+    exit "$status"
+}
+
+[ "$#" -eq 0 ] || fail "usage: backup (takes no arguments)"
+
+ariadne_require_backup_inputs
+trap on_exit EXIT INT TERM
+
+ariadne_create_backup
+
+log "pruning expired backups"
+"$SCRIPT_DIR/prune-backups" || fail "backup succeeded but pruning failed"
+
+log "backup $ARIADNE_CREATED_BACKUP.dump is complete"

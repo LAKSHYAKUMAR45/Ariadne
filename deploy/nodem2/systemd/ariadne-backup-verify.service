@@ -1,0 +1,37 @@
+# Daily PostgreSQL backup for the tracked nodem2 deployment.
+#
+# Install as /etc/systemd/system/ariadne-backup.service. The unit only runs the
+# fixed installed script; the script itself owns every path and Compose input.
+[Unit]
+Description=Ariadne PostgreSQL backup verification
+Documentation=https://github.com/LAKSHYAKUMAR45/Ariadne
+After=docker.service
+Wants=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/ariadne/verify-backup
+User=root
+UMask=0077
+TimeoutStartSec=1h
+
+# The backup root is the only path this unit may write.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/backups/ariadne
+ReadWritePaths=/run/docker.sock
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectClock=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target
