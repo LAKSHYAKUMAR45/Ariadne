@@ -87,9 +87,10 @@ export function createApp(pool: Pool, jwtSecret: string, options: CreateAppOptio
   // The operator holds no dashboard session, so its result callbacks are
   // mounted ahead of `requireAuth` and authenticate with the root-created
   // credential instead. It is also mounted ahead of the global JSON parser: a
-  // terminal callback carries up to 256 KiB of command output, which needs the
-  // router's own larger, route-scoped limit (see
-  // OPERATOR_CALLBACK_REQUEST_BODY_LIMIT) rather than the 100 KB default.
+  // terminal callback carries up to 256 KiB of command output, whose JSON
+  // escaping can multiply that several times over, so it needs the router's
+  // own larger, route-scoped limit (see OPERATOR_CALLBACK_REQUEST_BODY_LIMIT)
+  // rather than the 100 KB default.
   if (operatorCallbackTokenPath) {
     app.use(
       '/api/v1/admin',

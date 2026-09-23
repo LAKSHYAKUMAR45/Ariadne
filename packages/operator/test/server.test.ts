@@ -7,14 +7,17 @@ import { afterEach, describe, expect, it } from 'vitest';
 import {
   CALLBACK_TOKEN_HEADER,
   DEFAULT_CALLBACK_TOKEN_PATH,
+  MAX_CALLBACK_REQUEST_BODY_BYTES,
   createCallbackReporter,
   createOperatorServer,
   ensureCallbackToken,
+  fitCallbackPayload,
   getCallbackConfig,
   getOperatorSocketPath,
   withRestrictiveUmask,
   MAX_OPERATOR_REQUEST_BODY_BYTES,
 } from '../src/server.js';
+import { DEFAULT_OUTPUT_TAIL_BYTES } from '../src/executor.js';
 
 interface HttpResponse {
   statusCode: number;
@@ -755,12 +758,16 @@ describe('operator callback channel', () => {
     method: string;
     token: string | undefined;
     body: unknown;
+    /** Serialized request size, which is what the size ceilings actually bound. */
+    byteLength: number;
   }
 
   interface CallbackSink {
     baseUrl: string;
     received: RecordedCallback[];
     status: number;
+    /** Per-request status override, for exercising the 413 retry path. */
+    statusFor?(recorded: RecordedCallback): number;
   }
 
   async function startCallbackSink(): Promise<CallbackSink> {
@@ -781,15 +788,17 @@ describe('operator callback channel', () => {
         } catch {
           parsed = text;
         }
-        received.push({
+        const recorded: RecordedCallback = {
           url: req.url ?? '',
           method: req.method ?? '',
           token: req.headers[CALLBACK_TOKEN_HEADER] as string | undefined,
           body: parsed,
-        });
-        res.statusCode = sink.status;
+          byteLength: Buffer.byteLength(text, 'utf8'),
+        };
+        received.push(recorded);
+        res.statusCode = sink.statusFor?.(recorded) ?? sink.status;
         res.setHeader('content-type', 'application/json');
-        res.end(JSON.stringify({ ok: sink.status < 400 }));
+        res.end(JSON.stringify({ ok: res.statusCode < 400 }));
       });
     });
     servers.push(server);
@@ -893,6 +902,107 @@ describe('operator callback channel', () => {
       state: 'failed',
       metadata: { exitCode: 3, truncated: true },
     });
+  });
+
+  it('keeps a control-character-saturated maximum tail inside the callback ceiling', async () => {
+    const sink = await startCallbackSink();
+    const reporter = createCallbackReporter({ callbackUrl: sink.baseUrl, token: 'f'.repeat(64) });
+
+    // Worst case for JSON escaping: every byte of the executor's maximum tail
+    // becomes a six-byte \u00xx escape on the wire.
+    const output = '\u0001'.repeat(DEFAULT_OUTPUT_TAIL_BYTES);
+    expect(Buffer.byteLength(JSON.stringify(output), 'utf8')).toBeGreaterThan(
+      MAX_CALLBACK_REQUEST_BODY_BYTES,
+    );
+
+    await reporter.onResult?.({
+      operationId: 'op-escape-worst-case',
+      success: true,
+      output,
+      exitCode: 0,
+      signal: null,
+      truncated: true,
+    });
+
+    expect(sink.received).toHaveLength(2);
+    const terminal = sink.received[1];
+    expect(terminal.byteLength).toBeLessThanOrEqual(MAX_CALLBACK_REQUEST_BODY_BYTES);
+    const body = terminal.body as { state: string; output: string; metadata: { truncated: boolean } };
+    expect(body.state).toBe('succeeded');
+    expect(body.metadata.truncated).toBe(true);
+    expect(body.output.length).toBeGreaterThan(0);
+    expect(output.endsWith(body.output)).toBe(true);
+  });
+
+  it('retries a 413 terminal report with the outcome and no output', async () => {
+    const sink = await startCallbackSink();
+    sink.statusFor = (recorded) => {
+      const body = recorded.body as { state?: string; output?: unknown };
+      return body.state !== 'running' && typeof body.output === 'string' ? 413 : 200;
+    };
+    const errors: Error[] = [];
+    const reporter = createCallbackReporter({
+      callbackUrl: sink.baseUrl,
+      token: 'a'.repeat(64),
+      onError: (error) => errors.push(error),
+    });
+
+    await expect(
+      reporter.onResult?.({
+        operationId: 'op-413-retry',
+        success: false,
+        output: 'x'.repeat(4096),
+        exitCode: 1,
+        signal: null,
+        truncated: true,
+      }),
+    ).resolves.toBeUndefined();
+
+    expect(sink.received.map((entry) => (entry.body as { state: string }).state)).toEqual([
+      'running',
+      'failed',
+      'failed',
+    ]);
+    expect(sink.received[2].body).toMatchObject({
+      state: 'failed',
+      output: null,
+      metadata: { exitCode: 1, truncated: true, outputDropped: true },
+    });
+    expect(errors.some((error) => /413/.test(error.message))).toBe(true);
+  });
+
+  it('degrades the output tail on UTF-8 boundaries, never mid-character', () => {
+    const output = '😀'.repeat(512);
+    const fitted = fitCallbackPayload(
+      {
+        operationId: 'op-fit-utf8',
+        state: 'succeeded',
+        message: 'Operation succeeded',
+        output,
+        metadata: { exitCode: 0, signal: null, truncated: false },
+      },
+      512,
+    );
+
+    const fittedOutput = fitted.output ?? '';
+    expect(Buffer.byteLength(JSON.stringify(fitted), 'utf8')).toBeLessThanOrEqual(512);
+    expect(fittedOutput.length).toBeGreaterThan(0);
+    expect(fittedOutput).not.toContain('\uFFFD');
+    expect(fittedOutput).toBe('😀'.repeat(fittedOutput.length / 2));
+    expect(output.endsWith(fittedOutput)).toBe(true);
+    expect(fitted.metadata?.truncated).toBe(true);
+  });
+
+  it('leaves a payload that already fits untouched', () => {
+    const payload = {
+      operationId: 'op-fit-noop',
+      state: 'succeeded' as const,
+      message: 'Operation succeeded',
+      output: 'done\n',
+      metadata: { exitCode: 0, signal: null, truncated: false },
+    };
+
+    expect(fitCallbackPayload(payload, MAX_CALLBACK_REQUEST_BODY_BYTES)).toBe(payload);
   });
 
   it('marks a result-only operation as started before reporting its outcome', async () => {

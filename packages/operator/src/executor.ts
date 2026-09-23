@@ -87,8 +87,15 @@ export type SpawnImplementation = (
   options: OperatorSpawnOptions,
 ) => OperatorSpawnedProcess;
 
+/**
+ * Signals the executor sends. `0` is the POSIX existence probe: it delivers no
+ * signal and throws when the target group is already gone, which is how the
+ * escalation path learns it can stop holding a timer.
+ */
+export type OperatorSignal = NodeJS.Signals | 0;
+
 /** Injection point for `process.kill`, which vitest cannot safely stub. */
-export type KillImplementation = (pid: number, signal: NodeJS.Signals) => void;
+export type KillImplementation = (pid: number, signal: OperatorSignal) => void;
 
 export interface CreateOperatorExecutorOptions {
   spawnImpl?: SpawnImplementation;
@@ -158,6 +165,22 @@ class BoundedOutputTail {
 }
 
 /**
+ * Keeps at most `maxBytes` of `text`'s trailing UTF-8 bytes, cutting only on a
+ * character boundary. Used wherever an already-bounded tail has to be shrunk
+ * again to fit a downstream byte budget (see the callback reporter).
+ */
+export function takeUtf8Tail(text: string, maxBytes: number): string {
+  if (maxBytes <= 0) {
+    return '';
+  }
+  const buffer = Buffer.from(text, 'utf8');
+  if (buffer.length <= maxBytes) {
+    return text;
+  }
+  return dropLeadingContinuationBytes(buffer.subarray(buffer.length - maxBytes)).toString('utf8');
+}
+
+/**
  * Byte-bounded truncation can land in the middle of a multi-byte sequence, and
  * decoding the resulting leading fragment would produce U+FFFD replacement
  * characters at the head of every truncated result. Dropping the orphaned
@@ -213,8 +236,27 @@ function defaultSpawn(
   return spawn(file, [...args], options);
 }
 
-function defaultKill(pid: number, signal: NodeJS.Signals): void {
+function defaultKill(pid: number, signal: OperatorSignal): void {
   process.kill(pid, signal);
+}
+
+/**
+ * Best-effort check for whether anything is still running in the child's
+ * process group. Returns `true` whenever liveness cannot be established (no
+ * pid, or no process groups on this platform) so escalation is never cancelled
+ * on a guess.
+ */
+function processGroupAlive(child: OperatorSpawnedProcess, killImpl: KillImplementation): boolean {
+  const pid = child.pid;
+  if (!PROCESS_GROUPS_SUPPORTED || typeof pid !== 'number' || pid <= 0) {
+    return true;
+  }
+  try {
+    killImpl(-pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -296,24 +338,54 @@ export function createOperatorExecutor(
 
         let settled = false;
         let timedOut = false;
+        let escalationArmed = false;
         let killTimer: NodeJS.Timeout | undefined;
         let drainTimer: NodeJS.Timeout | undefined;
         let forceSettleTimer: NodeJS.Timeout | undefined;
 
-        // The timeout and kill timers are unref'd because they only bound a
-        // process that is already keeping the loop alive. The drain and
-        // force-settle timers are deliberately *not*: they are the mechanism
-        // that releases the execution slot, so they must survive an otherwise
-        // idle loop.
+        // The timeout timer is unref'd because it only bounds a process that is
+        // already keeping the loop alive. The drain, kill and force-settle
+        // timers are deliberately *not*: they release the execution slot and
+        // terminate the process group, so they must survive an otherwise idle
+        // loop.
         const unrefTimer = (timer: NodeJS.Timeout | undefined): void => {
           timer?.unref?.();
         };
 
+        /**
+         * Cancels the pending SIGKILL, but only once nothing is left running in
+         * the child's process group. Everything the timeout path is defending
+         * against — a descendant that ignored SIGTERM, or one that exited the
+         * direct child while still holding the inherited stdout pipe — leaves
+         * the group alive, so the timer is kept in those cases even though the
+         * execution itself has already settled.
+         */
+        const cancelEscalationIfGroupGone = (): void => {
+          if (!escalationArmed || processGroupAlive(child, killImpl)) {
+            return;
+          }
+          escalationArmed = false;
+          if (killTimer) {
+            clearTimeout(killTimer);
+            killTimer = undefined;
+          }
+        };
+
         const timeoutTimer = setTimeout(() => {
           timedOut = true;
+          escalationArmed = true;
           terminateProcessTree(child, 'SIGTERM', killImpl);
+          // Deliberately not unref'd, and deliberately not cleared by `settle`:
+          // the direct child can exit on SIGTERM while a descendant ignores it,
+          // so the group SIGKILL has to survive settlement. Otherwise the slot
+          // is released while privileged work is still running.
           killTimer = setTimeout(() => {
+            killTimer = undefined;
+            escalationArmed = false;
             terminateProcessTree(child, 'SIGKILL', killImpl);
+            if (settled) {
+              return;
+            }
             // Last resort: a SIGKILLed group can still leave an escaped
             // descendant holding the pipes, so the execution is settled from
             // the timeout path alone rather than waiting on `exit`/`close`.
@@ -321,7 +393,6 @@ export function createOperatorExecutor(
               settle({ exitCode: null, signal: 'SIGKILL', spawnError: null });
             }, drainGraceMs);
           }, killGraceMs);
-          unrefTimer(killTimer);
         }, timeoutMs);
         unrefTimer(timeoutTimer);
 
@@ -335,9 +406,7 @@ export function createOperatorExecutor(
           }
           settled = true;
           clearTimeout(timeoutTimer);
-          if (killTimer) {
-            clearTimeout(killTimer);
-          }
+          cancelEscalationIfGroupGone();
           if (drainTimer) {
             clearTimeout(drainTimer);
           }

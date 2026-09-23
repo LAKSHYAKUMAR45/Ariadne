@@ -11,6 +11,7 @@ import {
 } from './admission.js';
 import {
   createOperatorExecutor,
+  takeUtf8Tail,
   type OperatorEventSink,
   type OperatorExecutor,
   type OperatorProgressEvent,
@@ -37,6 +38,22 @@ export const CALLBACK_TOKEN_HEADER = 'x-ariadne-operator-token';
 export const CALLBACK_TOKEN_BYTES = 32;
 export const CALLBACK_TOKEN_MODE = 0o640;
 export const DEFAULT_CALLBACK_TIMEOUT_MS = 10 * 1000;
+
+/**
+ * Hard ceiling on the serialized body of a single callback request.
+ *
+ * The executor already bounds command output to a 256 KiB tail, but JSON
+ * string escaping is not byte-preserving: a tail saturated with quotes or
+ * control characters inflates by up to 6x on the wire. Sizing the callback
+ * against the *serialized* request instead of the raw tail is what keeps a
+ * hostile-looking build log from producing a body the web tier refuses, which
+ * would strand the operation in `running` with nothing left to report it.
+ *
+ * The web tier's callback route parses with headroom above this value, so a
+ * body the reporter considers legal is always accepted; anything larger is a
+ * bug or an attack and is rejected there.
+ */
+export const MAX_CALLBACK_REQUEST_BODY_BYTES = 1024 * 1024;
 
 const CALLBACK_TOKEN_PATTERN = /^[0-9a-f]{64}$/;
 const LOOPBACK_HOSTNAMES = new Set(['127.0.0.1', 'localhost', '::1', '[::1]']);
@@ -356,17 +373,89 @@ export interface CreateCallbackReporterOptions {
   callbackUrl: string;
   token: string;
   requestTimeoutMs?: number;
+  /** Overridable only so tests can exercise the degradation path cheaply. */
+  maxRequestBodyBytes?: number;
   onError?(error: Error): void;
 }
 
 type CallbackState = 'running' | 'succeeded' | 'failed';
 
+type CallbackMetadata = Record<string, string | number | boolean | null>;
+
 interface CallbackPayload {
   operationId: string;
   state: CallbackState;
   message: string;
-  output?: string;
-  metadata?: Record<string, string | number | boolean | null>;
+  output?: string | null;
+  metadata?: CallbackMetadata;
+}
+
+/** Non-2xx callback response, carrying the status so 413 can be handled. */
+class CallbackRejectedError extends Error {
+  constructor(
+    message: string,
+    readonly statusCode: number,
+  ) {
+    super(message);
+    this.name = 'CallbackRejectedError';
+  }
+}
+
+function serializedBytes(payload: CallbackPayload): number {
+  return Buffer.byteLength(JSON.stringify(payload), 'utf8');
+}
+
+/**
+ * Returns the terminal payload carrying as much of the output tail as fits the
+ * serialized budget, cutting on UTF-8 character boundaries and flagging
+ * `truncated` whenever anything was dropped here. Escaping cost varies per
+ * character, so the fit is found by search over the tail's byte length rather
+ * than estimated from it.
+ */
+export function fitCallbackPayload(
+  payload: CallbackPayload,
+  maxRequestBodyBytes: number,
+): CallbackPayload {
+  if (serializedBytes(payload) <= maxRequestBodyBytes) {
+    return payload;
+  }
+
+  const output = payload.output ?? '';
+  const truncate = (bytes: number): CallbackPayload => ({
+    ...payload,
+    output: takeUtf8Tail(output, bytes),
+    metadata: { ...payload.metadata, truncated: true },
+  });
+
+  let best = truncate(0);
+  let low = 0;
+  let high = Buffer.byteLength(output, 'utf8');
+
+  while (low <= high) {
+    const mid = Math.floor((low + high) / 2);
+    const candidate = truncate(mid);
+    if (serializedBytes(candidate) <= maxRequestBodyBytes) {
+      best = candidate;
+      low = mid + 1;
+      continue;
+    }
+    high = mid - 1;
+  }
+
+  return best;
+}
+
+/**
+ * Terminal report stripped of command output. Sent only if the web tier still
+ * rejects a fitted body as too large: the recorded outcome of a privileged
+ * operation matters more than its log tail.
+ */
+function withoutOutput(payload: CallbackPayload): CallbackPayload {
+  return {
+    ...payload,
+    output: null,
+    metadata: { ...payload.metadata, truncated: true, outputDropped: true },
+  };
 }
 
 /**
@@ -383,6 +472,7 @@ export function createCallbackReporter(
 ): OperatorEventSink {
   const callbackUrl = options.callbackUrl.replace(/\/+$/, '');
   const requestTimeoutMs = options.requestTimeoutMs ?? DEFAULT_CALLBACK_TIMEOUT_MS;
+  const maxRequestBodyBytes = options.maxRequestBodyBytes ?? MAX_CALLBACK_REQUEST_BODY_BYTES;
   const started = new Set<string>();
 
   async function post(payload: CallbackPayload): Promise<void> {
@@ -426,7 +516,10 @@ export function createCallbackReporter(
               settle();
               return;
             }
-            settle(new Error(`Operator callback was rejected with status ${statusCode}`));
+            settle(new CallbackRejectedError(
+              `Operator callback was rejected with status ${statusCode}`,
+              statusCode,
+            ));
           });
         },
       );
@@ -485,20 +578,33 @@ export function createCallbackReporter(
       }
 
       started.delete(event.operationId);
+      const terminal: CallbackPayload = {
+        operationId: event.operationId,
+        state: event.success ? 'succeeded' : 'failed',
+        message: event.success ? 'Operation succeeded' : 'Operation failed',
+        output: event.output,
+        metadata: {
+          exitCode: event.exitCode,
+          signal: event.signal,
+          truncated: event.truncated,
+        },
+      };
+
       try {
-        await deliver({
-          operationId: event.operationId,
-          state: event.success ? 'succeeded' : 'failed',
-          message: event.success ? 'Operation succeeded' : 'Operation failed',
-          output: event.output,
-          metadata: {
-            exitCode: event.exitCode,
-            signal: event.signal,
-            truncated: event.truncated,
-          },
-        });
-      } catch {
-        // Already surfaced through onError.
+        await deliver(fitCallbackPayload(terminal, maxRequestBodyBytes));
+      } catch (error: unknown) {
+        // Already surfaced through onError. A 413 means the web tier's own
+        // ceiling is lower than this reporter believes; retry once with the
+        // outcome alone so the operation still reaches a terminal state
+        // instead of being left `running` forever.
+        if (!(error instanceof CallbackRejectedError) || error.statusCode !== 413) {
+          return;
+        }
+        try {
+          await deliver(withoutOutput(terminal));
+        } catch {
+          // Already surfaced through onError.
+        }
       }
     },
   };

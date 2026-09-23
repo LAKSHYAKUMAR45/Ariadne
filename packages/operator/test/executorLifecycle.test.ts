@@ -11,7 +11,28 @@ import {
 } from '../src/executor.js';
 
 const HELPER_SCRIPT = path.join(__dirname, 'fixtures', 'holds-stdout.cjs');
+const TERM_RESISTANT_SCRIPT = path.join(__dirname, 'fixtures', 'term-resistant-descendant.cjs');
 const POSIX = process.platform !== 'win32';
+
+function isAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function waitForExit(pid: number, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (!isAlive(pid)) {
+      return true;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  return !isAlive(pid);
+}
 
 /**
  * Fake child that can emit `exit` and `close` independently, so the tests can
@@ -179,6 +200,84 @@ describe('operator executor process lifecycle', () => {
     const started = Date.now();
     await executor.execute({ operationId: 'op-close-wins', type: 'backup_create' });
     expect(Date.now() - started).toBeLessThan(1_000);
+  });
+
+  it.runIf(POSIX)(
+    'SIGKILLs the process group after settlement when a descendant ignores SIGTERM',
+    async () => {
+      let descendantPid: number | undefined;
+
+      const executor = createOperatorExecutor({
+        // Same ordering as the shipped defaults: the drain window is shorter
+        // than the kill grace, so the execution settles from `exit` before the
+        // escalation is due.
+        timeoutMs: 300,
+        killGraceMs: 900,
+        drainGraceMs: 200,
+        reporter: {
+          onProgress(event) {
+            const match = /descendant:(\d+)/.exec(event.chunk);
+            if (match) {
+              descendantPid = Number(match[1]);
+              reapPids.push(descendantPid);
+            }
+          },
+        },
+        spawnImpl(_file, _args, options) {
+          return spawn(process.execPath, [TERM_RESISTANT_SCRIPT], options) as OperatorSpawnedProcess;
+        },
+      });
+
+      const started = Date.now();
+      await expect(
+        executor.execute({ operationId: 'op-term-resistant', type: 'backup_create' }),
+      ).rejects.toThrowError(/timed out/i);
+      const settledAt = Date.now() - started;
+
+      // The slot is released on the drain window, well before the kill grace.
+      expect(settledAt).toBeLessThan(900);
+      expect(descendantPid).toBeGreaterThan(0);
+      expect(isAlive(descendantPid!)).toBe(true);
+
+      // …but the privileged descendant is still killed, so no follow-on
+      // operation can overlap with work from the timed-out one.
+      await expect(waitForExit(descendantPid!, 10_000)).resolves.toBe(true);
+    },
+    20_000,
+  );
+
+  it('stops holding the kill timer once the process group is confirmed gone', async () => {
+    const killed: Array<{ pid: number; signal: NodeJS.Signals | 0 }> = [];
+    let groupAlive = true;
+    let child: LifecycleChild | undefined;
+
+    const execution = createOperatorExecutor({
+      timeoutMs: 20,
+      killGraceMs: 5_000,
+      drainGraceMs: 10,
+      killImpl(pid, signal) {
+        killed.push({ pid, signal });
+        if (signal === 0 && !groupAlive) {
+          throw Object.assign(new Error('ESRCH'), { code: 'ESRCH' });
+        }
+        if (signal === 'SIGTERM') {
+          groupAlive = false;
+          process.nextTick(() => child?.closeToo(null, 'SIGTERM'));
+        }
+      },
+      spawnImpl() {
+        child = new LifecycleChild(5150);
+        return child;
+      },
+    }).execute({ operationId: 'op-group-confirmed-gone', type: 'backup_create' });
+
+    const started = Date.now();
+    await expect(execution).rejects.toThrowError(/timed out/i);
+
+    // Settling waited on `close`, not on the 5s kill grace, and no SIGKILL was
+    // queued against a group that no longer exists.
+    expect(Date.now() - started).toBeLessThan(2_000);
+    expect(killed.map((entry) => entry.signal)).toEqual(['SIGTERM', 0]);
   });
 
   it('exposes a bounded default drain window', () => {

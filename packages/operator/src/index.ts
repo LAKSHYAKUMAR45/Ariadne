@@ -9,6 +9,7 @@ import type { OperatorEventSink } from './executor.js';
 
 export {
   createOperatorExecutor,
+  takeUtf8Tail,
   DEFAULT_DRAIN_GRACE_MS,
   DEFAULT_OUTPUT_TAIL_BYTES,
   PROCESS_GROUPS_SUPPORTED,
@@ -19,6 +20,7 @@ export type {
   OperatorExecutor,
   OperatorProgressEvent,
   OperatorResultEvent,
+  OperatorSignal,
   OperatorSpawnOptions,
   OperatorSpawnedProcess,
   SpawnImplementation,
@@ -35,10 +37,12 @@ export {
   CALLBACK_TOKEN_BYTES,
   CALLBACK_TOKEN_HEADER,
   DEFAULT_CALLBACK_TOKEN_PATH,
+  MAX_CALLBACK_REQUEST_BODY_BYTES,
   MAX_OPERATOR_REQUEST_BODY_BYTES,
   createCallbackReporter,
   createOperatorServer,
   ensureCallbackToken,
+  fitCallbackPayload,
   getCallbackConfig,
   getOperatorSocketPath,
   withRestrictiveUmask,

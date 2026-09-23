@@ -66,11 +66,31 @@ describe('createApp request body limits', () => {
     expect(res.body.error.code).toBe('callback_unavailable');
   });
 
+  it('parses an operator callback whose escaped output fills the reporter ceiling', async () => {
+    // Serializes to just under the reporter's 1 MiB ceiling; the route's own
+    // limit carries headroom above it so a legally fitted body is never lost.
+    const output = '"\u0001'.repeat(130 * 1000);
+    const serializedBytes = Buffer.byteLength(
+      JSON.stringify({ operationId: 'op-escaped', state: 'succeeded', output }),
+      'utf8',
+    );
+    expect(serializedBytes).toBeGreaterThan(900 * 1024);
+    expect(serializedBytes).toBeLessThanOrEqual(1024 * 1024);
+
+    const res = await request(buildApp())
+      .post('/api/v1/admin/operations/op-escaped/callback')
+      .set('x-ariadne-operator-token', 'a'.repeat(64))
+      .send({ operationId: 'op-escaped', state: 'succeeded', output });
+
+    expect(res.status).toBe(503);
+    expect(res.body.error.code).toBe('callback_unavailable');
+  });
+
   it('rejects an operator callback beyond the route-scoped limit', async () => {
     const res = await request(buildApp())
       .post('/api/v1/admin/operations/op-huge/callback')
       .set('x-ariadne-operator-token', 'a'.repeat(64))
-      .send({ operationId: 'op-huge', state: 'succeeded', output: 'z'.repeat(700 * 1024) });
+      .send({ operationId: 'op-huge', state: 'succeeded', output: 'z'.repeat(3 * 1024 * 1024) });
 
     expect(res.status).toBe(413);
     expect(res.body.error.code).toBe('callback_payload_too_large');

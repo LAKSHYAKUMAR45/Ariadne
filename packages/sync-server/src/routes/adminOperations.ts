@@ -510,13 +510,17 @@ export interface OperatorCallbackRouterOptions {
 
 /**
  * The operator reports up to `DEFAULT_OUTPUT_TAIL_BYTES` (256 KiB) of command
- * output in a terminal callback, and JSON string escaping inflates that on the
- * wire. This route therefore parses with its own bounded limit — roughly twice
- * the maximum legitimate tail plus metadata, still a hard cap — while every
- * other route keeps `express.json()`'s 100 KB default. The router is mounted
- * ahead of the global parser in `app.ts` for that reason.
+ * output in a terminal callback, and JSON string escaping inflates that by up
+ * to 6x for quote- or control-character-saturated output. The reporter keeps
+ * its serialized request within its own 1 MiB ceiling
+ * (`MAX_CALLBACK_REQUEST_BODY_BYTES` in `@ariadne-dev/operator`), truncating
+ * the tail further when escaping demands it; this route parses with headroom
+ * above that ceiling so a legally fitted body is never rejected, while still
+ * imposing a hard bound on anything larger. Every other route keeps
+ * `express.json()`'s 100 KB default, which is why this router is mounted ahead
+ * of the global parser in `app.ts`.
  */
-export const OPERATOR_CALLBACK_REQUEST_BODY_LIMIT = '512kb';
+export const OPERATOR_CALLBACK_REQUEST_BODY_LIMIT = '2mb';
 
 /**
  * Wraps the route-scoped parser so an over-limit callback becomes a stable 413

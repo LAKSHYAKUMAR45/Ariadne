@@ -3291,10 +3291,39 @@ describe('sync-server: admin operator operations', () => {
       expect(events.some((event) => event.state === 'succeeded')).toBe(true);
     });
 
+    it('accepts a terminal callback whose escaped output fills the reporter ceiling', async () => {
+      const operationId = await queueOperation('cb-escape-saturated');
+      // Mirrors MAX_CALLBACK_REQUEST_BODY_BYTES in @ariadne-dev/operator: the
+      // reporter fits its serialized request under 1 MiB, so this route has to
+      // parse a body of that size even though the raw tail is only ~254 KiB.
+      // Quotes escape 2x and control characters 6x, which is the inflation the
+      // old 512 KB route limit could not absorb.
+      const maxCallbackBodyBytes = 1024 * 1024;
+      const output = '"\u0001'.repeat(130 * 1000);
+      const payload = {
+        operationId,
+        state: 'succeeded' as const,
+        message: 'Operation succeeded',
+        output,
+        metadata: { exitCode: 0, signal: null, truncated: true },
+      };
+      const serializedBytes = Buffer.byteLength(JSON.stringify(payload), 'utf8');
+      expect(Buffer.byteLength(output, 'utf8')).toBeLessThan(256 * 1024);
+      expect(serializedBytes).toBeGreaterThan(900 * 1024);
+      expect(serializedBytes).toBeLessThanOrEqual(maxCallbackBodyBytes);
+
+      const res = await callback(operationId, payload);
+
+      expect(res.status).toBe(200);
+      const persisted = await store.getOperation(operationId);
+      expect(persisted?.state).toBe('succeeded');
+      expect((persisted?.output ?? '').length).toBeGreaterThan(0);
+    });
+
     it('rejects a callback beyond the route limit with a stable 413 and no body echo', async () => {
       const operationId = await queueOperation('cb-oversize');
       const marker = 'OVERSIZE-CANARY';
-      const output = `${marker}${'z'.repeat(700 * 1024)}`;
+      const output = `${marker}${'z'.repeat(3 * 1024 * 1024)}`;
 
       const res = await callback(operationId, { operationId, state: 'succeeded', output });
 
