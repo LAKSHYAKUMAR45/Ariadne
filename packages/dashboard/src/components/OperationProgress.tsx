@@ -1,4 +1,4 @@
-import { useEffect } from 'react';
+import { useEffect, useRef } from 'react';
 import { useOperation } from '../hooks/useOperation';
 import type { AdminApiClient, AdminOperation } from '../api/types';
 import { StatusLabel } from './StatusLabel';
@@ -8,6 +8,7 @@ interface OperationProgressProps {
   operationId: string | null;
   initialOperation?: AdminOperation | null;
   onOperationChange?: (operation: AdminOperation | null) => void;
+  autoFocus?: boolean;
 }
 
 export function OperationProgress({
@@ -15,7 +16,9 @@ export function OperationProgress({
   operationId,
   initialOperation = null,
   onOperationChange,
+  autoFocus = false,
 }: OperationProgressProps) {
+  const sectionRef = useRef<HTMLElement | null>(null);
   const { operation, events, latestEvent, live, polling, error } = useOperation({
     api,
     operationId,
@@ -25,6 +28,13 @@ export function OperationProgress({
   useEffect(() => {
     onOperationChange?.(operation);
   }, [onOperationChange, operation]);
+
+  useEffect(() => {
+    if (!autoFocus || !operationId) {
+      return;
+    }
+    sectionRef.current?.focus();
+  }, [autoFocus, operationId]);
 
   if (!operationId) {
     return null;
@@ -40,9 +50,11 @@ export function OperationProgress({
 
   return (
     <section
+      ref={sectionRef}
       id={`operation-${operationId}`}
       className="panel data-panel"
       aria-label="Operation progress"
+      tabIndex={-1}
     >
       <div className="table-heading">
         <strong>{summary}</strong>

@@ -4,6 +4,7 @@ import { isAuditResponse } from '../api/guards';
 import type { AuditEvent } from '../api/types';
 import { useAuth } from '../auth/AuthProvider';
 import { AsyncState } from '../components/AsyncState';
+import { OperationProgress } from '../components/OperationProgress';
 import { shortenSha } from './helpers';
 
 function buildAuditPath(action: string, outcome: string, cursor?: string): string {
@@ -48,6 +49,7 @@ export function AuditPage() {
   const [actionFilter, setActionFilter] = useState('');
   const [outcomeFilter, setOutcomeFilter] = useState('');
   const [events, setEvents] = useState<AuditEvent[]>([]);
+  const [selectedOperationId, setSelectedOperationId] = useState<string | null>(null);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
@@ -102,6 +104,17 @@ export function AuditPage() {
     return () => controllerRef.current?.abort();
   }, [loadAudit]);
 
+  useEffect(() => {
+    if (!selectedOperationId) {
+      return;
+    }
+
+    const nextHash = `#operation-${selectedOperationId}`;
+    if (window.location.hash !== nextHash) {
+      window.history.replaceState(null, '', nextHash);
+    }
+  }, [selectedOperationId]);
+
   return (
     <div className="page-stack">
       <header className="page-heading">
@@ -132,6 +145,13 @@ export function AuditPage() {
         </button>
       </section>
       {error ? <div className="notice notice--error" role="alert">{error}</div> : null}
+      {selectedOperationId ? (
+        <OperationProgress
+          api={api}
+          operationId={selectedOperationId}
+          autoFocus
+        />
+      ) : null}
       <section className="panel data-panel">
         <div className="table-heading">
           <strong>Audit history</strong>
@@ -162,7 +182,15 @@ export function AuditPage() {
                   </div>
                   <span>{event.outcome}</span>
                   {operationId ? (
-                    <a href={`#operation-${operationId}`}>{`Operation ${operationId}`}</a>
+                    <a
+                      href={`#operation-${operationId}`}
+                      onClick={(clickEvent) => {
+                        clickEvent.preventDefault();
+                        setSelectedOperationId(operationId);
+                      }}
+                    >
+                      {`Operation ${operationId}`}
+                    </a>
                   ) : (
                     <span className="member-static">No operation</span>
                   )}

@@ -25,12 +25,28 @@ function renderWithProvider(child: ReactNode) {
   return render(<AuthProvider>{child}</AuthProvider>);
 }
 
+function eventStream(chunks: string[]): Response {
+  const encoder = new TextEncoder();
+  return new Response(
+    new ReadableStream<Uint8Array>({
+      start(controller) {
+        chunks.forEach((chunk) => controller.enqueue(encoder.encode(chunk)));
+        controller.close();
+      },
+    }),
+    {
+      status: 200,
+      headers: { 'Content-Type': 'text/event-stream; charset=utf-8' },
+    },
+  );
+}
+
 afterEach(() => {
   vi.unstubAllGlobals();
 });
 
 describe('AuditPage', () => {
-  it('filters, paginates, and renders operation links for immutable audit history', async () => {
+  it('filters, paginates, opens an in-page operation detail target, and renders operation links for immutable audit history', async () => {
     const fetchMock = vi.fn((input: RequestInfo | URL) => {
       const url = String(input);
       if (url === '/api/v1/admin/session') {
@@ -104,6 +120,31 @@ describe('AuditPage', () => {
           }),
         );
       }
+      if (url === '/api/v1/admin/operations/op-22/events') {
+        return Promise.resolve(
+          eventStream([
+            'event: operation_event\ndata: {"id":2201,"operationId":"op-22","state":"running","message":"Applying migration bundle","metadata":{},"createdAt":"2026-09-23T09:22:10.000Z"}\n\n',
+            'event: complete\ndata: {"operationId":"op-22","state":"failed"}\n\n',
+          ]),
+        );
+      }
+      if (url === '/api/v1/admin/operations/op-22') {
+        return Promise.resolve(
+          json({
+            operation: {
+              id: 'op-22',
+              requestedBy: 'admin-id',
+              type: 'deployment_apply',
+              state: 'failed',
+              summary: 'Deploy revision cccccccccccccccccccccccccccccccccccccccc',
+              output: 'Health checks timed out after cutover.',
+              startedAt: '2026-09-23T09:22:10.000Z',
+              completedAt: '2026-09-23T09:23:00.000Z',
+              createdAt: '2026-09-23T09:22:00.000Z',
+            },
+          }),
+        );
+      }
       return Promise.resolve(new Response(null, { status: 404 }));
     });
     vi.stubGlobal('fetch', fetchMock);
@@ -112,10 +153,19 @@ describe('AuditPage', () => {
     renderWithProvider(<AuditPage />);
 
     expect(await screen.findByText('admin_operation.state_changed')).toBeVisible();
-    expect(screen.getByRole('link', { name: 'Operation op-22' })).toHaveAttribute(
+    const operationLink = screen.getByRole('link', { name: 'Operation op-22' });
+    expect(operationLink).toHaveAttribute(
       'href',
       '#operation-op-22',
     );
+
+    await user.click(operationLink);
+
+    const operationPanel = await screen.findByLabelText('Operation progress');
+    expect(operationPanel).toHaveAttribute('id', 'operation-op-22');
+    expect(operationPanel).toHaveFocus();
+    expect(await screen.findByText('Applying migration bundle')).toBeVisible();
+    expect(await screen.findByText('Health checks timed out after cutover.')).toBeVisible();
 
     await user.type(screen.getByLabelText('Action'), 'admin_operation.state_changed');
     await user.type(screen.getByLabelText('Outcome'), 'failed');
