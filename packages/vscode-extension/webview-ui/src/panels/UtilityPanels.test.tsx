@@ -182,6 +182,22 @@ describe('UtilityPanels', () => {
     expect(screen.getByText('src/App.tsx')).toBeInTheDocument();
   });
 
+  it('submits all-workspaces searches when the toggle is enabled', async () => {
+    const harness = createBridge();
+    render(<SearchPanel bridge={harness} initialResults={[]} />);
+
+    await userEvent.click(screen.getByRole('checkbox', { name: 'Search all workspaces' }));
+    await userEvent.type(screen.getByRole('textbox', { name: /search query/i }), 'panel');
+    await userEvent.click(screen.getByRole('button', { name: 'Search' }));
+
+    await waitFor(() =>
+      expect(harness.request).toHaveBeenCalledWith('search.run', {
+        query: 'panel',
+        allWorkspaces: true,
+      }),
+    );
+  });
+
   it('invokes every sync action and keeps the latest output visible', async () => {
     const harness = createBridge();
     render(<SyncPanel bridge={harness} />);

@@ -1,4 +1,5 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
+import type { ReactNode } from 'react';
 import type { TaskFileCaptureWithEntries } from '@host/messages';
 import type { AriadneBridge } from '../bridge';
 
@@ -13,7 +14,7 @@ function lineClassName(line: string): string {
   return 'diff-line diff-line-context';
 }
 
-function renderDiffText(diff: string): React.ReactNode {
+function renderDiffText(diff: string): ReactNode {
   return diff.split('\n').map((line, index) => (
     <span key={`${index}-${line}`} className={lineClassName(line)} style={{ display: 'block' }}>
       {line}
@@ -31,6 +32,17 @@ export default function FilesPanel({ bridge, captures }: FilesPanelProps) {
     const entries = captures.map((capture) => [capture.id, capture] as const);
     return new Map(entries);
   }, [captures]);
+
+  useEffect(() => {
+    if (captures.length === 0) {
+      setSelectedCaptureId(null);
+      return;
+    }
+
+    if (!selectedCaptureId || !captures.some((capture) => capture.id === selectedCaptureId)) {
+      setSelectedCaptureId(captures[0].id);
+    }
+  }, [captures, selectedCaptureId]);
 
   const selectedCapture =
     (selectedCaptureId ? loadedCaptures[selectedCaptureId] ?? captureMap.get(selectedCaptureId) : undefined) ?? undefined;

@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
+import type { FormEvent } from 'react';
 import type { SearchResult } from '@host/messages';
 import type { AriadneBridge } from '../bridge';
 
@@ -55,7 +56,7 @@ export default function SearchPanel({ bridge, initialResults }: SearchPanelProps
       .filter((group) => group.hits.length > 0);
   }, [results]);
 
-  async function handleSubmit(event: React.FormEvent<HTMLFormElement>): Promise<void> {
+  async function handleSubmit(event: FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
     const trimmed = query.trim();
     if (!trimmed) {
