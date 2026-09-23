@@ -209,6 +209,7 @@ supported way to run this package in production:
 | ---- | ------- |
 | `deploy/nodem2/compose.yaml` | `postgres`, one-shot `migrate`, and `sync-server` services (fixed project name `ariadne-nodem2`) |
 | `deploy/nodem2/sync-server.Dockerfile` | Multi-stage Node 20 image: build stage compiles TypeScript, runtime stage carries only `pnpm deploy --prod` output |
+| `deploy/nodem2/scripts/import-release` | Validate a directly copied Git bundle and source archive, stage the exact reviewed tree, and update the fixed local trust ref |
 | `deploy/nodem2/scripts/deploy` | Deploy one trusted revision, with migration, health verification, and rollback |
 | `deploy/nodem2/scripts/restart-sync-server` / `restart-postgres` | Restart exactly one service, then wait (bounded) for `pg_isready` and `/healthz` before reporting success |
 | `deploy/nodem2/scripts/sync-server-entrypoint` | Container entrypoint that performs the key handoff and permanent privilege drop |
@@ -227,19 +228,32 @@ Fixed host layout (the scripts never accept these as arguments):
 
 ### Deploying
 
+Create a `git archive` tar and Git bundle for the same reviewed SHA on the
+review machine, then copy both directly to nodem2 with the approved SSH
+transport. Do not publish a deployment branch, clone on nodem2, or fetch from
+GitHub. As root, import the copied artifacts before requesting deployment:
+
 ```bash
+/usr/local/lib/ariadne/import-release \
+  <40-char-commit-sha> \
+  /root/ariadne-release/ariadne-<sha>.bundle \
+  /root/ariadne-release/ariadne-<sha>.tar
 /opt/ariadne/worktree/deploy/nodem2/scripts/deploy <40-char-commit-sha>
 ```
 
-The script requires all secret/key files before touching Compose, rejects a
-dirty worktree and any revision that is not reachable from the fixed trusted
-ref (`origin/deploy/nodem2`), validates `docker compose config --quiet` before
-building, builds the immutable candidate tag `ariadne-sync-server:<sha>` from
-the `build.context` declared for `sync-server`/`migrate` (the checked-out
-worktree root), runs migrations as a one-shot `migrate` service *before*
-replacing the app, polls `http://127.0.0.1:4300/healthz`, and rolls the
-`sync-server` service back to the previously deployed image when health
-verification fails. It never prints secret values.
+`import-release` validates the bundle, archive commit identity, archive paths
+and entry types, exact file content/modes, fixed destination ownership, and
+clean result before updating the root-managed local
+`refs/ariadne/deploy`. The deploy script has no fetch or other Git network
+dependency. It requires all secret/key files before touching Compose, rejects a
+dirty worktree and any revision that is not known locally and reachable from
+that fixed ref, validates `docker compose config --quiet` before building,
+builds the immutable candidate tag `ariadne-sync-server:<sha>` from the
+`build.context` declared for `sync-server`/`migrate` (the checked-out worktree
+root), runs migrations as a one-shot `migrate` service *before* replacing the
+app, polls `http://127.0.0.1:4300/healthz`, and rolls the `sync-server` service
+back to the previously deployed image when health verification fails. It never
+prints secret values.
 
 Caution: plain `docker compose config` renders every `env_file` value into its
 output. Only `docker compose config --quiet` is safe to run where output may be
@@ -254,7 +268,8 @@ installed under `/opt/ariadne`.
 
 All Compose operations are Ariadne-only: the scripts pin the
 `ariadne-nodem2` project and exact Compose file, never run host-wide Docker
-cleanup, and never restart services outside this tracked stack.
+cleanup, never restart Docker or unrelated systemd units, and never touch
+services, ports, volumes, or sibling paths outside this tracked stack.
 
 ### Runtime hardening and the root-owned key handoff
 
@@ -281,11 +296,14 @@ CapInh: 0 | CapPrm: 0 | CapEff: 0 | NoNewPrivs: 1
 canReadCanonical EACCES   canWriteRootFs EROFS   keyring loaded
 ```
 
-Deployment contract tests (fake `docker`/`git`/`curl`) live in
-`deploy/nodem2/test/deploy.test.ts`:
+Deployment and direct-copy import contracts live in
+`deploy/nodem2/test/deploy.test.ts` and
+`deploy/nodem2/test/import-release.test.ts`:
 
 ```bash
-pnpm --filter @ariadne-dev/operator exec vitest run ../../deploy/nodem2/test/deploy.test.ts
+pnpm --filter @ariadne-dev/operator exec vitest run \
+  ../../deploy/nodem2/test/deploy.test.ts \
+  ../../deploy/nodem2/test/import-release.test.ts
 docker compose -f deploy/nodem2/compose.yaml --env-file deploy/nodem2/.env.example config --quiet
 ```
 

@@ -31,6 +31,7 @@ const INSTALLED_EXECUTABLES = [
   'backup',
   'deployment-status',
   'deploy',
+  'import-release',
   'prune-backups',
   'rollback',
   'restart-postgres',
@@ -502,6 +503,9 @@ describe('install script', () => {
       schemaVersion: 10,
       candidates: expect.any(Array),
     });
+    expect(readLog(harness.gitLog).join('\n')).toContain(
+      'log refs/ariadne/deploy --format=%H\t%cI\t%s -n 20',
+    );
   });
 
   it('fails status when service probes fail while preserving legitimate stopped states', () => {
@@ -971,9 +975,8 @@ describe('ariadne-operator.service unit', () => {
     expect(text).toContain('RestrictSUIDSGID=true');
     expect(text).toContain('LockPersonality=true');
     expect(text).toContain('SystemCallArchitectures=native');
-    // The operator must refresh the trusted git ref before every deployment,
-    // so egress denial is incompatible with its required work and must not be
-    // reintroduced here.
+    // The operator reports results to the loopback sync-server endpoint, so
+    // blanket IP denial would break durable operation completion.
     expect(text).not.toContain('IPAddressDeny');
     expect(text).not.toContain('IPAddressAllow');
     expect(text).toContain('RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6');
@@ -1011,12 +1014,10 @@ describe('ariadne-operator.service unit', () => {
 });
 
 describe('deploy under the operator service', () => {
-  it('treats a failed trusted-ref refresh as fatal instead of deploying a stale ref', () => {
+  it('requires local imported-ref reachability without any Git network operation', () => {
     const deployScript = fs.readFileSync(path.join(scriptsDir, 'deploy'), 'utf8');
-    const fetchLine = deployScript.slice(deployScript.indexOf('fetch --quiet'));
-    expect(fetchLine.slice(0, 400)).toMatch(/fail "/);
-    expect(deployScript).not.toMatch(/continuing with the last fetched/);
-    // Reachability from the trusted ref stays enforced on top of the refresh.
+    expect(deployScript).not.toMatch(/\bgit\b[^\n]*\b(fetch|pull|clone|ls-remote)\b/);
+    expect(deployScript).toContain('refs/ariadne/deploy');
     expect(deployScript).toContain('merge-base --is-ancestor');
   });
 });

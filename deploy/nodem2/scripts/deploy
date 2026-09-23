@@ -3,8 +3,8 @@
 #
 #   deploy <40-character-commit-sha>
 #
-# The revision must already be reachable from the configured trusted remote ref
-# (origin/deploy/nodem2). The script validates Compose configuration, builds an
+# The revision must already be reachable from the fixed root-managed local ref
+# (refs/ariadne/deploy). The script validates Compose configuration, builds an
 # immutable candidate image, runs migrations as a one-shot job, replaces the
 # app, verifies /healthz, and rolls back to the previously deployed image on
 # failure.
@@ -56,18 +56,10 @@ mkdir -p "$ARIADNE_STATE_DIR"
 
 trap on_exit EXIT INT TERM
 
-log "verifying revision against $ARIADNE_TRUSTED_REMOTE/$ARIADNE_TRUSTED_BRANCH"
+log "verifying revision against $ARIADNE_TRUSTED_REF"
 if [ -n "$(git -C "$ARIADNE_WORKTREE" status --porcelain)" ]; then
     fail "deployment worktree is dirty; refusing to deploy modified source"
 fi
-
-# The trusted ref must be refreshed before it is trusted: deploying against a
-# stale local ref would allow a revision that has since been removed from the
-# trusted branch. The operator service therefore keeps the egress it needs to
-# reach the git remote.
-git -C "$ARIADNE_WORKTREE" fetch --quiet --no-tags "$ARIADNE_TRUSTED_REMOTE" \
-    "+refs/heads/$ARIADNE_TRUSTED_BRANCH:$ARIADNE_TRUSTED_REF" ||
-    fail "could not fetch $ARIADNE_TRUSTED_REF from $ARIADNE_TRUSTED_REMOTE; refusing to deploy against a stale trusted ref"
 
 TRUSTED_TIP=$(git -C "$ARIADNE_WORKTREE" rev-parse --verify --quiet "$ARIADNE_TRUSTED_REF^{commit}") ||
     fail "trusted ref $ARIADNE_TRUSTED_REF is not available"

@@ -126,7 +126,6 @@ case "\${1:-}" in
   status)
     if [ -n "\${FAKE_GIT_STATUS:-}" ]; then printf '%s\\n' "$FAKE_GIT_STATUS"; fi
     exit 0 ;;
-  fetch) exit "\${FAKE_GIT_FETCH_EXIT:-0}" ;;
   rev-parse)
     case "$*" in
       *HEAD*)
@@ -384,7 +383,7 @@ describe('deploy script', () => {
     expect(readLog(harness.dockerLog)).toEqual([]);
   });
 
-  it('rejects a commit that is not reachable from the trusted remote ref', () => {
+  it('rejects a commit that is not reachable from the fixed imported ref', () => {
     const harness = createHarness();
     const result = runScript(harness, 'deploy', {
       args: [VALID_SHA],
@@ -396,46 +395,23 @@ describe('deploy script', () => {
     expect(indexOfMatch(readLog(harness.dockerLog), 'build sync-server')).toBe(-1);
   });
 
-  it('aborts before touching Docker when the trusted ref cannot be refreshed', () => {
-    const harness = createHarness();
-    const result = runScript(harness, 'deploy', {
-      args: [VALID_SHA],
-      env: { FAKE_GIT_FETCH_EXIT: '1' },
-    });
-
-    // Deploying against a stale local ref would let a revision that has since
-    // been removed from the trusted branch reach production, so a failed fetch
-    // is fatal rather than a warning.
-    expect(result.status).not.toBe(0);
-    const text = `${result.stdout}${result.stderr}`.toLowerCase();
-    expect(text).toContain('fetch');
-    expect(text).not.toContain('continuing');
-    expect(readLog(harness.dockerLog)).toEqual([]);
-  });
-
-  it('refreshes the trusted ref before checking reachability or checking out', () => {
+  it('has no fetch or network dependency before checking local trust', () => {
     const harness = createHarness();
     const result = runScript(harness, 'deploy', { args: [VALID_SHA] });
 
     expect(result.status).toBe(0);
     const git = readLog(harness.gitLog);
-    const fetchIndex = indexOfMatch(git, 'fetch');
-    expect(fetchIndex).toBeGreaterThanOrEqual(0);
-    expect(indexOfMatch(git, 'merge-base --is-ancestor')).toBeGreaterThan(fetchIndex);
-    expect(indexOfMatch(git, 'checkout')).toBeGreaterThan(fetchIndex);
+    expect(git.some((line) => /\b(fetch|pull|clone|ls-remote)\b/.test(line))).toBe(false);
+    expect(indexOfMatch(git, 'merge-base --is-ancestor')).toBeGreaterThanOrEqual(0);
+    expect(indexOfMatch(git, 'checkout')).toBeGreaterThanOrEqual(0);
   });
 
-  it('fetches only the dedicated nodem2 deployment branch into the trusted remote ref', () => {
-    const harness = createHarness();
-    const result = runScript(harness, 'deploy', { args: [VALID_SHA] });
-
-    expect(result.status).toBe(0);
-    const fetch = readLog(harness.gitLog).find((line) => line.includes('fetch --quiet --no-tags'));
-    expect(fetch).toContain(
-      'origin +refs/heads/deploy/nodem2:refs/remotes/origin/deploy/nodem2',
-    );
-    expect(fetch).not.toContain('refs/heads/main');
-    expect(fetch).not.toContain('refs/remotes/origin/main');
+  it('uses only the fixed root-managed imported ref', () => {
+    const common = fs.readFileSync(path.join(scriptsDir, 'lib-common'), 'utf8');
+    expect(common).toContain('ARIADNE_TRUSTED_REF=refs/ariadne/deploy');
+    expect(common).not.toContain('ARIADNE_TRUSTED_REMOTE');
+    expect(common).not.toContain('ARIADNE_TRUSTED_BRANCH');
+    expect(common).not.toContain('refs/remotes/');
   });
 
   it('rejects a dirty deployment worktree', () => {

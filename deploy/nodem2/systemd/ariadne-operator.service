@@ -55,11 +55,10 @@ RestrictNamespaces=true
 LockPersonality=true
 SystemCallArchitectures=native
 
-# Egress is restricted by address family only. `deploy` must fetch the trusted
-# ref from the git remote before every deployment and fail closed when it
-# cannot, so a blanket egress denial is incompatible with this unit's required
-# work and must not be reintroduced. Docker and Compose are still driven through
-# /run/docker.sock, and the sync-server callback stays on 127.0.0.1:4300.
+# The deployment trust path has no network dependency. AF_INET/AF_INET6 remain
+# available only because the operator reports durable results to the
+# sync-server callback on 127.0.0.1:4300. Docker and Compose are driven through
+# /run/docker.sock.
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 
 [Install]
