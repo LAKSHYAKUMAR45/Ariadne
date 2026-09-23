@@ -287,7 +287,7 @@ describe('TasksPage', () => {
     await waitFor(() =>
       expect(screen.queryByText('<script>alert("never execute")</script>')).not.toBeInTheDocument(),
     );
-    expect(screen.getByRole('status')).toHaveTextContent('Capture deleted.');
+    expect(screen.queryByRole('status')).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: /src\/app.tsx/i })).toBeVisible();
 
     refreshTimeline.resolve(
@@ -298,12 +298,128 @@ describe('TasksPage', () => {
     );
 
     const nextCapture = await screen.findByRole('button', { name: /src\/routes.tsx/i });
+    expect(await screen.findByRole('status')).toHaveTextContent('Capture deleted.');
     await waitFor(() =>
       expect(screen.queryByRole('button', { name: /^Delete capture capture-1$/i })).not.toBeInTheDocument(),
     );
     await waitFor(() => expect(screen.queryByRole('button', { name: /src\/app.tsx/i })).not.toBeInTheDocument());
     await waitFor(() => expect(nextCapture).toHaveFocus());
     expect(container.querySelector('.task-workbench')).toHaveAttribute('data-active-pane', 'timeline');
+  });
+
+  it('preserves the previous timeline when post-delete refresh fails and allows an explicit retry', async () => {
+    const refreshTimeline = deferredResponse();
+    const retryTimeline = deferredResponse();
+    const eventStream = createEventStream();
+    let operationState: AdminOperationState = 'queued';
+    let timelineLoads = 0;
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url === '/api/v1/admin/session') {
+          return Promise.resolve(json(sessionBody(null)));
+        }
+        if (url === '/api/v1/admin/tasks?limit=100') {
+          return Promise.resolve(
+            json({
+              tasks: [taskSummary('task-1', 'Build cloud dashboard', 2)],
+              hasMore: false,
+              nextOffset: null,
+            }),
+          );
+        }
+        if (url === '/api/v1/admin/tasks/task-1/timeline') {
+          timelineLoads += 1;
+          if (timelineLoads === 1) {
+            return Promise.resolve(
+              json({
+                taskId: 'task-1',
+                events: [
+                  captureEvent('capture-1', 'src/App.tsx'),
+                  captureEvent('capture-2', 'src/routes.tsx', 84),
+                ],
+              }),
+            );
+          }
+          if (timelineLoads === 2) {
+            return refreshTimeline.promise;
+          }
+          return retryTimeline.promise;
+        }
+        if (url === '/api/v1/admin/tasks/task-1/file-captures/capture-1/files/src%2FApp.tsx') {
+          return Promise.resolve(json(fileBody('src/App.tsx')));
+        }
+        if (url === '/api/v1/admin/session/reauthenticate') {
+          return Promise.resolve(json({ reauthenticatedUntil: futureReauthenticatedUntil() }));
+        }
+        if (url === '/api/v1/admin/tasks/task-1/file-captures/capture-1') {
+          expect(init?.method).toBe('DELETE');
+          return Promise.resolve(json(acceptedOperation('op-1'), 202));
+        }
+        if (url === '/api/v1/admin/operations/op-1/events') {
+          return Promise.resolve(eventStream.response);
+        }
+        if (url === '/api/v1/admin/operations/op-1') {
+          return Promise.resolve(json(operationBody(operationState)));
+        }
+        return Promise.resolve(new Response(null, { status: 404 }));
+      }),
+    );
+    const user = userEvent.setup();
+
+    renderWithProvider(<TasksPage />);
+
+    await user.click(await screen.findByRole('button', { name: /build cloud dashboard/i }));
+    await user.click(await screen.findByRole('button', { name: /src\/app.tsx/i }));
+    expect(await screen.findByText('<script>alert("never execute")</script>')).toBeVisible();
+
+    await user.click(screen.getByRole('button', { name: 'Delete capture capture-1' }));
+    await user.type(screen.getByLabelText('Type DELETE capture-1 to continue'), 'DELETE capture-1');
+    await user.type(screen.getByLabelText('Administrator password'), 'correct horse battery staple');
+    await user.click(screen.getByRole('button', { name: 'Continue operation' }));
+
+    operationState = 'succeeded';
+    eventStream.emit('complete', {
+      operationId: 'op-1',
+      state: 'succeeded',
+    });
+
+    await waitFor(() =>
+      expect(screen.queryByText('<script>alert("never execute")</script>')).not.toBeInTheDocument(),
+    );
+    expect(screen.getByRole('button', { name: /src\/app.tsx/i })).toBeVisible();
+    expect(screen.queryByRole('status')).not.toBeInTheDocument();
+
+    refreshTimeline.resolve(
+      json(
+        {
+          error: {
+            code: 'timeline_refresh_failed',
+            message: 'Unable to refresh task history.',
+          },
+        },
+        503,
+      ),
+    );
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Unable to refresh task history.');
+    const retry = screen.getByRole('button', { name: 'Retry timeline' });
+    expect(retry).toBeVisible();
+    expect(screen.getByRole('button', { name: /src\/app.tsx/i })).toBeVisible();
+    expect(screen.queryByRole('status')).not.toBeInTheDocument();
+
+    await user.click(retry);
+    retryTimeline.resolve(
+      json({
+        taskId: 'task-1',
+        events: [captureEvent('capture-2', 'src/routes.tsx', 84)],
+      }),
+    );
+
+    expect(await screen.findByRole('status')).toHaveTextContent('Capture deleted.');
+    await waitFor(() => expect(screen.queryByRole('button', { name: /src\/app.tsx/i })).not.toBeInTheDocument());
   });
 
   it('cancels a capture deletion before submitting the protected request', async () => {

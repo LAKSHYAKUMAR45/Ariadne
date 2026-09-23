@@ -754,6 +754,18 @@ a:focus-visible {
   color: #9cedc3;
 }
 
+.notice--actionable {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.notice--actionable .quiet-action {
+  min-height: 32px;
+  flex: 0 0 auto;
+}
+
 .page-action {
   min-width: 138px;
   margin: 0;

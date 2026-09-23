@@ -37,6 +37,13 @@ interface LoadTimelineOptions {
   nextPane?: MobilePane;
   deletedCaptureId?: string | null;
   focusTarget?: FocusTarget | null;
+  preserveEventsOnError?: boolean;
+  allowRetry?: boolean;
+}
+
+interface TimelineRetryRequest {
+  taskId: string;
+  options: LoadTimelineOptions;
 }
 
 function formatTime(value: string): string {
@@ -127,6 +134,7 @@ export function TasksPage() {
   const [deleteBusy, setDeleteBusy] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [deleteOperation, setDeleteOperation] = useState<AdminOperation | null>(null);
+  const [timelineRetry, setTimelineRetry] = useState<TimelineRetryRequest | null>(null);
   const timelineControllerRef = useRef<AbortController | null>(null);
   const fileControllerRef = useRef<AbortController | null>(null);
   const deleteControllerRef = useRef<AbortController | null>(null);
@@ -167,6 +175,7 @@ export function TasksPage() {
 
     setDetailLoading(true);
     setError(null);
+    setTimelineRetry(null);
 
     try {
       const response = await api.get(
@@ -185,6 +194,7 @@ export function TasksPage() {
           (event) => isCaptureEvent(event) && event.id === options.deletedCaptureId,
         );
         if (!stillPresent) {
+          setStatusMessage('Capture deleted.');
           nextFocusTargetRef.current = options.focusTarget ?? firstCaptureTarget(response.events);
           setTasks((current) =>
             current.map((task) =>
@@ -202,8 +212,13 @@ export function TasksPage() {
       if (controller.signal.aborted || isAbortError(loadError)) {
         return;
       }
-      setEvents([]);
+      if (!options.preserveEventsOnError) {
+        setEvents([]);
+      }
       setError(loadError instanceof Error ? loadError.message : 'Unable to load task history.');
+      if (options.allowRetry) {
+        setTimelineRetry({ taskId, options });
+      }
     } finally {
       if (timelineControllerRef.current === controller) {
         setDetailLoading(false);
@@ -278,6 +293,7 @@ export function TasksPage() {
     deleteOperationStateRef.current = null;
     deleteTaskIdRef.current = null;
     deletedCaptureIdRef.current = null;
+    setTimelineRetry(null);
     setSelectedTaskId(taskId);
     await loadTimeline(taskId, {
       clearSelection: true,
@@ -386,8 +402,6 @@ export function TasksPage() {
   }
 
   const handleDeleteOperationChange = useCallback((operation: AdminOperation | null) => {
-    setDeleteOperation(operation);
-
     if (!operation) {
       deleteOperationStateRef.current = null;
       return;
@@ -402,7 +416,6 @@ export function TasksPage() {
 
     if (operation.state === 'succeeded') {
       clearSelectedFile();
-      setStatusMessage('Capture deleted.');
       setActivePane('timeline');
 
       const deleteTaskId = deleteTaskIdRef.current;
@@ -411,6 +424,8 @@ export function TasksPage() {
           deletedCaptureId: deletedCaptureIdRef.current,
           focusTarget: nextFocusTargetRef.current,
           nextPane: 'timeline',
+          preserveEventsOnError: true,
+          allowRetry: true,
         });
       }
       return;
@@ -436,7 +451,20 @@ export function TasksPage() {
       </header>
 
       {statusMessage ? <div className="notice notice--success" role="status">{statusMessage}</div> : null}
-      {error ? <div className="notice notice--error" role="alert">{error}</div> : null}
+      {error ? (
+        <div className="notice notice--error notice--actionable" role="alert">
+          <span>{error}</span>
+          {timelineRetry ? (
+            <button
+              className="quiet-action"
+              type="button"
+              onClick={() => void loadTimeline(timelineRetry.taskId, timelineRetry.options)}
+            >
+              Retry timeline
+            </button>
+          ) : null}
+        </div>
+      ) : null}
 
       <div className="task-workbench" data-active-pane={activePane}>
         <aside className="task-list" aria-label="Tasks">
