@@ -90,6 +90,9 @@ export default function App({ bridge, initialState }: AppProps) {
   );
 
   const currentTask = state?.currentTask;
+  function handlePanelError(message: string): void {
+    setBanner(message ? { kind: 'error', message } : null);
+  }
 
   async function switchTask(taskId: string): Promise<void> {
     setBusyLabel(`Switching to ${taskId}…`);
@@ -169,13 +172,13 @@ export default function App({ bridge, initialState }: AppProps) {
           </>
         );
       case 'todos':
-        return <TodosPanel state={state} bridge={bridge} onBusy={setBusyLabel} onError={(message) => setBanner({ kind: 'error', message })} />;
+        return <TodosPanel state={state} bridge={bridge} onBusy={setBusyLabel} onError={handlePanelError} />;
       case 'decisions':
-        return <DecisionsPanel state={state} bridge={bridge} onBusy={setBusyLabel} onError={(message) => setBanner({ kind: 'error', message })} />;
+        return <DecisionsPanel state={state} bridge={bridge} onBusy={setBusyLabel} onError={handlePanelError} />;
       case 'errors':
-        return <ErrorsPanel state={state} bridge={bridge} onBusy={setBusyLabel} onError={(message) => setBanner({ kind: 'error', message })} />;
+        return <ErrorsPanel state={state} bridge={bridge} onBusy={setBusyLabel} onError={handlePanelError} />;
       case 'questions':
-        return <QuestionsPanel state={state} bridge={bridge} onBusy={setBusyLabel} onError={(message) => setBanner({ kind: 'error', message })} />;
+        return <QuestionsPanel state={state} bridge={bridge} onBusy={setBusyLabel} onError={handlePanelError} />;
       case 'files':
         return (
           state?.fileCaptures.length ? (

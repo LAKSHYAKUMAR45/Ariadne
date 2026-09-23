@@ -115,6 +115,36 @@ function renderPanels(state: WebviewState = baseState) {
 }
 
 describe('EntityPanels', () => {
+  it('reconciles todo rows when host state changes', async () => {
+    const bridge = createBridge();
+    const onBusy = vi.fn();
+    const onError = vi.fn();
+    const { rerender } = render(
+      <TodosPanel state={baseState} bridge={bridge} onBusy={onBusy} onError={onError} />,
+    );
+
+    expect(screen.getByRole('textbox', { name: 'Todo text for todo-1' })).toHaveValue('Existing todo');
+
+    rerender(
+      <TodosPanel
+        state={{
+          ...baseState,
+          todos: [
+            {
+              ...todo,
+              text: 'Synced todo',
+            },
+          ],
+        }}
+        bridge={bridge}
+        onBusy={onBusy}
+        onError={onError}
+      />,
+    );
+
+    expect(screen.getByRole('textbox', { name: 'Todo text for todo-1' })).toHaveValue('Synced todo');
+  });
+
   it('sends todo create, edit, status, and delete requests without local mutation', async () => {
     const { bridge, onBusy, onError, rerender, user } = renderPanels();
 
@@ -123,7 +153,7 @@ describe('EntityPanels', () => {
 
     expect(bridge.request).toHaveBeenCalledWith('todo.create', { text: 'New todo' });
     expect(onBusy).toHaveBeenCalled();
-    expect(onError).not.toHaveBeenCalled();
+    expect(onError.mock.calls.filter(([message]) => message).length).toBe(0);
     expect(screen.getByRole('textbox', { name: 'Todo text for todo-1' })).toHaveValue('Existing todo');
 
     await user.clear(screen.getByRole('textbox', { name: 'Todo text for todo-1' }));
@@ -141,7 +171,10 @@ describe('EntityPanels', () => {
         state={{
           ...baseState,
           todos: [
-            todo,
+            {
+              ...todo,
+              text: 'Updated todo',
+            },
             {
               ...todo,
               id: 'todo-2',
@@ -157,6 +190,7 @@ describe('EntityPanels', () => {
 
     expect(screen.getByRole('textbox', { name: 'Todo text for todo-1' })).toHaveValue('Updated todo');
     expect(screen.getByRole('textbox', { name: 'Todo text for todo-2' })).toHaveValue('New todo');
+    expect(onError.mock.calls.filter(([message]) => message).length).toBe(0);
   });
 
   it('sends decision create, edit, and delete requests', async () => {
@@ -185,7 +219,7 @@ describe('EntityPanels', () => {
     });
     expect(bridge.request).toHaveBeenCalledWith('decision.delete', { id: 'decision-1' });
     expect(onBusy).toHaveBeenCalled();
-    expect(onError).not.toHaveBeenCalled();
+    expect(onError.mock.calls.filter(([message]) => message).length).toBe(0);
   });
 
   it('sends error create, edit, resolve, reopen, and delete requests', async () => {
@@ -208,7 +242,32 @@ describe('EntityPanels', () => {
     expect(bridge.request).toHaveBeenCalledWith('error.reopen', { id: 'error-1' });
     expect(bridge.request).toHaveBeenCalledWith('error.delete', { id: 'error-1' });
     expect(onBusy).toHaveBeenCalled();
-    expect(onError).not.toHaveBeenCalled();
+    expect(onError.mock.calls.filter(([message]) => message).length).toBe(0);
+  });
+
+  it('clears a previous error banner before a later successful request', async () => {
+    const request = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('sync failed'))
+      .mockResolvedValueOnce({});
+    const bridge = {
+      request,
+      subscribe: vi.fn(() => () => undefined),
+    } satisfies AriadneBridge;
+    const onBusy = vi.fn();
+    const onError = vi.fn();
+    const user = userEvent.setup();
+
+    render(<ErrorsPanel state={baseState} bridge={bridge} onBusy={onBusy} onError={onError} />);
+
+    await user.type(screen.getByRole('textbox', { name: 'Error message for error-1' }), 'Failed to sync again');
+    await user.click(screen.getByRole('button', { name: 'Save error-1' }));
+    await user.click(screen.getByRole('button', { name: 'Save error-1' }));
+
+    expect(onError).toHaveBeenCalledWith('sync failed');
+    expect(onError).toHaveBeenCalledWith('');
+    expect(request).toHaveBeenNthCalledWith(1, 'error.update', { id: 'error-1', message: 'Failed to sync again' });
+    expect(request).toHaveBeenNthCalledWith(2, 'error.update', { id: 'error-1', message: 'Failed to sync again' });
   });
 
   it('sends question create, edit, resolve, reopen, and delete requests', async () => {
@@ -234,6 +293,6 @@ describe('EntityPanels', () => {
     expect(bridge.request).toHaveBeenCalledWith('question.reopen', { id: 'question-1' });
     expect(bridge.request).toHaveBeenCalledWith('question.delete', { id: 'question-1' });
     expect(onBusy).toHaveBeenCalled();
-    expect(onError).not.toHaveBeenCalled();
+    expect(onError.mock.calls.filter(([message]) => message).length).toBe(0);
   });
 });

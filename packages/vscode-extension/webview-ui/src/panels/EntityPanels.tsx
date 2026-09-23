@@ -13,15 +13,20 @@ interface EntityPanelProps {
 type TodoDraft = {
   text: string;
   status: TodoStatus;
+  dirtyText: boolean;
+  dirtyStatus: boolean;
 };
 
 type DecisionDraft = {
   text: string;
   rationale: string;
+  dirtyText: boolean;
+  dirtyRationale: boolean;
 };
 
 type TextDraft = {
   text: string;
+  dirty: boolean;
 };
 
 function formatErrorMessage(error: unknown): string {
@@ -30,6 +35,7 @@ function formatErrorMessage(error: unknown): string {
 
 function useRequestRunner(onBusy: (label: string | undefined) => void, onError: (message: string) => void) {
   return async function runRequest(label: string, action: () => Promise<void>): Promise<void> {
+    onError('');
     onBusy(label);
     try {
       await action();
@@ -46,9 +52,33 @@ function ensureTodoDrafts(todos: Todo[]): Record<string, TodoDraft> {
     acc[todo.id] = {
       text: todo.text,
       status: todo.status,
+      dirtyText: false,
+      dirtyStatus: false,
     };
     return acc;
   }, {});
+}
+
+function toTodoDraft(todo: Todo): TodoDraft {
+  return {
+    text: todo.text,
+    status: todo.status,
+    dirtyText: false,
+    dirtyStatus: false,
+  };
+}
+
+function reconcileTodoDraft(current: TodoDraft | undefined, todo: Todo): TodoDraft {
+  if (!current) {
+    return toTodoDraft(todo);
+  }
+
+  return {
+    text: current.dirtyText ? current.text : todo.text,
+    status: current.dirtyStatus ? current.status : todo.status,
+    dirtyText: current.dirtyText && current.text !== todo.text,
+    dirtyStatus: current.dirtyStatus && current.status !== todo.status,
+  };
 }
 
 function useTodoDrafts(todos: Todo[]) {
@@ -56,16 +86,10 @@ function useTodoDrafts(todos: Todo[]) {
 
   useEffect(() => {
     setDrafts((current) => {
-      const next = { ...current };
-      for (const todo of todos) {
-        if (!next[todo.id]) {
-          next[todo.id] = {
-            text: todo.text,
-            status: todo.status,
-          };
-        }
-      }
-      return next;
+      return todos.reduce<Record<string, TodoDraft>>((next, todo) => {
+        next[todo.id] = reconcileTodoDraft(current[todo.id], todo);
+        return next;
+      }, {});
     });
   }, [todos]);
 
@@ -78,6 +102,8 @@ function useDecisionDrafts(decisions: Decision[]) {
       acc[decision.id] = {
         text: decision.text,
         rationale: decision.rationale ?? '',
+        dirtyText: false,
+        dirtyRationale: false,
       };
       return acc;
     }, {}),
@@ -85,16 +111,23 @@ function useDecisionDrafts(decisions: Decision[]) {
 
   useEffect(() => {
     setDrafts((current) => {
-      const next = { ...current };
-      for (const decision of decisions) {
-        if (!next[decision.id]) {
-          next[decision.id] = {
-            text: decision.text,
-            rationale: decision.rationale ?? '',
-          };
-        }
-      }
-      return next;
+      return decisions.reduce<Record<string, DecisionDraft>>((next, decision) => {
+        const existing = current[decision.id];
+        next[decision.id] = existing
+          ? {
+              text: existing.dirtyText ? existing.text : decision.text,
+              rationale: existing.dirtyRationale ? existing.rationale : decision.rationale ?? '',
+              dirtyText: existing.dirtyText && existing.text !== decision.text,
+              dirtyRationale: existing.dirtyRationale && existing.rationale !== (decision.rationale ?? ''),
+            }
+          : {
+              text: decision.text,
+              rationale: decision.rationale ?? '',
+              dirtyText: false,
+              dirtyRationale: false,
+            };
+        return next;
+      }, {});
     });
   }, [decisions]);
 
@@ -104,20 +137,23 @@ function useDecisionDrafts(decisions: Decision[]) {
 function useTextDrafts<T extends { id: string; text: string }>(items: T[]) {
   const [drafts, setDrafts] = useState<Record<string, TextDraft>>(() =>
     items.reduce<Record<string, TextDraft>>((acc, item) => {
-      acc[item.id] = { text: item.text };
+      acc[item.id] = { text: item.text, dirty: false };
       return acc;
     }, {}),
   );
 
   useEffect(() => {
     setDrafts((current) => {
-      const next = { ...current };
-      for (const item of items) {
-        if (!next[item.id]) {
-          next[item.id] = { text: item.text };
-        }
-      }
-      return next;
+      return items.reduce<Record<string, TextDraft>>((next, item) => {
+        const existing = current[item.id];
+        next[item.id] = existing
+          ? {
+              text: existing.dirty ? existing.text : item.text,
+              dirty: existing.dirty && existing.text !== item.text,
+            }
+          : { text: item.text, dirty: false };
+        return next;
+      }, {});
     });
   }, [items]);
 
@@ -172,6 +208,15 @@ export function TodosPanel({ state, bridge, onBusy, onError }: EntityPanelProps)
     await runRequest('Updating todo…', async () => {
       await bridge.request('todo.updateText', { id: todoId, text });
       await bridge.request('todo.setStatus', { id: todoId, status: draft.status });
+      setDrafts((current) => ({
+        ...current,
+        [todoId]: {
+          text,
+          status: draft.status,
+          dirtyText: false,
+          dirtyStatus: false,
+        },
+      }));
     });
   }
 
@@ -198,7 +243,12 @@ export function TodosPanel({ state, bridge, onBusy, onError }: EntityPanelProps)
 
       <div style={styles.list}>
         {todos.map((todo) => {
-          const draft = drafts[todo.id] ?? { text: todo.text, status: todo.status };
+          const draft = drafts[todo.id] ?? {
+            text: todo.text,
+            status: todo.status,
+            dirtyText: false,
+            dirtyStatus: false,
+          };
           return (
             <article key={todo.id} style={styles.card}>
               <div style={styles.row}>
@@ -211,8 +261,14 @@ export function TodosPanel({ state, bridge, onBusy, onError }: EntityPanelProps)
                       setDrafts((current) => ({
                         ...current,
                         [todo.id]: {
-                          ...(current[todo.id] ?? { text: todo.text, status: todo.status }),
+                          ...(current[todo.id] ?? {
+                            text: todo.text,
+                            status: todo.status,
+                            dirtyText: false,
+                            dirtyStatus: false,
+                          }),
                           text: event.target.value,
+                          dirtyText: true,
                         },
                       }))
                     }
@@ -228,8 +284,14 @@ export function TodosPanel({ state, bridge, onBusy, onError }: EntityPanelProps)
                       setDrafts((current) => ({
                         ...current,
                         [todo.id]: {
-                          ...(current[todo.id] ?? { text: todo.text, status: todo.status }),
+                          ...(current[todo.id] ?? {
+                            text: todo.text,
+                            status: todo.status,
+                            dirtyText: false,
+                            dirtyStatus: false,
+                          }),
                           status: event.target.value as TodoStatus,
+                          dirtyStatus: true,
                         },
                       }))
                     }
@@ -296,6 +358,15 @@ export function DecisionsPanel({ state, bridge, onBusy, onError }: EntityPanelPr
         text,
         rationale: draft.rationale.trim() || null,
       });
+      setDrafts((current) => ({
+        ...current,
+        [decisionId]: {
+          text,
+          rationale: draft.rationale.trim(),
+          dirtyText: false,
+          dirtyRationale: false,
+        },
+      }));
     });
   }
 
@@ -334,6 +405,8 @@ export function DecisionsPanel({ state, bridge, onBusy, onError }: EntityPanelPr
           const draft = drafts[decision.id] ?? {
             text: decision.text,
             rationale: decision.rationale ?? '',
+            dirtyText: false,
+            dirtyRationale: false,
           };
           return (
             <article key={decision.id} style={styles.card}>
@@ -347,8 +420,14 @@ export function DecisionsPanel({ state, bridge, onBusy, onError }: EntityPanelPr
                       setDrafts((current) => ({
                         ...current,
                         [decision.id]: {
-                          ...(current[decision.id] ?? { text: decision.text, rationale: decision.rationale ?? '' }),
+                          ...(current[decision.id] ?? {
+                            text: decision.text,
+                            rationale: decision.rationale ?? '',
+                            dirtyText: false,
+                            dirtyRationale: false,
+                          }),
                           text: event.target.value,
+                          dirtyText: true,
                         },
                       }))
                     }
@@ -364,8 +443,14 @@ export function DecisionsPanel({ state, bridge, onBusy, onError }: EntityPanelPr
                       setDrafts((current) => ({
                         ...current,
                         [decision.id]: {
-                          ...(current[decision.id] ?? { text: decision.text, rationale: decision.rationale ?? '' }),
+                          ...(current[decision.id] ?? {
+                            text: decision.text,
+                            rationale: decision.rationale ?? '',
+                            dirtyText: false,
+                            dirtyRationale: false,
+                          }),
                           rationale: event.target.value,
+                          dirtyRationale: true,
                         },
                       }))
                     }
@@ -413,6 +498,13 @@ export function ErrorsPanel({ state, bridge, onBusy, onError }: EntityPanelProps
 
     await runRequest('Updating error…', async () => {
       await bridge.request('error.update', { id: errorId, message });
+      setDrafts((current) => ({
+        ...current,
+        [errorId]: {
+          text: message,
+          dirty: false,
+        },
+      }));
     });
   }
 
@@ -451,7 +543,7 @@ export function ErrorsPanel({ state, bridge, onBusy, onError }: EntityPanelProps
 
       <div style={styles.list}>
         {state.errors.map((taskError) => {
-          const draft = drafts[taskError.id] ?? { text: taskError.message };
+          const draft = drafts[taskError.id] ?? { text: taskError.message, dirty: false };
           return (
             <article key={taskError.id} style={styles.card}>
               <div style={styles.row}>
@@ -464,8 +556,9 @@ export function ErrorsPanel({ state, bridge, onBusy, onError }: EntityPanelProps
                       setDrafts((current) => ({
                         ...current,
                         [taskError.id]: {
-                          ...(current[taskError.id] ?? { text: taskError.message }),
+                          ...(current[taskError.id] ?? { text: taskError.message, dirty: false }),
                           text: event.target.value,
+                          dirty: true,
                         },
                       }))
                     }
@@ -520,6 +613,13 @@ export function QuestionsPanel({ state, bridge, onBusy, onError }: EntityPanelPr
 
     await runRequest('Updating question…', async () => {
       await bridge.request('question.update', { id: questionId, text });
+      setDrafts((current) => ({
+        ...current,
+        [questionId]: {
+          text,
+          dirty: false,
+        },
+      }));
     });
   }
 
@@ -558,7 +658,7 @@ export function QuestionsPanel({ state, bridge, onBusy, onError }: EntityPanelPr
 
       <div style={styles.list}>
         {state.questions.map((question) => {
-          const draft = drafts[question.id] ?? { text: question.text };
+          const draft = drafts[question.id] ?? { text: question.text, dirty: false };
           return (
             <article key={question.id} style={styles.card}>
               <div style={styles.row}>
@@ -571,8 +671,9 @@ export function QuestionsPanel({ state, bridge, onBusy, onError }: EntityPanelPr
                       setDrafts((current) => ({
                         ...current,
                         [question.id]: {
-                          ...(current[question.id] ?? { text: question.text }),
+                          ...(current[question.id] ?? { text: question.text, dirty: false }),
                           text: event.target.value,
+                          dirty: true,
                         },
                       }))
                     }
