@@ -59,6 +59,38 @@ describe('handleWebviewMessage', () => {
     store.close();
   });
 
+  it('rejects invalid todo statuses instead of coercing them', () => {
+    const { store, task } = makeStore();
+    const created = store.listTodos(task.id)[0];
+    const response = handleWebviewMessage(
+      { store, currentTaskId: task.id, workspaceRoot: '/repo' },
+      { id: 'bad-status', type: 'todo.setStatus', payload: { id: created.id, status: 'finished' } },
+    );
+
+    expect(response).toEqual({
+      id: 'bad-status',
+      ok: false,
+      error: 'todo.setStatus requires payload.id and payload.status to be pending, done, or blocked.',
+    });
+    expect(store.listTodos(task.id).find((todo) => todo.id === created.id)?.status).toBe('pending');
+    store.close();
+  });
+
+  it('keeps cross-workspace switching explicit and safe', () => {
+    const { store } = makeStore();
+    const response = handleWebviewMessage(
+      { store, currentTaskId: undefined, workspaceRoot: '/repo' },
+      { id: 'switch', type: 'task.switch', payload: { id: 'missing-task' } },
+    );
+
+    expect(response).toEqual({
+      id: 'switch',
+      ok: false,
+      error: 'task.switch only supports tasks in the current workspace. Cross-workspace switching is not available in this layer.',
+    });
+    store.close();
+  });
+
   it('returns an error response instead of throwing when a task is required', () => {
     const store = new TaskStore(':memory:');
     const response = handleWebviewMessage(

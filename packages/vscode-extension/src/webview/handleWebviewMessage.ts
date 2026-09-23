@@ -113,9 +113,12 @@ function handleTaskSwitch(deps: WebviewDispatcherDeps, message: WebviewRequest):
   if (!taskId) {
     return errorResponse(message.id, 'task.switch requires payload.id.');
   }
-  const task = requireTask(deps, taskId, message.id);
-  if ('ok' in task && task.ok === false) {
-    return task;
+  const task = deps.store.getTask(taskId);
+  if (!task) {
+    return errorResponse(
+      message.id,
+      'task.switch only supports tasks in the current workspace. Cross-workspace switching is not available in this layer.',
+    );
   }
   deps.setCurrentTaskId?.(taskId);
   return {
@@ -165,8 +168,8 @@ function handleTodoUpdateText(deps: WebviewDispatcherDeps, message: WebviewReque
 function handleTodoSetStatus(deps: WebviewDispatcherDeps, message: WebviewRequest): WebviewResponse {
   const payload = getPayload(message);
   const id = readString(payload.id);
-  const status = readString(payload.status) as TodoStatus | undefined;
-  if (!id || !status) return errorResponse(message.id, 'todo.setStatus requires payload.id and payload.status.');
+  const status = payload.status === undefined ? undefined : isTodoStatus(payload.status) ? payload.status : undefined;
+  if (!id || !status) return errorResponse(message.id, 'todo.setStatus requires payload.id and payload.status to be pending, done, or blocked.');
   return mutateAndReturnState(
     deps,
     message.id,
