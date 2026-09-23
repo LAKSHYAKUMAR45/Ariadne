@@ -1,33 +1,27 @@
 import { useEffect, useState } from 'react';
+import { isAbortError } from '../api/client';
+import { isServicesResponse } from '../api/guards';
+import { useAuth } from '../auth/AuthProvider';
 import { usePrivilegedAction } from '../auth/usePrivilegedAction';
-import { getJson } from '../api/client';
 
-interface Service {
-  name: string;
-  state: string;
-  detail: string;
-}
-
-interface ServicesResponse {
-  services: Service[];
-}
-
-export function ServicesPage({ csrfToken }: { csrfToken?: string }) {
-  const [services, setServices] = useState<Service[]>([]);
+export function ServicesPage() {
+  const { api } = useAuth();
+  const [services, setServices] = useState<import('../api/types').ServiceStatus[]>([]);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const action = usePrivilegedAction(csrfToken);
+  const action = usePrivilegedAction();
 
   useEffect(() => {
     const controller = new AbortController();
-    getJson<ServicesResponse>('/api/v1/admin/services', controller.signal)
+    api
+      .get('/api/v1/admin/services', isServicesResponse, controller.signal)
       .then((response) => setServices(response.services))
       .catch((loadError: unknown) => {
-        if (!(loadError instanceof DOMException && loadError.name === 'AbortError')) {
+        if (!isAbortError(loadError)) {
           setLoadError(loadError instanceof Error ? loadError.message : 'Unable to load services.');
         }
       });
     return () => controller.abort();
-  }, []);
+  }, [api]);
 
   return (
     <div className="page-stack">
@@ -54,6 +48,7 @@ export function ServicesPage({ csrfToken }: { csrfToken?: string }) {
       </header>
       {action.message ? <div className="notice notice--success" role="status">{action.message}</div> : null}
       {loadError || action.error ? <div className="notice notice--error" role="alert">{loadError ?? action.error}</div> : null}
+      {action.progress}
       <section className="service-grid" aria-label="Service status">
         {services.map((service) => {
           const healthy = service.state === 'running' || service.state === 'available';

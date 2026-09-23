@@ -1,34 +1,26 @@
 import { useEffect, useState } from 'react';
-import { getJson } from '../api/client';
-
-interface LogEntry {
-  id: string;
-  source: string;
-  severity: string;
-  message: string;
-  createdAt: string;
-}
-
-interface LogsResponse {
-  entries: LogEntry[];
-}
+import { isAbortError } from '../api/client';
+import { isLogsResponse } from '../api/guards';
+import { useAuth } from '../auth/AuthProvider';
 
 export function LogsPage() {
-  const [source, setSource] = useState<'operations' | 'backup'>('operations');
-  const [entries, setEntries] = useState<LogEntry[]>([]);
+  const { api } = useAuth();
+  const [source, setSource] = useState<'sync-server' | 'backup'>('sync-server');
+  const [entries, setEntries] = useState<import('../api/types').LogEntry[]>([]);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     const controller = new AbortController();
-    getJson<LogsResponse>(`/api/v1/admin/logs?source=${source}&limit=100`, controller.signal)
+    api
+      .get(`/api/v1/admin/logs?source=${source}&limit=100`, isLogsResponse, controller.signal)
       .then((response) => setEntries(response.entries))
       .catch((loadError: unknown) => {
-        if (!(loadError instanceof DOMException && loadError.name === 'AbortError')) {
+        if (!isAbortError(loadError)) {
           setError(loadError instanceof Error ? loadError.message : 'Unable to load logs.');
         }
       });
     return () => controller.abort();
-  }, [source]);
+  }, [api, source]);
 
   return (
     <div className="page-stack">
@@ -41,7 +33,7 @@ export function LogsPage() {
         <label className="source-select">
           <span>Source</span>
           <select value={source} onChange={(event) => setSource(event.target.value as typeof source)}>
-            <option value="operations">Operations</option>
+            <option value="sync-server">Operations</option>
             <option value="backup">Backups</option>
           </select>
         </label>
@@ -53,9 +45,11 @@ export function LogsPage() {
         </div>
         {entries.length === 0 && !error ? <p className="pane-message">No recent records.</p> : null}
         {entries.map((entry) => (
-          <article className="log-row" key={entry.id}>
-            <time dateTime={entry.createdAt}>{new Date(entry.createdAt).toLocaleString()}</time>
-            <span className={`severity severity--${entry.severity}`}>{entry.source}</span>
+          <article className="log-row" key={entry.sequence}>
+            <time dateTime={entry.timestamp}>{new Date(entry.timestamp).toLocaleString()}</time>
+            <span className={`severity severity--${entry.severity}`}>
+              {source === 'sync-server' ? 'operations' : source}
+            </span>
             <pre>{entry.message}</pre>
           </article>
         ))}

@@ -1,126 +1,68 @@
-import { FormEvent, useEffect, useState } from 'react';
+import { useState } from 'react';
+import { AuthProvider, useAuth } from './auth/AuthProvider';
+import { LoginPage } from './auth/LoginPage';
 import { BackupsPage } from './operations/BackupsPage';
 import { LogsPage } from './operations/LogsPage';
 import { OverviewPage } from './operations/OverviewPage';
 import { ServicesPage } from './operations/ServicesPage';
 import { TasksPage } from './tasks/TasksPage';
 
-type Section = 'overview' | 'tasks' | 'backups' | 'services' | 'logs';
-
-interface AdminSession {
-  userId: string;
-  username: string;
-  reauthenticatedUntil: string | null;
-  csrfToken?: string;
-}
+type Section =
+  | 'overview'
+  | 'members'
+  | 'tasks'
+  | 'backups'
+  | 'services'
+  | 'deployments'
+  | 'logs'
+  | 'audit';
 
 const sections: ReadonlyArray<{ id: Section; label: string; glyph: string }> = [
   { id: 'overview', label: 'Overview', glyph: 'OV' },
+  { id: 'members', label: 'Members', glyph: 'MB' },
   { id: 'tasks', label: 'Tasks', glyph: 'TK' },
   { id: 'backups', label: 'Backups', glyph: 'BK' },
   { id: 'services', label: 'Services', glyph: 'SV' },
+  { id: 'deployments', label: 'Deployments', glyph: 'DP' },
   { id: 'logs', label: 'Logs', glyph: 'LG' },
+  { id: 'audit', label: 'Audit', glyph: 'AT' },
 ];
 
-async function readJson(response: Response): Promise<unknown> {
-  const contentType = response.headers.get('content-type') ?? '';
-  return contentType.includes('application/json') ? response.json() : null;
-}
-
-function isSession(value: unknown): value is AdminSession {
-  if (!value || typeof value !== 'object') {
-    return false;
-  }
-  const candidate = value as Record<string, unknown>;
-  return typeof candidate.userId === 'string' && typeof candidate.username === 'string';
-}
-
-function LoginPage({ onAuthenticated }: { onAuthenticated: (session: AdminSession) => void }) {
-  const [error, setError] = useState<string | null>(null);
-  const [submitting, setSubmitting] = useState(false);
-
-  async function submit(event: FormEvent<HTMLFormElement>): Promise<void> {
-    event.preventDefault();
-    setSubmitting(true);
-    setError(null);
-    const form = new FormData(event.currentTarget);
-
-    try {
-      const response = await fetch('/api/v1/admin/session', {
-        method: 'POST',
-        credentials: 'same-origin',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          username: String(form.get('username') ?? ''),
-          password: String(form.get('password') ?? ''),
-        }),
-      });
-      const body = await readJson(response);
-      if (!response.ok || !isSession(body)) {
-        throw new Error('The username or password was not accepted.');
-      }
-      onAuthenticated(body);
-    } catch (loginError: unknown) {
-      setError(loginError instanceof Error ? loginError.message : 'Unable to reach Ariadne.');
-    } finally {
-      setSubmitting(false);
-    }
-  }
-
+function PlaceholderPage({
+  title,
+  eyebrow,
+  message,
+}: {
+  title: string;
+  eyebrow: string;
+  message: string;
+}) {
   return (
-    <main className="login-shell">
-      <section className="login-story" aria-labelledby="login-title">
-        <div className="brand-lockup brand-lockup--large">
-          <span className="brand-mark" aria-hidden="true">A</span>
-          <span>ARIADNE</span>
+    <div className="page-stack">
+      <header className="page-heading">
+        <div>
+          <p className="eyebrow">{eyebrow}</p>
+          <h1>{title}</h1>
+          <p>{message}</p>
         </div>
-        <p className="eyebrow">Operations console</p>
-        <h1 id="login-title">Command your Ariadne cloud</h1>
-        <p className="login-copy">
-          Inspect synced work, captured files, backups, and the health of nodem2 from one focused
-          control surface.
-        </p>
-        <div className="login-signal" aria-label="Connection details">
-          <span className="signal-dot" aria-hidden="true" />
-          <span>Private tunnel</span>
-          <strong>127.0.0.1:14300</strong>
+      </header>
+      <section className="panel data-panel">
+        <div className="pane-empty">
+          <span>+</span>
+          <p>{message}</p>
         </div>
       </section>
-
-      <section className="login-panel" aria-label="Administrator login">
-        <p className="eyebrow">Restricted access</p>
-        <h2>Sign in as administrator</h2>
-        <p className="muted">Use the credentials registered for this Ariadne server.</p>
-        <form onSubmit={submit}>
-          <label htmlFor="username">Username</label>
-          <input id="username" name="username" autoComplete="username" required />
-          <label htmlFor="password">Password</label>
-          <input
-            id="password"
-            name="password"
-            type="password"
-            autoComplete="current-password"
-            required
-          />
-          {error ? <p className="form-error" role="alert">{error}</p> : null}
-          <button className="primary-action" type="submit" disabled={submitting}>
-            {submitting ? 'Signing in...' : 'Open console'}
-          </button>
-        </form>
-        <p className="login-footnote">Available only through the configured SSH tunnel.</p>
-      </section>
-    </main>
+    </div>
   );
 }
 
-function ConsoleShell({
-  session,
-  onLogout,
-}: {
-  session: AdminSession;
-  onLogout: () => Promise<void>;
-}) {
+function ConsoleShell() {
+  const { error, logout, session } = useAuth();
   const [section, setSection] = useState<Section>('overview');
+
+  if (!session) {
+    return null;
+  }
 
   return (
     <div className="app-shell">
@@ -140,6 +82,7 @@ function ConsoleShell({
         <nav aria-label="Primary">
           {sections.map((item) => (
             <button
+              id={`nav-${item.id}`}
               className={item.id === section ? 'nav-item nav-item--active' : 'nav-item'}
               key={item.id}
               type="button"
@@ -157,70 +100,48 @@ function ConsoleShell({
             <strong>{session.username}</strong>
             <span>Administrator</span>
           </div>
-          <button className="logout-action" type="button" onClick={() => void onLogout()}>
+          <button className="logout-action" type="button" onClick={() => void logout()}>
             Sign out
           </button>
         </div>
       </aside>
       <main id="main-content" className="main-content">
+        {error ? <div className="notice notice--error" role="alert">{error}</div> : null}
         {section === 'overview' ? <OverviewPage /> : null}
+        {section === 'members' ? (
+          <PlaceholderPage
+            eyebrow="Access"
+            title="Members"
+            message="Member management ships in the next dashboard task."
+          />
+        ) : null}
         {section === 'tasks' ? <TasksPage /> : null}
-        {section === 'backups' ? <BackupsPage csrfToken={session.csrfToken} /> : null}
-        {section === 'services' ? <ServicesPage csrfToken={session.csrfToken} /> : null}
+        {section === 'backups' ? <BackupsPage /> : null}
+        {section === 'services' ? <ServicesPage /> : null}
+        {section === 'deployments' ? (
+          <PlaceholderPage
+            eyebrow="Delivery"
+            title="Deployments"
+            message="Deployment orchestration ships in the next dashboard task."
+          />
+        ) : null}
         {section === 'logs' ? <LogsPage /> : null}
+        {section === 'audit' ? (
+          <PlaceholderPage
+            eyebrow="Forensics"
+            title="Audit"
+            message="Audit exploration ships in the next dashboard task."
+          />
+        ) : null}
       </main>
     </div>
   );
 }
 
-export function App() {
-  const [session, setSession] = useState<AdminSession | null>(null);
-  const [checkingSession, setCheckingSession] = useState(true);
+function AuthenticatedApp() {
+  const { ready, session } = useAuth();
 
-  useEffect(() => {
-    const controller = new AbortController();
-
-    async function restoreSession(): Promise<void> {
-      try {
-        const response = await fetch('/api/v1/admin/session', {
-          credentials: 'same-origin',
-          signal: controller.signal,
-        });
-        const body = await readJson(response);
-        if (response.ok && isSession(body)) {
-          setSession(body);
-        }
-      } catch (error: unknown) {
-        if (!(error instanceof DOMException && error.name === 'AbortError')) {
-          setSession(null);
-        }
-      } finally {
-        setCheckingSession(false);
-      }
-    }
-
-    void restoreSession();
-    return () => controller.abort();
-  }, []);
-
-  async function logout(): Promise<void> {
-    if (!session?.csrfToken) {
-      setSession(null);
-      return;
-    }
-    const response = await fetch('/api/v1/admin/session', {
-      method: 'DELETE',
-      credentials: 'same-origin',
-      headers: {
-        'X-CSRF-Token': session.csrfToken,
-      },
-    });
-    if (response.ok || response.status === 401) {
-      setSession(null);
-    }
-  }
-
-  if (checkingSession) {
+  if (!ready) {
     return (
       <main className="boot-screen">
         <div className="brand-lockup brand-lockup--large">
@@ -232,9 +153,13 @@ export function App() {
     );
   }
 
-  return session ? (
-    <ConsoleShell session={session} onLogout={logout} />
-  ) : (
-    <LoginPage onAuthenticated={setSession} />
+  return session ? <ConsoleShell /> : <LoginPage />;
+}
+
+export function App() {
+  return (
+    <AuthProvider>
+      <AuthenticatedApp />
+    </AuthProvider>
   );
 }

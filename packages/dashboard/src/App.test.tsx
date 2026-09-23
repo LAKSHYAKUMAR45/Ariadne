@@ -1,7 +1,16 @@
-import { render, screen } from '@testing-library/react';
+import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { App } from './App';
+import type { AdminApiClient } from './api/types';
+import { OperationProgress } from './components/OperationProgress';
+
+function json(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { 'Content-Type': 'application/json' },
+  });
+}
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -11,12 +20,7 @@ describe('Ariadne operations console', () => {
   it('shows only the admin login when no session exists', async () => {
     vi.stubGlobal(
       'fetch',
-      vi.fn().mockResolvedValue(
-        new Response(JSON.stringify({ code: 'unauthorized', message: 'Authentication required' }), {
-          status: 401,
-          headers: { 'Content-Type': 'application/json' },
-        }),
-      ),
+      vi.fn().mockResolvedValue(json({ error: { code: 'missing_session', message: 'Authentication required' } }, 401)),
     );
 
     render(<App />);
@@ -31,15 +35,12 @@ describe('Ariadne operations console', () => {
     vi.stubGlobal(
       'fetch',
       vi.fn().mockResolvedValue(
-        new Response(
-          JSON.stringify({
-            userId: 'admin-id',
-            username: 'admin',
-            reauthenticatedUntil: null,
-            csrfToken: 'csrf-token',
-          }),
-          { status: 200, headers: { 'Content-Type': 'application/json' } },
-        ),
+        json({
+          userId: 'admin-id',
+          username: 'admin',
+          reauthenticatedUntil: null,
+          csrfToken: 'csrf-token',
+        }),
       ),
     );
     const user = userEvent.setup();
@@ -49,37 +50,45 @@ describe('Ariadne operations console', () => {
     expect(await screen.findByText('nodem2 / production')).toBeVisible();
     expect(screen.getByRole('navigation', { name: 'Primary' })).toBeVisible();
     expect(screen.getByRole('heading', { name: 'System overview' })).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Members' })).toHaveAttribute('id', 'nav-members');
+    expect(screen.getByRole('button', { name: 'Deployments' })).toHaveAttribute('id', 'nav-deployments');
+    expect(screen.getByRole('button', { name: 'Audit' })).toHaveAttribute('id', 'nav-audit');
 
     await user.click(screen.getByRole('button', { name: 'Tasks' }));
     expect(screen.getByRole('heading', { name: 'Task history' })).toBeVisible();
     expect(screen.getByText('Select a task to inspect its timeline and captured files.')).toBeVisible();
+
+    await user.click(screen.getByRole('button', { name: 'Members' }));
+    expect(screen.getByRole('heading', { name: 'Members' })).toBeVisible();
+    expect(
+      screen.getAllByText('Member management ships in the next dashboard task.').length,
+    ).toBeGreaterThan(0);
   });
 
   it('logs out from the console and returns to the login screen', async () => {
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(
-        new Response(
-          JSON.stringify({
-            userId: 'admin-id',
-            username: 'admin',
-            reauthenticatedUntil: null,
-            csrfToken: 'csrf-token',
-          }),
-          { status: 200, headers: { 'Content-Type': 'application/json' } },
-        ),
+        json({
+          userId: 'admin-id',
+          username: 'admin',
+          reauthenticatedUntil: null,
+          csrfToken: 'csrf-token',
+        }),
       )
       .mockResolvedValueOnce(
-        new Response(
-          JSON.stringify({
-            generatedAt: '2026-09-23T08:00:00.000Z',
-            database: { healthy: true, latencyMs: 4 },
-            tasks: { total: 0, active: 0, updatedLast24h: 0 },
-            backup: { latestAt: null, latestVerifiedAt: null, status: 'unavailable' },
-            operations: { running: 0, failedLast24h: 0 },
-          }),
-          { status: 200, headers: { 'Content-Type': 'application/json' } },
-        ),
+        json({
+          generatedAt: '2026-09-23T08:00:00.000Z',
+          database: { status: 'healthy', healthy: true, latencyMs: 4 },
+          host: null,
+          databaseSizeBytes: 512,
+          tasks: { total: 0, active: 0, updatedLast24h: 0 },
+          members: { total: 1, active: 1, inactive: 0, admins: 1, members: 0 },
+          sync: { lastPushAt: null, lastPullAt: null },
+          backup: { latestAt: null, latestVerifiedAt: null, status: 'unavailable' },
+          operations: { running: 0, failedLast24h: 0 },
+          components: { database: { healthy: true }, operator: { healthy: true } },
+        }),
       )
       .mockResolvedValueOnce(new Response(null, { status: 204 }));
     vi.stubGlobal('fetch', fetchMock);
@@ -96,5 +105,58 @@ describe('Ariadne operations console', () => {
         headers: expect.objectContaining({ 'X-CSRF-Token': 'csrf-token' }),
       }),
     );
+  });
+
+  it('reconnects an operation stream after remount and reloads the persisted terminal operation', async () => {
+    const eventStreamChunks = [
+      'id: 1\nevent: operation_event\ndata: {"id":1,"operationId":"op-1","state":"running","message":"Operation started","metadata":{},"createdAt":"2026-09-23T08:00:00.000Z"}\n\n',
+      'event: complete\ndata: {"operationId":"op-1","state":"succeeded"}\n\n',
+    ];
+
+    const fetchMock = vi.fn().mockImplementation((input: RequestInfo | URL) => {
+      if (String(input) === '/api/v1/admin/operations/op-1/events') {
+        const stream = new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode(eventStreamChunks.shift() ?? ''));
+            controller.close();
+          },
+        });
+        return Promise.resolve(
+          new Response(stream, {
+            status: 200,
+            headers: { 'Content-Type': 'text/event-stream; charset=utf-8' },
+          }),
+        );
+      }
+      return Promise.resolve(new Response(null, { status: 404 }));
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const api: AdminApiClient = {
+      get: vi.fn().mockResolvedValue({
+        operation: {
+          id: 'op-1',
+          requestedBy: 'admin-id',
+          type: 'backup_create',
+          state: 'succeeded',
+          summary: 'Create database backup',
+          output: null,
+          startedAt: '2026-09-23T08:00:00.000Z',
+          completedAt: '2026-09-23T08:01:00.000Z',
+          createdAt: '2026-09-23T08:00:00.000Z',
+        },
+      }),
+      mutate: vi.fn(),
+      download: vi.fn(),
+    };
+
+    const first = render(<OperationProgress api={api} operationId="op-1" />);
+    await waitFor(() => expect(api.get).toHaveBeenCalledTimes(1));
+    first.unmount();
+
+    render(<OperationProgress api={api} operationId="op-1" />);
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    expect(await screen.findByText('Create database backup')).toBeVisible();
+    expect(screen.getByText('succeeded')).toBeVisible();
   });
 });

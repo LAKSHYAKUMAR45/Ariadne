@@ -1,14 +1,33 @@
+import { type ReactNode } from 'react';
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, expect, it, vi } from 'vitest';
+import { AuthProvider } from '../auth/AuthProvider';
 import { TasksPage } from './TasksPage';
 
 afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+function renderWithProvider(child: ReactNode) {
+  return render(<AuthProvider>{child}</AuthProvider>);
+}
+
+function sessionBody() {
+  return {
+    userId: 'admin-id',
+    username: 'admin',
+    csrfToken: 'csrf-token',
+    reauthenticatedUntil: null,
+  };
+}
+
 it('opens a task capture and renders captured source as inert text', async () => {
   const responses = new Map<string, unknown>([
+    [
+      '/api/v1/admin/session',
+      sessionBody(),
+    ],
     [
       '/api/v1/admin/tasks?limit=100',
       {
@@ -77,7 +96,7 @@ it('opens a task capture and renders captured source as inert text', async () =>
   );
   const user = userEvent.setup();
 
-  render(<TasksPage />);
+  renderWithProvider(<TasksPage />);
 
   await user.click(await screen.findByRole('button', { name: /build cloud dashboard/i }));
   await user.click(await screen.findByRole('button', { name: /src\/app.tsx/i }));
@@ -130,9 +149,19 @@ it('ignores a stale timeline response after the user selects another task', asyn
                   updatedAt: '2026-09-23T07:01:00.000Z',
                 },
               ],
+              hasMore: false,
+              nextOffset: null,
             }),
             { status: 200, headers: { 'Content-Type': 'application/json' } },
           ),
+        );
+      }
+      if (url === '/api/v1/admin/session') {
+        return Promise.resolve(
+          new Response(JSON.stringify(sessionBody()), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          }),
         );
       }
       if (url.endsWith('/task-1/timeline')) {
@@ -162,7 +191,7 @@ it('ignores a stale timeline response after the user selects another task', asyn
   );
   const user = userEvent.setup();
 
-  render(<TasksPage />);
+  renderWithProvider(<TasksPage />);
 
   await user.click(await screen.findByRole('button', { name: /first task/i }));
   await user.click(screen.getByRole('button', { name: /second task/i }));

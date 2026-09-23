@@ -1,53 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { getJson } from '../api/client';
-
-interface TaskSummary {
-  taskId: string;
-  localId: string;
-  title: string;
-  goal: string | null;
-  status: string;
-  branch: string | null;
-  workspaceLabel: string | null;
-  owner: string;
-  captureCount: number;
-  createdAt: string;
-  updatedAt: string;
-}
-
-interface CapturedFileMetadata {
-  path: string;
-  contentSha256: string;
-  byteLength: number;
-}
-
-interface TimelineEvent {
-  kind: string;
-  id: string;
-  occurredAt: string;
-  summary: string;
-  metadata: {
-    files?: CapturedFileMetadata[];
-    [key: string]: unknown;
-  };
-}
-
-interface CapturedFile {
-  path: string;
-  content: string;
-  unifiedDiff: string;
-  contentSha256: string;
-  byteLength: number;
-}
-
-interface TasksResponse {
-  tasks: TaskSummary[];
-}
-
-interface TimelineResponse {
-  taskId: string;
-  events: TimelineEvent[];
-}
+import { isAbortError } from '../api/client';
+import { isCapturedFile, isTasksResponse, isTimelineResponse } from '../api/guards';
+import { useAuth } from '../auth/AuthProvider';
+import type { CapturedFile, TaskSummary, TimelineEvent } from '../api/types';
 
 function formatTime(value: string): string {
   return new Intl.DateTimeFormat(undefined, {
@@ -74,6 +29,7 @@ function EventGlyph({ kind }: { kind: string }) {
 }
 
 export function TasksPage() {
+  const { api } = useAuth();
   const [tasks, setTasks] = useState<TaskSummary[]>([]);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [events, setEvents] = useState<TimelineEvent[]>([]);
@@ -89,16 +45,17 @@ export function TasksPage() {
 
   useEffect(() => {
     const controller = new AbortController();
-    getJson<TasksResponse>('/api/v1/admin/tasks?limit=100', controller.signal)
+    api
+      .get('/api/v1/admin/tasks?limit=100', isTasksResponse, controller.signal)
       .then((response) => setTasks(response.tasks))
       .catch((loadError: unknown) => {
-        if (!(loadError instanceof DOMException && loadError.name === 'AbortError')) {
+        if (!isAbortError(loadError)) {
           setError(loadError instanceof Error ? loadError.message : 'Unable to load tasks.');
         }
       })
       .finally(() => setLoading(false));
     return () => controller.abort();
-  }, []);
+  }, [api]);
 
   useEffect(
     () => () => {
@@ -134,8 +91,9 @@ export function TasksPage() {
     setDetailLoading(true);
     setError(null);
     try {
-      const response = await getJson<TimelineResponse>(
+      const response = await api.get(
         `/api/v1/admin/tasks/${encodeURIComponent(taskId)}/timeline`,
+        isTimelineResponse,
         controller.signal,
       );
       if (timelineControllerRef.current !== controller) {
@@ -167,8 +125,9 @@ export function TasksPage() {
     setDetailLoading(true);
     setError(null);
     try {
-      const file = await getJson<CapturedFile>(
+      const file = await api.get(
         `/api/v1/admin/tasks/${encodeURIComponent(selectedTaskId)}/file-captures/${encodeURIComponent(captureId)}/files/${encodeURIComponent(path)}`,
+        isCapturedFile,
         controller.signal,
       );
       if (fileControllerRef.current !== controller) {

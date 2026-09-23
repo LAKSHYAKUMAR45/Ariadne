@@ -1,41 +1,79 @@
-import { FormEvent, useState } from 'react';
-import { AdminApiError, postJson } from '../api/client';
+import { useMemo, useState } from 'react';
+import { AdminApiError } from '../api/client';
+import { isAcceptedOperationResponse } from '../api/guards';
+import type {
+  AdminOperation,
+  ConfirmationRequest,
+} from '../api/types';
+import { ConfirmationDialog } from '../components/ConfirmationDialog';
+import { OperationProgress } from '../components/OperationProgress';
+import { useAuth } from './AuthProvider';
 
 interface PendingAction {
+  method: 'POST' | 'PATCH' | 'DELETE';
   path: string;
-  body?: Record<string, unknown>;
+  body: Record<string, unknown>;
   successMessage: string;
+  confirmation?: ConfirmationRequest;
+}
+
+interface RunActionOptions {
+  method?: 'POST' | 'PATCH' | 'DELETE';
+  confirmation?: ConfirmationRequest;
 }
 
 interface PrivilegedAction {
   busy: boolean;
   error: string | null;
   message: string | null;
-  run: (path: string, successMessage: string, body?: Record<string, unknown>) => Promise<void>;
+  run: (
+    path: string,
+    successMessage: string,
+    body?: Record<string, unknown>,
+    options?: RunActionOptions,
+  ) => Promise<void>;
   dialog: React.ReactNode;
+  progress: React.ReactNode;
 }
 
-export function usePrivilegedAction(csrfToken?: string): PrivilegedAction {
+const REAUTH_REQUEST: ConfirmationRequest = {
+  title: 'Confirm administrator',
+  impact: 'Enter your password to continue this operation.',
+  expectedConfirmation: '',
+  confirmationLabel: '',
+  requiresReauthentication: true,
+};
+
+export function usePrivilegedAction(): PrivilegedAction {
+  const { api, reauthenticate } = useAuth();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [pending, setPending] = useState<PendingAction | null>(null);
-  const [reauthError, setReauthError] = useState<string | null>(null);
+  const [dialogError, setDialogError] = useState<string | null>(null);
+  const [operation, setOperation] = useState<AdminOperation | null>(null);
 
-  async function execute(action: PendingAction): Promise<void> {
-    if (!csrfToken) {
-      setError('Sign in again before starting an operation.');
-      return;
-    }
+  async function execute(action: PendingAction, confirmation?: string): Promise<void> {
     setBusy(true);
     setError(null);
     setMessage(null);
+
+    const nextBody = confirmation
+      ? { ...action.body, confirmation }
+      : action.body;
+
     try {
-      await postJson(action.path, csrfToken, action.body);
+      const response = await api.mutate(
+        action.method,
+        action.path,
+        nextBody,
+        isAcceptedOperationResponse,
+      );
+      setOperation(response.operation);
       setMessage(action.successMessage);
     } catch (actionError: unknown) {
       if (actionError instanceof AdminApiError && actionError.code === 'reauthentication_required') {
-        setPending(action);
+        setPending({ ...action, confirmation: action.confirmation ?? REAUTH_REQUEST });
         return;
       }
       setError(actionError instanceof Error ? actionError.message : 'The operation could not start.');
@@ -44,22 +82,26 @@ export function usePrivilegedAction(csrfToken?: string): PrivilegedAction {
     }
   }
 
-  async function submitPassword(event: FormEvent<HTMLFormElement>): Promise<void> {
-    event.preventDefault();
-    if (!pending || !csrfToken) {
+  async function confirmPending(input: { confirmation: string; password?: string }): Promise<void> {
+    if (!pending) {
       return;
     }
-    const form = new FormData(event.currentTarget);
-    const password = String(form.get('password') ?? '');
+
     setBusy(true);
-    setReauthError(null);
+    setDialogError(null);
+
     try {
-      await postJson('/api/v1/admin/session/reauthenticate', csrfToken, { password });
+      if (pending.confirmation?.requiresReauthentication) {
+        await reauthenticate(input.password ?? '');
+      }
       const action = pending;
       setPending(null);
-      await execute(action);
+      await execute(
+        action,
+        action.confirmation?.expectedConfirmation ? input.confirmation : undefined,
+      );
     } catch (actionError: unknown) {
-      setReauthError(
+      setDialogError(
         actionError instanceof Error ? actionError.message : 'The password was not accepted.',
       );
     } finally {
@@ -67,41 +109,48 @@ export function usePrivilegedAction(csrfToken?: string): PrivilegedAction {
     }
   }
 
-  const dialog = pending ? (
-    <div className="dialog-backdrop">
-      <section className="reauth-dialog" role="dialog" aria-modal="true" aria-labelledby="reauth-title">
-        <p className="eyebrow">Protected action</p>
-        <h2 id="reauth-title">Confirm administrator</h2>
-        <p>Enter your password to continue this operation.</p>
-        <form onSubmit={(event) => void submitPassword(event)}>
-          <label htmlFor="reauth-password">Administrator password</label>
-          <input
-            id="reauth-password"
-            name="password"
-            type="password"
-            autoComplete="current-password"
-            autoFocus
-            required
-          />
-          {reauthError ? <p className="form-error" role="alert">{reauthError}</p> : null}
-          <div className="dialog-actions">
-            <button className="quiet-action" type="button" onClick={() => setPending(null)}>
-              Cancel
-            </button>
-            <button className="primary-action" type="submit" disabled={busy}>
-              {busy ? 'Confirming...' : 'Continue operation'}
-            </button>
-          </div>
-        </form>
-      </section>
-    </div>
-  ) : null;
-
   return {
     busy,
     error,
     message,
-    run: (path, successMessage, body) => execute({ path, successMessage, body }),
-    dialog,
+    run: async (path, successMessage, body = {}, options) => {
+      const action: PendingAction = {
+        method: options?.method ?? 'POST',
+        path,
+        body,
+        successMessage,
+        confirmation: options?.confirmation,
+      };
+
+      if (options?.confirmation) {
+        setPending(action);
+        setDialogError(null);
+        return;
+      }
+
+      await execute(action);
+    },
+    dialog: pending?.confirmation ? (
+      <ConfirmationDialog
+        request={pending.confirmation}
+        busy={busy}
+        error={dialogError}
+        onCancel={() => {
+          setPending(null);
+          setDialogError(null);
+        }}
+        onConfirm={confirmPending}
+      />
+    ) : null,
+    progress: useMemo(
+      () => (
+        <OperationProgress
+          api={api}
+          operationId={operation?.id ?? null}
+          initialOperation={operation}
+        />
+      ),
+      [api, operation],
+    ),
   };
 }

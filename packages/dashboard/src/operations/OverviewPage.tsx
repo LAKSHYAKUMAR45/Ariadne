@@ -1,13 +1,8 @@
 import { useEffect, useState } from 'react';
-import { getJson } from '../api/client';
-
-interface Overview {
-  generatedAt: string;
-  database: { healthy: boolean; latencyMs: number };
-  tasks: { total: number; active: number; updatedLast24h: number };
-  backup: { latestAt: string | null; latestVerifiedAt: string | null; status: string };
-  operations: { running: number; failedLast24h: number };
-}
+import { isAbortError } from '../api/client';
+import { isOverviewResponse } from '../api/guards';
+import type { OverviewResponse } from '../api/types';
+import { useAuth } from '../auth/AuthProvider';
 
 function formatTimestamp(value: string | null): string {
   if (!value) {
@@ -22,21 +17,23 @@ function formatTimestamp(value: string | null): string {
 }
 
 export function OverviewPage() {
-  const [overview, setOverview] = useState<Overview | null>(null);
+  const { api } = useAuth();
+  const [overview, setOverview] = useState<OverviewResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
 
   useEffect(() => {
     const controller = new AbortController();
-    getJson<Overview>('/api/v1/admin/overview', controller.signal)
+    api
+      .get('/api/v1/admin/overview', isOverviewResponse, controller.signal)
       .then(setOverview)
       .catch((loadError: unknown) => {
-        if (!(loadError instanceof DOMException && loadError.name === 'AbortError')) {
+        if (!isAbortError(loadError)) {
           setError(loadError instanceof Error ? loadError.message : 'Unable to load system status.');
         }
       });
     return () => controller.abort();
-  }, [refreshKey]);
+  }, [api, refreshKey]);
 
   const healthy = overview?.database.healthy === true && overview.operations.failedLast24h === 0;
 

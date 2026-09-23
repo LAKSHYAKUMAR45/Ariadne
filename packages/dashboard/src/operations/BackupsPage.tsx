@@ -1,24 +1,8 @@
 import { useEffect, useState } from 'react';
+import { isAbortError } from '../api/client';
+import { isBackupsResponse } from '../api/guards';
+import { useAuth } from '../auth/AuthProvider';
 import { usePrivilegedAction } from '../auth/usePrivilegedAction';
-import { getJson } from '../api/client';
-
-interface Backup {
-  filename: string;
-  sha256: string;
-  sizeBytes: number;
-  status: string;
-  createdAt: string;
-  verifiedAt: string | null;
-  restoreVerificationMessage: string | null;
-}
-
-interface BackupsResponse {
-  backups: Backup[];
-}
-
-interface BackupsPageProps {
-  csrfToken?: string;
-}
 
 function formatSize(bytes: number): string {
   if (bytes < 1024 * 1024) {
@@ -27,22 +11,24 @@ function formatSize(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
 }
 
-export function BackupsPage({ csrfToken }: BackupsPageProps) {
-  const [backups, setBackups] = useState<Backup[]>([]);
+export function BackupsPage() {
+  const { api } = useAuth();
+  const [backups, setBackups] = useState<import('../api/types').BackupRecord[]>([]);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const action = usePrivilegedAction(csrfToken);
+  const action = usePrivilegedAction();
 
   useEffect(() => {
     const controller = new AbortController();
-    getJson<BackupsResponse>('/api/v1/admin/backups', controller.signal)
+    api
+      .get('/api/v1/admin/backups', isBackupsResponse, controller.signal)
       .then((response) => setBackups(response.backups))
       .catch((loadError: unknown) => {
-        if (!(loadError instanceof DOMException && loadError.name === 'AbortError')) {
+        if (!isAbortError(loadError)) {
           setLoadError(loadError instanceof Error ? loadError.message : 'Unable to load backups.');
         }
       });
     return () => controller.abort();
-  }, []);
+  }, [api]);
 
   return (
     <div className="page-stack">
@@ -63,6 +49,7 @@ export function BackupsPage({ csrfToken }: BackupsPageProps) {
       </header>
       {action.message ? <div className="notice notice--success" role="status">{action.message}</div> : null}
       {loadError || action.error ? <div className="notice notice--error" role="alert">{loadError ?? action.error}</div> : null}
+      {action.progress}
       <section className="panel data-panel">
         <div className="table-heading">
           <strong>Recovery points</strong>
