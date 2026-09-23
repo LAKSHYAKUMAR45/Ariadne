@@ -2,6 +2,9 @@ import {
   exportTaskMarkdown,
   listTasksAcrossWorkspaces,
   searchAcrossWorkspaces,
+  findTaskWorkspace,
+  openRegistry,
+  openWorkspaceStoreReadOnly,
   searchWorkspace,
   type Task,
   type TaskStore,
@@ -59,12 +62,32 @@ function requireCurrentTaskId(deps: WebviewDispatcherDeps, id: string): string |
   return currentTaskId;
 }
 
-function requireTask(deps: WebviewDispatcherDeps, id: string, responseId: string): Task | WebviewResponse {
-  const task = deps.store.getTask(id);
-  if (!task) {
-    return errorResponse(responseId, `Task not found: ${id}`);
+function resolveTaskStoreForSwitch(
+  deps: WebviewDispatcherDeps,
+  taskId: string,
+  responseId: string,
+): { store: TaskStore; workspaceRoot: string | undefined } | WebviewResponse {
+  if (deps.store.getTask(taskId)) {
+    return { store: deps.store, workspaceRoot: deps.workspaceRoot };
   }
-  return task;
+
+  if (!deps.workspaceRoot) {
+    return errorResponse(responseId, 'task.switch cannot resolve cross-workspace tasks without a workspace root.');
+  }
+
+  const otherRoot = findTaskWorkspace(openRegistry(), taskId);
+  if (!otherRoot || otherRoot === deps.workspaceRoot) {
+    return errorResponse(responseId, `Task not found: ${taskId}`);
+  }
+
+  const otherStore = openWorkspaceStoreReadOnly(otherRoot);
+  const task = otherStore.getTask(taskId);
+  if (!task) {
+    otherStore.close();
+    return errorResponse(responseId, `Task not found: ${taskId}`);
+  }
+
+  return { store: otherStore, workspaceRoot: otherRoot };
 }
 
 function buildCounts(currentTaskId: string | undefined, store: WebviewDispatcherDeps['store']): WebviewCounts {
@@ -113,19 +136,22 @@ function handleTaskSwitch(deps: WebviewDispatcherDeps, message: WebviewRequest):
   if (!taskId) {
     return errorResponse(message.id, 'task.switch requires payload.id.');
   }
-  const task = deps.store.getTask(taskId);
-  if (!task) {
-    return errorResponse(
-      message.id,
-      'task.switch only supports tasks in the current workspace. Cross-workspace switching is not available in this layer.',
-    );
+  const resolved = resolveTaskStoreForSwitch(deps, taskId, message.id);
+  if (!('store' in resolved)) {
+    return resolved;
   }
+  resolved.store.setCurrentTaskId(taskId);
   deps.setCurrentTaskId?.(taskId);
   return {
     id: message.id,
     ok: true,
     data: { currentTaskId: taskId },
-    state: buildWebviewState({ ...deps, currentTaskId: taskId }),
+    state: buildWebviewState({
+      ...deps,
+      store: resolved.store,
+      workspaceRoot: resolved.workspaceRoot,
+      currentTaskId: taskId,
+    }),
   };
 }
 

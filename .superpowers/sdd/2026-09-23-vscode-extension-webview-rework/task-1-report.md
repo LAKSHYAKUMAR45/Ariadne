@@ -105,3 +105,29 @@ RUN  v3.2.7 /home/lkumar/Ariadne/.worktrees/nodem2-cloud/packages/vscode-extensi
   - PASS
 - `cd packages/vscode-extension && pnpm vitest run test/webviewMessage.test.ts`
   - PASS: 6 tests passed
+
+## Fix report — 2026-09-23 round 2
+
+### Review issue addressed
+
+- **Cross-workspace task switching**
+  - Implemented actual cross-workspace resolution for `task.switch` using the registry:
+    - looks up the owning workspace root for the requested task id
+    - opens that workspace store read-only
+    - sets the selected task as current in that owning store
+    - returns a refreshed `WebviewState` built from the resolved workspace
+  - Local task switching still uses the current workspace store and continues to work the same way.
+  - Unknown ids still return a structured error response.
+
+### Additional tests added
+
+- Switching to a task from another registered workspace succeeds and returns state for the resolved workspace.
+- Unknown task ids still fail with a structured error.
+- Local task switching still succeeds.
+
+### Verification
+
+- `cd packages/vscode-extension && pnpm exec tsc --noEmit`
+  - PASS
+- `cd packages/vscode-extension && pnpm vitest run test/webviewMessage.test.ts`
+  - PASS: 8 tests passed
