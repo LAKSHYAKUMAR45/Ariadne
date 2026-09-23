@@ -130,6 +130,18 @@ exit "\${FAKE_CURL_EXIT:-0}"
 `,
   );
 
+  // Lets a test claim to be uid 0 without actually being root.
+  writeExecutable(
+    path.join(binDir, 'id'),
+    `#!/bin/sh
+if [ -n "\${FAKE_ID_UID:-}" ] && [ "\${1:-}" = "-u" ]; then
+  printf '%s\\n' "$FAKE_ID_UID"
+  exit 0
+fi
+exec /usr/bin/id "$@"
+`,
+  );
+
   return { root, etcDir, keysDir, stateDir, worktree, composeFile, binDir, dockerLog, gitLog, curlLog };
 }
 
@@ -235,22 +247,60 @@ describe('deploy script', () => {
     }
   });
 
-  it('ignores path overrides unless the self-test flag is set', () => {
+  it('rejects production invocations that try to redirect the fixed paths', () => {
+    const harness = createHarness();
+    for (const variable of ['ARIADNE_DEPLOY_ROOT', 'ARIADNE_DEPLOY_ETC', 'ARIADNE_DEPLOY_STATE']) {
+      const result = runScript(harness, 'deploy', {
+        args: [VALID_SHA],
+        selftest: false,
+        env: { [variable]: harness.etcDir },
+      });
+
+      expect(result.status).not.toBe(0);
+      const output = `${result.stdout}${result.stderr}`;
+      expect(output).toContain(variable);
+      expect(output).not.toContain(harness.etcDir);
+      expect(readLog(harness.dockerLog)).toEqual([]);
+    }
+  });
+
+  it('rejects self-test mode outside self-test runs, keeping the fixed paths', () => {
     const harness = createHarness();
     const result = runScript(harness, 'deploy', {
       args: [VALID_SHA],
       selftest: false,
-      env: {
-        ARIADNE_DEPLOY_ROOT: path.join(harness.root, 'opt', 'ariadne'),
-        ARIADNE_DEPLOY_ETC: harness.etcDir,
-        ARIADNE_DEPLOY_STATE: harness.stateDir,
-      },
+      env: { ARIADNE_DEPLOY_SELFTEST: '1' },
     });
 
     expect(result.status).not.toBe(0);
-    const output = `${result.stdout}${result.stderr}`;
-    expect(output).toContain('/etc/ariadne');
-    expect(output).not.toContain(harness.etcDir);
+    expect(`${result.stdout}${result.stderr}`).toContain('ARIADNE_DEPLOY_SELFTEST');
+    expect(readLog(harness.dockerLog)).toEqual([]);
+  });
+
+  it('refuses self-test mode when the caller is root', () => {
+    const harness = createHarness();
+    for (const script of ['deploy', 'restart-sync-server', 'restart-postgres']) {
+      const result = runScript(harness, script, {
+        args: script === 'deploy' ? [VALID_SHA] : [],
+        env: { FAKE_ID_UID: '0' },
+      });
+
+      expect(result.status).not.toBe(0);
+      expect(`${result.stdout}${result.stderr}`.toLowerCase()).toContain('root');
+      expect(readLog(harness.dockerLog)).toEqual([]);
+    }
+  });
+
+  it('refuses self-test mode for scripts installed under the production root', () => {
+    const libCommon = fs.readFileSync(path.join(scriptsDir, 'lib-common'), 'utf8');
+    const selftestBlock = libCommon.slice(
+      libCommon.indexOf('ARIADNE_DEPLOY_SELFTEST'),
+      libCommon.indexOf('ARIADNE_COMPOSE_PROJECT='),
+    );
+    // The installed copy at /opt/ariadne/... must never honour the flag, so a
+    // root-writable environment cannot redirect a privileged deploy.
+    expect(selftestBlock).toContain('/opt/ariadne');
+    expect(selftestBlock).toMatch(/id -u/);
   });
 
   it('checks required secret and key files before invoking Compose', () => {
@@ -471,6 +521,33 @@ describe('compose topology', () => {
     }
   });
 
+  it('defines a real build for the shared sync-server/migrate image', () => {
+    const text = compose();
+    for (const service of ['sync-server', 'migrate']) {
+      const start = text.indexOf(`  ${service}:`);
+      expect(start).toBeGreaterThan(0);
+      const block = text.slice(start, text.indexOf('\n  ', text.indexOf('init: true', start)));
+      expect(block).toContain('build:');
+      expect(block).toMatch(/context:\s*\.\.\/\.\./);
+      expect(block).toMatch(/dockerfile:\s*deploy\/nodem2\/sync-server\.Dockerfile/);
+    }
+    expect(fs.existsSync(path.join(deployDir, 'sync-server.Dockerfile'))).toBe(true);
+  });
+
+  it('warns that only `config --quiet` keeps env_file values out of output', () => {
+    const text = compose();
+    expect(text).toContain('config --quiet');
+    expect(text).toMatch(/docker compose config[^\n]*(prints|reveals|renders)/i);
+    expect(text).not.toMatch(/`?docker compose config`? output\s*\n?#?\s*stays secret-free/i);
+
+    const readme = fs.readFileSync(
+      path.join(repoRoot, 'packages', 'sync-server', 'README.md'),
+      'utf8',
+    );
+    expect(readme).toMatch(/config --quiet/);
+    expect(readme).toMatch(/docker compose config[^\n]*(prints|reveals|renders)/i);
+  });
+
   it('grants the sync-server only the capabilities the startup handoff needs', () => {
     const syncServerBlock = compose().slice(compose().indexOf('  sync-server:'));
     const capAdd = syncServerBlock.slice(syncServerBlock.indexOf('cap_add:'));
@@ -535,4 +612,60 @@ describe('sync-server image', () => {
 
     expect(result.status).not.toBe(0);
   });
+});
+
+const dockerAvailable = (() => {
+  const probe = spawnSync('docker', ['version', '--format', '{{.Server.Version}}'], {
+    encoding: 'utf8',
+    timeout: 30_000,
+  });
+  return probe.status === 0;
+})();
+
+describe.skipIf(!dockerAvailable)('compose build (real docker)', () => {
+  const composeArgs = ['compose', '-f', composeSource, '--env-file', path.join(deployDir, '.env.example')];
+
+  it('resolves a build context and Dockerfile that exist on disk', () => {
+    const result = spawnSync('docker', [...composeArgs, 'config', '--format', 'json'], {
+      encoding: 'utf8',
+      timeout: 60_000,
+    });
+
+    expect(result.status).toBe(0);
+    const config = JSON.parse(result.stdout) as {
+      services: Record<string, { image?: string; build?: { context?: string; dockerfile?: string } }>;
+    };
+
+    for (const service of ['sync-server', 'migrate']) {
+      const build = config.services[service]?.build;
+      expect(build?.context, `${service} has no build context`).toBeTruthy();
+      expect(fs.existsSync(build!.context!)).toBe(true);
+      const dockerfile = path.resolve(build!.context!, build!.dockerfile ?? 'Dockerfile');
+      expect(fs.existsSync(dockerfile)).toBe(true);
+    }
+    expect(config.services['sync-server'].image).toBe(config.services.migrate.image);
+  });
+
+  it('produces the candidate image that `docker compose build` is asked for', () => {
+    const tag = `ariadne-sync-server:contract-test-${process.pid}`;
+    spawnSync('docker', ['image', 'rm', '-f', tag], { timeout: 60_000 });
+    try {
+      const build = spawnSync('docker', [...composeArgs, 'build', 'sync-server'], {
+        encoding: 'utf8',
+        timeout: 900_000,
+        env: { ...process.env, SYNC_SERVER_IMAGE: tag },
+      });
+      expect(build.stderr ?? '').not.toMatch(/no such service|failed to solve/i);
+      expect(build.status).toBe(0);
+
+      const inspect = spawnSync('docker', ['image', 'inspect', '--format', '{{.Id}}', tag], {
+        encoding: 'utf8',
+        timeout: 60_000,
+      });
+      expect(inspect.status, `candidate image ${tag} was never created`).toBe(0);
+      expect(inspect.stdout.trim()).toMatch(/^sha256:[0-9a-f]{64}$/);
+    } finally {
+      spawnSync('docker', ['image', 'rm', '-f', tag], { timeout: 60_000 });
+    }
+  }, 960_000);
 });

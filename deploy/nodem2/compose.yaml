@@ -6,8 +6,12 @@
 # Always drive this file through deploy/nodem2/scripts/deploy (or the restart
 # scripts); they pin the file, project name, and env files. Secrets live only in
 # /etc/ariadne/compose.env and /etc/ariadne/sync-server.env (root-owned, 0600)
-# and are never interpolated into this file, so `docker compose config` output
-# stays secret-free.
+# and are never interpolated into this file.
+#
+# Caution: plain `docker compose config` renders every env_file value into its
+# output, so it must never be piped into logs or shared. Only
+# `docker compose config --quiet` (what scripts/deploy runs) validates without
+# printing secrets.
 name: ariadne-nodem2
 
 services:
@@ -55,6 +59,11 @@ services:
   migrate:
     # Same immutable candidate image as the app; one-shot, never restarted.
     image: ${SYNC_SERVER_IMAGE:-ariadne-sync-server:current}
+    build:
+      # Relative to this file, i.e. the root of the checked-out deployment
+      # worktree, so `docker compose build` really produces the candidate tag.
+      context: ../..
+      dockerfile: deploy/nodem2/sync-server.Dockerfile
     command: ["node", "/app/dist/migrate.js"]
     restart: "no"
     depends_on:
@@ -82,7 +91,12 @@ services:
     init: true
 
   sync-server:
+    # Built and tagged by scripts/deploy as ariadne-sync-server:<commit-sha>;
+    # the migrate service above builds and runs the exact same image.
     image: ${SYNC_SERVER_IMAGE:-ariadne-sync-server:current}
+    build:
+      context: ../..
+      dockerfile: deploy/nodem2/sync-server.Dockerfile
     restart: unless-stopped
     depends_on:
       postgres:

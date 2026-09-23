@@ -3,19 +3,59 @@
 # shellcheck shell=sh
 # shellcheck disable=SC2034  # values are consumed by the sourcing scripts
 
-# Production paths are fixed constants. They may only be redirected when
-# ARIADNE_DEPLOY_SELFTEST=1, which exists solely for the tracked contract tests
-# in deploy/nodem2/test/deploy.test.ts.
-if [ "${ARIADNE_DEPLOY_SELFTEST:-0}" = "1" ]; then
-    ARIADNE_DEPLOY_ROOT="${ARIADNE_DEPLOY_ROOT:?ARIADNE_DEPLOY_ROOT is required in self-test mode}"
-    ARIADNE_ETC_DIR="${ARIADNE_DEPLOY_ETC:?ARIADNE_DEPLOY_ETC is required in self-test mode}"
-    ARIADNE_STATE_DIR="${ARIADNE_DEPLOY_STATE:?ARIADNE_DEPLOY_STATE is required in self-test mode}"
+log() {
+    printf '[ariadne-deploy] %s\n' "$1"
+}
+
+fail() {
+    printf '[ariadne-deploy] error: %s\n' "$1" >&2
+    exit 1
+}
+
+# Production paths are fixed constants that the environment can never redirect.
+# The tracked contract tests in deploy/nodem2/test/deploy.test.ts exercise these
+# same scripts through ARIADNE_DEPLOY_SELFTEST=1, which is refused whenever it
+# could affect a real deployment: as root, or for the copy installed under
+# /opt/ariadne. Any production invocation carrying an override variable fails
+# before Docker runs instead of silently ignoring it.
+ARIADNE_PRODUCTION_ROOT=/opt/ariadne
+ARIADNE_PRODUCTION_SCRIPTS_DIR="$ARIADNE_PRODUCTION_ROOT/worktree/deploy/nodem2/scripts"
+
+if [ "${ARIADNE_DEPLOY_SELFTEST:-}" = "1" ]; then
+    if [ "$(id -u)" = "0" ]; then
+        fail "ARIADNE_DEPLOY_SELFTEST=1 is refused when running as root; deployments always use the fixed paths"
+    fi
+    case "${SCRIPT_DIR:-}" in
+        "$ARIADNE_PRODUCTION_ROOT" | "$ARIADNE_PRODUCTION_ROOT"/*)
+            fail "ARIADNE_DEPLOY_SELFTEST=1 is refused for scripts installed under $ARIADNE_PRODUCTION_SCRIPTS_DIR"
+            ;;
+    esac
+
+    [ -n "${ARIADNE_DEPLOY_ROOT:-}" ] ||
+        fail "ARIADNE_DEPLOY_SELFTEST=1 requires ARIADNE_DEPLOY_ROOT"
+    [ -n "${ARIADNE_DEPLOY_ETC:-}" ] ||
+        fail "ARIADNE_DEPLOY_SELFTEST=1 requires ARIADNE_DEPLOY_ETC"
+    [ -n "${ARIADNE_DEPLOY_STATE:-}" ] ||
+        fail "ARIADNE_DEPLOY_SELFTEST=1 requires ARIADNE_DEPLOY_STATE"
+
+    ARIADNE_ETC_DIR="$ARIADNE_DEPLOY_ETC"
+    ARIADNE_STATE_DIR="$ARIADNE_DEPLOY_STATE"
     ARIADNE_HEALTH_ATTEMPTS="${ARIADNE_DEPLOY_HEALTH_ATTEMPTS:-30}"
     ARIADNE_HEALTH_INTERVAL="${ARIADNE_DEPLOY_HEALTH_INTERVAL:-2}"
+elif [ -n "${ARIADNE_DEPLOY_SELFTEST:-}" ]; then
+    fail "ARIADNE_DEPLOY_SELFTEST must not be set for a deployment invocation"
 else
+    for ariadne_override in ARIADNE_DEPLOY_ROOT ARIADNE_DEPLOY_ETC ARIADNE_DEPLOY_STATE \
+        ARIADNE_DEPLOY_HEALTH_ATTEMPTS ARIADNE_DEPLOY_HEALTH_INTERVAL; do
+        eval "ariadne_override_value=\${$ariadne_override:-}"
+        [ -z "$ariadne_override_value" ] ||
+            fail "$ariadne_override must not be set: deployments use the fixed production paths"
+    done
+    unset ariadne_override ariadne_override_value
+
     PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
     export PATH
-    ARIADNE_DEPLOY_ROOT=/opt/ariadne
+    ARIADNE_DEPLOY_ROOT="$ARIADNE_PRODUCTION_ROOT"
     ARIADNE_ETC_DIR=/etc/ariadne
     ARIADNE_STATE_DIR=/var/lib/ariadne/deploy
     ARIADNE_HEALTH_ATTEMPTS=30
@@ -36,15 +76,6 @@ ARIADNE_HEALTH_URL="http://127.0.0.1:4300/healthz"
 ARIADNE_TRUSTED_REMOTE=origin
 ARIADNE_TRUSTED_BRANCH=main
 ARIADNE_TRUSTED_REF="refs/remotes/$ARIADNE_TRUSTED_REMOTE/$ARIADNE_TRUSTED_BRANCH"
-
-log() {
-    printf '[ariadne-deploy] %s\n' "$1"
-}
-
-fail() {
-    printf '[ariadne-deploy] error: %s\n' "$1" >&2
-    exit 1
-}
 
 # Every Compose invocation uses the same fixed file, project, and env file.
 ariadne_compose() {
