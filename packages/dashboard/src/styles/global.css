@@ -1006,6 +1006,36 @@ a:focus-visible {
   font-size: 12px;
 }
 
+.capture-delete-preview {
+  margin-top: 18px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #09111b;
+}
+
+.capture-delete-preview__title {
+  margin: 0 0 8px;
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.capture-delete-preview__list {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding-left: 18px;
+}
+
+.capture-delete-preview__list code {
+  color: #d8e2ef;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+}
+
 .reauth-dialog form {
   display: grid;
   gap: 10px;
@@ -1117,6 +1147,23 @@ a:focus-visible {
   font-size: 10px;
 }
 
+.pane-actions,
+.file-pane__controls {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.pane-actions span {
+  flex: 0 0 auto;
+}
+
+.pane-toggle {
+  display: none;
+}
+
 .search-field {
   padding: 12px;
   border-bottom: 1px solid var(--line);
@@ -1209,6 +1256,38 @@ a:focus-visible {
 .capture-count {
   color: var(--text-faint);
   font-size: 9px;
+}
+
+.task-workbench {
+  display: block;
+  height: auto;
+  min-height: 0;
+}
+
+.task-list,
+.timeline-pane,
+.file-pane {
+  min-height: 420px;
+  border-right: 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.task-workbench[data-active-pane="tasks"] .timeline-pane,
+.task-workbench[data-active-pane="tasks"] .file-pane,
+.task-workbench[data-active-pane="timeline"] .task-list,
+.task-workbench[data-active-pane="timeline"] .file-pane,
+.task-workbench[data-active-pane="file"] .task-list,
+.task-workbench[data-active-pane="file"] .timeline-pane {
+  display: none;
+}
+
+.pane-toggle {
+  display: inline-flex;
+  align-items: center;
+}
+
+.file-pane__controls {
+  flex-wrap: wrap;
 }
 
 .capture-count {
@@ -1368,8 +1447,26 @@ a:focus-visible {
   color: var(--text);
 }
 
+.destructive-action {
+  border-color: rgb(255 107 114 / 40%);
+  color: #ffd2d4;
+}
+
+.destructive-action:hover {
+  border-color: rgb(255 107 114 / 65%);
+  background: rgb(255 107 114 / 10%);
+}
+
 .file-content {
   background: #070c13;
+}
+
+.file-pane__progress {
+  padding: 14px 14px 0;
+}
+
+.file-pane__progress .panel {
+  margin: 0;
 }
 
 .code-view {

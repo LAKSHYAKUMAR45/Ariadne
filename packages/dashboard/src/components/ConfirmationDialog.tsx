@@ -1,10 +1,11 @@
-import { useEffect, useId, useRef, useState, type FormEvent } from 'react';
+import { useEffect, useId, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import type { ConfirmationRequest } from '../api/types';
 
 interface ConfirmationDialogProps {
   request: ConfirmationRequest;
   busy: boolean;
   error: string | null;
+  children?: ReactNode;
   onCancel: () => void;
   onConfirm: (input: { confirmation: string; password?: string }) => Promise<void>;
 }
@@ -13,6 +14,7 @@ export function ConfirmationDialog({
   request,
   busy,
   error,
+  children,
   onCancel,
   onConfirm,
 }: ConfirmationDialogProps) {
@@ -77,6 +79,7 @@ export function ConfirmationDialog({
         <p className="eyebrow">Protected action</p>
         <h2 id={titleId}>{request.title}</h2>
         <p>{request.impact}</p>
+        {children}
         <form onSubmit={(event) => void submit(event)}>
           {requiresConfirmation ? (
             <>

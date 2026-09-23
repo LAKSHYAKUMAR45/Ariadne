@@ -1,8 +1,43 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
-import { isAbortError } from '../api/client';
-import { isCapturedFile, isTasksResponse, isTimelineResponse } from '../api/guards';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { AdminApiError, isAbortError } from '../api/client';
+import {
+  isAcceptedOperationResponse,
+  isCapturedFile,
+  isTasksResponse,
+  isTimelineResponse,
+} from '../api/guards';
 import { useAuth } from '../auth/AuthProvider';
-import type { CapturedFile, TaskSummary, TimelineEvent } from '../api/types';
+import { OperationProgress } from '../components/OperationProgress';
+import type {
+  AdminOperation,
+  AdminOperationState,
+  CapturedFile,
+  CapturedFileMetadata,
+  TaskSummary,
+  TimelineEvent,
+} from '../api/types';
+import { CaptureDeleteDialog } from './CaptureDeleteDialog';
+
+type MobilePane = 'tasks' | 'timeline' | 'file';
+
+interface PendingCaptureDelete {
+  taskId: string;
+  captureId: string;
+  files: CapturedFileMetadata[];
+  requiresReauthentication: boolean;
+}
+
+interface FocusTarget {
+  captureId: string;
+  path: string;
+}
+
+interface LoadTimelineOptions {
+  clearSelection?: boolean;
+  nextPane?: MobilePane;
+  deletedCaptureId?: string | null;
+  focusTarget?: FocusTarget | null;
+}
 
 function formatTime(value: string): string {
   return new Intl.DateTimeFormat(undefined, {
@@ -11,6 +46,10 @@ function formatTime(value: string): string {
     hour: '2-digit',
     minute: '2-digit',
   }).format(new Date(value));
+}
+
+function hasFreshReauthentication(value: string | null): boolean {
+  return value !== null && Date.parse(value) > Date.now();
 }
 
 function EventGlyph({ kind }: { kind: string }) {
@@ -28,8 +67,50 @@ function EventGlyph({ kind }: { kind: string }) {
   return <span className={`event-glyph event-glyph--${kind}`} aria-hidden="true">{glyphs[kind] ?? 'EV'}</span>;
 }
 
+function isCaptureEvent(event: TimelineEvent): event is TimelineEvent & { kind: 'capture'; metadata: { files?: CapturedFileMetadata[] } } {
+  return event.kind === 'capture';
+}
+
+function firstCaptureTarget(events: TimelineEvent[]): FocusTarget | null {
+  for (const event of events) {
+    if (!isCaptureEvent(event)) {
+      continue;
+    }
+    const firstFile = event.metadata.files?.[0];
+    if (firstFile) {
+      return {
+        captureId: event.id,
+        path: firstFile.path,
+      };
+    }
+  }
+  return null;
+}
+
+function nextCaptureTarget(events: TimelineEvent[], deletedCaptureId: string): FocusTarget | null {
+  const captures = events.filter(isCaptureEvent);
+  const currentIndex = captures.findIndex((event) => event.id === deletedCaptureId);
+
+  if (currentIndex === -1) {
+    return firstCaptureTarget(events);
+  }
+
+  const nextEvent = captures[currentIndex + 1] ?? captures[currentIndex - 1] ?? null;
+  const nextFile = nextEvent?.metadata.files?.[0];
+  return nextEvent && nextFile
+    ? {
+        captureId: nextEvent.id,
+        path: nextFile.path,
+      }
+    : null;
+}
+
+function focusKey(target: FocusTarget): string {
+  return `${target.captureId}:${target.path}`;
+}
+
 export function TasksPage() {
-  const { api } = useAuth();
+  const { api, reauthenticate, session } = useAuth();
   const [tasks, setTasks] = useState<TaskSummary[]>([]);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [events, setEvents] = useState<TimelineEvent[]>([]);
@@ -40,8 +121,95 @@ export function TasksPage() {
   const [loading, setLoading] = useState(true);
   const [detailLoading, setDetailLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [statusMessage, setStatusMessage] = useState<string | null>(null);
+  const [activePane, setActivePane] = useState<MobilePane>('tasks');
+  const [pendingDelete, setPendingDelete] = useState<PendingCaptureDelete | null>(null);
+  const [deleteBusy, setDeleteBusy] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [deleteOperation, setDeleteOperation] = useState<AdminOperation | null>(null);
   const timelineControllerRef = useRef<AbortController | null>(null);
   const fileControllerRef = useRef<AbortController | null>(null);
+  const deleteControllerRef = useRef<AbortController | null>(null);
+  const fileButtonRefs = useRef(new Map<string, HTMLButtonElement>());
+  const nextFocusTargetRef = useRef<FocusTarget | null>(null);
+  const deleteTaskIdRef = useRef<string | null>(null);
+  const deletedCaptureIdRef = useRef<string | null>(null);
+  const deleteOperationStateRef = useRef<AdminOperationState | null>(null);
+
+  const clearSelectedFile = useCallback(() => {
+    fileControllerRef.current?.abort();
+    fileControllerRef.current = null;
+    setSelectedCaptureId(null);
+    setSelectedFile(null);
+    setMode('snapshot');
+  }, []);
+
+  const abortPendingDelete = useCallback(() => {
+    deleteControllerRef.current?.abort();
+    deleteControllerRef.current = null;
+    setPendingDelete(null);
+    setDeleteBusy(false);
+    setDeleteError(null);
+  }, []);
+
+  const loadTimeline = useCallback(async (taskId: string, options: LoadTimelineOptions = {}): Promise<void> => {
+    timelineControllerRef.current?.abort();
+    const controller = new AbortController();
+    timelineControllerRef.current = controller;
+
+    if (options.clearSelection) {
+      clearSelectedFile();
+    }
+
+    if (options.nextPane) {
+      setActivePane(options.nextPane);
+    }
+
+    setDetailLoading(true);
+    setError(null);
+
+    try {
+      const response = await api.get(
+        `/api/v1/admin/tasks/${encodeURIComponent(taskId)}/timeline`,
+        isTimelineResponse,
+        controller.signal,
+      );
+      if (timelineControllerRef.current !== controller) {
+        return;
+      }
+
+      setEvents(response.events);
+
+      if (options.deletedCaptureId) {
+        const stillPresent = response.events.some(
+          (event) => isCaptureEvent(event) && event.id === options.deletedCaptureId,
+        );
+        if (!stillPresent) {
+          nextFocusTargetRef.current = options.focusTarget ?? firstCaptureTarget(response.events);
+          setTasks((current) =>
+            current.map((task) =>
+              task.taskId === taskId
+                ? {
+                    ...task,
+                    captureCount: response.events.filter(isCaptureEvent).length,
+                  }
+                : task,
+            ),
+          );
+        }
+      }
+    } catch (loadError: unknown) {
+      if (controller.signal.aborted || isAbortError(loadError)) {
+        return;
+      }
+      setEvents([]);
+      setError(loadError instanceof Error ? loadError.message : 'Unable to load task history.');
+    } finally {
+      if (timelineControllerRef.current === controller) {
+        setDetailLoading(false);
+      }
+    }
+  }, [api, clearSelectedFile]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -61,9 +229,25 @@ export function TasksPage() {
     () => () => {
       timelineControllerRef.current?.abort();
       fileControllerRef.current?.abort();
+      deleteControllerRef.current?.abort();
     },
     [],
   );
+
+  useEffect(() => {
+    const target = nextFocusTargetRef.current;
+    if (!target) {
+      return;
+    }
+
+    const button = fileButtonRefs.current.get(focusKey(target));
+    if (!button) {
+      return;
+    }
+
+    button.focus();
+    nextFocusTargetRef.current = null;
+  }, [events]);
 
   const filteredTasks = useMemo(() => {
     const normalized = query.trim().toLocaleLowerCase();
@@ -78,52 +262,43 @@ export function TasksPage() {
   }, [query, tasks]);
 
   const selectedTask = tasks.find((task) => task.taskId === selectedTaskId) ?? null;
+  const selectedCapture = useMemo(
+    () =>
+      events.find(
+        (event): event is TimelineEvent & { kind: 'capture'; metadata: { files?: CapturedFileMetadata[] } } =>
+          isCaptureEvent(event) && event.id === selectedCaptureId,
+      ) ?? null,
+    [events, selectedCaptureId],
+  );
 
   async function selectTask(taskId: string): Promise<void> {
-    timelineControllerRef.current?.abort();
-    fileControllerRef.current?.abort();
-    const controller = new AbortController();
-    timelineControllerRef.current = controller;
+    abortPendingDelete();
+    setStatusMessage(null);
+    setDeleteOperation(null);
+    deleteOperationStateRef.current = null;
+    deleteTaskIdRef.current = null;
+    deletedCaptureIdRef.current = null;
     setSelectedTaskId(taskId);
-    setSelectedCaptureId(null);
-    setSelectedFile(null);
-    setEvents([]);
-    setDetailLoading(true);
-    setError(null);
-    try {
-      const response = await api.get(
-        `/api/v1/admin/tasks/${encodeURIComponent(taskId)}/timeline`,
-        isTimelineResponse,
-        controller.signal,
-      );
-      if (timelineControllerRef.current !== controller) {
-        return;
-      }
-      setEvents(response.events);
-    } catch (loadError: unknown) {
-      if (controller.signal.aborted) {
-        return;
-      }
-      setEvents([]);
-      setError(loadError instanceof Error ? loadError.message : 'Unable to load task history.');
-    } finally {
-      if (timelineControllerRef.current === controller) {
-        setDetailLoading(false);
-      }
-    }
+    await loadTimeline(taskId, {
+      clearSelection: true,
+      nextPane: 'timeline',
+    });
   }
 
   async function selectFile(captureId: string, path: string): Promise<void> {
     if (!selectedTaskId) {
       return;
     }
+
     fileControllerRef.current?.abort();
     const controller = new AbortController();
     fileControllerRef.current = controller;
+    setStatusMessage(null);
     setSelectedCaptureId(captureId);
     setSelectedFile(null);
     setDetailLoading(true);
     setError(null);
+
     try {
       const file = await api.get(
         `/api/v1/admin/tasks/${encodeURIComponent(selectedTaskId)}/file-captures/${encodeURIComponent(captureId)}/files/${encodeURIComponent(path)}`,
@@ -135,8 +310,9 @@ export function TasksPage() {
       }
       setSelectedFile(file);
       setMode('snapshot');
+      setActivePane('file');
     } catch (loadError: unknown) {
-      if (controller.signal.aborted) {
+      if (controller.signal.aborted || isAbortError(loadError)) {
         return;
       }
       setError(loadError instanceof Error ? loadError.message : 'Unable to decrypt this file.');
@@ -146,6 +322,104 @@ export function TasksPage() {
       }
     }
   }
+
+  async function confirmDelete(input: { confirmation: string; password?: string }): Promise<void> {
+    if (!pendingDelete) {
+      return;
+    }
+
+    const controller = new AbortController();
+    deleteControllerRef.current = controller;
+    setDeleteBusy(true);
+    setDeleteError(null);
+    setStatusMessage(null);
+
+    try {
+      if (pendingDelete.requiresReauthentication) {
+        await reauthenticate(input.password ?? '', controller.signal);
+      }
+
+      const response = await api.mutate(
+        'DELETE',
+        `/api/v1/admin/tasks/${encodeURIComponent(pendingDelete.taskId)}/file-captures/${encodeURIComponent(pendingDelete.captureId)}`,
+        { confirmation: input.confirmation },
+        isAcceptedOperationResponse,
+        controller.signal,
+      );
+      if (deleteControllerRef.current !== controller) {
+        return;
+      }
+
+      deleteTaskIdRef.current = pendingDelete.taskId;
+      deletedCaptureIdRef.current = pendingDelete.captureId;
+      deleteOperationStateRef.current = response.operation.state;
+      nextFocusTargetRef.current = nextCaptureTarget(events, pendingDelete.captureId);
+      setDeleteOperation(response.operation);
+      setPendingDelete(null);
+    } catch (deleteActionError: unknown) {
+      if (controller.signal.aborted || isAbortError(deleteActionError)) {
+        return;
+      }
+
+      if (deleteActionError instanceof AdminApiError && deleteActionError.code === 'reauthentication_required') {
+        setPendingDelete((current) =>
+          current
+            ? {
+                ...current,
+                requiresReauthentication: true,
+              }
+            : current,
+        );
+      }
+
+      setDeleteError(
+        deleteActionError instanceof Error
+          ? deleteActionError.message
+          : 'The file capture could not be deleted.',
+      );
+    } finally {
+      if (deleteControllerRef.current === controller) {
+        deleteControllerRef.current = null;
+        setDeleteBusy(false);
+      }
+    }
+  }
+
+  const handleDeleteOperationChange = useCallback((operation: AdminOperation | null) => {
+    setDeleteOperation(operation);
+
+    if (!operation) {
+      deleteOperationStateRef.current = null;
+      return;
+    }
+
+    const previousState = deleteOperationStateRef.current;
+    deleteOperationStateRef.current = operation.state;
+
+    if (operation.state === previousState) {
+      return;
+    }
+
+    if (operation.state === 'succeeded') {
+      clearSelectedFile();
+      setStatusMessage('Capture deleted.');
+      setActivePane('timeline');
+
+      const deleteTaskId = deleteTaskIdRef.current;
+      if (deleteTaskId && deleteTaskId === selectedTaskId) {
+        void loadTimeline(deleteTaskId, {
+          deletedCaptureId: deletedCaptureIdRef.current,
+          focusTarget: nextFocusTargetRef.current,
+          nextPane: 'timeline',
+        });
+      }
+      return;
+    }
+
+    if (operation.state === 'failed') {
+      setStatusMessage(null);
+    }
+  }, [clearSelectedFile, loadTimeline, selectedTaskId]);
 
   return (
     <div className="task-page">
@@ -161,9 +435,10 @@ export function TasksPage() {
         </div>
       </header>
 
+      {statusMessage ? <div className="notice notice--success" role="status">{statusMessage}</div> : null}
       {error ? <div className="notice notice--error" role="alert">{error}</div> : null}
 
-      <div className="task-workbench">
+      <div className="task-workbench" data-active-pane={activePane}>
         <aside className="task-list" aria-label="Tasks">
           <div className="pane-heading">
             <strong>Workspace tasks</strong>
@@ -208,7 +483,14 @@ export function TasksPage() {
               <strong>{selectedTask?.title ?? 'Timeline'}</strong>
               <span>{selectedTask?.status ?? 'Select a task'}</span>
             </div>
-            {events.length ? <span>{events.length} events</span> : null}
+            <div className="pane-actions">
+              {selectedTaskId ? (
+                <button className="quiet-action pane-toggle" type="button" onClick={() => setActivePane('tasks')}>
+                  Tasks
+                </button>
+              ) : null}
+              {events.length ? <span>{events.length} events</span> : null}
+            </div>
           </div>
           <div className="scroll-region timeline">
             {!selectedTaskId ? (
@@ -229,21 +511,31 @@ export function TasksPage() {
                   <p>{event.summary}</p>
                   {event.kind === 'capture' && event.metadata.files?.length ? (
                     <div className="capture-files">
-                      {event.metadata.files.map((file) => (
-                        <button
-                          key={file.path}
-                          type="button"
-                          className={
-                            selectedCaptureId === event.id && selectedFile?.path === file.path
-                              ? 'file-row file-row--selected'
-                              : 'file-row'
-                          }
-                          onClick={() => void selectFile(event.id, file.path)}
-                        >
-                          <span>{file.path}</span>
-                          <small>{file.byteLength.toLocaleString()} B</small>
-                        </button>
-                      ))}
+                      {event.metadata.files.map((file) => {
+                        const key = focusKey({ captureId: event.id, path: file.path });
+                        return (
+                          <button
+                            key={file.path}
+                            ref={(node) => {
+                              if (node) {
+                                fileButtonRefs.current.set(key, node);
+                                return;
+                              }
+                              fileButtonRefs.current.delete(key);
+                            }}
+                            type="button"
+                            className={
+                              selectedCaptureId === event.id && selectedFile?.path === file.path
+                                ? 'file-row file-row--selected'
+                                : 'file-row'
+                            }
+                            onClick={() => void selectFile(event.id, file.path)}
+                          >
+                            <span>{file.path}</span>
+                            <small>{file.byteLength.toLocaleString()} B</small>
+                          </button>
+                        );
+                      })}
                     </div>
                   ) : null}
                 </div>
@@ -258,26 +550,61 @@ export function TasksPage() {
               <strong>{selectedFile?.path ?? 'File inspector'}</strong>
               <span>{selectedFile ? `${selectedFile.byteLength.toLocaleString()} bytes` : 'Snapshot and diff'}</span>
             </div>
-            {selectedFile ? (
-              <div className="segmented-control" aria-label="File view">
+            <div className="file-pane__controls">
+              {selectedCapture ? (
                 <button
+                  className="quiet-action destructive-action"
                   type="button"
-                  className={mode === 'snapshot' ? 'is-active' : ''}
-                  onClick={() => setMode('snapshot')}
+                  onClick={() => {
+                    setDeleteError(null);
+                    setStatusMessage(null);
+                    setPendingDelete({
+                      taskId: selectedTaskId ?? '',
+                      captureId: selectedCapture.id,
+                      files: selectedCapture.metadata.files ?? [],
+                      requiresReauthentication: !hasFreshReauthentication(session?.reauthenticatedUntil ?? null),
+                    });
+                  }}
                 >
-                  Snapshot
+                  Delete capture {selectedCapture.id}
                 </button>
-                <button
-                  type="button"
-                  className={mode === 'diff' ? 'is-active' : ''}
-                  onClick={() => setMode('diff')}
-                >
-                  Diff
+              ) : null}
+              {selectedCapture ? (
+                <button className="quiet-action pane-toggle" type="button" onClick={() => setActivePane('timeline')}>
+                  Timeline
                 </button>
-              </div>
-            ) : null}
+              ) : null}
+              {selectedFile ? (
+                <div className="segmented-control" aria-label="File view">
+                  <button
+                    type="button"
+                    className={mode === 'snapshot' ? 'is-active' : ''}
+                    onClick={() => setMode('snapshot')}
+                  >
+                    Snapshot
+                  </button>
+                  <button
+                    type="button"
+                    className={mode === 'diff' ? 'is-active' : ''}
+                    onClick={() => setMode('diff')}
+                  >
+                    Diff
+                  </button>
+                </div>
+              ) : null}
+            </div>
           </div>
           <div className="file-content">
+            {deleteOperation ? (
+              <div className="file-pane__progress">
+                <OperationProgress
+                  api={api}
+                  operationId={deleteOperation.id}
+                  initialOperation={deleteOperation}
+                  onOperationChange={handleDeleteOperationChange}
+                />
+              </div>
+            ) : null}
             {detailLoading && !selectedFile ? <p className="pane-message">Decrypting file...</p> : null}
             {!selectedFile && !detailLoading ? (
               <div className="pane-empty">
@@ -293,6 +620,23 @@ export function TasksPage() {
           </div>
         </section>
       </div>
+
+      {pendingDelete ? (
+        <CaptureDeleteDialog
+          captureId={pendingDelete.captureId}
+          files={pendingDelete.files}
+          requiresReauthentication={pendingDelete.requiresReauthentication}
+          busy={deleteBusy}
+          error={deleteError}
+          onCancel={() => {
+            if (!deleteBusy) {
+              setPendingDelete(null);
+              setDeleteError(null);
+            }
+          }}
+          onConfirm={confirmDelete}
+        />
+      ) : null}
     </div>
   );
 }
