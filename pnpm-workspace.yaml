@@ -1,5 +1,6 @@
 packages:
   - "packages/*"
+  - "packages/vscode-extension/*"
   - "packages/plugins/*"
 allowBuilds:
   better-sqlite3: false
