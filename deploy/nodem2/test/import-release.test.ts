@@ -110,12 +110,16 @@ describe('release import script', () => {
   it('keeps the local rollout report ignored and out of Git tracking', () => {
     const report =
       '.superpowers/sdd/2026-09-23-complete-operations-console/task-10-report.md';
+    const ignored = spawnSync('git', ['check-ignore', '--quiet', report], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+    });
     const tracked = spawnSync('git', ['ls-files', '--error-unmatch', report], {
       cwd: repoRoot,
       encoding: 'utf8',
     });
+    expect(ignored.status).toBe(0);
     expect(tracked.status).not.toBe(0);
-    expect(fs.existsSync(path.join(repoRoot, report))).toBe(true);
   });
 
   it('imports the reviewed commit, updates only the fixed trust ref, and leaves a clean exact worktree', () => {

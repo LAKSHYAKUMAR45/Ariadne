@@ -42,6 +42,10 @@ function sessionBody(overrides: Partial<{ reauthenticatedUntil: string | null }>
   };
 }
 
+function futureReauthenticatedUntil(): string {
+  return new Date(Date.now() + 60 * 60 * 1000).toISOString();
+}
+
 function renderWithProvider(child: ReactNode) {
   return render(<AuthProvider>{child}</AuthProvider>);
 }
@@ -234,7 +238,7 @@ describe('operations pages', () => {
       const url = String(input);
       if (url === '/api/v1/admin/session') {
         return Promise.resolve(
-          json(sessionBody({ reauthenticatedUntil: '2026-09-23T20:00:00.000Z' })),
+          json(sessionBody({ reauthenticatedUntil: futureReauthenticatedUntil() })),
         );
       }
       if (url === '/api/v1/admin/services') {
@@ -320,7 +324,7 @@ describe('operations pages', () => {
       const url = String(input);
       if (url === '/api/v1/admin/session') {
         return Promise.resolve(
-          json(sessionBody({ reauthenticatedUntil: '2026-09-23T20:00:00.000Z' })),
+          json(sessionBody({ reauthenticatedUntil: futureReauthenticatedUntil() })),
         );
       }
       if (url === '/api/v1/admin/services') {
@@ -490,7 +494,7 @@ describe('operations pages', () => {
       const url = String(input);
       if (url === '/api/v1/admin/session') {
         return Promise.resolve(
-          json(sessionBody({ reauthenticatedUntil: '2026-09-23T20:00:00.000Z' })),
+          json(sessionBody({ reauthenticatedUntil: futureReauthenticatedUntil() })),
         );
       }
       if (url === '/api/v1/admin/backups') {
@@ -541,7 +545,7 @@ describe('operations pages', () => {
         );
       }
       if (url === '/api/v1/admin/session/reauthenticate') {
-        return Promise.resolve(json({ reauthenticatedUntil: '2026-09-23T20:05:00.000Z' }));
+        return Promise.resolve(json({ reauthenticatedUntil: futureReauthenticatedUntil() }));
       }
       if (url === '/api/v1/admin/operations/op-restore-reauth/events') {
         return Promise.resolve(
@@ -602,7 +606,7 @@ describe('operations pages', () => {
       const url = String(input);
       if (url === '/api/v1/admin/session') {
         return Promise.resolve(
-          json(sessionBody({ reauthenticatedUntil: '2026-09-23T20:00:00.000Z' })),
+          json(sessionBody({ reauthenticatedUntil: futureReauthenticatedUntil() })),
         );
       }
       if (url === '/api/v1/admin/services') {
@@ -639,7 +643,7 @@ describe('operations pages', () => {
         );
       }
       if (url === '/api/v1/admin/session/reauthenticate') {
-        return Promise.resolve(json({ reauthenticatedUntil: '2026-09-23T20:05:00.000Z' }));
+        return Promise.resolve(json({ reauthenticatedUntil: futureReauthenticatedUntil() }));
       }
       return Promise.resolve(new Response(null, { status: 404 }));
     });
@@ -671,7 +675,7 @@ describe('operations pages', () => {
       const url = String(input);
       if (url === '/api/v1/admin/session') {
         return Promise.resolve(
-          json(sessionBody({ reauthenticatedUntil: '2026-09-23T20:00:00.000Z' })),
+          json(sessionBody({ reauthenticatedUntil: futureReauthenticatedUntil() })),
         );
       }
       if (url === '/api/v1/admin/services') {
