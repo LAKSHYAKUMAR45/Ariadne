@@ -163,3 +163,17 @@ export type {
   KnowledgePageRecord,
   KnowledgeSourceRecord,
 } from './knowledge/KnowledgeTypes.js';
+export {
+  CodeIngestor,
+  MarkdownIngestor,
+  PlainTextIngestor,
+  TaskHistoryIngestor,
+} from './knowledge/formats/index.js';
+export type {
+  ExtractedSource,
+  IngestHeading,
+  IngestInput,
+  IngestLink,
+  IngestSpan,
+  KnowledgeIngestor,
+} from './knowledge/formats/index.js';
