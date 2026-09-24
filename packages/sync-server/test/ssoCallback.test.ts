@@ -7,6 +7,7 @@ import { createPool } from '../src/db.js';
 import { runMigrations } from '../src/migrate.js';
 import { TEST_DATABASE_URL, TEST_JWT_SECRET } from './testConfig.js';
 import { CORE_FIXTURE_TABLES, truncateFixtureTables } from './dbCleanup.js';
+
 import { createTestEncryptionKeyring } from './testKeyring.js';
 
 describe('GET /sso/callback', () => {
@@ -23,7 +24,7 @@ describe('GET /sso/callback', () => {
   });
 
   beforeEach(async () => {
-    await truncateFixtureTables(pool, [...CORE_FIXTURE_TABLES, 'sso_exchange_codes']);
+    await truncateFixtureTables(pool, CORE_FIXTURE_TABLES);
   });
 
   function buildApp() {
