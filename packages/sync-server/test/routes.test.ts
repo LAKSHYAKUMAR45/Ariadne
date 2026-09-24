@@ -15,7 +15,7 @@ import {
   requireAuth,
   requireCsrf,
 } from '../src/middleware.js';
-import { ADMIN_SESSION_COOKIE_NAME } from '../src/adminSessions.js';
+import { ADMIN_SESSION_COOKIE_NAME, createAdminSession } from '../src/adminSessions.js';
 import { confirmationFor } from '../src/operationConfirmation.js';
 import { createOperatorClient, type OperatorClient } from '../src/operatorClient.js';
 import {
@@ -1945,7 +1945,7 @@ describe('sync-server: auth + sync routes', () => {
       const teamId = await createDirectTeam('History team');
       const otherTeamId = await createDirectTeam('Other team');
       const admin = await createDirectUser('history-admin', DASHBOARD_PASSWORD);
-      const member = await createDirectUser('history-member');
+      const member = await createDirectUser('history-member', DASHBOARD_PASSWORD);
       const inactive = await createDirectUser('history-inactive');
       const outsider = await createDirectUser('history-outsider');
 
@@ -2291,39 +2291,48 @@ describe('sync-server: auth + sync routes', () => {
       expect(res.body.error.code).toBe('invalid_request');
     });
 
-    it('restricts every admin audit route to a live singleton-admin session', async () => {
+    it('restricts write admin routes to singleton-admin, but allows member read access', async () => {
       const fixture = await seedHistoryFixture();
       await request(app).post(captureUrl(TASK_ID)).set(fixture.member.authHeader).send(captureBody()).expect(200);
 
-      const auditUrls = [
+      const readAuditUrls = [
         '/api/v1/admin/tasks',
         `/api/v1/admin/tasks/${TASK_ID}/timeline`,
         `/api/v1/admin/tasks/${TASK_ID}/file-captures/capture-1/files/src/a.ts`,
       ];
 
+      const writeAuditUrl = `/api/v1/admin/tasks/${TASK_ID}/file-captures/capture-1`;
+
       // A member's sync bearer token carries no dashboard authority at all.
-      for (const url of auditUrls) {
+      for (const url of readAuditUrls) {
         const res = await request(app).get(url).set(fixture.member.authHeader);
         expect(res.status).toBe(401);
         expect(res.body.error.code).toBe('missing_session');
       }
 
       // Nor does an anonymous request.
-      for (const url of auditUrls) {
+      for (const url of readAuditUrls) {
         const res = await request(app).get(url);
         expect(res.status).toBe(401);
         expect(res.body.error.code).toBe('missing_session');
       }
 
-      // A real session whose admin membership is gone is refused per request.
+      // A real session whose admin membership is gone can read audit endpoints (member access allowed).
       await pool.query(`UPDATE team_memberships SET role = 'member' WHERE user_id = $1`, [
         fixture.admin.userId,
       ]);
-      for (const url of auditUrls) {
+      for (const url of readAuditUrls) {
         const res = await request(app).get(url).set(fixture.admin.session);
-        expect(res.status).toBe(403);
-        expect(res.body.error.code).toBe('admin_required');
+        expect(res.status).toBe(200);
       }
+
+      // But write operations (DELETE) remain admin-only.
+      const deleteRes = await request(app)
+        .delete(writeAuditUrl)
+        .set(fixture.admin.session)
+        .send({ confirmation: 'test' });
+      expect(deleteRes.status).toBe(403);
+      expect(deleteRes.body.error.code).toBe('admin_required');
     });
 
     it('lists only the admin team tasks with capture counts', async () => {
@@ -2521,6 +2530,104 @@ describe('sync-server: auth + sync routes', () => {
         .set(fixture.admin.session);
       expect(res.status).toBe(404);
       expect(res.body.error.code).toBe('task_not_found');
+    });
+
+    it('allows a member-role dashboard session to read task lists', async () => {
+      const fixture = await seedHistoryFixture();
+      await request(app).post(captureUrl(TASK_ID)).set(fixture.member.authHeader).send(captureBody()).expect(200);
+
+      // Create a member dashboard session directly in the database for testing
+      // (in production, members would get sessions through the admin auth endpoint
+      // which we're testing separately)
+      const memberSession = await createAdminSession(pool, fixture.member.userId);
+      const memberSessionHeaders: AdminSessionHeaders = {
+        Cookie: `${ADMIN_SESSION_COOKIE_NAME}=${memberSession.sessionToken}`,
+        'X-CSRF-Token': memberSession.csrfToken,
+      };
+
+      // Member can now list tasks
+      const res = await request(app)
+        .get('/api/v1/admin/tasks')
+        .set(memberSessionHeaders);
+      expect(res.status).toBe(200);
+      expect(res.body.tasks).toHaveLength(1);
+      expect(res.body.tasks[0].taskId).toBe(TASK_ID);
+    });
+
+    it('allows a member-role dashboard session to read task timeline', async () => {
+      const fixture = await seedHistoryFixture();
+      await request(app).post(captureUrl(TASK_ID)).set(fixture.member.authHeader).send(captureBody()).expect(200);
+
+      // Create a member dashboard session directly in the database for testing
+      const memberSession = await createAdminSession(pool, fixture.member.userId);
+      const memberSessionHeaders: AdminSessionHeaders = {
+        Cookie: `${ADMIN_SESSION_COOKIE_NAME}=${memberSession.sessionToken}`,
+        'X-CSRF-Token': memberSession.csrfToken,
+      };
+
+      // Member can read timeline
+      const res = await request(app)
+        .get(`/api/v1/admin/tasks/${TASK_ID}/timeline`)
+        .set(memberSessionHeaders)
+        .expect(200);
+      expect(res.body.taskId).toBe(TASK_ID);
+      expect(res.body.events.length).toBeGreaterThan(0);
+    });
+
+    it('allows a member-role dashboard session to read file capture content', async () => {
+      const fixture = await seedHistoryFixture();
+      await request(app).post(captureUrl(TASK_ID)).set(fixture.member.authHeader).send(captureBody()).expect(200);
+
+      // Create a member dashboard session directly in the database for testing
+      const memberSession = await createAdminSession(pool, fixture.member.userId);
+      const memberSessionHeaders: AdminSessionHeaders = {
+        Cookie: `${ADMIN_SESSION_COOKIE_NAME}=${memberSession.sessionToken}`,
+        'X-CSRF-Token': memberSession.csrfToken,
+      };
+
+      // Member can read capture file
+      const res = await request(app)
+        .get(`/api/v1/admin/tasks/${TASK_ID}/file-captures/capture-1/files/src/a.ts`)
+        .set(memberSessionHeaders)
+        .expect(200);
+      expect(res.body.path).toBe('src/a.ts');
+      expect(res.body.content).toBe('export const a = 1;\n');
+    });
+
+    it('rejects a member-role dashboard session on capture DELETE (admin-only)', async () => {
+      const fixture = await seedHistoryFixture();
+      await request(app).post(captureUrl(TASK_ID)).set(fixture.member.authHeader).send(captureBody()).expect(200);
+
+      // Create a member dashboard session directly in the database for testing
+      const memberSession = await createAdminSession(pool, fixture.member.userId);
+      const memberSessionHeaders: AdminSessionHeaders = {
+        Cookie: `${ADMIN_SESSION_COOKIE_NAME}=${memberSession.sessionToken}`,
+        'X-CSRF-Token': memberSession.csrfToken,
+      };
+
+      // Member should be rejected on DELETE
+      const res = await request(app)
+        .delete(`/api/v1/admin/tasks/${TASK_ID}/file-captures/capture-1`)
+        .set(memberSessionHeaders)
+        .send({ confirmation: confirmationFor.captureDelete('capture-1') });
+      expect(res.status).toBe(403);
+      expect(res.body.error.code).toBe('admin_required');
+    });
+
+    it('admin dashboard session can still delete file captures', async () => {
+      const fixture = await seedHistoryFixture();
+      await request(app).post(captureUrl(TASK_ID)).set(fixture.member.authHeader).send(captureBody()).expect(200);
+
+      // Admin reauthentication for DELETE
+      await reauthenticateAdminSession(app, fixture.admin.session);
+
+      // Admin can delete
+      const res = await request(app)
+        .delete(`/api/v1/admin/tasks/${TASK_ID}/file-captures/capture-1`)
+        .set(fixture.admin.session)
+        .send({ confirmation: confirmationFor.captureDelete('capture-1') });
+      expect(res.status).toBe(202);
+      expect(res.body.accepted).toBe(true);
     });
   });
 });

@@ -176,9 +176,9 @@ export function createApp(pool: Pool, jwtSecret: string, options: CreateAppOptio
     requireCsrf({ allowedOrigin: adminPublicOrigin }),
   ];
 
+  app.use('/api/v1/admin', ...taskSession, createAdminTasksRouter(pool, taskHistoryStore));
   app.use('/api/v1/admin', ...adminSession, createAdminMembersRouter(pool));
   app.use('/api/v1/admin', ...adminSession, createMembersRouter(pool));
-  app.use('/api/v1/admin', ...taskSession, createAdminTasksRouter(pool, taskHistoryStore));
   app.use(
     '/api/v1/admin',
     ...adminSession,

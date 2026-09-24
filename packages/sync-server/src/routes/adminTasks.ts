@@ -8,6 +8,7 @@ import { ApiError } from '../errors.js';
 import { asyncHandler, type AuthenticatedRequest } from '../middleware.js';
 import { createOperationsStore, type AdminOperation } from '../operationsStore.js';
 import { confirmationFor, requireConfirmation } from '../operationConfirmation.js';
+import { requireActiveMembership } from '../teamAccess.js';
 import { requireTeamTask } from '../taskAccess.js';
 import type { FileCaptureTrigger, TaskHistoryStore } from '../taskHistoryTypes.js';
 import { requireUuidParam } from './taskHistory.js';
@@ -170,8 +171,8 @@ export function createAdminTasksRouter(pool: Pool, store: TaskHistoryStore): Rou
   const router = Router();
   const operationsStore = createOperationsStore(pool);
 
-  async function requireAdminTask(req: AuthenticatedRequest): Promise<{ teamId: string; taskId: string }> {
-    const membership = await requireSingletonAdmin(pool, req.userId!);
+  async function requireTaskAccess(req: AuthenticatedRequest): Promise<{ teamId: string; taskId: string }> {
+    const membership = await requireActiveMembership(pool, req.userId!);
     const taskId = requireUuidParam(req.params.taskId, 'taskId');
     await requireTeamTask(pool, membership.teamId, taskId);
     return { teamId: membership.teamId, taskId };
@@ -180,7 +181,7 @@ export function createAdminTasksRouter(pool: Pool, store: TaskHistoryStore): Rou
   router.get(
     '/tasks',
     asyncHandler(async (req: AuthenticatedRequest, res) => {
-      const membership = await requireSingletonAdmin(pool, req.userId!);
+      const membership = await requireActiveMembership(pool, req.userId!);
       const { limit, offset } = parsePagination(req.query as Record<string, unknown>);
 
       const { rows } = await pool.query<AdminTaskRow>(
@@ -221,7 +222,12 @@ export function createAdminTasksRouter(pool: Pool, store: TaskHistoryStore): Rou
   router.delete(
     '/tasks/:taskId/file-captures/:captureId',
     asyncHandler(async (req: ReauthenticatedAdminRequest, res) => {
-      const { teamId, taskId } = await requireAdminTask(req);
+      // DELETE is admin-only, not member-accessible
+      const membership = await requireSingletonAdmin(pool, req.userId!);
+      const taskId = requireUuidParam(req.params.taskId, 'taskId');
+      await requireTeamTask(pool, membership.teamId, taskId);
+      const teamId = membership.teamId;
+
       if (req.adminReauthenticated !== true) {
         throw new ApiError(
           403,
@@ -311,7 +317,7 @@ export function createAdminTasksRouter(pool: Pool, store: TaskHistoryStore): Rou
   router.get(
     '/tasks/:taskId/timeline',
     asyncHandler(async (req: AuthenticatedRequest, res) => {
-      const { teamId, taskId } = await requireAdminTask(req);
+      const { teamId, taskId } = await requireTaskAccess(req);
       const events: AdminTimelineEvent[] = [];
 
       const task = await pool.query<AdminTaskRow>(
@@ -546,7 +552,7 @@ export function createAdminTasksRouter(pool: Pool, store: TaskHistoryStore): Rou
   router.get(
     '/tasks/:taskId/file-captures/:captureId/files/:path(*)',
     asyncHandler(async (req: AuthenticatedRequest, res) => {
-      const { teamId, taskId } = await requireAdminTask(req);
+      const { teamId, taskId } = await requireTaskAccess(req);
       const captureId = requireCaptureIdParam(req.params.captureId);
       const filePath = requireCapturePathParam(req.params.path);
 
