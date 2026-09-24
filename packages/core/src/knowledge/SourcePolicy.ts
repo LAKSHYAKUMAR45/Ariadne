@@ -1,6 +1,7 @@
 import path from 'node:path';
 import { isAlwaysExcludedCapturePath } from '../FileCapture.js';
 import { normalizeKnowledgePath } from './KnowledgeIds.js';
+export { isPathWithinRoot } from './KnowledgePathSecurity.js';
 
 export type SourceDecisionAction = 'ingest' | 'skip' | 'reject';
 export type SourceDecisionReason =

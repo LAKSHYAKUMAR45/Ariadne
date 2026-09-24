@@ -1,4 +1,4 @@
-import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import type Database from 'better-sqlite3';
 import { buildKnowledgeManifest, type KnowledgeManifest } from './KnowledgeManifest.js';
@@ -6,6 +6,7 @@ import { createKnowledgeId, normalizeKnowledgePath } from './KnowledgeIds.js';
 import { KnowledgePageStore, type CreatePageVersionInput, type KnowledgePageVersion } from './KnowledgePageStore.js';
 import { KnowledgeRenderer, renderKnowledgeIndex, renderKnowledgeLog, renderKnowledgeOverview, type KnowledgeIndexEntry } from './KnowledgeRenderer.js';
 import type { KnowledgePageType, KnowledgeProvenanceRef } from './KnowledgeTypes.js';
+import { assertNoSymlinkComponents, isPathWithinRoot } from './KnowledgePathSecurity.js';
 
 export interface KnowledgeGenerationPageInput {
   pageId?: string;
@@ -201,7 +202,13 @@ export class KnowledgeGeneratorService {
     const payload = parsePayload(job.payload_json);
     const generatedAt = payload.generatedAt ?? this.now();
     const generatorVersion = payload.generatorVersion ?? '1';
-    const outputRoot = path.resolve(payload.outputRoot ?? path.join(project.workspace_root, '.ariadne', 'knowledge'));
+    const workspaceRoot = realpathSync(project.workspace_root);
+    const approvedOutputRoot = path.join(workspaceRoot, '.ariadne', 'knowledge');
+    const outputRoot = path.resolve(payload.outputRoot ?? approvedOutputRoot);
+    if (!isPathWithinRoot(approvedOutputRoot, outputRoot)) {
+      throw new Error('Knowledge generation output root must stay within .ariadne/knowledge');
+    }
+    assertNoSymlinkComponents(workspaceRoot, outputRoot, 'Knowledge generation output root');
     const manifest = buildKnowledgeManifest(project.id, generatedAt);
     const pageStore = new KnowledgePageStore(this.db);
     const renderedPages: Array<{ input: KnowledgeGenerationPageInput; pageId: string; version: number; markdown: string; relativePath: string }> = [];

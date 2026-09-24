@@ -49,9 +49,10 @@ describe('KnowledgeGeneratorService', () => {
   }
 
   it('generates pages, indexes, and manifest atomically', async () => {
-    const outputRoot = mkdtempSync(join(process.cwd(), '.knowledge-generator-test-'));
-    directories.push(outputRoot);
-    const database = createDatabase(outputRoot);
+    const workspaceRoot = mkdtempSync(join(process.cwd(), '.knowledge-generator-test-'));
+    const outputRoot = join(workspaceRoot, '.ariadne', 'knowledge');
+    directories.push(workspaceRoot);
+    const database = createDatabase(workspaceRoot);
     const jobId = enqueue(database, outputRoot);
 
     const result = await new KnowledgeGeneratorService(database).runKnowledgeGeneration(jobId);
@@ -64,9 +65,10 @@ describe('KnowledgeGeneratorService', () => {
   });
 
   it('leaves prior files and versions unchanged when rendering fails', async () => {
-    const outputRoot = mkdtempSync(join(process.cwd(), '.knowledge-generator-test-'));
-    directories.push(outputRoot);
-    const database = createDatabase(outputRoot);
+    const workspaceRoot = mkdtempSync(join(process.cwd(), '.knowledge-generator-test-'));
+    const outputRoot = join(workspaceRoot, '.ariadne', 'knowledge');
+    directories.push(workspaceRoot);
+    const database = createDatabase(workspaceRoot);
     const jobId = enqueue(database, outputRoot, 'Original');
     await new KnowledgeGeneratorService(database).runKnowledgeGeneration(jobId);
 
@@ -95,9 +97,10 @@ describe('KnowledgeGeneratorService', () => {
   });
 
   it('rejects page slugs that would write outside the output root', async () => {
-    const outputRoot = mkdtempSync(join(process.cwd(), '.knowledge-generator-test-'));
-    directories.push(outputRoot);
-    const database = createDatabase(outputRoot);
+    const workspaceRoot = mkdtempSync(join(process.cwd(), '.knowledge-generator-test-'));
+    const outputRoot = join(workspaceRoot, '.ariadne', 'knowledge');
+    directories.push(workspaceRoot);
+    const database = createDatabase(workspaceRoot);
     database
       .prepare(
         `INSERT INTO knowledge_jobs
@@ -122,5 +125,33 @@ describe('KnowledgeGeneratorService', () => {
     expect(database.prepare('SELECT status FROM knowledge_jobs WHERE id = ?').get('job_traversal')).toEqual({
       status: 'failed',
     });
+  });
+
+  it('rejects an output root outside the project workspace', async () => {
+    const workspaceRoot = mkdtempSync(join(process.cwd(), '.knowledge-generator-workspace-'));
+    const outputRoot = mkdtempSync(join(process.cwd(), '.knowledge-generator-outside-'));
+    directories.push(workspaceRoot, outputRoot);
+    const database = createDatabase(workspaceRoot);
+    database
+      .prepare(
+        `INSERT INTO knowledge_jobs
+         (id, project_id, job_kind, status, payload_json, requested_at)
+         VALUES (?, ?, ?, 'queued', ?, ?)`,
+      )
+      .run(
+        'job_output_escape',
+        'project_1',
+        'generate',
+        JSON.stringify({
+          outputRoot,
+          pages: [{ type: 'concept', title: 'Escape', slug: 'escape', content: 'Generated' }],
+        }),
+        '2026-01-04T00:00:00.000Z',
+      );
+
+    await expect(new KnowledgeGeneratorService(database).runKnowledgeGeneration('job_output_escape')).rejects.toThrow(
+      /knowledge|workspace/i,
+    );
+    expect(existsSync(join(outputRoot, 'pages'))).toBe(false);
   });
 });

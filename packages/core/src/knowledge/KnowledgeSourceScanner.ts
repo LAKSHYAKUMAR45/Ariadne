@@ -3,6 +3,7 @@ import path from 'node:path';
 import { isAlwaysExcludedCapturePath } from '../FileCapture.js';
 import { shouldIngestSource } from './SourcePolicy.js';
 import type { SourcePolicy } from './SourcePolicy.js';
+import { isPathWithinRoot } from './KnowledgePathSecurity.js';
 
 export interface SourceCandidate {
   path: string;
@@ -42,7 +43,8 @@ async function scanDirectory(
 
     const absolutePath = path.join(root, relativePath);
     const stats = await fs.stat(absolutePath);
-    const decision = shouldIngestSource(relativePath, { ...policy, size: stats.size });
+    const workspaceRelativePath = path.relative(policy.workspaceRoot, absolutePath).replace(/\\/g, '/');
+    const decision = shouldIngestSource(workspaceRelativePath, { ...policy, size: stats.size });
     if (decision.action !== 'ingest' || !decision.path) continue;
 
     const binaryDecision = shouldIngestSource(decision.path, {
@@ -70,8 +72,12 @@ export async function scanKnowledgeSources(
   root: string,
   policy: SourcePolicy,
 ): Promise<SourceCandidate[]> {
-  const absoluteRoot = path.resolve(root);
+  const workspaceRoot = await fs.realpath(policy.workspaceRoot);
+  const absoluteRoot = await fs.realpath(root);
+  if (!isPathWithinRoot(workspaceRoot, absoluteRoot)) {
+    throw new Error('Knowledge scan root must stay within the workspace');
+  }
   const candidates: SourceCandidate[] = [];
-  await scanDirectory(absoluteRoot, '.', { ...policy, workspaceRoot: absoluteRoot }, candidates);
+  await scanDirectory(absoluteRoot, '.', { ...policy, workspaceRoot }, candidates);
   return candidates.sort((left, right) => left.path.localeCompare(right.path));
 }

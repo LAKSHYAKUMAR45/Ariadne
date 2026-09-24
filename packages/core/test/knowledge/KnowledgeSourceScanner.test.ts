@@ -48,4 +48,14 @@ describe('scanKnowledgeSources', () => {
 
     expect(sources.map((source) => source.path)).toEqual(['docs/keep.md']);
   });
+
+  it('rejects a scan root outside the workspace', async () => {
+    workspaceRoot = await mkdtemp(path.join(tmpdir(), 'ariadne-knowledge-scan-'));
+    const outsideRoot = await mkdtemp(path.join(tmpdir(), 'ariadne-knowledge-outside-'));
+    try {
+      await expect(scanKnowledgeSources(outsideRoot, { workspaceRoot })).rejects.toThrow(/within the workspace/i);
+    } finally {
+      await rm(outsideRoot, { recursive: true, force: true });
+    }
+  });
 });

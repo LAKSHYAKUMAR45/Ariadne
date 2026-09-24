@@ -278,7 +278,8 @@ export function registerKnowledgeTools(server: McpServer, context: KnowledgeMcpC
       try {
         requireWrite(args.confirm);
         project(db, args.projectId);
-        const result = queue.enqueue(args);
+        const { confirm: _confirm, ...queueInput } = args;
+        const result = queue.enqueue(queueInput);
         return jsonResult(envelope(result, [{ kind: 'job', id: result.id }]));
       } catch (err) {
         return errorResult(err);

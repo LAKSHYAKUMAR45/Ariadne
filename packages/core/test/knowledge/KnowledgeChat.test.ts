@@ -245,6 +245,25 @@ describe('KnowledgeChatService', () => {
     expect(page.provenance).toEqual([{ kind: 'source', id: 'source_1', confidence: 1 }]);
   });
 
+  it('rejects unsafe page paths when saving chat output', async () => {
+    const { db } = createDatabase();
+    const service = new KnowledgeChatService(db, registryWithChatProvider(), chunkProvider(['answer']));
+    const conversation = service.createConversation({ projectId: 'project_1' });
+    const events = await collect(
+      service.streamKnowledgeChat({ conversationId: conversation.id, query: 'question', mode: 'knowledge' }),
+    );
+    const done = events.find((event) => event.type === 'done') as Extract<KnowledgeChatEvent, { type: 'done' }>;
+
+    expect(() =>
+      service.saveMessageToPage({
+        messageId: done.messageId,
+        type: 'synthesis',
+        title: 'Unsafe',
+        slug: '../../outside',
+      }),
+    ).toThrow(/safe path components/i);
+  });
+
   it('emits an error event when no chat-capable provider is registered', async () => {
     const { db } = createDatabase();
     const emptyRegistry = new KnowledgeProviderRegistry();

@@ -18,6 +18,7 @@ import {
 import { createPageVersion, type CreatePageVersionInput, type KnowledgePageVersion } from './KnowledgePageStore.js';
 import type { KnowledgePageType, KnowledgeProvenanceRef } from './KnowledgeTypes.js';
 import type { TaskStore } from '../TaskStore.js';
+import { assertNoSymlinkComponents, isPathWithinRoot } from './KnowledgePathSecurity.js';
 
 export type KnowledgeChatRole = 'user' | 'assistant';
 
@@ -364,6 +365,12 @@ export class KnowledgeChatService {
       }));
 
     const contentPath = pageContentPath(input.type, input.slug);
+    const outputRoot = this.knowledgeOutputRoot(workspaceRoot);
+    const outputPath = path.resolve(outputRoot, contentPath);
+    if (!isPathWithinRoot(outputRoot, outputPath)) {
+      throw new Error('Knowledge chat page path must stay within the knowledge output root');
+    }
+    assertNoSymlinkComponents(outputRoot, outputPath, 'Knowledge chat page path');
     const versionInput: CreatePageVersionInput = {
       projectId: message.projectId,
       type: input.type,
@@ -376,7 +383,7 @@ export class KnowledgeChatService {
       generatorVersion: input.generatorVersion ?? 'knowledge-chat',
     };
     const version = createPageVersion(this.db, versionInput);
-    writeKnowledgePageFile(path.join(this.knowledgeOutputRoot(workspaceRoot), contentPath), message.content);
+    writeKnowledgePageFile(outputPath, message.content);
     return version;
   }
 
@@ -660,7 +667,16 @@ export class KnowledgeChatService {
 }
 
 function pageContentPath(type: string, slug: string): string {
-  return `pages/${type}/${slug}.md`;
+  const normalizedType = type.trim();
+  const normalizedSlug = slug.trim().replace(/\\/g, '/');
+  if (
+    !/^[a-z0-9_-]+$/i.test(normalizedType) ||
+    !normalizedSlug ||
+    normalizedSlug.split('/').some((part) => !/^[a-z0-9._-]+$/i.test(part) || part === '.' || part === '..')
+  ) {
+    throw new Error('Knowledge chat page type and slug must be safe path components');
+  }
+  return `pages/${normalizedType}/${normalizedSlug}.md`;
 }
 
 function writeKnowledgePageFile(absolutePath: string, content: string): void {

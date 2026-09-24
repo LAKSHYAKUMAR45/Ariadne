@@ -269,7 +269,14 @@ export function registerKnowledgeCommands(program: Command): void {
           throw new Error(`File is not eligible for ingestion (${decision.reason ?? 'rejected'}): ${relativePath}`);
         }
         const absolutePath = path.resolve(workspaceRoot, decision.path);
-        const content = fs.readFileSync(absolutePath, 'utf8');
+        const canonicalWorkspace = fs.realpathSync(workspaceRoot);
+        const canonicalPath = fs.realpathSync(absolutePath);
+        const relativeToWorkspace = path.relative(canonicalWorkspace, canonicalPath);
+        const fileStats = fs.lstatSync(absolutePath);
+        if (relativeToWorkspace.startsWith('..') || path.isAbsolute(relativeToWorkspace) || fileStats.isSymbolicLink() || !fileStats.isFile()) {
+          throw new Error(`File must be a regular non-symlink file within the workspace: ${relativePath}`);
+        }
+        const content = fs.readFileSync(canonicalPath, 'utf8');
         const ingestor = selectIngestor(decision.path);
         const extracted = await ingestor.extract({ content, path: decision.path });
         return withKnowledgeDb((db) => {
@@ -769,11 +776,24 @@ export function registerKnowledgeCommands(program: Command): void {
     .action(async (_projectId: string, inputDir: string, opts: { replace?: boolean; json?: boolean }) => {
       await runKnowledgeAction(opts, () =>
         withKnowledgeDb((db) => {
-          const resolvedInputDir = path.resolve(findWorkspaceRoot(), inputDir);
-          const manifest = JSON.parse(fs.readFileSync(path.join(resolvedInputDir, 'manifest.json'), 'utf8')) as KnowledgeArchive['manifest'];
+          const resolvedInputDir = fs.realpathSync(path.resolve(findWorkspaceRoot(), inputDir));
+          const manifestPath = path.join(resolvedInputDir, 'manifest.json');
+          if (fs.lstatSync(manifestPath).isSymbolicLink()) throw new Error('Knowledge archive manifest must not be a symbolic link');
+          const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8')) as KnowledgeArchive['manifest'];
           const files: Record<string, KnowledgeArchiveFile> = {};
           for (const entry of manifest.entries) {
-            files[entry.path] = fs.readFileSync(path.join(resolvedInputDir, entry.path));
+            const normalized = entry.path.replaceAll('\\', '/');
+            if (!normalized || normalized.startsWith('/') || normalized.split('/').includes('..') || path.posix.normalize(normalized) !== normalized) {
+              throw new Error(`Knowledge archive path traversal rejected: ${entry.path}`);
+            }
+            const target = path.resolve(resolvedInputDir, normalized);
+            const canonicalTarget = fs.realpathSync(target);
+            const relativeToInput = path.relative(resolvedInputDir, canonicalTarget);
+            const entryStats = fs.lstatSync(target);
+            if (relativeToInput.startsWith('..') || path.isAbsolute(relativeToInput) || entryStats.isSymbolicLink() || !entryStats.isFile()) {
+              throw new Error(`Knowledge archive entry must stay within the input directory: ${entry.path}`);
+            }
+            files[normalized] = fs.readFileSync(canonicalTarget);
           }
           return importKnowledgeProject(db, { manifest, files }, { replaceExisting: opts.replace });
         }),
