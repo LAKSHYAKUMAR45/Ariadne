@@ -146,6 +146,30 @@ export type {
   PluginHooks,
 } from './PluginRegistry.js';
 export { createKnowledgeId, normalizeKnowledgePath } from './knowledge/KnowledgeIds.js';
+export { KnowledgeProjectStore } from './knowledge/KnowledgeProjectStore.js';
+export type {
+  CreateKnowledgeProjectInput,
+  KnowledgeProject,
+  KnowledgeProjectStatus,
+  ListKnowledgeProjectsOptions,
+  UpdateKnowledgeProjectInput,
+} from './knowledge/KnowledgeProjectStore.js';
+export {
+  KNOWLEDGE_MANIFEST_VERSION,
+  buildKnowledgeManifest,
+  readKnowledgeManifest,
+  writeKnowledgeManifest,
+} from './knowledge/KnowledgeManifest.js';
+export type { KnowledgeManifest } from './knowledge/KnowledgeManifest.js';
+export { KnowledgeProvenance } from './knowledge/KnowledgeProvenance.js';
+export type { RecordKnowledgeProvenanceInput } from './knowledge/KnowledgeProvenance.js';
+export { KnowledgeOperationLog } from './knowledge/KnowledgeOperationLog.js';
+export type {
+  AppendKnowledgeOperationInput,
+  KnowledgeOperationEvent,
+  KnowledgeOperationStatus,
+  ListKnowledgeOperationsOptions,
+} from './knowledge/KnowledgeOperationLog.js';
 export type {
   KnowledgeProjectId,
   KnowledgeSourceId,
