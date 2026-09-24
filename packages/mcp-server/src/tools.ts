@@ -32,11 +32,29 @@ import {
   runGraphify,
   summarizeGraphifyRun,
   GRAPHIFY_INSTALL_HINT,
+  projectTaskKnowledge,
+  createOrResumeTaskFromKnowledgeInsight,
 } from '@ariadne-dev/core';
+import type { DatabaseType } from '@ariadne-dev/core';
 import type { GraphifyResult } from '@ariadne-dev/core';
 import type { CrossWorkspaceTask, CrossWorkspaceSearchResult } from '@ariadne-dev/core';
 import type { CaptureResult, CaptureSkip } from '@ariadne-dev/core';
 import { readCurrentTaskId, setCurrentTaskId } from './workspace.js';
+
+/** Shared bounds used by MCP adapters to keep database-backed responses predictable. */
+export const KNOWLEDGE_MCP_LIMITS = {
+  defaultResults: 20,
+  maxResults: 100,
+  maxContentCharacters: 100_000,
+} as const;
+
+export function validateKnowledgeLimit(value: number | undefined): number {
+  const limit = value ?? KNOWLEDGE_MCP_LIMITS.defaultResults;
+  if (!Number.isInteger(limit) || limit < 1 || limit > KNOWLEDGE_MCP_LIMITS.maxResults) {
+    throw new Error(`Knowledge result limit must be an integer between 1 and ${KNOWLEDGE_MCP_LIMITS.maxResults}`);
+  }
+  return limit;
+}
 
 /**
  * Pure, MCP-transport-agnostic implementations of every tool this server
@@ -168,6 +186,42 @@ export function taskEdit(store: TaskStore, workspaceRoot: string, args: TaskEdit
     if (args.goal !== undefined) s.updateTaskGoal(taskId, args.goal);
     return s.getTask(taskId)!;
   });
+}
+
+export interface KnowledgeProjectTaskArgs {
+  projectId: string;
+  taskId?: string;
+  trigger?: 'explicit' | 'checkpoint' | 'build';
+}
+
+export function knowledgeProjectTask(
+  db: DatabaseType,
+  store: TaskStore,
+  workspaceRoot: string,
+  args: KnowledgeProjectTaskArgs,
+): ReturnType<typeof projectTaskKnowledge> {
+  return projectTaskKnowledge(db, store, {
+    projectId: args.projectId,
+    taskId: args.taskId ?? resolveTaskId(store, workspaceRoot, undefined),
+    trigger: args.trigger ?? 'explicit',
+  });
+}
+
+export interface KnowledgeTaskFromInsightArgs {
+  projectId: string;
+  insightId: string;
+  title?: string;
+}
+
+export function knowledgeTaskFromInsight(
+  db: DatabaseType,
+  store: TaskStore,
+  workspaceRoot: string,
+  args: KnowledgeTaskFromInsightArgs,
+): ReturnType<typeof createOrResumeTaskFromKnowledgeInsight> {
+  const result = createOrResumeTaskFromKnowledgeInsight(db, store, args);
+  setCurrentTaskId(result.task.id, workspaceRoot);
+  return result;
 }
 
 export interface CheckpointAddArgs {

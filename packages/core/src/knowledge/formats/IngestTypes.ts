@@ -2,11 +2,21 @@ import type { KnowledgeProvenanceRef } from '../KnowledgeTypes.js';
 
 export interface IngestInput {
   content: string;
+  data?: Uint8Array;
   path?: string;
   sourceId?: string;
   sourceKind?: string;
   mimeType?: string;
+  sizeBytes?: number;
   metadata?: Record<string, string>;
+  mediaRefs?: IngestMediaReference[];
+}
+
+export interface IngestMediaReference {
+  kind: 'image' | 'audio' | 'video' | 'attachment';
+  uri: string;
+  mimeType?: string;
+  metadata?: Record<string, unknown>;
 }
 
 export interface IngestSpan {
@@ -39,6 +49,7 @@ export interface ExtractedSource {
   headings: IngestHeading[];
   links: IngestLink[];
   provenance: KnowledgeProvenanceRef[];
+  mediaRefs?: IngestMediaReference[];
 }
 
 export interface KnowledgeIngestor {
@@ -59,5 +70,9 @@ export function baseExtraction(input: IngestInput, text: string): ExtractedSourc
       : input.path
         ? [{ kind: 'file', id: input.path, path: input.path }]
         : [],
+    mediaRefs: input.mediaRefs?.map((reference) => ({
+      ...reference,
+      metadata: reference.metadata ? { ...reference.metadata } : undefined,
+    })),
   };
 }

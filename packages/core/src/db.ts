@@ -4,6 +4,8 @@ import * as path from 'node:path';
 import { SCHEMA_SQL } from './schema.js';
 import { runMigrations } from './migrations.js';
 
+export type DatabaseType = Database.Database;
+
 /**
  * Opens (creating if necessary) the Ariadne SQLite database at `dbPath` and
  * applies the schema. Safe to call repeatedly — schema statements use

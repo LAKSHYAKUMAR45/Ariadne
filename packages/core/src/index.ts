@@ -1,5 +1,6 @@
 export { TaskStore } from './TaskStore.js';
 export { openDatabase } from './db.js';
+export type { DatabaseType } from './db.js';
 export { runMigrations, MIGRATIONS } from './migrations.js';
 export type { Migration } from './migrations.js';
 export { SCHEMA_SQL, SCHEMA_VERSION } from './schema.js';
@@ -192,6 +193,11 @@ export type {
   ListKnowledgeProjectsOptions,
   UpdateKnowledgeProjectInput,
 } from './knowledge/KnowledgeProjectStore.js';
+export { KnowledgeSourceStore, registerKnowledgeSource } from './knowledge/KnowledgeSourceStore.js';
+export type {
+  RegisterKnowledgeSourceInput,
+  KnowledgeSourceVersionRecord,
+} from './knowledge/KnowledgeSourceStore.js';
 export {
   KNOWLEDGE_MANIFEST_VERSION,
   buildKnowledgeManifest,
@@ -199,6 +205,41 @@ export {
   writeKnowledgeManifest,
 } from './knowledge/KnowledgeManifest.js';
 export type { KnowledgeManifest } from './knowledge/KnowledgeManifest.js';
+export {
+  KnowledgePageStore,
+  createPageVersion,
+  getCurrentPage,
+  listPages,
+  supersedePageVersion,
+  markPageStale,
+} from './knowledge/KnowledgePageStore.js';
+export type {
+  CreatePageVersionInput,
+  KnowledgePage,
+  KnowledgePageVersion,
+  SupersedePageVersionInput,
+} from './knowledge/KnowledgePageStore.js';
+export {
+  KnowledgeRenderer,
+  renderKnowledgePage,
+  renderKnowledgeIndex,
+  renderKnowledgeOverview,
+  renderKnowledgeLog,
+} from './knowledge/KnowledgeRenderer.js';
+export type {
+  KnowledgePageRenderInput,
+  KnowledgeIndexEntry,
+} from './knowledge/KnowledgeRenderer.js';
+export {
+  KnowledgeGeneratorService,
+  runKnowledgeGeneration,
+} from './knowledge/KnowledgeGeneratorService.js';
+export type {
+  KnowledgeGenerationPageInput,
+  KnowledgeGenerationPayload,
+  KnowledgeGenerationResult,
+  KnowledgeGeneratorServiceOptions,
+} from './knowledge/KnowledgeGeneratorService.js';
 export {
   KnowledgeQueue,
   enqueueKnowledgeJob,
@@ -255,18 +296,93 @@ export type {
   KnowledgeSourceRecord,
 } from './knowledge/KnowledgeTypes.js';
 export {
+  detectKnowledgeCommunities,
+  scoreCommunityCohesion,
+  findBridgeNodes,
+  persistKnowledgeCommunities,
+} from './knowledge/graph/KnowledgeCommunities.js';
+export type {
+  KnowledgeGraphNode,
+  KnowledgeGraphEdge,
+  KnowledgeGraphView,
+  KnowledgeCommunity,
+  KnowledgeBridgeNode,
+} from './knowledge/graph/KnowledgeCommunities.js';
+export {
+  detectKnowledgeInsights,
+  findSparseCommunities,
+  findOrphanPages,
+  findContradictions,
+  findStalePages,
+  persistKnowledgeInsights,
+} from './knowledge/graph/KnowledgeInsights.js';
+export type {
+  KnowledgeInsight,
+  KnowledgeInsightType,
+  KnowledgeInsightAction,
+} from './knowledge/graph/KnowledgeInsights.js';
+export {
+  createOrResumeTaskFromKnowledgeInsight,
+  getKnowledgeInsight,
+  projectTaskKnowledge,
+} from './knowledge/TaskKnowledgeProjection.js';
+export type {
+  CreateOrResumeTaskFromKnowledgeInsightInput,
+  CreateOrResumeTaskFromKnowledgeInsightResult,
+  KnowledgeInsightRecord,
+  ProjectTaskKnowledgeInput,
+  TaskKnowledgeProjectionResult,
+  TaskKnowledgeProjectionTrigger,
+} from './knowledge/TaskKnowledgeProjection.js';
+export {
+  KnowledgeGraph,
+  scoreGraphEdge,
+} from './knowledge/graph/KnowledgeGraph.js';
+export type {
+  KnowledgeGraphNodeRecord,
+  KnowledgeGraphEdgeRecord,
+  UpsertGraphNodeInput,
+  UpsertGraphEdgeInput,
+} from './knowledge/graph/KnowledgeGraph.js';
+export {
+  getGraphNeighborhood,
+  findGraphPath,
+} from './knowledge/graph/KnowledgeGraphTraversal.js';
+export type {
+  GraphTraversalOptions,
+  KnowledgeGraphNeighborhood,
+  KnowledgeGraphPath,
+} from './knowledge/graph/KnowledgeGraphTraversal.js';
+export {
+  KNOWLEDGE_EDGE_EVIDENCE_WEIGHTS,
+} from './knowledge/graph/KnowledgeGraphScoring.js';
+export {
   CodeIngestor,
+  DocumentIngestor,
   MarkdownIngestor,
+  MediaIngestor,
   PlainTextIngestor,
   TaskHistoryIngestor,
+  documentFormat,
+  mediaFormat,
 } from './knowledge/formats/index.js';
 export type {
+  DocumentAdapter,
+  DocumentFormat,
+  DocumentIngestorOptions,
   ExtractedSource,
   IngestHeading,
   IngestInput,
   IngestLink,
+  IngestMediaReference,
   IngestSpan,
   KnowledgeIngestor,
+  MediaAdapter,
+  MediaFormat,
+  MediaIngestorOptions,
+  OptionalIngestFailed,
+  OptionalIngestResult,
+  OptionalIngestUnsupported,
 } from './knowledge/formats/index.js';
 export {
   KNOWLEDGE_PROVIDER_CAPABILITIES,
@@ -303,6 +419,20 @@ export {
   validateKnowledgeAnalysis,
   validateKnowledgeGeneration,
 } from './knowledge/KnowledgeAnalysis.js';
+export {
+  KNOWLEDGE_ARCHIVE_VERSION,
+  exportKnowledgeProject,
+  importKnowledgeProject,
+} from './knowledge/KnowledgeArchive.js';
+export type {
+  KnowledgeArchive,
+  KnowledgeArchiveEntry,
+  KnowledgeArchiveFile,
+  KnowledgeArchiveManifest,
+  ExportKnowledgeProjectOptions,
+  ImportKnowledgeProjectOptions,
+  ImportResult,
+} from './knowledge/KnowledgeArchive.js';
 export type {
   GeneratedKnowledge,
   KnowledgeAnalysis,
@@ -320,4 +450,3 @@ export type {
   KnowledgeResearchGap,
   ProviderRequiredKnowledgeGeneration,
 } from './knowledge/KnowledgeAnalysis.js';
-export {
