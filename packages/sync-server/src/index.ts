@@ -1,8 +1,12 @@
 #!/usr/bin/env node
 import { createApp } from './app.js';
-import { loadConfig } from './config.js';
+import { loadConfig, SyncServerConfigError } from './config.js';
+import { assertDashboardAssets } from './dashboardStatic.js';
 import { createPool } from './db.js';
+import { loadEncryptionKeyring } from './encryption.js';
 import { runMigrations } from './migrate.js';
+import { createOperatorClient } from './operatorClient.js';
+import { createOperatorQueryClient } from './operatorQueryClient.js';
 
 /**
  * Entry point for `ariadne-sync-server`: runs any pending migrations, then
@@ -10,6 +14,15 @@ import { runMigrations } from './migrate.js';
  */
 async function main(): Promise<void> {
   const config = loadConfig();
+  if (process.env.NODE_ENV === 'production' && !config.dashboardDistDir) {
+    throw new SyncServerConfigError(
+      'DASHBOARD_DIST_DIR environment variable is required for the production HTTP server',
+    );
+  }
+  if (config.dashboardDistDir) {
+    await assertDashboardAssets(config.dashboardDistDir);
+  }
+  const encryptionKeyring = loadEncryptionKeyring(config.encryptionKeyDir);
   const pool = createPool(config.databaseUrl);
 
   const applied = await runMigrations(pool);
@@ -17,9 +30,24 @@ async function main(): Promise<void> {
     console.log(`Applied ${applied.length} migration(s): ${applied.join(', ')}`);
   }
 
-  const app = createApp(pool, config.jwtSecret);
-  app.listen(config.port, () => {
-    console.log(`ariadne-sync-server listening on port ${config.port}`);
+  const operatorClient = config.operatorSocketPath
+    ? createOperatorClient({ socketPath: config.operatorSocketPath })
+    : null;
+  const operatorQueryClient = config.operatorSocketPath
+    ? createOperatorQueryClient({ socketPath: config.operatorSocketPath })
+    : null;
+
+  const app = createApp(pool, config.jwtSecret, {
+    encryptionKeyring,
+    operatorClient,
+    operatorQueryClient,
+    operatorCallbackTokenPath: config.operatorCallbackTokenPath,
+    adminPublicOrigin: config.adminPublicOrigin,
+    adminCookieSecure: config.adminCookieSecure,
+    dashboardDistDir: config.dashboardDistDir,
+  });
+  app.listen(config.port, config.host, () => {
+    console.log(`ariadne-sync-server listening on ${config.host}:${config.port}`);
   });
 }
 
@@ -33,4 +61,10 @@ if (require.main === module) {
 export { createApp } from './app.js';
 export { loadConfig } from './config.js';
 export { createPool } from './db.js';
+// `createEncryptionKeyring` is intentionally not re-exported: production must
+// load key material from a validated key directory, and tests import the raw
+// module directly.
+export { loadEncryptionKeyring } from './encryption.js';
+export { createOperatorClient } from './operatorClient.js';
 export { runMigrations } from './migrate.js';
+export { createTaskHistoryStore, DEFAULT_SERVER_CAPTURE_LIMITS } from './taskHistoryStore.js';

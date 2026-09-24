@@ -1,7 +1,10 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
+import { execFileSync } from 'node:child_process';
+import { inspect } from 'node:util';
+import * as core from '@ariadne-dev/core';
 import { TaskStore } from '@ariadne-dev/core';
 import { createAriadneMcpServer } from '../src/server.js';
 
@@ -29,6 +32,7 @@ describe('createAriadneMcpServer tool handlers (success + error envelopes)', () 
   }
 
   function cleanup(workspaceRoot: string, store: TaskStore) {
+    vi.restoreAllMocks();
     store.close();
     fs.rmSync(workspaceRoot, { recursive: true, force: true });
   }
@@ -84,6 +88,9 @@ describe('createAriadneMcpServer tool handlers (success + error envelopes)', () 
     try {
       const created = await tools.task_new.handler({ title: 'Checkpoint handler task' });
       const task = JSON.parse(created.content[0].text);
+      execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: workspaceRoot });
+      execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: workspaceRoot });
+      execFileSync('git', ['config', 'user.name', 'Test'], { cwd: workspaceRoot });
 
       // The MCP SDK validates inputSchema (a zod enum) before invoking our
       // handler, so an invalid level never reaches tools.ts — it's rejected
@@ -96,8 +103,73 @@ describe('createAriadneMcpServer tool handlers (success + error envelopes)', () 
         summary: 'Valid checkpoint',
       });
       expect(result.isError).toBeUndefined();
-      const checkpoint = JSON.parse(result.content[0].text);
-      expect(checkpoint.summary).toBe('Valid checkpoint');
+      const payload = JSON.parse(result.content[0].text);
+      expect(payload.checkpoint.summary).toBe('Valid checkpoint');
+      expect(payload.capture).toBeNull();
+    } finally {
+      cleanup(workspaceRoot, store);
+    }
+  });
+
+  it('checkpoint_add returns a generic error envelope when capture fails after checkpoint persistence', async () => {
+    const { workspaceRoot, store, tools } = setup();
+    const secretMarker = 'mcp-handler-checkpoint-secret-marker';
+    try {
+      const created = await tools.task_new.handler({ title: 'Checkpoint handler task' });
+      const task = JSON.parse(created.content[0].text);
+      execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: workspaceRoot });
+      execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: workspaceRoot });
+      execFileSync('git', ['config', 'user.name', 'Test'], { cwd: workspaceRoot });
+      vi.spyOn(core, 'captureTaskFiles').mockImplementation(() => {
+        throw new Error(`capture exploded with ${secretMarker}`);
+      });
+
+      const result = await tools.checkpoint_add.handler({
+        taskId: task.id,
+        level: 'micro',
+        summary: 'Valid checkpoint',
+      });
+
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toBe('Task file capture failed after checkpoint.');
+      expect(inspect(result, { depth: 8 })).not.toContain(secretMarker);
+      expect(result.content[0].text.trim().startsWith('{')).toBe(false);
+    } finally {
+      cleanup(workspaceRoot, store);
+    }
+  });
+
+  it('checkpoint_add returns a generic error envelope when capture and failure recording both fail', async () => {
+    const { workspaceRoot, store, tools } = setup();
+    const captureMarker = 'mcp-handler-checkpoint-capture-secret-marker';
+    const recordMarker = 'mcp-handler-checkpoint-record-secret-marker';
+    try {
+      const created = await tools.task_new.handler({ title: 'Checkpoint handler task' });
+      const task = JSON.parse(created.content[0].text);
+      execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: workspaceRoot });
+      execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: workspaceRoot });
+      execFileSync('git', ['config', 'user.name', 'Test'], { cwd: workspaceRoot });
+      vi.spyOn(core, 'captureTaskFiles').mockImplementation(() => {
+        throw new Error(`capture exploded with ${captureMarker}`);
+      });
+      vi.spyOn(TaskStore.prototype, 'recordError').mockImplementation(() => {
+        throw new Error(`recordError write failed with ${recordMarker}`);
+      });
+
+      const result = await tools.checkpoint_add.handler({
+        taskId: task.id,
+        level: 'micro',
+        summary: 'Valid checkpoint',
+      });
+
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toBe(
+        'Task file capture failed after checkpoint, and Ariadne also failed to record that capture failure.',
+      );
+      const rendered = inspect(result, { depth: 8 });
+      expect(rendered).not.toContain(captureMarker);
+      expect(rendered).not.toContain(recordMarker);
+      expect(result.content[0].text.trim().startsWith('{')).toBe(false);
     } finally {
       cleanup(workspaceRoot, store);
     }

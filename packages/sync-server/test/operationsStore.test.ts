@@ -1,0 +1,549 @@
+import type { Pool } from 'pg';
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { createPool } from '../src/db.js';
+import { runMigrations } from '../src/migrate.js';
+import {
+  OUTPUT_TRUNCATION_MARKER,
+  OperationTransitionError,
+  createOperationsStore,
+  sanitizeOperationOutputForStorage,
+  type OperationsStore,
+} from '../src/operationsStore.js';
+import { TEST_DATABASE_URL } from './testConfig.js';
+
+describe('operationsStore', () => {
+  let pool: Pool;
+  let store: OperationsStore;
+  let teamId: string;
+  let adminUserId: string;
+
+  beforeAll(async () => {
+    pool = createPool(TEST_DATABASE_URL);
+    store = createOperationsStore(pool);
+  });
+
+  afterAll(async () => {
+    await pool.end();
+  });
+
+  beforeEach(async () => {
+    await pool.query('DROP SCHEMA public CASCADE; CREATE SCHEMA public;');
+    await runMigrations(pool);
+    teamId = await createSingletonTeam();
+    adminUserId = await createAdminUser(teamId, 'alice');
+  });
+
+  async function createSingletonTeam(): Promise<string> {
+    const existing = await pool.query<{ id: string }>(
+      `SELECT id FROM teams WHERE singleton_key = 'default'`,
+    );
+    if (existing.rows[0]) {
+      return existing.rows[0].id;
+    }
+
+    const { rows } = await pool.query<{ id: string }>(
+      `INSERT INTO teams (singleton_key, name, created_at)
+       VALUES ('default', 'Default team', '2026-09-21T00:00:00.000Z')
+       RETURNING id`,
+    );
+    return rows[0].id;
+  }
+
+  async function createAdminUser(teamIdValue: string, username: string): Promise<string> {
+    const { rows } = await pool.query<{ id: string }>(
+      `INSERT INTO users (username, password_hash, created_at)
+       VALUES ($1, $2, '2026-09-21T00:05:00.000Z')
+       RETURNING id`,
+      [username, `hash-${username}`],
+    );
+    const userId = rows[0].id;
+    await pool.query(
+      `INSERT INTO team_memberships (team_id, user_id, role, active, created_at)
+       VALUES ($1, $2, 'admin', true, '2026-09-21T00:05:01.000Z')`,
+      [teamIdValue, userId],
+    );
+    return userId;
+  }
+
+  it('creates queued operations with an initial event and audit row', async () => {
+    const created = await store.createOperation({
+      id: 'op-create-1',
+      requestedBy: adminUserId,
+      type: 'backup_create',
+      summary: 'Create the daily safety backup',
+      source: 'admin_api',
+      createdAt: '2026-09-21T01:00:00.000Z',
+      metadata: { phase: 'queued' },
+    });
+
+    expect(created).toEqual({
+      id: 'op-create-1',
+      requestedBy: adminUserId,
+      type: 'backup_create',
+      state: 'queued',
+      summary: 'Create the daily safety backup',
+      output: null,
+      startedAt: null,
+      completedAt: null,
+      createdAt: '2026-09-21T01:00:00.000Z',
+    });
+
+    const events = await store.listOperationEvents('op-create-1');
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      operationId: 'op-create-1',
+      state: 'queued',
+      message: 'Operation queued',
+      metadata: { phase: 'queued' },
+    });
+
+    const { events: audits } = await store.listAuditEvents({ limit: 50 });
+    expect(audits).toHaveLength(1);
+    expect(audits[0]).toMatchObject({
+      actorUserId: adminUserId,
+      action: 'admin_operation.created',
+      source: 'admin_api',
+      outcome: 'accepted',
+      metadata: {
+        operationId: 'op-create-1',
+        type: 'backup_create',
+        state: 'queued',
+        phase: 'queued',
+      },
+    });
+  });
+
+  it('allows legal state transitions and appends chronological events', async () => {
+    await store.createOperation({
+      id: 'op-transition-1',
+      requestedBy: adminUserId,
+      type: 'deployment_apply',
+      summary: 'Deploy revision aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      source: 'admin_api',
+      createdAt: '2026-09-21T02:00:00.000Z',
+    });
+
+    const running = await store.transitionOperation({
+      id: 'op-transition-1',
+      nextState: 'running',
+      actorUserId: adminUserId,
+      source: 'operator',
+      message: 'Deployment started',
+      metadata: { revision: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' },
+      occurredAt: '2026-09-21T02:00:05.000Z',
+    });
+
+    expect(running.state).toBe('running');
+    expect(running.startedAt).toBe('2026-09-21T02:00:05.000Z');
+    expect(running.completedAt).toBeNull();
+
+    const succeeded = await store.transitionOperation({
+      id: 'op-transition-1',
+      nextState: 'succeeded',
+      actorUserId: adminUserId,
+      source: 'operator',
+      message: 'Deployment completed',
+      metadata: { revision: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' },
+      output: 'Deployment finished successfully.',
+      occurredAt: '2026-09-21T02:00:10.000Z',
+    });
+
+    expect(succeeded).toMatchObject({
+      id: 'op-transition-1',
+      state: 'succeeded',
+      startedAt: '2026-09-21T02:00:05.000Z',
+      completedAt: '2026-09-21T02:00:10.000Z',
+      output: 'Deployment finished successfully.',
+    });
+
+    expect(await store.getOperation('op-transition-1')).toEqual(succeeded);
+
+    const events = await store.listOperationEvents('op-transition-1');
+    expect(events.map((event) => event.state)).toEqual(['queued', 'running', 'succeeded']);
+    expect(events.map((event) => event.message)).toEqual([
+      'Operation queued',
+      'Deployment started',
+      'Deployment completed',
+    ]);
+  });
+
+  it('rejects transitions after an operation reaches a terminal state', async () => {
+    await store.createOperation({
+      id: 'op-terminal-1',
+      requestedBy: adminUserId,
+      type: 'service_restart',
+      summary: 'Restart the sync-server service',
+      source: 'admin_api',
+      createdAt: '2026-09-21T03:00:00.000Z',
+    });
+
+    await store.transitionOperation({
+      id: 'op-terminal-1',
+      nextState: 'failed',
+      actorUserId: adminUserId,
+      source: 'operator',
+      message: 'Socket unavailable',
+      output: 'operator_unavailable',
+      occurredAt: '2026-09-21T03:00:01.000Z',
+    });
+
+    await expect(
+      store.transitionOperation({
+        id: 'op-terminal-1',
+        nextState: 'running',
+        actorUserId: adminUserId,
+        source: 'operator',
+        message: 'Should not restart a failed operation',
+        occurredAt: '2026-09-21T03:00:02.000Z',
+      }),
+    ).rejects.toBeInstanceOf(OperationTransitionError);
+
+    const operation = await store.getOperation('op-terminal-1');
+    expect(operation?.state).toBe('failed');
+    expect((await store.listOperationEvents('op-terminal-1')).map((event) => event.state)).toEqual([
+      'queued',
+      'failed',
+    ]);
+    expect(await countRows('admin_audit_events')).toBe(2);
+  });
+
+  it('redacts secrets and truncates persisted output and audit metadata', async () => {
+    await store.createOperation({
+      id: 'op-output-1',
+      requestedBy: adminUserId,
+      type: 'backup_verify',
+      summary: 'Verify the newest dump',
+      source: 'admin_api',
+      createdAt: '2026-09-21T04:00:00.000Z',
+    });
+
+    const longSecretOutput =
+      `TOKEN=abc123\npassword=hunter2\n` +
+      `ghp_1234567890abcdefghij1234567890ABCD\n` +
+      `-----BEGIN PRIVATE KEY-----
+line-one-private-key
+line-two-private-key
+-----END PRIVATE KEY-----\n` +
+      'x'.repeat(300 * 1024);
+
+    const failed = await store.transitionOperation({
+      id: 'op-output-1',
+      nextState: 'failed',
+      actorUserId: adminUserId,
+      source: 'operator',
+      message: 'Verification failed',
+      metadata: {
+        command: 'PGPASSWORD=hunter2 pg_restore --dbname=postgres',
+        token: 'ghp_1234567890abcdefghij1234567890ABCD',
+      },
+      output: longSecretOutput,
+      occurredAt: '2026-09-21T04:00:05.000Z',
+    });
+
+    expect(failed.output).not.toContain('abc123');
+    expect(failed.output).not.toContain('hunter2');
+    expect(failed.output).not.toContain('ghp_1234567890abcdefghij1234567890ABCD');
+    expect(failed.output).not.toContain('line-one-private-key');
+    expect(failed.output).not.toContain('line-two-private-key');
+    expect(failed.output).toContain('TOKEN=***');
+    expect(failed.output).toContain('***REDACTED PRIVATE KEY***');
+    expect(failed.output).toContain('password=***');
+    expect(failed.output).toContain(OUTPUT_TRUNCATION_MARKER);
+
+    const { events: audits } = await store.listAuditEvents({ limit: 50 });
+    expect(audits[0].metadata).toMatchObject({
+      command: 'PGPASSWORD=*** pg_restore --dbname=postgres',
+      token: '***',
+    });
+  });
+
+  it('keeps trusted audit metadata when caller metadata reuses reserved fields', async () => {
+    await store.createOperation({
+      id: 'op-metadata-1',
+      requestedBy: adminUserId,
+      type: 'backup_restore',
+      summary: 'Restore the latest verified backup',
+      source: 'admin_api',
+      createdAt: '2026-09-21T04:30:00.000Z',
+      metadata: {
+        operationId: 'forged-create-operation-id',
+        type: 'service_restart',
+        state: 'failed',
+        phase: 'submitted',
+      },
+    });
+
+    await store.transitionOperation({
+      id: 'op-metadata-1',
+      nextState: 'running',
+      actorUserId: adminUserId,
+      source: 'operator',
+      message: 'Restore started',
+      metadata: {
+        operationId: 'forged-transition-operation-id',
+        type: 'backup_create',
+        fromState: 'failed',
+        toState: 'queued',
+        state: 'failed',
+        executor: 'restore-worker',
+      },
+      occurredAt: '2026-09-21T04:30:05.000Z',
+    });
+
+    const { events: audits } = await store.listAuditEvents({ limit: 50 });
+    expect(audits).toHaveLength(2);
+    expect(audits[1].metadata).toEqual({
+      operationId: 'op-metadata-1',
+      type: 'backup_restore',
+      state: 'queued',
+      phase: 'submitted',
+    });
+    expect(audits[0].metadata).toEqual({
+      operationId: 'op-metadata-1',
+      type: 'backup_restore',
+      fromState: 'queued',
+      toState: 'running',
+      state: 'running',
+      executor: 'restore-worker',
+    });
+  });
+
+  it('sanitizes adversarial long lines within the timeout budget', { timeout: 2_000 }, async () => {
+    const adversarialLine = `prefix:${'through '.repeat(24_000)}`;
+
+    const sanitized = await withTimeout(
+      Promise.resolve(sanitizeOperationOutputForStorage(adversarialLine)),
+      150,
+    );
+
+    expect(sanitized).toBe(adversarialLine);
+  });
+
+  it('lists operations newest first', async () => {
+    await store.createOperation({
+      id: 'op-list-1',
+      requestedBy: adminUserId,
+      type: 'backup_create',
+      summary: 'Older operation',
+      source: 'admin_api',
+      createdAt: '2026-09-21T05:00:00.000Z',
+    });
+    await store.createOperation({
+      id: 'op-list-2',
+      requestedBy: adminUserId,
+      type: 'backup_restore',
+      summary: 'Newer operation',
+      source: 'admin_api',
+      createdAt: '2026-09-21T05:00:01.000Z',
+    });
+
+    const { operations } = await store.listOperations({ limit: 50 });
+    expect(operations.map((operation) => operation.id)).toEqual(['op-list-2', 'op-list-1']);
+  });
+
+  it('writes a backup record in the same transaction as its terminal transition', async () => {
+    await store.createOperation({
+      id: 'op-backup-record',
+      requestedBy: adminUserId,
+      type: 'backup_create',
+      summary: 'Create database backup',
+      source: 'admin_api',
+    });
+    await store.transitionOperation({
+      id: 'op-backup-record',
+      nextState: 'running',
+      source: 'operator_callback',
+    });
+    await store.transitionOperation({
+      id: 'op-backup-record',
+      nextState: 'succeeded',
+      source: 'operator_callback',
+      output: 'published backup',
+      backupRecord: {
+        filename: 'ariadne-20260921T060000Z.dump',
+        sha256: 'c'.repeat(64),
+        sizeBytes: 2048,
+        status: 'created',
+        createdAt: '2026-09-21T06:00:00.000Z',
+      },
+    });
+
+    expect(await store.listBackupRecords()).toEqual([
+      {
+        filename: 'ariadne-20260921T060000Z.dump',
+        sha256: 'c'.repeat(64),
+        sizeBytes: 2048,
+        status: 'created',
+        createdAt: '2026-09-21T06:00:00.000Z',
+        verifiedAt: null,
+        restoreVerificationMessage: null,
+      },
+    ]);
+  });
+
+  it('records no backup row when the transition itself is rejected', async () => {
+    await store.createOperation({
+      id: 'op-backup-illegal',
+      requestedBy: adminUserId,
+      type: 'backup_verify',
+      summary: 'Verify backup',
+      source: 'admin_api',
+    });
+    await store.transitionOperation({
+      id: 'op-backup-illegal',
+      nextState: 'running',
+      source: 'operator_callback',
+    });
+    await store.transitionOperation({
+      id: 'op-backup-illegal',
+      nextState: 'succeeded',
+      source: 'operator_callback',
+    });
+
+    await expect(
+      store.transitionOperation({
+        id: 'op-backup-illegal',
+        nextState: 'failed',
+        source: 'operator_callback',
+        backupRecord: {
+          filename: 'ariadne-20260921T070000Z.dump',
+          sha256: 'd'.repeat(64),
+          sizeBytes: 64,
+          status: 'verify_failed',
+          createdAt: '2026-09-21T07:00:00.000Z',
+        },
+      }),
+    ).rejects.toBeInstanceOf(OperationTransitionError);
+
+    expect(await store.listBackupRecords()).toEqual([]);
+  });
+
+  it('keeps the original creation and verification facts across later updates', async () => {
+    await store.upsertBackupRecord({
+      filename: 'ariadne-20260921T080000Z.dump',
+      sha256: 'e'.repeat(64),
+      sizeBytes: 512,
+      status: 'created',
+      createdAt: '2026-09-21T08:00:00.000Z',
+    });
+    await store.upsertBackupRecord({
+      filename: 'ariadne-20260921T080000Z.dump',
+      sha256: 'e'.repeat(64),
+      sizeBytes: 512,
+      status: 'verified',
+      createdAt: '2026-09-21T08:00:00.000Z',
+      verifiedAt: '2026-09-21T08:05:00.000Z',
+      restoreVerificationMessage: 'verified: schema 0008, 12 tables',
+    });
+    // A later failure must not rewrite when the backup was made, nor erase
+    // the fact that it once verified cleanly.
+    await store.upsertBackupRecord({
+      filename: 'ariadne-20260921T080000Z.dump',
+      sha256: 'e'.repeat(64),
+      sizeBytes: 512,
+      status: 'verify_failed',
+      createdAt: '2026-09-25T00:00:00.000Z',
+    });
+
+    expect(await store.listBackupRecords()).toEqual([
+      {
+        filename: 'ariadne-20260921T080000Z.dump',
+        sha256: 'e'.repeat(64),
+        sizeBytes: 512,
+        status: 'verify_failed',
+        createdAt: '2026-09-21T08:00:00.000Z',
+        verifiedAt: '2026-09-21T08:05:00.000Z',
+        restoreVerificationMessage: null,
+      },
+    ]);
+  });
+
+  it('stores immutable audit rows and upserts backup metadata records', async () => {
+    await store.recordAuditEvent({
+      actorUserId: null,
+      action: 'admin.login.failed',
+      source: 'dashboard',
+      outcome: 'rejected',
+      metadata: {
+        username: 'alice',
+        password: 'hunter2',
+      },
+      createdAt: '2026-09-21T06:00:00.000Z',
+    });
+
+    await store.upsertBackupRecord({
+      filename: 'ariadne-20260921T060000Z.dump',
+      sha256: 'a'.repeat(64),
+      sizeBytes: 1024,
+      status: 'created',
+      createdAt: '2026-09-21T06:00:00.000Z',
+      verifiedAt: null,
+      restoreVerificationMessage: null,
+    });
+    await store.upsertBackupRecord({
+      filename: 'ariadne-20260921T060000Z.dump',
+      sha256: 'a'.repeat(64),
+      sizeBytes: 1024,
+      status: 'verified',
+      createdAt: '2026-09-21T06:00:00.000Z',
+      verifiedAt: '2026-09-21T06:05:00.000Z',
+      restoreVerificationMessage: 'Restored into verification DB successfully',
+    });
+
+    expect(await store.listBackupRecords()).toEqual([
+      {
+        filename: 'ariadne-20260921T060000Z.dump',
+        sha256: 'a'.repeat(64),
+        sizeBytes: 1024,
+        status: 'verified',
+        createdAt: '2026-09-21T06:00:00.000Z',
+        verifiedAt: '2026-09-21T06:05:00.000Z',
+        restoreVerificationMessage: 'Restored into verification DB successfully',
+      },
+    ]);
+
+    const { events: audits } = await store.listAuditEvents({ limit: 50 });
+    expect(audits[0]).toMatchObject({
+      actorUserId: null,
+      action: 'admin.login.failed',
+      outcome: 'rejected',
+      metadata: {
+        username: 'alice',
+        password: '***',
+      },
+    });
+
+    await expect(
+      pool.query(`UPDATE admin_audit_events SET outcome = 'accepted' WHERE action = 'admin.login.failed'`),
+    ).rejects.toThrow(/append-only/i);
+    await expect(
+      pool.query(`DELETE FROM admin_audit_events WHERE action = 'admin.login.failed'`),
+    ).rejects.toThrow(/append-only/i);
+  });
+
+  async function countRows(table: string): Promise<number> {
+    const { rows } = await pool.query<{ count: number }>(
+      `SELECT count(*)::int AS count FROM ${table}`,
+    );
+    return rows[0].count;
+  }
+
+  async function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        reject(new Error(`Operation exceeded ${timeoutMs}ms`));
+      }, timeoutMs);
+
+      promise.then(
+        (value) => {
+          clearTimeout(timeout);
+          resolve(value);
+        },
+        (error: unknown) => {
+          clearTimeout(timeout);
+          reject(error);
+        },
+      );
+    });
+  }
+});

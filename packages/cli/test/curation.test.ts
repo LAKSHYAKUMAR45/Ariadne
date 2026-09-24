@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { execFileSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
@@ -17,7 +18,14 @@ describe('ariadne curation commands (todo/decision/error/question/checkpoint/exp
   let originalCwd: string;
   let previousRegistryPath: string | undefined;
 
+  function resetCommanderOptionState(cmd: import('commander').Command): void {
+    (cmd as unknown as { _optionValues: Record<string, unknown> })._optionValues = {};
+    (cmd as unknown as { _optionValueSources: Record<string, unknown> })._optionValueSources = {};
+    for (const sub of cmd.commands) resetCommanderOptionState(sub);
+  }
+
   beforeEach(() => {
+    resetCommanderOptionState(program);
     root = fs.mkdtempSync(path.join(os.tmpdir(), 'ariadne-cli-curation-test-'));
     previousRegistryPath = process.env.ARIADNE_REGISTRY_PATH;
     process.env.ARIADNE_REGISTRY_PATH = path.join(root, 'registry.db');
@@ -124,6 +132,30 @@ describe('ariadne curation commands (todo/decision/error/question/checkpoint/exp
     expect(loggedLines()).toContainEqual('No decisions found.');
   });
 
+  it('decision --supersedes and decisions edit --supersedes round-trip', async () => {
+    setCurrentTask('Supersede task');
+
+    await program.parseAsync(['node', 'ariadne', 'decision', 'Use fixed delay retries']);
+    const olderId = loggedLines()
+      .find((l) => l.startsWith('Recorded decision'))!
+      .match(/Recorded decision (\S+):/)![1];
+
+    await program.parseAsync(['node', 'ariadne', 'decision', 'Use exponential backoff instead', '--supersedes', olderId]);
+    const newerId = loggedLines()
+      .filter((l) => l.startsWith('Recorded decision'))
+      .at(-1)!
+      .match(/Recorded decision (\S+):/)![1];
+
+    let store = openWorkspaceStore(root);
+    expect(store.getDecision(newerId)?.supersedesId).toBe(olderId);
+    store.close();
+
+    await program.parseAsync(['node', 'ariadne', 'decisions', 'edit', newerId, '--supersedes', '']);
+    store = openWorkspaceStore(root);
+    expect(store.getDecision(newerId)?.supersedesId).toBeNull();
+    store.close();
+  });
+
   it('error add/list/resolve/reopen/edit/delete round-trip against the current task', async () => {
     setCurrentTask('Error task');
 
@@ -195,6 +227,9 @@ describe('ariadne curation commands (todo/decision/error/question/checkpoint/exp
 
   it('checkpoint records a checkpoint at the given level for the current task', async () => {
     setCurrentTask('Checkpoint task');
+    execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: root });
+    execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: root });
+    execFileSync('git', ['config', 'user.name', 'Test'], { cwd: root });
 
     await program.parseAsync(['node', 'ariadne', 'checkpoint', 'Finished the schema', '--level', 'session']);
 

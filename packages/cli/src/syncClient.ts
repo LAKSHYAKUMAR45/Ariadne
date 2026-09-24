@@ -201,30 +201,35 @@ export function pullTodos(serverUrl: string, token: string, taskRemoteId: string
 }
 
 // ---------------------------------------------------------------------
-// Decisions, errors, open questions, commands — create-once sync,
-// mirroring checkpoints above (push is insert-only, pull is a
-// since-cursor scan). See docs/07-CLOUD-SYNC-API-CONTRACT.md §4.6.
+// Decisions, errors, open questions, commands — full bidirectional sync,
+// mirroring todos above (update-by-remoteId on push, updatedAt-driven
+// since cursors on pull). See docs/07-CLOUD-SYNC-API-CONTRACT.md §4.6.
 // ---------------------------------------------------------------------
 
 export interface RemoteDecision {
   remoteId: string;
   text: string;
   rationale: string | null;
+  supersedesId: string | null;
   workspaceLabel?: string | null;
   createdAt: string;
+  updatedAt: string;
 }
 
 export interface PushDecisionInput {
   localId: string;
+  remoteId: string | null;
   remoteTaskId: string;
   text: string;
   rationale: string | null;
+  supersedesId: string | null;
   workspaceLabel: string | null;
   createdAt: string;
+  updatedAt: string;
 }
 
 export function pushDecisions(serverUrl: string, token: string, decisions: PushDecisionInput[]) {
-  return request<{ results: { localId: string; remoteId: string }[] }>(`${serverUrl}/api/v1/sync/decisions`, {
+  return request<{ results: { localId: string; remoteId: string; updatedAt: string }[] }>(`${serverUrl}/api/v1/sync/decisions`, {
     method: 'POST',
     headers: authHeaders(token),
     body: JSON.stringify({ decisions }),
@@ -247,20 +252,23 @@ export interface RemoteTaskError {
   resolution: string | null;
   workspaceLabel?: string | null;
   createdAt: string;
+  updatedAt: string;
 }
 
 export interface PushErrorInput {
   localId: string;
+  remoteId: string | null;
   remoteTaskId: string;
   message: string;
   resolved: boolean;
   resolution: string | null;
   workspaceLabel: string | null;
   createdAt: string;
+  updatedAt: string;
 }
 
 export function pushErrors(serverUrl: string, token: string, errors: PushErrorInput[]) {
-  return request<{ results: { localId: string; remoteId: string }[] }>(`${serverUrl}/api/v1/sync/errors`, {
+  return request<{ results: { localId: string; remoteId: string; updatedAt: string }[] }>(`${serverUrl}/api/v1/sync/errors`, {
     method: 'POST',
     headers: authHeaders(token),
     body: JSON.stringify({ errors }),
@@ -282,23 +290,29 @@ export interface RemoteOpenQuestion {
   resolved: boolean;
   workspaceLabel?: string | null;
   createdAt: string;
+  updatedAt: string;
 }
 
 export interface PushOpenQuestionInput {
   localId: string;
+  remoteId: string | null;
   remoteTaskId: string;
   text: string;
   resolved: boolean;
   workspaceLabel: string | null;
   createdAt: string;
+  updatedAt: string;
 }
 
 export function pushOpenQuestions(serverUrl: string, token: string, openQuestions: PushOpenQuestionInput[]) {
-  return request<{ results: { localId: string; remoteId: string }[] }>(`${serverUrl}/api/v1/sync/open-questions`, {
-    method: 'POST',
-    headers: authHeaders(token),
-    body: JSON.stringify({ openQuestions }),
-  });
+  return request<{ results: { localId: string; remoteId: string; updatedAt: string }[] }>(
+    `${serverUrl}/api/v1/sync/open-questions`,
+    {
+      method: 'POST',
+      headers: authHeaders(token),
+      body: JSON.stringify({ openQuestions }),
+    },
+  );
 }
 
 export function pullOpenQuestions(serverUrl: string, token: string, taskRemoteId: string, since?: string) {
@@ -317,20 +331,23 @@ export interface RemoteCommand {
   summary: string | null;
   workspaceLabel?: string | null;
   createdAt: string;
+  updatedAt: string;
 }
 
 export interface PushCommandInput {
   localId: string;
+  remoteId: string | null;
   remoteTaskId: string;
   cmdRedacted: string;
   exitCode: number | null;
   summary: string | null;
   workspaceLabel: string | null;
   createdAt: string;
+  updatedAt: string;
 }
 
 export function pushCommands(serverUrl: string, token: string, commands: PushCommandInput[]) {
-  return request<{ results: { localId: string; remoteId: string }[] }>(`${serverUrl}/api/v1/sync/commands`, {
+  return request<{ results: { localId: string; remoteId: string; updatedAt: string }[] }>(`${serverUrl}/api/v1/sync/commands`, {
     method: 'POST',
     headers: authHeaders(token),
     body: JSON.stringify({ commands }),
@@ -343,5 +360,60 @@ export function pullCommands(serverUrl: string, token: string, taskRemoteId: str
   return request<{ commands: RemoteCommand[]; serverTime: string }>(
     `${serverUrl}/api/v1/sync/commands?${params.toString()}`,
     { method: 'GET', headers: authHeaders(token) },
+  );
+}
+
+// ---------------------------------------------------------------------
+// Task file captures — encrypted-at-rest file history (docs §4.7).
+// ---------------------------------------------------------------------
+
+export type FileCaptureTrigger = 'git_commit' | 'checkpoint' | 'explicit';
+
+export interface PushFileCaptureEntryInput {
+  path: string;
+  content: string;
+  unifiedDiff: string;
+  contentSha256: string;
+  byteLength: number;
+}
+
+export interface PushFileCaptureInput {
+  captureId: string;
+  trigger: FileCaptureTrigger;
+  gitCommitSha: string | null;
+  checkpointId: string | null;
+  createdAt: string;
+  entries: PushFileCaptureEntryInput[];
+}
+
+export interface FileCaptureAck {
+  captureId: string;
+  status: 'stored' | 'duplicate';
+  entryCount: number;
+}
+
+/**
+ * Uploads exactly one capture per request. Batching several captures into one
+ * body would multiply the server's 10 MiB per-capture ceiling and make a
+ * partial failure ambiguous, so each capture is its own retryable unit. The
+ * body is plain UTF-8 JSON — never multipart, and never staged through a
+ * temporary plaintext file on disk.
+ */
+export function pushFileCapture(
+  serverUrl: string,
+  token: string,
+  remoteTaskId: string,
+  capture: PushFileCaptureInput,
+) {
+  return request<FileCaptureAck>(
+    `${serverUrl}/api/v1/sync/tasks/${encodeURIComponent(remoteTaskId)}/file-captures`,
+    {
+      method: 'POST',
+      headers: {
+        ...authHeaders(token),
+        'Content-Type': 'application/json; charset=utf-8',
+      },
+      body: JSON.stringify({ capture }),
+    },
   );
 }

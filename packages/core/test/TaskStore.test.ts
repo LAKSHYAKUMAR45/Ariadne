@@ -135,6 +135,25 @@ describe('TaskStore', () => {
     expect(store.listDecisions(task.id)).toEqual([]);
   });
 
+  it('supports setting/clearing supersedesId via updateDecision (curation)', () => {
+    const task = store.createTask({ title: 'A' });
+    const older = store.recordDecision({ taskId: task.id, text: 'Use fixed delay retries' });
+    const newer = store.recordDecision({ taskId: task.id, text: 'Use exponential backoff instead' });
+
+    store.updateDecision(newer.id, { supersedesId: older.id });
+    expect(store.getDecision(newer.id)?.supersedesId).toBe(older.id);
+
+    store.updateDecision(newer.id, { supersedesId: null });
+    expect(store.getDecision(newer.id)?.supersedesId).toBeNull();
+  });
+
+  it('supports recording a decision that supersedes another directly via recordDecision', () => {
+    const task = store.createTask({ title: 'A' });
+    const older = store.recordDecision({ taskId: task.id, text: 'Use fixed delay retries' });
+    const newer = store.recordDecision({ taskId: task.id, text: 'Use exponential backoff instead', supersedesId: older.id });
+    expect(newer.supersedesId).toBe(older.id);
+  });
+
   it('supports editing and deleting a todo, and reopening a done todo (curation)', () => {
     const task = store.createTask({ title: 'A' });
     const todo = store.createTodo({ taskId: task.id, text: 'Write tests' });
@@ -210,6 +229,38 @@ describe('TaskStore', () => {
     expect(store.getTask(task.id)!.updatedAt > afterErrorResolve).toBe(true);
   });
 
+  describe('autoResolveMatchingCommandErrors', () => {
+    it('resolves an unresolved "Command failed" error whose command exactly matches a later successful run', () => {
+      const task = store.createTask({ title: 'A' });
+      store.recordCommand({ taskId: task.id, cmdRedacted: 'pytest test_x.py', exitCode: 1 });
+      const failure = store.recordError({
+        taskId: task.id,
+        message: 'Command failed (exit 1): pytest test_x.py',
+      });
+
+      store.recordCommand({ taskId: task.id, cmdRedacted: 'pytest test_x.py', exitCode: 0 });
+      const resolvedIds = store.autoResolveMatchingCommandErrors(task.id, 'pytest test_x.py');
+
+      expect(resolvedIds).toEqual([failure.id]);
+      expect(store.getError(failure.id)!.resolved).toBe(true);
+      expect(store.listErrors(task.id, { resolved: false })).toEqual([]);
+    });
+
+    it('leaves unrelated unresolved errors and errors for a different command untouched', () => {
+      const task = store.createTask({ title: 'A' });
+      const unrelated = store.recordError({ taskId: task.id, message: 'Some other problem' });
+      const otherCommand = store.recordError({
+        taskId: task.id,
+        message: 'Command failed (exit 1): pytest test_y.py',
+      });
+
+      store.autoResolveMatchingCommandErrors(task.id, 'pytest test_x.py');
+
+      expect(store.getError(unrelated.id)!.resolved).toBe(false);
+      expect(store.getError(otherCommand.id)!.resolved).toBe(false);
+    });
+  });
+
   describe('cloud sync helpers', () => {
     it('a freshly created task/checkpoint has null remoteId/syncedAt and shows up as needing push', () => {
       const task = store.createTask({ title: 'A' });
@@ -235,6 +286,314 @@ describe('TaskStore', () => {
       await new Promise((resolve) => setTimeout(resolve, 5));
       store.updateTaskTitle(task.id, 'A (renamed)');
       expect(store.listTasksNeedingPush().map((t) => t.id)).toContain(task.id);
+    });
+
+    it('creates immutable explicit task file captures and marks them synced', async () => {
+      const task = store.createTask({ title: 'Capture task' });
+      store.setTaskRemoteSync(task.id, 'remote-capture-task', new Date().toISOString());
+      const beforeCapture = store.getTask(task.id)!;
+      expect(store.listTasksNeedingPush().map((candidate) => candidate.id)).not.toContain(task.id);
+
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      const input = {
+        taskId: task.id,
+        trigger: 'explicit' as const,
+        entries: [
+          {
+            path: 'src/index.ts',
+            content: 'export const value = 1;\n',
+            unifiedDiff: '@@ -0,0 +1 @@\n+export const value = 1;',
+            byteLength: 24,
+            contentSha256: 'sha-explicit-1',
+          },
+        ],
+      };
+
+      const created = store.createTaskFileCapture(input);
+      expect(store.getTask(task.id)!.updatedAt).toBe(beforeCapture.updatedAt);
+      expect(store.listTasksNeedingPush().map((candidate) => candidate.id)).not.toContain(task.id);
+      expect(store.getPendingTaskFileCaptures(task.id)).toEqual([created]);
+
+      const captures = store.getTaskFileCaptures(task.id);
+      expect(captures).toHaveLength(1);
+      expect(captures[0].entries).toEqual([
+        {
+          captureId: captures[0].id,
+          path: 'src/index.ts',
+          content: 'export const value = 1;\n',
+          unifiedDiff: '@@ -0,0 +1 @@\n+export const value = 1;',
+          byteLength: 24,
+          contentSha256: 'sha-explicit-1',
+        },
+      ]);
+
+      input.entries[0].content = 'mutated';
+      captures[0].entries[0].content = 'mutated again';
+      captures[0].entries.push({
+        captureId: captures[0].id,
+        path: 'src/extra.ts',
+        content: 'unexpected',
+        unifiedDiff: '@@',
+        byteLength: 10,
+        contentSha256: 'sha-explicit-2',
+      });
+      expect(store.getTaskFileCaptures(task.id)[0].entries).toEqual([
+        {
+          captureId: captures[0].id,
+          path: 'src/index.ts',
+          content: 'export const value = 1;\n',
+          unifiedDiff: '@@ -0,0 +1 @@\n+export const value = 1;',
+          byteLength: 24,
+          contentSha256: 'sha-explicit-1',
+        },
+      ]);
+
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      store.markTaskFileCaptureSynced(created.id, '2026-09-21T00:00:00.000Z');
+      expect(store.getPendingTaskFileCaptures(task.id)).toEqual([]);
+      expect(store.getTaskFileCaptures(task.id)[0].syncedAt).toBe('2026-09-21T00:00:00.000Z');
+      expect(store.getTaskFileCaptures(task.id)[0].failedAt).toBeNull();
+      expect(store.getTaskFileCaptures(task.id)[0].failureCode).toBeNull();
+      expect(store.getTask(task.id)!.updatedAt).toBe(beforeCapture.updatedAt);
+      expect(store.listTasksNeedingPush().map((candidate) => candidate.id)).not.toContain(task.id);
+    });
+
+    it('removes permanently failed captures from the pending upload queue', () => {
+      const task = store.createTask({ title: 'Failed capture task' });
+      const capture = store.createTaskFileCapture({
+        taskId: task.id,
+        trigger: 'explicit',
+        entries: [
+          {
+            path: 'src/index.ts',
+            content: 'invalid capture',
+            unifiedDiff: '+invalid capture',
+            byteLength: 15,
+            contentSha256: 'sha-invalid',
+          },
+        ],
+      });
+
+      store.markTaskFileCaptureFailed(
+        capture.id,
+        'invalid_capture',
+        '2026-09-21T00:00:00.000Z',
+      );
+
+      expect(store.getPendingTaskFileCaptures(task.id)).toEqual([]);
+      expect(store.getTaskFileCaptures(task.id)[0]).toMatchObject({
+        syncedAt: null,
+        failedAt: '2026-09-21T00:00:00.000Z',
+        failureCode: 'invalid_capture',
+      });
+    });
+
+    it('treats duplicate git-commit and checkpoint capture events as idempotent while keeping explicit captures distinct', () => {
+      const task = store.createTask({ title: 'Capture dedupe task' });
+      store.recordCommit({ taskId: task.id, sha: 'abc123', message: 'capture commit' });
+      const checkpoint = store.createCheckpoint({ taskId: task.id, level: 'micro', summary: 'capture point' });
+
+      const gitCommitCapture = store.createTaskFileCapture({
+        taskId: task.id,
+        trigger: 'git_commit',
+        gitCommitSha: 'abc123',
+        entries: [
+          {
+            path: 'src/git.ts',
+            content: 'first version',
+            unifiedDiff: '@@ -0,0 +1 @@\n+first version',
+            byteLength: 13,
+            contentSha256: 'sha-git-1',
+          },
+        ],
+      });
+      const gitCommitCaptureDuplicate = store.createTaskFileCapture({
+        taskId: task.id,
+        trigger: 'git_commit',
+        gitCommitSha: 'abc123',
+        entries: [
+          {
+            path: 'src/git.ts',
+            content: 'second version should be ignored',
+            unifiedDiff: '@@ -1 +1 @@\n-second\n+ignored',
+            byteLength: 32,
+            contentSha256: 'sha-git-2',
+          },
+        ],
+      });
+      expect(gitCommitCaptureDuplicate).toEqual(gitCommitCapture);
+      expect(store.getTaskFileCaptures(task.id).filter((capture) => capture.trigger === 'git_commit')).toEqual([
+        gitCommitCapture,
+      ]);
+
+      const checkpointCapture = store.createTaskFileCapture({
+        taskId: task.id,
+        trigger: 'checkpoint',
+        checkpointId: checkpoint.id,
+        entries: [
+          {
+            path: 'src/checkpoint.ts',
+            content: 'checkpoint version',
+            unifiedDiff: '@@ -0,0 +1 @@\n+checkpoint version',
+            byteLength: 18,
+            contentSha256: 'sha-checkpoint-1',
+          },
+        ],
+      });
+      const checkpointCaptureDuplicate = store.createTaskFileCapture({
+        taskId: task.id,
+        trigger: 'checkpoint',
+        checkpointId: checkpoint.id,
+        entries: [
+          {
+            path: 'src/checkpoint.ts',
+            content: 'mutated checkpoint version',
+            unifiedDiff: '@@ -1 +1 @@\n-old\n+new',
+            byteLength: 26,
+            contentSha256: 'sha-checkpoint-2',
+          },
+        ],
+      });
+      expect(checkpointCaptureDuplicate).toEqual(checkpointCapture);
+
+      const explicitOne = store.createTaskFileCapture({
+        taskId: task.id,
+        trigger: 'explicit',
+        entries: [
+          {
+            path: 'src/manual.ts',
+            content: 'manual one',
+            unifiedDiff: '@@ -0,0 +1 @@\n+manual one',
+            byteLength: 10,
+            contentSha256: 'sha-manual-1',
+          },
+        ],
+      });
+      const explicitTwo = store.createTaskFileCapture({
+        taskId: task.id,
+        trigger: 'explicit',
+        entries: [
+          {
+            path: 'src/manual.ts',
+            content: 'manual one',
+            unifiedDiff: '@@ -0,0 +1 @@\n+manual one',
+            byteLength: 10,
+            contentSha256: 'sha-manual-1',
+          },
+        ],
+      });
+
+      expect(explicitTwo.id).not.toBe(explicitOne.id);
+      expect(store.getTaskFileCaptures(task.id)).toHaveLength(4);
+    });
+
+    it('enforces same-task git-commit and checkpoint capture references', () => {
+      const task = store.createTask({ title: 'Capture owner task' });
+      const otherTask = store.createTask({ title: 'Other task' });
+      const commit = store.recordCommit({ taskId: task.id, sha: 'capture-commit-sha', message: 'capture commit' });
+      const checkpoint = store.createCheckpoint({ taskId: task.id, level: 'micro', summary: 'owner checkpoint' });
+
+      expect(() =>
+        store.createTaskFileCapture({
+          taskId: task.id,
+          trigger: 'git_commit',
+          gitCommitSha: commit.sha,
+          entries: [
+            {
+              path: 'src/valid-commit.ts',
+              content: 'valid commit ref',
+              unifiedDiff: '@@ -0,0 +1 @@\n+valid commit ref',
+              byteLength: 16,
+              contentSha256: 'sha-valid-commit',
+            },
+          ],
+        }),
+      ).not.toThrow();
+
+      expect(() =>
+        store.createTaskFileCapture({
+          taskId: task.id,
+          trigger: 'git_commit',
+          gitCommitSha: 'missing-commit',
+          entries: [
+            {
+              path: 'src/missing-commit.ts',
+              content: 'missing commit ref',
+              unifiedDiff: '@@ -0,0 +1 @@\n+missing commit ref',
+              byteLength: 18,
+              contentSha256: 'sha-missing-commit',
+            },
+          ],
+        }),
+      ).toThrow(/FOREIGN KEY/);
+
+      expect(() =>
+        store.createTaskFileCapture({
+          taskId: otherTask.id,
+          trigger: 'git_commit',
+          gitCommitSha: commit.sha,
+          entries: [
+            {
+              path: 'src/cross-task-commit.ts',
+              content: 'cross task commit ref',
+              unifiedDiff: '@@ -0,0 +1 @@\n+cross task commit ref',
+              byteLength: 21,
+              contentSha256: 'sha-cross-task-commit',
+            },
+          ],
+        }),
+      ).toThrow(/FOREIGN KEY/);
+
+      expect(() =>
+        store.createTaskFileCapture({
+          taskId: task.id,
+          trigger: 'checkpoint',
+          checkpointId: checkpoint.id,
+          entries: [
+            {
+              path: 'src/valid-checkpoint.ts',
+              content: 'valid checkpoint ref',
+              unifiedDiff: '@@ -0,0 +1 @@\n+valid checkpoint ref',
+              byteLength: 20,
+              contentSha256: 'sha-valid-checkpoint',
+            },
+          ],
+        }),
+      ).not.toThrow();
+
+      expect(() =>
+        store.createTaskFileCapture({
+          taskId: task.id,
+          trigger: 'checkpoint',
+          checkpointId: 'missing-checkpoint',
+          entries: [
+            {
+              path: 'src/missing-checkpoint.ts',
+              content: 'missing checkpoint ref',
+              unifiedDiff: '@@ -0,0 +1 @@\n+missing checkpoint ref',
+              byteLength: 22,
+              contentSha256: 'sha-missing-checkpoint',
+            },
+          ],
+        }),
+      ).toThrow(/FOREIGN KEY/);
+
+      expect(() =>
+        store.createTaskFileCapture({
+          taskId: otherTask.id,
+          trigger: 'checkpoint',
+          checkpointId: checkpoint.id,
+          entries: [
+            {
+              path: 'src/cross-task-checkpoint.ts',
+              content: 'cross task checkpoint ref',
+              unifiedDiff: '@@ -0,0 +1 @@\n+cross task checkpoint ref',
+              byteLength: 25,
+              contentSha256: 'sha-cross-task-checkpoint',
+            },
+          ],
+        }),
+      ).toThrow(/FOREIGN KEY/);
     });
 
     it('getTaskByRemoteId finds a task by its cloud-sync-server id', () => {
@@ -403,29 +762,69 @@ describe('TaskStore', () => {
       expect(store.listTodosNeedingPush(task.id)).toEqual([]);
     });
 
-    it('decisions, commands, errors and open questions support create-once sync: push detection, remote-sync marking, and pulled-insert', () => {
+    it('decisions support bidirectional sync: local edits are re-detected, and pulled updates apply in place', async () => {
       const task = store.createTask({ title: 'A' });
+      const olderDecision = store.recordDecision({ taskId: task.id, text: 'Use flat files first' });
 
       const decision = store.recordDecision({ taskId: task.id, text: 'Use SQLite' });
       expect(store.listDecisionsNeedingPush(task.id).map((d) => d.id)).toContain(decision.id);
+      store.setDecisionRemoteSync(olderDecision.id, 'remote-dec-0', new Date().toISOString());
       store.setDecisionRemoteSync(decision.id, 'remote-dec-1', new Date().toISOString());
       expect(store.listDecisionsNeedingPush(task.id)).toEqual([]);
       expect(store.getDecisionByRemoteId('remote-dec-1')?.id).toBe(decision.id);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      store.updateDecision(decision.id, { text: 'Use SQLite (WAL)', rationale: 'Faster writes', supersedesId: olderDecision.id });
+      expect(store.listDecisionsNeedingPush(task.id).map((d) => d.id)).toContain(decision.id);
+      store.applyPulledDecision(decision.id, {
+        text: 'Use Postgres instead',
+        rationale: 'Team-wide visibility',
+        supersedesId: null,
+        updatedAt: '2026-09-03T00:00:00.000Z',
+        syncedAt: '2026-09-03T00:00:01.000Z',
+      });
+      expect(store.getDecision(decision.id)).toMatchObject({
+        text: 'Use Postgres instead',
+        rationale: 'Team-wide visibility',
+        supersedesId: null,
+        updatedAt: '2026-09-03T00:00:00.000Z',
+        syncedAt: '2026-09-03T00:00:01.000Z',
+      });
+      expect(store.listDecisionsNeedingPush(task.id).map((d) => d.id)).not.toContain(decision.id);
       const pulledDecision = store.insertPulledDecision({
         taskId: task.id,
         remoteId: 'remote-dec-9',
         text: 'From another machine',
         rationale: null,
         createdAt: '2026-09-03T00:00:00.000Z',
+        updatedAt: '2026-09-03T00:00:00.000Z',
         syncedAt: '2026-09-03T00:00:01.000Z',
       });
       expect(store.getDecisionByRemoteId('remote-dec-9')?.id).toBe(pulledDecision.id);
+      expect(store.getDecision(pulledDecision.id)?.updatedAt).toBe('2026-09-03T00:00:00.000Z');
+    });
 
+    it('commands support bidirectional sync storage: remote-sync marking plus pulled update/insert', () => {
+      const task = store.createTask({ title: 'A' });
       const command = store.recordCommand({ taskId: task.id, cmdRedacted: 'npm test' });
       expect(store.listCommandsNeedingPush(task.id).map((c) => c.id)).toContain(command.id);
       store.setCommandRemoteSync(command.id, 'remote-cmd-1', new Date().toISOString());
       expect(store.listCommandsNeedingPush(task.id)).toEqual([]);
       expect(store.getCommandByRemoteId('remote-cmd-1')?.id).toBe(command.id);
+      store.applyPulledCommand(command.id, {
+        cmdRedacted: 'pnpm test',
+        exitCode: 0,
+        summary: 'Tests passed',
+        updatedAt: '2026-09-03T00:00:00.000Z',
+        syncedAt: '2026-09-03T00:00:01.000Z',
+      });
+      expect(store.getCommand(command.id)).toMatchObject({
+        cmdRedacted: 'pnpm test',
+        exitCode: 0,
+        summary: 'Tests passed',
+        updatedAt: '2026-09-03T00:00:00.000Z',
+        syncedAt: '2026-09-03T00:00:01.000Z',
+      });
+      expect(store.listCommandsNeedingPush(task.id)).toEqual([]);
       const pulledCommand = store.insertPulledCommand({
         taskId: task.id,
         remoteId: 'remote-cmd-9',
@@ -433,15 +832,38 @@ describe('TaskStore', () => {
         exitCode: 0,
         summary: null,
         createdAt: '2026-09-03T00:00:00.000Z',
+        updatedAt: '2026-09-03T00:00:00.000Z',
         syncedAt: '2026-09-03T00:00:01.000Z',
       });
       expect(store.getCommandByRemoteId('remote-cmd-9')?.id).toBe(pulledCommand.id);
+      expect(store.getCommand(pulledCommand.id)?.updatedAt).toBe('2026-09-03T00:00:00.000Z');
+    });
 
+    it('errors support bidirectional sync: local edits are re-detected, and pulled updates apply in place', async () => {
+      const task = store.createTask({ title: 'A' });
       const error = store.recordError({ taskId: task.id, message: 'TypeError: x is undefined' });
       expect(store.listErrorsNeedingPush(task.id).map((e) => e.id)).toContain(error.id);
       store.setErrorRemoteSync(error.id, 'remote-err-1', new Date().toISOString());
       expect(store.listErrorsNeedingPush(task.id)).toEqual([]);
       expect(store.getErrorByRemoteId('remote-err-1')?.id).toBe(error.id);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      store.resolveError(error.id, 'Fixed locally');
+      expect(store.listErrorsNeedingPush(task.id).map((e) => e.id)).toContain(error.id);
+      store.applyPulledError(error.id, {
+        message: 'ReferenceError: y is undefined',
+        resolved: false,
+        resolution: null,
+        updatedAt: '2026-09-03T00:00:00.000Z',
+        syncedAt: '2026-09-03T00:00:01.000Z',
+      });
+      expect(store.getError(error.id)).toMatchObject({
+        message: 'ReferenceError: y is undefined',
+        resolved: false,
+        resolution: null,
+        updatedAt: '2026-09-03T00:00:00.000Z',
+        syncedAt: '2026-09-03T00:00:01.000Z',
+      });
+      expect(store.listErrorsNeedingPush(task.id)).toEqual([]);
       const pulledError = store.insertPulledError({
         taskId: task.id,
         remoteId: 'remote-err-9',
@@ -449,25 +871,47 @@ describe('TaskStore', () => {
         resolved: false,
         resolution: null,
         createdAt: '2026-09-03T00:00:00.000Z',
+        updatedAt: '2026-09-03T00:00:00.000Z',
         syncedAt: '2026-09-03T00:00:01.000Z',
       });
       expect(store.getErrorByRemoteId('remote-err-9')?.id).toBe(pulledError.id);
+      expect(store.getError(pulledError.id)?.updatedAt).toBe('2026-09-03T00:00:00.000Z');
+    });
 
+    it('open questions support bidirectional sync: local edits are re-detected, and pulled updates apply in place', async () => {
+      const task = store.createTask({ title: 'A' });
       const question = store.recordOpenQuestion({ taskId: task.id, text: 'Which DB engine?' });
       expect(store.listOpenQuestionsNeedingPush(task.id).map((q) => q.id)).toContain(question.id);
       store.setOpenQuestionRemoteSync(question.id, 'remote-q-1', new Date().toISOString());
       expect(store.listOpenQuestionsNeedingPush(task.id)).toEqual([]);
       expect(store.getOpenQuestionByRemoteId('remote-q-1')?.id).toBe(question.id);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      store.resolveOpenQuestion(question.id);
+      expect(store.listOpenQuestionsNeedingPush(task.id).map((q) => q.id)).toContain(question.id);
+      store.applyPulledOpenQuestion(question.id, {
+        text: 'Which SQL engine?',
+        resolved: false,
+        updatedAt: '2026-09-03T00:00:00.000Z',
+        syncedAt: '2026-09-03T00:00:01.000Z',
+      });
+      expect(store.getOpenQuestion(question.id)).toMatchObject({
+        text: 'Which SQL engine?',
+        resolved: false,
+        updatedAt: '2026-09-03T00:00:00.000Z',
+        syncedAt: '2026-09-03T00:00:01.000Z',
+      });
+      expect(store.listOpenQuestionsNeedingPush(task.id)).toEqual([]);
       const pulledQuestion = store.insertPulledOpenQuestion({
         taskId: task.id,
         remoteId: 'remote-q-9',
         text: 'From another machine',
         resolved: false,
         createdAt: '2026-09-03T00:00:00.000Z',
+        updatedAt: '2026-09-03T00:00:00.000Z',
         syncedAt: '2026-09-03T00:00:01.000Z',
       });
       expect(store.getOpenQuestionByRemoteId('remote-q-9')?.id).toBe(pulledQuestion.id);
+      expect(store.getOpenQuestion(pulledQuestion.id)?.updatedAt).toBe('2026-09-03T00:00:00.000Z');
     });
   });
 });
-

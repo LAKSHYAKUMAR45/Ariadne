@@ -4,7 +4,7 @@ import * as path from 'node:path';
 import * as os from 'node:os';
 import { execFileSync } from 'node:child_process';
 import { TaskStore } from '../src/TaskStore.js';
-import { getHeadSha, getCurrentBranch, listRecentCommits, syncTaskGit } from '../src/GitWatcher.js';
+import { getHeadSha, getCurrentBranch, listRecentCommits, syncTaskGit, isGitCommitCommand } from '../src/GitWatcher.js';
 
 function git(args: string[], cwd: string): string {
   return execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
@@ -21,6 +21,15 @@ function commit(dir: string, filename: string, message: string): string {
   git(['add', filename], dir);
   git(['commit', '-q', '-m', message], dir);
   return git(['rev-parse', 'HEAD'], dir);
+}
+
+function createGitlinkRepo(): { dir: string; sha: string } {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ariadne-gitlink-target-'));
+  initRepo(dir);
+  fs.writeFileSync(path.join(dir, 'README.md'), 'submodule target\n');
+  git(['add', 'README.md'], dir);
+  git(['commit', '-q', '-m', 'Initial target'], dir);
+  return { dir, sha: git(['rev-parse', 'HEAD'], dir) };
 }
 
 describe('GitWatcher', () => {
@@ -118,5 +127,177 @@ describe('GitWatcher', () => {
     expect(second.recordedCommits).toEqual([]);
     expect(store.listCommits(taskB.id)).toEqual([]);
     expect(store.listCommits(taskA.id).map((c) => c.sha)).toEqual([sha1]);
+  });
+
+  it('syncTaskGit also records the files each new commit touched, with role derived from git status', () => {
+    const task = store.createTask({ title: 'A' });
+    commit(repoRoot, 'a.txt', 'First commit'); // creates a.txt
+    fs.writeFileSync(path.join(repoRoot, 'a.txt'), 'changed\n');
+    git(['add', 'a.txt'], repoRoot);
+    git(['rm', '-q', '--cached', '--ignore-unmatch', 'nonexistent'], repoRoot); // no-op, keeps helper generic
+    git(['commit', '-q', '-m', 'Second commit'], repoRoot); // modifies a.txt
+
+    syncTaskGit(store, task.id, repoRoot);
+
+    const files = store.listFiles(task.id);
+    const byPath = new Map(files.map((f) => [f.path, f.role]));
+    expect(byPath.get('a.txt')).toBe('edited'); // last commit modified it, so "edited" wins over the earlier "created"
+  });
+
+  it('syncTaskGit captures the committed file contents for each new commit', () => {
+    const task = store.createTask({ title: 'A' });
+    const sha1 = commit(repoRoot, 'a.txt', 'First commit');
+    fs.writeFileSync(path.join(repoRoot, 'a.txt'), 'second version\n');
+    git(['add', 'a.txt'], repoRoot);
+    git(['commit', '-q', '-m', 'Second commit'], repoRoot);
+    const sha2 = git(['rev-parse', 'HEAD'], repoRoot);
+    // Worktree drifts after the commit -- the capture must use the commit blob.
+    fs.writeFileSync(path.join(repoRoot, 'a.txt'), 'uncommitted\n');
+
+    const result = syncTaskGit(store, task.id, repoRoot);
+
+    expect(result.captureFailures).toEqual([]);
+    expect(result.captures.map((c) => c.gitCommitSha)).toEqual([sha1, sha2]);
+
+    const captures = store.getTaskFileCaptures(task.id);
+    expect(captures).toHaveLength(2);
+    const second = captures.find((c) => c.gitCommitSha === sha2)!;
+    expect(second.trigger).toBe('git_commit');
+    expect(second.entries.map((e) => e.path)).toEqual(['a.txt']);
+    expect(second.entries[0].content).toBe('second version\n');
+  });
+
+  it('syncTaskGit does not duplicate captures when re-synced', () => {
+    const task = store.createTask({ title: 'A' });
+    commit(repoRoot, 'a.txt', 'First commit');
+
+    syncTaskGit(store, task.id, repoRoot);
+    const second = syncTaskGit(store, task.id, repoRoot);
+
+    expect(second.captures).toEqual([]);
+    expect(store.getTaskFileCaptures(task.id)).toHaveLength(1);
+  });
+
+  it('syncTaskGit backfills captures for commits recorded before capture support', () => {
+    const task = store.createTask({ title: 'A' });
+    const sha = commit(repoRoot, 'a.txt', 'First commit');
+    store.recordCommit({ taskId: task.id, sha, message: 'First commit' });
+
+    const result = syncTaskGit(store, task.id, repoRoot);
+
+    expect(result.recordedCommits).toEqual([]);
+    expect(result.captureFailures).toEqual([]);
+    expect(result.captures.map((capture) => capture.gitCommitSha)).toEqual([sha]);
+    expect(store.getTaskFileCaptures(task.id)).toHaveLength(1);
+
+    const second = syncTaskGit(store, task.id, repoRoot);
+    expect(second.captures).toEqual([]);
+    expect(store.getTaskFileCaptures(task.id)).toHaveLength(1);
+  });
+
+  it('syncTaskGit surfaces and records capture failures without marking the commit captured', () => {
+    const task = store.createTask({ title: 'A' });
+    const sha = commit(repoRoot, 'a.txt', 'First commit');
+    const failing = Object.create(store) as TaskStore;
+    (failing as unknown as { createTaskFileCapture: () => never }).createTaskFileCapture = () => {
+      throw new Error('disk exploded');
+    };
+
+    const result = syncTaskGit(failing, task.id, repoRoot);
+
+    expect(result.recordedCommits.map((c) => c.sha)).toEqual([sha]);
+    expect(result.captures).toEqual([]);
+    expect(result.captureFailures).toEqual([
+      { sha, message: expect.stringContaining('disk exploded') },
+    ]);
+    expect(store.getTaskFileCaptures(task.id)).toEqual([]);
+    const errors = store.listErrors(task.id);
+    expect(errors).toHaveLength(1);
+    expect(errors[0].message).toContain(sha);
+    expect(errors[0].message).toContain('disk exploded');
+  });
+
+  it('does not duplicate an unresolved capture failure while retrying a missing capture', () => {
+    const task = store.createTask({ title: 'A' });
+    const sha = commit(repoRoot, 'a.txt', 'First commit');
+    store.recordCommit({ taskId: task.id, sha, message: 'First commit' });
+    const failing = Object.create(store) as TaskStore;
+    (failing as unknown as { createTaskFileCapture: () => never }).createTaskFileCapture = () => {
+      throw new Error('disk exploded');
+    };
+
+    syncTaskGit(failing, task.id, repoRoot);
+    syncTaskGit(failing, task.id, repoRoot);
+
+    expect(store.listErrors(task.id, { resolved: false })).toHaveLength(1);
+  });
+
+  it('does not rescan a commit that was already found to contain no eligible files', () => {
+    const task = store.createTask({ title: 'A' });
+    const sha = commit(repoRoot, '.env', 'Add excluded environment file');
+    store.recordCommit({ taskId: task.id, sha, message: 'Add excluded environment file' });
+
+    const first = syncTaskGit(store, task.id, repoRoot);
+    expect(first.captures).toEqual([]);
+    expect(first.captureFailures).toEqual([]);
+    expect(store.hasTaskFileCaptureEmptyMarker(task.id, sha)).toBe(true);
+
+    const blob = git(['rev-parse', `${sha}:.env`], repoRoot);
+    fs.rmSync(path.join(repoRoot, '.git', 'objects', blob.slice(0, 2), blob.slice(2)));
+
+    const second = syncTaskGit(store, task.id, repoRoot);
+    expect(second.captures).toEqual([]);
+    expect(second.captureFailures).toEqual([]);
+  });
+
+  it('syncTaskGit records a capture failure when a committed blob is unreadable', () => {
+    const task = store.createTask({ title: 'A' });
+    const sha = commit(repoRoot, 'a.txt', 'First commit');
+    const blob = git(['rev-parse', `${sha}:a.txt`], repoRoot);
+    fs.rmSync(path.join(repoRoot, '.git', 'objects', blob.slice(0, 2), blob.slice(2)));
+
+    const result = syncTaskGit(store, task.id, repoRoot);
+
+    expect(result.captures).toEqual([]);
+    expect(result.captureFailures).toHaveLength(1);
+    expect(result.captureFailures[0].sha).toBe(sha);
+    expect(store.getTaskFileCaptures(task.id)).toEqual([]);
+    expect(store.listErrors(task.id)).toHaveLength(1);
+  });
+
+  it('syncTaskGit skips gitlinks and still captures regular commit files without a capture failure', () => {
+    const task = store.createTask({ title: 'A' });
+    const gitlinkRepo = createGitlinkRepo();
+    try {
+      fs.mkdirSync(path.join(repoRoot, 'src'), { recursive: true });
+      fs.writeFileSync(path.join(repoRoot, 'src', 'app.ts'), 'export const a = 1;\n');
+      git(['add', 'src/app.ts'], repoRoot);
+      git(['update-index', '--add', '--cacheinfo', `160000,${gitlinkRepo.sha},vendor/submodule`], repoRoot);
+      git(['commit', '-q', '-m', 'Add gitlink and app'], repoRoot);
+
+      const result = syncTaskGit(store, task.id, repoRoot);
+
+      expect(result.captureFailures).toEqual([]);
+      expect(result.captures).toHaveLength(1);
+      expect(result.captures[0].entries.map((entry) => entry.path)).toEqual(['src/app.ts']);
+      expect(result.captures[0].entries[0].content).toBe('export const a = 1;\n');
+      expect(result.captures[0].gitCommitSha).toBe(result.recordedCommits[0].sha);
+      expect(result.recordedCommits).toHaveLength(1);
+
+      const captures = store.getTaskFileCaptures(task.id);
+      expect(captures).toHaveLength(1);
+      expect(captures[0].entries.map((entry) => entry.path)).toEqual(['src/app.ts']);
+    } finally {
+      fs.rmSync(gitlinkRepo.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('isGitCommitCommand recognizes git commit invocations but not lookalikes', () => {
+    expect(isGitCommitCommand('git commit -m "fix bug"')).toBe(true);
+    expect(isGitCommitCommand('cd repo && git commit -m "fix"')).toBe(true);
+    expect(isGitCommitCommand('git -C repo commit -m "fix"')).toBe(true);
+    expect(isGitCommitCommand('git commit-graph write')).toBe(false);
+    expect(isGitCommitCommand('git log --grep=commit')).toBe(false);
+    expect(isGitCommitCommand('npm test')).toBe(false);
   });
 });

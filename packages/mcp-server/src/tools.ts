@@ -16,7 +16,10 @@ import type {
 } from '@ariadne-dev/core';
 import {
   buildContext,
+  captureTaskFiles,
+  throwSanitizedTaskFileCaptureFailure,
   syncTaskGit,
+  isGitCommitCommand,
   exportTaskMarkdown,
   searchWorkspace,
   resolveTaskAnyWorkspace,
@@ -31,6 +34,7 @@ import {
 } from '@ariadne-dev/core';
 import type { GraphifyResult } from '@ariadne-dev/core';
 import type { CrossWorkspaceTask, CrossWorkspaceSearchResult } from '@ariadne-dev/core';
+import type { CaptureResult, CaptureSkip } from '@ariadne-dev/core';
 import { readCurrentTaskId, setCurrentTaskId } from './workspace.js';
 
 /**
@@ -171,10 +175,50 @@ export interface CheckpointAddArgs {
   taskId?: string;
 }
 
-export function checkpointAdd(store: TaskStore, workspaceRoot: string, args: CheckpointAddArgs): Checkpoint {
-  return withTaskStore(store, workspaceRoot, args.taskId, (s, taskId) =>
-    s.createCheckpoint({ taskId, level: args.level ?? 'micro', summary: args.summary }),
-  );
+export interface CaptureSummary {
+  id: string;
+  fileCount: number;
+  byteCount: number;
+}
+
+export interface CheckpointAddResult {
+  checkpoint: Checkpoint;
+  capture: CaptureSummary | null;
+  skipped: CaptureSkip[];
+}
+
+function captureSummary(result: CaptureResult): CaptureSummary | null {
+  if (!result.capture) {
+    return null;
+  }
+
+  return {
+    id: result.capture.id,
+    fileCount: result.capture.entries.length,
+    byteCount: result.capture.entries.reduce((total, entry) => total + entry.byteLength, 0),
+  };
+}
+
+export function checkpointAdd(store: TaskStore, workspaceRoot: string, args: CheckpointAddArgs): CheckpointAddResult {
+  return withTaskStore(store, workspaceRoot, args.taskId, (s, taskId, resolvedWorkspaceRoot) => {
+    const checkpoint = s.createCheckpoint({ taskId, level: args.level ?? 'micro', summary: args.summary });
+    try {
+      const result = captureTaskFiles(s, {
+        taskId,
+        workspace: resolvedWorkspaceRoot,
+        trigger: 'checkpoint',
+        checkpointId: checkpoint.id,
+      });
+
+      return {
+        checkpoint,
+        capture: captureSummary(result),
+        skipped: result.skipped.map((skip) => ({ ...skip })),
+      };
+    } catch {
+      return throwSanitizedTaskFileCaptureFailure(s, taskId, 'checkpoint');
+    }
+  });
 }
 
 export interface TodoAddArgs {
@@ -269,11 +313,13 @@ export interface DecisionAddArgs {
   text: string;
   rationale?: string;
   taskId?: string;
+  /** Marks an earlier decision as superseded by this new one — moves it from the ranked "current decisions" (high tier) to "historical decisions" (low tier) in status/resume/get_context, per docs/03-DATA-MODEL.md §5. Previously only reachable via `TaskStore.recordDecision` directly; no surface exposed it, so a run of near-duplicate follow-on decisions (e.g. "for Task 8, follow the Task 7 pattern...") had no way to demote the ones they replaced. */
+  supersedesId?: string;
 }
 
 export function decisionAdd(store: TaskStore, workspaceRoot: string, args: DecisionAddArgs): Decision {
   return withTaskStore(store, workspaceRoot, args.taskId, (s, taskId) =>
-    s.recordDecision({ taskId, text: args.text, rationale: args.rationale }),
+    s.recordDecision({ taskId, text: args.text, rationale: args.rationale, supersedesId: args.supersedesId }),
   );
 }
 
@@ -290,10 +336,17 @@ export interface DecisionEditArgs {
   text?: string;
   rationale?: string;
   taskId?: string;
+  /** Set to mark this decision as superseding another (by id), or pass an empty string to clear an existing supersedesId (curation, e.g. it was set by mistake). Leave undefined to leave it unchanged. */
+  supersedesId?: string;
 }
 
 export function decisionEdit(store: TaskStore, workspaceRoot: string, args: DecisionEditArgs): void {
-  const apply = (s: TaskStore) => s.updateDecision(args.decisionId, { text: args.text, rationale: args.rationale });
+  const apply = (s: TaskStore) =>
+    s.updateDecision(args.decisionId, {
+      text: args.text,
+      rationale: args.rationale,
+      supersedesId: args.supersedesId !== undefined ? (args.supersedesId === '' ? null : args.supersedesId) : undefined,
+    });
   if (args.taskId) {
     withTaskStore(store, workspaceRoot, args.taskId, (s) => apply(s));
     return;
@@ -339,17 +392,45 @@ export interface CommandLogArgs {
  * step) or the VS Code extension (passive background capture of terminal
  * commands), an MCP client's own shell/bash tool calls are otherwise
  * invisible to Ariadne — there was previously no MCP-surface equivalent.
- * On a non-zero exit code, also records a matching unresolved error, exactly
- * mirroring `packages/cli/src/exec.ts`'s recordFailedCommand behavior, so
- * status/resume/get_context surface agent-run failures the same way a CLI
- * `ariadne exec` failure would.
+ *
+ * - On a non-zero exit code, also records a matching unresolved error,
+ *   exactly mirroring `packages/cli/src/exec.ts`'s recordFailedCommand
+ *   behavior, so status/resume/get_context surface agent-run failures the
+ *   same way a CLI `ariadne exec` failure would.
+ * - On exit code 0, auto-resolves any earlier unresolved error for this
+ *   exact command (see `TaskStore.autoResolveMatchingCommandErrors`) — a
+ *   command that failed once (e.g. a RED-phase test run) and now succeeds
+ *   is no longer an open problem, so it shouldn't keep cluttering
+ *   status/resume as one.
+ * - On a successful `git commit` command, best-effort triggers the same
+ *   sync `git-sync`/`git_sync` does (new commits + the files each one
+ *   touched), so `recentCommits`/`recentFiles` stay populated for
+ *   CLI/MCP-driven sessions that commit but never explicitly call
+ *   `git_sync` themselves. Never throws: git may be unavailable or
+ *   `workspaceRoot` may not be a repo, and command logging must still
+ *   succeed either way.
  */
 export function commandLog(store: TaskStore, workspaceRoot: string, args: CommandLogArgs): Command {
   const cmdRedacted = redactCommand(args.command);
-  return withTaskStore(store, workspaceRoot, args.taskId, (s, taskId) => {
+  return withTaskStore(store, workspaceRoot, args.taskId, (s, taskId, resolvedWorkspaceRoot) => {
     const recorded = s.recordCommand({ taskId, cmdRedacted, exitCode: args.exitCode });
     if (args.exitCode !== 0) {
       s.recordError({ taskId, message: `Command failed (exit ${args.exitCode}): ${cmdRedacted}` });
+    } else {
+      s.autoResolveMatchingCommandErrors(taskId, cmdRedacted);
+      if (isGitCommitCommand(cmdRedacted)) {
+        try {
+          // Use the *resolved* workspace root (which may differ from the
+          // caller's own `workspaceRoot` when `args.taskId` belongs to a
+          // different, cross-workspace task) so we sync against the repo
+          // the task actually lives in, not wherever this MCP call happened
+          // to be invoked from.
+          syncTaskGit(s, taskId, resolvedWorkspaceRoot);
+        } catch {
+          // Best-effort: not a git repo, git unavailable, etc. — command
+          // logging itself must never fail because of this.
+        }
+      }
     }
     return recorded;
   });

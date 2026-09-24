@@ -215,7 +215,7 @@ Common commands: `task new <title>`, `task list`, `task use <id>`,
 `todo add <text>` / `todo list` / `todo done <id>`,
 `question add <text>` / `question list` / `question resolve <id>`,
 `search <query>`, `status`, `resume`, `git-sync`, `export`, `where`,
-`sync login` / `sync push` / `sync pull` (see "Cloud sync" below). Run `ariadne --help` for the full list.
+`sync setup` / `sync login` / `sync push` / `sync pull` (see "Cloud sync" below). Run `ariadne --help` for the full list.
 
 Any command that takes `--task <id>` (or `[id]`) works across workspaces:
 if the id isn't a task in your current workspace, Ariadne transparently
@@ -255,6 +255,9 @@ running the server itself. This is entirely opt-in — nothing leaves your
 machine unless you run these commands.
 
 ```bash
+ariadne init                        # creates task storage + Copilot guidance + project sync config
+ariadne sync setup [username]       # new machine: SSH key/tunnel + secure password prompt + login
+ariadne sync setup [username] --register  # first machine/account only
 ariadne sync register <username> <password> --server https://your-sync-server
 ariadne sync push          # push local task/checkpoint changes
 ariadne sync pull          # pull changes made by teammates / other machines
@@ -262,12 +265,39 @@ ariadne sync list-remote   # browse every task on the server, including ones nev
 ariadne sync unlink <id>   # clear a task's link to the sync server, locally only
 ```
 
+For this repository, `.github/ariadne-sync.json` describes the nodem2 SSH
+tunnel without containing credentials. `sync setup` verifies key-based SSH
+access, runs `ssh-keygen`/`ssh-copy-id` when necessary (prompting once for the
+SSH password), verifies nodem2 against the pinned SSH host-key fingerprint,
+opens an owned SSH ControlMaster tunnel, prompts for the Ariadne account
+password without echoing it, and stores only the resulting JWT. Future
+`push`, `pull`, and `list-remote` commands automatically recreate a stopped
+tunnel and refuse to send credentials if another process occupies the port.
+
 `sync push`/`sync pull` take an optional `--task <id>` to scope to a single
 task. `sync pull --import-new` also creates local tasks for remote ones this
-workspace has never linked, instead of skipping them. Phase 1 syncs `tasks`
-and `checkpoints` only (todos/decisions/open questions/commands/files stay
-local for now); access is flat (any account on the server can read/write
-any synced task) and conflicts are resolved remote-wins.
+workspace has never linked, instead of skipping them. Tasks, checkpoints,
+todos, decisions, errors, open questions, and commands sync; files/commits
+remain local by design. Access is flat (any account on the server can
+read/write any synced task). Conflicts default to remote-wins and can be
+changed with `--on-conflict local-wins`.
+
+### Operations console
+
+The tracked nodem2 deployment also provides a single-admin operations console.
+After `ariadne sync setup [username]` creates the project-configured tunnel,
+open `http://127.0.0.1:14300/admin`. The console is the supported interface
+for its eight sections: **Overview**, **Members**, **Tasks**, **Backups**,
+**Services**, **Deployments**, **Logs**, and **Audit**.
+
+It uses a browser session and CSRF protection, not the sync JWT. Every guarded
+change requires fresh password reauthentication (within five minutes) and the
+exact confirmation text shown by the UI. It creates a durable operation and
+an audit event; submitting a request is not success. Use the console or
+tracked deployment scripts, never arbitrary shell commands or Docker socket
+access. See [`deploy/nodem2/README.md`](deploy/nodem2/README.md) for the
+operator runbook and [`docs/05-USER-GUIDE.md`](docs/05-USER-GUIDE.md) for
+page-by-page guidance.
 
 ### Using the MCP server
 

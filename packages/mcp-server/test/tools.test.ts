@@ -1,8 +1,10 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import { execFileSync } from 'node:child_process';
+import { inspect } from 'node:util';
+import * as core from '@ariadne-dev/core';
 import { TaskStore } from '@ariadne-dev/core';
 import * as tools from '../src/tools.js';
 import { readCurrentTaskId } from '../src/workspace.js';
@@ -11,12 +13,35 @@ describe('mcp-server tools', () => {
   let store: TaskStore;
   let workspaceRoot: string;
 
+  function git(args: string[], cwd: string): string {
+    return execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
+  }
+
+  function initRepo(dir: string): void {
+    git(['init', '-q', '-b', 'main'], dir);
+    git(['config', 'user.email', 'test@example.com'], dir);
+    git(['config', 'user.name', 'Test'], dir);
+  }
+
+  function write(relPath: string, content: string): void {
+    const fullPath = path.join(workspaceRoot, relPath);
+    fs.mkdirSync(path.dirname(fullPath), { recursive: true });
+    fs.writeFileSync(fullPath, content, 'utf8');
+  }
+
+  function commitAll(message: string, force = false): string {
+    git(force ? ['add', '-f', '-A'] : ['add', '-A'], workspaceRoot);
+    git(['commit', '-q', '-m', message], workspaceRoot);
+    return git(['rev-parse', 'HEAD'], workspaceRoot);
+  }
+
   beforeEach(() => {
     store = new TaskStore(':memory:');
     workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'ariadne-mcp-test-'));
   });
 
   afterEach(() => {
+    vi.restoreAllMocks();
     store.close();
     fs.rmSync(workspaceRoot, { recursive: true, force: true });
   });
@@ -69,11 +94,12 @@ describe('mcp-server tools', () => {
   });
 
   it('checkpoint_add, todo_add/list/done, decision_add, error_add/resolve operate on the current task', () => {
+    initRepo(workspaceRoot);
     const task = tools.taskNew(store, workspaceRoot, { title: 'A' });
 
     const cp = tools.checkpointAdd(store, workspaceRoot, { summary: 'did stuff' });
-    expect(cp.taskId).toBe(task.id);
-    expect(cp.level).toBe('micro');
+    expect(cp.checkpoint.taskId).toBe(task.id);
+    expect(cp.checkpoint.level).toBe('micro');
 
     const todo = tools.todoAdd(store, workspaceRoot, { text: 'write tests' });
     expect(tools.todoList(store, workspaceRoot, {}).map((t) => t.id)).toContain(todo.id);
@@ -86,6 +112,108 @@ describe('mcp-server tools', () => {
     const error = tools.errorAdd(store, workspaceRoot, { message: 'build failed' });
     tools.errorResolve(store, workspaceRoot, { errorId: error.id, resolution: 'fixed typo' });
     expect(store.listErrors(task.id, { resolved: false })).toHaveLength(0);
+  });
+
+  it('captures files after a checkpoint is persisted', () => {
+    initRepo(workspaceRoot);
+    const task = tools.taskNew(store, workspaceRoot, { title: 'Checkpoint capture task' });
+    write('src/app.ts', 'export const value = 1;\n');
+    commitAll('Add app');
+    write('src/app.ts', 'export const value = 2;\n');
+    store.touchFile({ taskId: task.id, path: 'src/app.ts', role: 'edited' });
+
+    const result = tools.checkpointAdd(store, workspaceRoot, { summary: 'did stuff' });
+    const persistedCapture = store.getTaskFileCaptures(task.id)[0]!;
+
+    expect(result.capture).not.toBeNull();
+    expect(result.capture?.id).toBe(persistedCapture.id);
+    expect(result.capture?.fileCount).toBe(1);
+    expect(result.capture?.byteCount).toBe(Buffer.byteLength('export const value = 2;\n', 'utf8'));
+    expect(persistedCapture.checkpointId).toBe(result.checkpoint.id);
+    expect(persistedCapture.entries.map((entry) => entry.path)).toEqual(['src/app.ts']);
+    expect(result.skipped).toEqual([]);
+  });
+
+  it('creates checkpoints without capture errors in a non-Git workspace', () => {
+    const task = tools.taskNew(store, workspaceRoot, { title: 'Non-Git checkpoint task' });
+
+    const result = tools.checkpointAdd(store, workspaceRoot, { summary: 'saved without Git' });
+
+    expect(result.capture).toBeNull();
+    expect(result.skipped).toEqual([]);
+    expect(store.listCheckpoints(task.id)).toHaveLength(1);
+    expect(store.getTaskFileCaptures(task.id)).toEqual([]);
+    expect(store.listErrors(task.id)).toEqual([]);
+  });
+
+  it('does not capture when checkpoint creation fails', () => {
+    initRepo(workspaceRoot);
+    const task = tools.taskNew(store, workspaceRoot, { title: 'Failing checkpoint task' });
+    const failing = Object.create(store) as TaskStore;
+    (failing as unknown as { createCheckpoint: () => never }).createCheckpoint = () => {
+      throw new Error('checkpoint write failed');
+    };
+
+    expect(() => tools.checkpointAdd(failing, workspaceRoot, { summary: 'did stuff' })).toThrow('checkpoint write failed');
+    expect(store.getTaskFileCaptures(task.id)).toEqual([]);
+  });
+
+  it('checkpoint_add records a generic task error and throws a sanitized capture error', () => {
+    initRepo(workspaceRoot);
+    const task = tools.taskNew(store, workspaceRoot, { title: 'Checkpoint capture failure task' });
+    const secretMarker = 'mcp-checkpoint-secret-marker';
+    vi.spyOn(core, 'captureTaskFiles').mockImplementation(() => {
+      throw new Error(`capture exploded with ${secretMarker}`);
+    });
+
+    try {
+      tools.checkpointAdd(store, workspaceRoot, { summary: 'did stuff' });
+      expect.unreachable('checkpointAdd should have thrown');
+    } catch (error: unknown) {
+      expect(error).toBeInstanceOf(core.TaskFileCaptureFailureError);
+      expect((error as Error).message).toBe('Task file capture failed after checkpoint.');
+      expect(inspect(error, { depth: 8 })).not.toContain(secretMarker);
+    }
+
+    expect(store.listCheckpoints(task.id)).toHaveLength(1);
+    expect(store.getTaskFileCaptures(task.id)).toEqual([]);
+    expect(store.listErrors(task.id)).toMatchObject([
+      { message: 'Task file capture failed after checkpoint.' },
+    ]);
+  });
+
+  it('checkpoint_add surfaces sanitized capture and failure-recording errors together without returning a result', () => {
+    initRepo(workspaceRoot);
+    const task = tools.taskNew(store, workspaceRoot, { title: 'Checkpoint capture failure task' });
+    const captureMarker = 'mcp-checkpoint-capture-secret-marker';
+    const recordMarker = 'mcp-checkpoint-record-secret-marker';
+    vi.spyOn(core, 'captureTaskFiles').mockImplementation(() => {
+      throw new Error(`capture exploded with ${captureMarker}`);
+    });
+    vi.spyOn(TaskStore.prototype, 'recordError').mockImplementation(() => {
+      throw new Error(`recordError write failed with ${recordMarker}`);
+    });
+
+    try {
+      tools.checkpointAdd(store, workspaceRoot, { summary: 'did stuff' });
+      expect.unreachable('checkpointAdd should have thrown');
+    } catch (error: unknown) {
+      expect(error).toBeInstanceOf(core.TaskFileCaptureFailureAggregateError);
+      expect((error as Error).message).toBe(
+        'Task file capture failed after checkpoint, and Ariadne also failed to record that capture failure.',
+      );
+      expect((error as AggregateError).errors).toMatchObject([
+        { message: 'Task file capture failed after checkpoint.' },
+        { message: 'Ariadne failed to record the checkpoint capture failure.' },
+      ]);
+      const rendered = inspect(error, { depth: 8 });
+      expect(rendered).not.toContain(captureMarker);
+      expect(rendered).not.toContain(recordMarker);
+    }
+
+    expect(store.listCheckpoints(task.id)).toHaveLength(1);
+    expect(store.getTaskFileCaptures(task.id)).toEqual([]);
+    expect(store.listErrors(task.id)).toEqual([]);
   });
 
   it('command_log records a successful command without adding an error', () => {
@@ -118,6 +246,36 @@ describe('mcp-server tools', () => {
       exitCode: 0,
     });
     expect(cmd.cmdRedacted).not.toContain('sk-abcdefghijklmnop1234567890');
+  });
+
+  it('command_log auto-resolves an earlier "Command failed" error once the exact same command succeeds', () => {
+    const task = tools.taskNew(store, workspaceRoot, { title: 'A' });
+
+    tools.commandLog(store, workspaceRoot, { command: 'pytest test_x.py', exitCode: 1 });
+    expect(store.listErrors(task.id, { resolved: false })).toHaveLength(1);
+
+    tools.commandLog(store, workspaceRoot, { command: 'pytest test_x.py', exitCode: 0 });
+    expect(store.listErrors(task.id, { resolved: false })).toHaveLength(0);
+    expect(store.listErrors(task.id, { resolved: true })).toHaveLength(1);
+  });
+
+  it('command_log auto-triggers a git-sync (commits + files) on a successful "git commit"', () => {
+    execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: workspaceRoot });
+    execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: workspaceRoot });
+    execFileSync('git', ['config', 'user.name', 'Test'], { cwd: workspaceRoot });
+    const task = tools.taskNew(store, workspaceRoot, { title: 'A' });
+
+    fs.writeFileSync(path.join(workspaceRoot, 'a.txt'), 'a');
+    execFileSync('git', ['add', 'a.txt'], { cwd: workspaceRoot });
+    // The MCP client already ran the commit itself via its own shell tool;
+    // command_log only reports it happened (and, on success, auto-syncs).
+    execFileSync('git', ['commit', '-q', '-m', 'Add a.txt'], { cwd: workspaceRoot });
+
+    tools.commandLog(store, workspaceRoot, { command: 'git commit -m "Add a.txt"', exitCode: 0 });
+
+    expect(store.listCommits(task.id)).toHaveLength(1);
+    expect(store.listCommits(task.id)[0].message).toBe('Add a.txt');
+    expect(store.listFiles(task.id).map((f) => f.path)).toContain('a.txt');
   });
 
   it('question_add/list/resolve operate on the current task', () => {
@@ -159,6 +317,7 @@ describe('mcp-server tools', () => {
   });
 
   it('get_context assembles the full task context as structured data', () => {
+    initRepo(workspaceRoot);
     const task = tools.taskNew(store, workspaceRoot, { title: 'Fix login bug' });
     tools.checkpointAdd(store, workspaceRoot, { summary: 'first checkpoint' });
     tools.todoAdd(store, workspaceRoot, { text: 'write tests' });
@@ -199,6 +358,7 @@ describe('mcp-server tools', () => {
   });
 
   it('export_task renders the current task as Markdown', () => {
+    initRepo(workspaceRoot);
     const task = tools.taskNew(store, workspaceRoot, { title: 'Fix login bug' });
     tools.checkpointAdd(store, workspaceRoot, { summary: 'first checkpoint' });
 
@@ -250,6 +410,28 @@ describe('mcp-server tools', () => {
 
     tools.decisionDelete(store, workspaceRoot, { decisionId: decision.id });
     expect(store.getDecision(decision.id)).toBeUndefined();
+  });
+
+  it('decision_add accepts supersedesId to demote an earlier decision to "historical"', () => {
+    tools.taskNew(store, workspaceRoot, { title: 'Task' });
+    const older = tools.decisionAdd(store, workspaceRoot, { text: 'Use fixed delay retries' });
+    const newer = tools.decisionAdd(store, workspaceRoot, {
+      text: 'Use exponential backoff instead',
+      supersedesId: older.id,
+    });
+    expect(newer.supersedesId).toBe(older.id);
+  });
+
+  it('decision_edit can set and clear supersedesId (curation)', () => {
+    tools.taskNew(store, workspaceRoot, { title: 'Task' });
+    const older = tools.decisionAdd(store, workspaceRoot, { text: 'Use fixed delay retries' });
+    const newer = tools.decisionAdd(store, workspaceRoot, { text: 'Use exponential backoff instead' });
+
+    tools.decisionEdit(store, workspaceRoot, { decisionId: newer.id, supersedesId: older.id });
+    expect(store.getDecision(newer.id)?.supersedesId).toBe(older.id);
+
+    tools.decisionEdit(store, workspaceRoot, { decisionId: newer.id, supersedesId: '' });
+    expect(store.getDecision(newer.id)?.supersedesId).toBeNull();
   });
 
   it('error curation: reopen, edit, delete', () => {

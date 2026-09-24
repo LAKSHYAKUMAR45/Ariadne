@@ -2,6 +2,13 @@ import type { TaskStore, TaskStatus } from '@ariadne-dev/core';
 import { readSyncConfig, writeSyncConfig, requireSyncConfig, setCurrentSyncProfile, listSyncProfiles, DEFAULT_SYNC_PROFILE } from './syncConfig.js';
 import * as syncClient from './syncClient.js';
 import { getWorkspaceLabel } from './workspaceLabel.js';
+import {
+  bootstrapSshAccess,
+  ensureConfiguredSyncTunnel,
+  ensureSshTunnel,
+  promptHidden,
+  readProjectSyncConnection,
+} from './syncTunnel.js';
 
 /**
  * Compares two flat field maps and returns every key whose value differs,
@@ -18,6 +25,49 @@ function diffFields(local: Record<string, unknown>, remote: Record<string, unkno
     }
   }
   return diffs;
+}
+
+/**
+ * Renders an upload failure as a stable, non-sensitive token. Only a
+ * whitelisted-shape error code from the server is echoed: server messages may
+ * quote capture paths, and a hostile or buggy server must not be able to push
+ * arbitrary text through the CLI's output.
+ */
+const SAFE_ERROR_CODE_PATTERN = /^[a-z0-9_]{1,64}$/;
+
+function describeCaptureFailure(error: unknown): string {
+  const candidate = error as { name?: unknown; status?: unknown; code?: unknown } | null;
+  if (
+    candidate &&
+    candidate.name === 'SyncApiError' &&
+    typeof candidate.code === 'string' &&
+    SAFE_ERROR_CODE_PATTERN.test(candidate.code)
+  ) {
+    const status = typeof candidate.status === 'number' ? candidate.status : 0;
+    return `HTTP ${status} ${candidate.code}`;
+  }
+  return 'unexpected_error';
+}
+
+const PERMANENT_CAPTURE_FAILURE_CODES = new Set([
+  'capture_conflict',
+  'capture_event_conflict',
+  'capture_too_large',
+  'invalid_capture',
+  'invalid_capture_encoding',
+  'invalid_request',
+]);
+
+function permanentCaptureFailureCode(error: unknown): string | null {
+  const candidate = error as { name?: unknown; code?: unknown } | null;
+  if (
+    candidate?.name === 'SyncApiError' &&
+    typeof candidate.code === 'string' &&
+    PERMANENT_CAPTURE_FAILURE_CODES.has(candidate.code)
+  ) {
+    return candidate.code;
+  }
+  return null;
 }
 
 /** `ariadne sync register <username> <password>` — creates an account, then logs in immediately for convenience. */
@@ -41,6 +91,43 @@ export async function runSyncLogin(username: string, password: string, serverUrl
   writeSyncConfig({ ...existing, serverUrl, token, username }, name);
   setCurrentSyncProfile(name);
   console.log(`Logged in to ${serverUrl} as ${username} (profile "${name}").`);
+}
+
+/**
+ * `ariadne sync setup [username] [--register]` — bootstraps key-based SSH
+ * access and a local tunnel from the project connection file, then stores
+ * an authenticated sync profile carrying enough tunnel metadata for future
+ * push/pull commands to reconnect automatically.
+ */
+export async function runSyncSetup(
+  workspaceRoot: string,
+  username: string,
+  options: { register?: boolean } = {},
+): Promise<void> {
+  const connection = readProjectSyncConnection(workspaceRoot);
+  await bootstrapSshAccess(connection.tunnel);
+  await ensureSshTunnel(connection.tunnel);
+  const password = await promptHidden('Ariadne password: ');
+  if (!password) throw new Error('Ariadne password cannot be empty.');
+
+  if (options.register) {
+    await syncClient.register(connection.serverUrl, username, password);
+    console.log(`Registered account "${username}" through the ${connection.profile} tunnel.`);
+  }
+  const { token } = await syncClient.login(connection.serverUrl, username, password);
+  const existing = readSyncConfig(connection.profile);
+  writeSyncConfig(
+    {
+      ...existing,
+      serverUrl: connection.serverUrl,
+      token,
+      username,
+      tunnel: connection.tunnel,
+    },
+    connection.profile,
+  );
+  setCurrentSyncProfile(connection.profile);
+  console.log(`Cloud sync ready through ${connection.tunnel.sshHost} (profile "${connection.profile}").`);
 }
 
 /** `ariadne sync logout [--profile <name>]` — forgets the locally-stored token for that profile (does not affect the account on the server). */
@@ -85,7 +172,7 @@ export function runSyncProfileUse(name: string): void {
  * for it.
  */
 export async function runSyncPush(store: TaskStore, workspaceRoot: string, taskId?: string, profileName?: string): Promise<void> {
-  const config = requireSyncConfig(profileName);
+  const config = await ensureConfiguredSyncTunnel(requireSyncConfig(profileName));
   const workspaceLabel = getWorkspaceLabel(workspaceRoot);
   const tasksToPush = taskId
     ? store.listTasksNeedingPush().filter((t) => t.id === taskId)
@@ -186,10 +273,6 @@ export async function runSyncPush(store: TaskStore, workspaceRoot: string, taskI
     console.log(`Pushed ${todosPushed} todo(s).`);
   }
 
-  // Decisions, errors, open questions, commands — create-once sync,
-  // mirroring checkpoints above: an edit/resolve made after the initial
-  // push is not automatically re-detected/re-pushed in this phase (see
-  // docs/07-CLOUD-SYNC-API-CONTRACT.md §4.6).
   let decisionsPushed = 0;
   for (const id of taskIdsToCheck) {
     const task = store.getTask(id);
@@ -197,14 +280,23 @@ export async function runSyncPush(store: TaskStore, workspaceRoot: string, taskI
     if (!remoteTaskId) continue;
     const pending = store.listDecisionsNeedingPush(id);
     if (pending.length === 0) continue;
-    const { results } = await syncClient.pushDecisions(
-      config.serverUrl,
-      config.token,
-      pending.map((d) => ({ localId: d.id, remoteTaskId, text: d.text, rationale: d.rationale, workspaceLabel, createdAt: d.createdAt })),
-    );
-    const now = new Date().toISOString();
-    for (const r of results) store.setDecisionRemoteSync(r.localId, r.remoteId, now);
-    decisionsPushed += results.length;
+    for (const d of pending) {
+      const { results } = await syncClient.pushDecisions(config.serverUrl, config.token, [
+        {
+          localId: d.id,
+          remoteId: d.remoteId,
+          remoteTaskId,
+          text: d.text,
+          rationale: d.rationale,
+          supersedesId: d.supersedesId ? (store.getDecision(d.supersedesId)?.remoteId ?? null) : null,
+          workspaceLabel,
+          createdAt: d.createdAt,
+          updatedAt: d.updatedAt,
+        },
+      ]);
+      for (const r of results) store.setDecisionRemoteSync(r.localId, r.remoteId, r.updatedAt);
+      decisionsPushed += results.length;
+    }
   }
   if (decisionsPushed > 0) console.log(`Pushed ${decisionsPushed} decision(s).`);
 
@@ -220,16 +312,17 @@ export async function runSyncPush(store: TaskStore, workspaceRoot: string, taskI
       config.token,
       pending.map((e) => ({
         localId: e.id,
+        remoteId: e.remoteId,
         remoteTaskId,
         message: e.message,
         resolved: e.resolved,
         resolution: e.resolution,
         workspaceLabel,
         createdAt: e.createdAt,
+        updatedAt: e.updatedAt,
       })),
     );
-    const now = new Date().toISOString();
-    for (const r of results) store.setErrorRemoteSync(r.localId, r.remoteId, now);
+    for (const r of results) store.setErrorRemoteSync(r.localId, r.remoteId, r.updatedAt);
     errorsPushed += results.length;
   }
   if (errorsPushed > 0) console.log(`Pushed ${errorsPushed} error(s).`);
@@ -244,10 +337,18 @@ export async function runSyncPush(store: TaskStore, workspaceRoot: string, taskI
     const { results } = await syncClient.pushOpenQuestions(
       config.serverUrl,
       config.token,
-      pending.map((q) => ({ localId: q.id, remoteTaskId, text: q.text, resolved: q.resolved, workspaceLabel, createdAt: q.createdAt })),
+      pending.map((q) => ({
+        localId: q.id,
+        remoteId: q.remoteId,
+        remoteTaskId,
+        text: q.text,
+        resolved: q.resolved,
+        workspaceLabel,
+        createdAt: q.createdAt,
+        updatedAt: q.updatedAt,
+      })),
     );
-    const now = new Date().toISOString();
-    for (const r of results) store.setOpenQuestionRemoteSync(r.localId, r.remoteId, now);
+    for (const r of results) store.setOpenQuestionRemoteSync(r.localId, r.remoteId, r.updatedAt);
     openQuestionsPushed += results.length;
   }
   if (openQuestionsPushed > 0) console.log(`Pushed ${openQuestionsPushed} open question(s).`);
@@ -264,19 +365,87 @@ export async function runSyncPush(store: TaskStore, workspaceRoot: string, taskI
       config.token,
       pending.map((c) => ({
         localId: c.id,
+        remoteId: c.remoteId,
         remoteTaskId,
         cmdRedacted: c.cmdRedacted,
         exitCode: c.exitCode,
         summary: c.summary,
         workspaceLabel,
         createdAt: c.createdAt,
+        updatedAt: c.updatedAt,
       })),
     );
-    const now = new Date().toISOString();
-    for (const r of results) store.setCommandRemoteSync(r.localId, r.remoteId, now);
+    for (const r of results) store.setCommandRemoteSync(r.localId, r.remoteId, r.updatedAt);
     commandsPushed += results.length;
   }
   if (commandsPushed > 0) console.log(`Pushed ${commandsPushed} command(s).`);
+
+  // File captures upload last: the server rejects a capture whose task is not
+  // already present, and one capture per request keeps each upload an
+  // independently retryable unit under the 10 MiB per-capture cap.
+  let capturesUploaded = 0;
+  let captureFailures = 0;
+  let capturesRejected = 0;
+  for (const id of taskIdsToCheck) {
+    const task = store.getTask(id);
+    const remoteTaskId = task?.remoteId ?? undefined;
+    if (!remoteTaskId) continue;
+
+    for (const capture of store.getPendingTaskFileCaptures(id)) {
+      try {
+        const ack = await syncClient.pushFileCapture(config.serverUrl, config.token, remoteTaskId, {
+          captureId: capture.id,
+          trigger: capture.trigger,
+          gitCommitSha: capture.gitCommitSha,
+          checkpointId: capture.checkpointId,
+          createdAt: capture.createdAt,
+          entries: capture.entries.map((entry) => ({
+            path: entry.path,
+            content: entry.content,
+            unifiedDiff: entry.unifiedDiff,
+            contentSha256: entry.contentSha256,
+            byteLength: entry.byteLength,
+          })),
+        });
+
+        // Only an acknowledgement naming this exact capture proves the server
+        // stored it; anything else leaves the capture pending for a later push.
+        if (ack?.captureId === capture.id) {
+          store.markTaskFileCaptureSynced(capture.id);
+          capturesUploaded += 1;
+        } else {
+          captureFailures += 1;
+          console.warn(`File capture ${capture.id} was not acknowledged by the server; it stays pending.`);
+        }
+      } catch (err) {
+        const permanentFailureCode = permanentCaptureFailureCode(err);
+        if (permanentFailureCode) {
+          capturesRejected += 1;
+          store.markTaskFileCaptureFailed(capture.id, permanentFailureCode);
+          store.recordError({
+            taskId: id,
+            message: `File capture upload permanently failed (${describeCaptureFailure(err)}).`,
+          });
+          console.warn(
+            `File capture ${capture.id} upload failed (${describeCaptureFailure(err)}) and will not be retried.`,
+          );
+          continue;
+        }
+
+        captureFailures += 1;
+        // Only the stable error code is reported: server messages can quote
+        // capture paths, and capture content must never reach the terminal.
+        console.warn(`File capture ${capture.id} upload failed (${describeCaptureFailure(err)}); it stays pending.`);
+      }
+    }
+  }
+  if (capturesUploaded > 0) console.log(`Uploaded ${capturesUploaded} file capture(s).`);
+  if (captureFailures > 0) {
+    console.log(`${captureFailures} file capture(s) will be retried on the next push.`);
+  }
+  if (capturesRejected > 0) {
+    console.log(`${capturesRejected} file capture(s) were rejected permanently and recorded as task errors.`);
+  }
 
   if (
     tasksToPush.length === 0 &&
@@ -286,6 +455,9 @@ export async function runSyncPush(store: TaskStore, workspaceRoot: string, taskI
     errorsPushed === 0 &&
     openQuestionsPushed === 0 &&
     commandsPushed === 0 &&
+    capturesUploaded === 0 &&
+    captureFailures === 0 &&
+    capturesRejected === 0 &&
     !taskId
   ) {
     console.log('Nothing to push — everything is already synced.');
@@ -326,7 +498,7 @@ export async function runSyncPull(
   taskId?: string,
   options: { importNew?: boolean; profileName?: string; onConflict?: 'remote-wins' | 'local-wins' } = {},
 ): Promise<void> {
-  const config = requireSyncConfig(options.profileName);
+  const config = await ensureConfiguredSyncTunnel(requireSyncConfig(options.profileName));
   const onConflict = options.onConflict ?? 'remote-wins';
 
   // Page through GET /tasks (§4.5) rather than assuming the whole
@@ -509,98 +681,239 @@ export async function runSyncPull(
     console.log(`Pulled ${todosInserted} new todo(s), updated ${todosUpdated} existing todo(s)${todoConflictNote}.`);
   }
 
-  // Decisions, errors, open questions, commands — create-once sync
-  // (insert-only if not already known locally; never re-applies changes
-  // to an existing row, mirroring checkpoints above).
   const decisionsPullAt = { ...(config.decisionsPullAt ?? {}) };
   let decisionsInserted = 0;
+  let decisionsUpdated = 0;
+  let decisionConflicts = 0;
   for (const task of linkedTasks) {
     const remoteTaskId = task.remoteId!;
     const since = decisionsPullAt[remoteTaskId];
     const { decisions, serverTime: decisionServerTime } = await syncClient.pullDecisions(config.serverUrl, config.token, remoteTaskId, since);
+    const newlyInsertedDecisionRemoteIds = new Set<string>();
     for (const remoteDecision of decisions) {
-      if (store.getDecisionByRemoteId(remoteDecision.remoteId)) continue;
+      const existing = store.getDecisionByRemoteId(remoteDecision.remoteId);
+      if (existing) continue;
       store.insertPulledDecision({
         taskId: task.id,
         remoteId: remoteDecision.remoteId,
         text: remoteDecision.text,
         rationale: remoteDecision.rationale,
+        supersedesId: null,
         createdAt: remoteDecision.createdAt,
+        updatedAt: remoteDecision.updatedAt,
         syncedAt: decisionServerTime,
       });
+      newlyInsertedDecisionRemoteIds.add(remoteDecision.remoteId);
       decisionsInserted++;
+    }
+    for (const remoteDecision of decisions) {
+      const local = store.getDecisionByRemoteId(remoteDecision.remoteId);
+      if (!local) continue;
+      const mappedSupersedesId = remoteDecision.supersedesId
+        ? (store.getDecisionByRemoteId(remoteDecision.supersedesId)?.id ?? null)
+        : null;
+      if (!newlyInsertedDecisionRemoteIds.has(remoteDecision.remoteId)) {
+        const hasUnpushedLocalChange = !local.syncedAt || local.updatedAt > local.syncedAt;
+        if (hasUnpushedLocalChange) {
+          const diffs = diffFields(
+            { text: local.text, rationale: local.rationale, supersedesId: local.supersedesId },
+            { text: remoteDecision.text, rationale: remoteDecision.rationale, supersedesId: mappedSupersedesId },
+          );
+          if (diffs.length > 0) {
+            decisionConflicts++;
+            console.log(
+              `⚠ Conflict on decision ${local.id} — changed both locally and remotely since last sync. Differing field(s): ${diffs
+                .map((d) => `${d.field} (local: ${JSON.stringify(d.local)}, remote: ${JSON.stringify(d.remote)})`)
+                .join(', ')}. Resolving via ${onConflict}.`,
+            );
+            if (onConflict === 'local-wins') continue;
+          }
+        }
+        decisionsUpdated++;
+      }
+      store.applyPulledDecision(local.id, {
+        text: remoteDecision.text,
+        rationale: remoteDecision.rationale,
+        supersedesId: mappedSupersedesId,
+        updatedAt: remoteDecision.updatedAt,
+        syncedAt: decisionServerTime,
+      });
     }
     decisionsPullAt[remoteTaskId] = decisionServerTime;
   }
-  if (decisionsInserted > 0) console.log(`Pulled ${decisionsInserted} new decision(s).`);
+  if (decisionsInserted > 0 || decisionsUpdated > 0) {
+    const decisionConflictNote = decisionConflicts > 0 ? ` (${decisionConflicts} conflict(s), resolved via ${onConflict})` : '';
+    console.log(`Pulled ${decisionsInserted} new decision(s), updated ${decisionsUpdated} existing decision(s)${decisionConflictNote}.`);
+  }
 
   const errorsPullAt = { ...(config.errorsPullAt ?? {}) };
   let errorsInserted = 0;
+  let errorsUpdated = 0;
+  let errorConflicts = 0;
   for (const task of linkedTasks) {
     const remoteTaskId = task.remoteId!;
     const since = errorsPullAt[remoteTaskId];
     const { errors, serverTime: errorServerTime } = await syncClient.pullErrors(config.serverUrl, config.token, remoteTaskId, since);
     for (const remoteError of errors) {
-      if (store.getErrorByRemoteId(remoteError.remoteId)) continue;
-      store.insertPulledError({
-        taskId: task.id,
-        remoteId: remoteError.remoteId,
-        message: remoteError.message,
-        resolved: remoteError.resolved,
-        resolution: remoteError.resolution,
-        createdAt: remoteError.createdAt,
-        syncedAt: errorServerTime,
-      });
-      errorsInserted++;
+      const local = store.getErrorByRemoteId(remoteError.remoteId);
+      if (local) {
+        const hasUnpushedLocalChange = !local.syncedAt || local.updatedAt > local.syncedAt;
+        if (hasUnpushedLocalChange) {
+          const diffs = diffFields(
+            { message: local.message, resolved: local.resolved, resolution: local.resolution },
+            { message: remoteError.message, resolved: remoteError.resolved, resolution: remoteError.resolution },
+          );
+          if (diffs.length > 0) {
+            errorConflicts++;
+            console.log(
+              `⚠ Conflict on error ${local.id} — changed both locally and remotely since last sync. Differing field(s): ${diffs
+                .map((d) => `${d.field} (local: ${JSON.stringify(d.local)}, remote: ${JSON.stringify(d.remote)})`)
+                .join(', ')}. Resolving via ${onConflict}.`,
+            );
+            if (onConflict === 'local-wins') continue;
+          }
+        }
+        store.applyPulledError(local.id, {
+          message: remoteError.message,
+          resolved: remoteError.resolved,
+          resolution: remoteError.resolution,
+          updatedAt: remoteError.updatedAt,
+          syncedAt: errorServerTime,
+        });
+        errorsUpdated++;
+      } else {
+        store.insertPulledError({
+          taskId: task.id,
+          remoteId: remoteError.remoteId,
+          message: remoteError.message,
+          resolved: remoteError.resolved,
+          resolution: remoteError.resolution,
+          createdAt: remoteError.createdAt,
+          updatedAt: remoteError.updatedAt,
+          syncedAt: errorServerTime,
+        });
+        errorsInserted++;
+      }
     }
     errorsPullAt[remoteTaskId] = errorServerTime;
   }
-  if (errorsInserted > 0) console.log(`Pulled ${errorsInserted} new error(s).`);
+  if (errorsInserted > 0 || errorsUpdated > 0) {
+    const errorConflictNote = errorConflicts > 0 ? ` (${errorConflicts} conflict(s), resolved via ${onConflict})` : '';
+    console.log(`Pulled ${errorsInserted} new error(s), updated ${errorsUpdated} existing error(s)${errorConflictNote}.`);
+  }
 
   const openQuestionsPullAt = { ...(config.openQuestionsPullAt ?? {}) };
   let openQuestionsInserted = 0;
+  let openQuestionsUpdated = 0;
+  let openQuestionConflicts = 0;
   for (const task of linkedTasks) {
     const remoteTaskId = task.remoteId!;
     const since = openQuestionsPullAt[remoteTaskId];
     const { openQuestions, serverTime: questionServerTime } = await syncClient.pullOpenQuestions(config.serverUrl, config.token, remoteTaskId, since);
     for (const remoteQuestion of openQuestions) {
-      if (store.getOpenQuestionByRemoteId(remoteQuestion.remoteId)) continue;
-      store.insertPulledOpenQuestion({
-        taskId: task.id,
-        remoteId: remoteQuestion.remoteId,
-        text: remoteQuestion.text,
-        resolved: remoteQuestion.resolved,
-        createdAt: remoteQuestion.createdAt,
-        syncedAt: questionServerTime,
-      });
-      openQuestionsInserted++;
+      const local = store.getOpenQuestionByRemoteId(remoteQuestion.remoteId);
+      if (local) {
+        const hasUnpushedLocalChange = !local.syncedAt || local.updatedAt > local.syncedAt;
+        if (hasUnpushedLocalChange) {
+          const diffs = diffFields(
+            { text: local.text, resolved: local.resolved },
+            { text: remoteQuestion.text, resolved: remoteQuestion.resolved },
+          );
+          if (diffs.length > 0) {
+            openQuestionConflicts++;
+            console.log(
+              `⚠ Conflict on open question ${local.id} — changed both locally and remotely since last sync. Differing field(s): ${diffs
+                .map((d) => `${d.field} (local: ${JSON.stringify(d.local)}, remote: ${JSON.stringify(d.remote)})`)
+                .join(', ')}. Resolving via ${onConflict}.`,
+            );
+            if (onConflict === 'local-wins') continue;
+          }
+        }
+        store.applyPulledOpenQuestion(local.id, {
+          text: remoteQuestion.text,
+          resolved: remoteQuestion.resolved,
+          updatedAt: remoteQuestion.updatedAt,
+          syncedAt: questionServerTime,
+        });
+        openQuestionsUpdated++;
+      } else {
+        store.insertPulledOpenQuestion({
+          taskId: task.id,
+          remoteId: remoteQuestion.remoteId,
+          text: remoteQuestion.text,
+          resolved: remoteQuestion.resolved,
+          createdAt: remoteQuestion.createdAt,
+          updatedAt: remoteQuestion.updatedAt,
+          syncedAt: questionServerTime,
+        });
+        openQuestionsInserted++;
+      }
     }
     openQuestionsPullAt[remoteTaskId] = questionServerTime;
   }
-  if (openQuestionsInserted > 0) console.log(`Pulled ${openQuestionsInserted} new open question(s).`);
+  if (openQuestionsInserted > 0 || openQuestionsUpdated > 0) {
+    const openQuestionConflictNote =
+      openQuestionConflicts > 0 ? ` (${openQuestionConflicts} conflict(s), resolved via ${onConflict})` : '';
+    console.log(
+      `Pulled ${openQuestionsInserted} new open question(s), updated ${openQuestionsUpdated} existing open question(s)${openQuestionConflictNote}.`,
+    );
+  }
 
   const commandsPullAt = { ...(config.commandsPullAt ?? {}) };
   let commandsInserted = 0;
+  let commandsUpdated = 0;
+  let commandConflicts = 0;
   for (const task of linkedTasks) {
     const remoteTaskId = task.remoteId!;
     const since = commandsPullAt[remoteTaskId];
     const { commands, serverTime: commandServerTime } = await syncClient.pullCommands(config.serverUrl, config.token, remoteTaskId, since);
     for (const remoteCommand of commands) {
-      if (store.getCommandByRemoteId(remoteCommand.remoteId)) continue;
-      store.insertPulledCommand({
-        taskId: task.id,
-        remoteId: remoteCommand.remoteId,
-        cmdRedacted: remoteCommand.cmdRedacted,
-        exitCode: remoteCommand.exitCode,
-        summary: remoteCommand.summary,
-        createdAt: remoteCommand.createdAt,
-        syncedAt: commandServerTime,
-      });
-      commandsInserted++;
+      const local = store.getCommandByRemoteId(remoteCommand.remoteId);
+      if (local) {
+        const hasUnpushedLocalChange = !local.syncedAt || local.updatedAt > local.syncedAt;
+        if (hasUnpushedLocalChange) {
+          const diffs = diffFields(
+            { cmdRedacted: local.cmdRedacted, exitCode: local.exitCode, summary: local.summary },
+            { cmdRedacted: remoteCommand.cmdRedacted, exitCode: remoteCommand.exitCode, summary: remoteCommand.summary },
+          );
+          if (diffs.length > 0) {
+            commandConflicts++;
+            console.log(
+              `⚠ Conflict on command ${local.id} — changed both locally and remotely since last sync. Differing field(s): ${diffs
+                .map((d) => `${d.field} (local: ${JSON.stringify(d.local)}, remote: ${JSON.stringify(d.remote)})`)
+                .join(', ')}. Resolving via ${onConflict}.`,
+            );
+            if (onConflict === 'local-wins') continue;
+          }
+        }
+        store.applyPulledCommand(local.id, {
+          cmdRedacted: remoteCommand.cmdRedacted,
+          exitCode: remoteCommand.exitCode,
+          summary: remoteCommand.summary,
+          updatedAt: remoteCommand.updatedAt,
+          syncedAt: commandServerTime,
+        });
+        commandsUpdated++;
+      } else {
+        store.insertPulledCommand({
+          taskId: task.id,
+          remoteId: remoteCommand.remoteId,
+          cmdRedacted: remoteCommand.cmdRedacted,
+          exitCode: remoteCommand.exitCode,
+          summary: remoteCommand.summary,
+          createdAt: remoteCommand.createdAt,
+          updatedAt: remoteCommand.updatedAt,
+          syncedAt: commandServerTime,
+        });
+        commandsInserted++;
+      }
     }
     commandsPullAt[remoteTaskId] = commandServerTime;
   }
-  if (commandsInserted > 0) console.log(`Pulled ${commandsInserted} new command(s).`);
+  if (commandsInserted > 0 || commandsUpdated > 0) {
+    const commandConflictNote = commandConflicts > 0 ? ` (${commandConflicts} conflict(s), resolved via ${onConflict})` : '';
+    console.log(`Pulled ${commandsInserted} new command(s), updated ${commandsUpdated} existing command(s)${commandConflictNote}.`);
+  }
 
   writeSyncConfig(
     { ...config, lastTasksPullAt: serverTime, checkpointsPullAt, todosPullAt, decisionsPullAt, errorsPullAt, openQuestionsPullAt, commandsPullAt },
@@ -635,7 +948,7 @@ async function listAllRemoteTasksPaged(serverUrl: string, token: string): Promis
  * this always shows everything regardless of team size.
  */
 export async function runSyncListRemote(profileName?: string): Promise<void> {
-  const config = requireSyncConfig(profileName);
+  const config = await ensureConfiguredSyncTunnel(requireSyncConfig(profileName));
   const tasks = await listAllRemoteTasksPaged(config.serverUrl, config.token);
   if (tasks.length === 0) {
     console.log('No tasks on the server yet.');

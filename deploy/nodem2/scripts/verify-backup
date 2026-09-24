@@ -1,0 +1,105 @@
+#!/bin/sh
+# Verifies one backup by restoring it into a throwaway database.
+#
+#   verify-backup [ariadne-YYYYMMDDTHHMMSSZ.dump]
+#
+# Without an argument the newest complete backup is verified. The dump is only
+# ever restored into a freshly created, isolated verification database, which is
+# dropped again on every exit path; the production database is never touched and
+# the backup itself is never modified or deleted.
+set -eu
+umask 077
+
+SCRIPT_DIR=$(unset CDPATH; cd -- "$(dirname -- "$0")" && pwd)
+# shellcheck source=deploy/nodem2/scripts/lib-common
+. "$SCRIPT_DIR/lib-common"
+ARIADNE_LOG_TAG=ariadne-backup-verify
+
+VERIFY_DB=""
+TARGET=""
+VERIFY_RECORD_BASE=""
+VERIFY_RECORD_FAILURE_ENABLED=0
+
+on_exit() {
+    status=$?
+    if [ -n "$VERIFY_DB" ]; then
+        if ariadne_psql "$ARIADNE_MAINTENANCE_DB" \
+            "DROP DATABASE IF EXISTS $VERIFY_DB WITH (FORCE)" >/dev/null 2>&1; then
+            log "dropped verification database $VERIFY_DB"
+        else
+            log "warning: verification database $VERIFY_DB could not be dropped"
+        fi
+        VERIFY_DB=""
+    fi
+    if [ "$status" -ne 0 ] && [ -n "$VERIFY_RECORD_BASE" ] &&
+        [ "$VERIFY_RECORD_FAILURE_ENABLED" -eq 1 ]; then
+        ariadne_record_backup_metadata "$VERIFY_RECORD_BASE" verify_failed
+    fi
+    if [ "$status" -ne 0 ]; then
+        log "verification failed for ${TARGET:-the selected backup}"
+    fi
+    exit "$status"
+}
+
+[ "$#" -le 1 ] || fail "usage: verify-backup [ariadne-YYYYMMDDTHHMMSSZ.dump]"
+
+ariadne_require_backup_inputs
+
+if [ "$#" -eq 1 ]; then
+    ariadne_validate_backup_name "$1"
+else
+    ARIADNE_BACKUP_BASE=$(ariadne_newest_backup)
+    [ -n "$ARIADNE_BACKUP_BASE" ] || fail "no complete backup is available to verify"
+fi
+
+ariadne_require_backup_set "$ARIADNE_BACKUP_BASE"
+TARGET="$ARIADNE_BACKUP_BASE.dump"
+DUMP="$ARIADNE_BACKUP_DIR/$TARGET"
+VERIFY_RECORD_BASE="$ARIADNE_BACKUP_BASE"
+VERIFY_RECORD_FAILURE_ENABLED=1
+
+# Identity is reported before the checks run so a failed verification is still
+# attributed to the backup it examined; the outcome comes from the exit code.
+ariadne_write_backup_result "$ARIADNE_BACKUP_BASE"
+
+log "verifying $TARGET"
+trap on_exit EXIT INT TERM
+ariadne_checksum_matches "$ARIADNE_BACKUP_BASE" ||
+    fail "checksum mismatch for $TARGET; the backup was not restored anywhere"
+
+ariadne_dump_is_readable "$DUMP" || fail "$TARGET could not be listed by pg_restore"
+
+STAMP=${ARIADNE_BACKUP_BASE#ariadne-}
+CANDIDATE_DB=$(printf 'ariadne_verify_%s_%s' "$STAMP" "$$" | tr 'TZ' 'tz')
+case "$CANDIDATE_DB" in
+    *[!a-z0-9_]*) fail "refusing to use a generated database name that is not plain identifier text" ;;
+esac
+
+VERIFY_DB="$CANDIDATE_DB"
+ariadne_psql "$ARIADNE_MAINTENANCE_DB" "CREATE DATABASE $CANDIDATE_DB" >/dev/null ||
+    fail "failed to create the isolated verification database"
+
+ariadne_compose exec -T postgres pg_restore \
+    --no-owner --no-acl --exit-on-error \
+    --username "$ARIADNE_DB_USER" --dbname "$VERIFY_DB" <"$DUMP" ||
+    fail "$TARGET could not be restored into $VERIFY_DB"
+
+SCHEMA_VERSION=$(ariadne_psql "$VERIFY_DB" 'SELECT max(filename) FROM migrations_applied' |
+    tr -d ' \t\r\n') || fail "the restored archive has no readable migration history"
+[ -n "$SCHEMA_VERSION" ] || fail "the restored archive has no applied migrations"
+
+TABLE_COUNT=$(ariadne_psql "$VERIFY_DB" \
+    "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public'" |
+    tr -d ' \t\r\n') || fail "the restored archive has no readable table catalogue"
+case "$TABLE_COUNT" in
+    "" | *[!0-9]*) fail "the restored archive returned an unreadable table count" ;;
+esac
+[ "$TABLE_COUNT" -gt 0 ] || fail "the restored archive contains no tables"
+
+VERIFY_MESSAGE="verified: schema $SCHEMA_VERSION, $TABLE_COUNT tables"
+VERIFY_RECORD_FAILURE_ENABLED=0
+ariadne_record_backup_metadata "$ARIADNE_BACKUP_BASE" verified "$VERIFY_MESSAGE"
+ariadne_write_backup_result "$ARIADNE_BACKUP_BASE" \
+    "$VERIFY_MESSAGE"
+
+log "verified $TARGET: schema $SCHEMA_VERSION, $TABLE_COUNT tables"

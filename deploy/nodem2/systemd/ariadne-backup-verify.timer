@@ -1,0 +1,14 @@
+# Restores the newest backup into a throwaway database every Sunday at 03:30.
+[Unit]
+Description=Weekly Ariadne PostgreSQL backup verification
+Documentation=https://github.com/LAKSHYAKUMAR45/Ariadne
+
+[Timer]
+Unit=ariadne-backup-verify.service
+OnCalendar=Sun *-*-* 03:30:00
+Persistent=true
+RandomizedDelaySec=600
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

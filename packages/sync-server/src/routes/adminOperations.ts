@@ -1,0 +1,904 @@
+import { randomUUID, timingSafeEqual } from 'node:crypto';
+import type { Socket } from 'node:net';
+import express, { Router, type NextFunction, type Request, type Response } from 'express';
+import type { Pool } from 'pg';
+import { z } from 'zod';
+import { requireSingletonAdmin } from '../adminAccess.js';
+import { ApiError, isPayloadTooLargeError } from '../errors.js';
+import {
+  asyncHandler,
+  createDatabaseUnavailableError,
+  isDatabaseError,
+  type AuthenticatedRequest,
+} from '../middleware.js';
+import {
+  OperatorClientError,
+  type OperatorClientErrorCode,
+  type OperatorClient,
+  type OperatorSubmitRequest,
+} from '../operatorClient.js';
+import type {
+  DeploymentStatusResult,
+  OperatorQueryClient,
+} from '../operatorQueryClient.js';
+import { confirmationFor, requireConfirmation } from '../operationConfirmation.js';
+import {
+  AdminOperationNotFoundError,
+  OperationTransitionError,
+  type AdminOperation,
+  type AdminOperationType,
+  type BackupRecordStatus,
+  type OperationsStore,
+  type UpsertBackupRecordInput,
+} from '../operationsStore.js';
+
+/**
+ * Plan 04 supplies the dashboard reauthentication middleware that sets this
+ * marker. Until then these routes fail closed: an unmarked request is rejected
+ * rather than being granted a temporary bypass.
+ */
+export interface ReauthenticatedAdminRequest extends AuthenticatedRequest {
+  adminReauthenticated?: boolean;
+}
+
+export const ADMIN_OPERATION_SOURCE = 'admin_api';
+export const OPERATOR_CALLBACK_SOURCE = 'operator_callback';
+export const OPERATOR_CALLBACK_TOKEN_HEADER = 'x-ariadne-operator-token';
+export const OPERATOR_CALLBACK_UID = 0;
+export const DEFAULT_HEARTBEAT_INTERVAL_MS = 15_000;
+export const DEFAULT_POLL_INTERVAL_MS = 1_000;
+export const DEFAULT_MAX_STREAM_DURATION_MS = 30 * 60 * 1000;
+const MAX_OPERATION_LIST_LIMIT = 200;
+const DEFAULT_OPERATION_LIST_LIMIT = 50;
+const OPERATOR_SUBMISSION_FAILED_MESSAGE = 'Operator submission failed';
+const OPERATOR_SUBMISSION_UNCERTAIN_MESSAGE =
+  'Operator submission status is uncertain; awaiting callback or reconciliation';
+const UNCERTAIN_SUBMISSION_FAILURE_CODES = new Set<OperatorClientErrorCode>([
+  'operator_timeout',
+  'operator_unavailable',
+  // A malformed or oversized acceptance body is only observable *after* the
+  // operator has already read the request, so it may well have been admitted
+  // and started. Treating it as a definite failure would close out an
+  // operation that is still running; the operation stays queued for the
+  // callback instead.
+  'operator_invalid_response',
+]);
+
+const OPERATION_ID_PATTERN = /^[A-Za-z0-9_-]{1,200}$/;
+const REVISION_PATTERN = /^[0-9a-f]{40}$/;
+const BACKUP_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/;
+/** Exactly the artifact names deploy/nodem2/scripts publishes. */
+const BACKUP_ARTIFACT_PATTERN = /^ariadne-\d{8}T\d{6}Z\.dump$/;
+
+const serviceRestartBodySchema = z.object({
+  service: z.enum(['sync-server', 'postgres']),
+  confirmation: z.string(),
+});
+
+const deployBodySchema = z.object({
+  revision: z.string().regex(REVISION_PATTERN),
+  confirmation: z.string(),
+});
+
+const restoreBodySchema = z
+  .object({
+    confirmation: z.string(),
+  })
+  .strict();
+
+export interface AdminOperationsRouterOptions {
+  operationsStore: OperationsStore;
+  /** `null` when no operator socket is configured for this deployment. */
+  operatorClient: OperatorClient | null;
+  operatorQueryClient?: OperatorQueryClient | null;
+  heartbeatIntervalMs?: number;
+  pollIntervalMs?: number;
+  maxStreamDurationMs?: number;
+  generateOperationId?: () => string;
+}
+
+interface OperationSpec {
+  type: AdminOperationType;
+  summary: string;
+  metadata: Record<string, string>;
+  confirmation?: {
+    expected: string;
+    provided: unknown;
+  };
+  beforeCreate?(): Promise<void>;
+  buildOperatorRequest(operationId: string): OperatorSubmitRequest;
+}
+
+function noStore(res: Response): void {
+  res.setHeader('Cache-Control', 'no-store');
+}
+
+function invalidRequest(message: string): ApiError {
+  return new ApiError(400, 'invalid_request', message);
+}
+
+function parseBody<T>(schema: z.ZodType<T>, body: unknown, message: string): T {
+  const parsed = schema.safeParse(body ?? {});
+  if (!parsed.success) {
+    throw invalidRequest(message);
+  }
+  return parsed.data;
+}
+
+function requireOperationId(value: unknown): string {
+  if (typeof value !== 'string' || !OPERATION_ID_PATTERN.test(value)) {
+    throw invalidRequest('operationId must be an opaque identifier');
+  }
+  return value;
+}
+
+function requireBackupName(value: unknown): string {
+  if (
+    typeof value !== 'string' ||
+    value === '.' ||
+    value === '..' ||
+    !BACKUP_NAME_PATTERN.test(value)
+  ) {
+    throw invalidRequest('backup name must be a plain file name without path separators');
+  }
+  return value;
+}
+
+function parseListLimit(value: unknown): number {
+  if (value === undefined) {
+    return DEFAULT_OPERATION_LIST_LIMIT;
+  }
+  const limit = Number(value);
+  if (!Number.isInteger(limit) || limit < 1 || limit > MAX_OPERATION_LIST_LIMIT) {
+    throw invalidRequest(`limit must be an integer from 1 to ${MAX_OPERATION_LIST_LIMIT}`);
+  }
+  return limit;
+}
+
+function serializeOperation(operation: AdminOperation): AdminOperation {
+  return { ...operation };
+}
+
+function writeSseEvent(res: Response, name: string, payload: unknown, id?: number): void {
+  if (res.writableEnded) {
+    return;
+  }
+  const idLine = id === undefined ? '' : `id: ${id}\n`;
+  res.write(`${idLine}event: ${name}\ndata: ${JSON.stringify(payload)}\n\n`);
+}
+
+export function createAdminOperationsRouter(
+  pool: Pool,
+  options: AdminOperationsRouterOptions,
+): Router {
+  const router = Router();
+  const store = options.operationsStore;
+  const operatorClient = options.operatorClient;
+  const operatorQueryClient = options.operatorQueryClient ?? null;
+  const heartbeatIntervalMs = options.heartbeatIntervalMs ?? DEFAULT_HEARTBEAT_INTERVAL_MS;
+  const pollIntervalMs = options.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
+  const maxStreamDurationMs = options.maxStreamDurationMs ?? DEFAULT_MAX_STREAM_DURATION_MS;
+  const generateOperationId = options.generateOperationId ?? (() => randomUUID());
+
+  async function requireReauthenticatedAdmin(
+    req: ReauthenticatedAdminRequest,
+  ): Promise<string> {
+    await requireSingletonAdmin(pool, req.userId!);
+    if (req.adminReauthenticated !== true) {
+      throw new ApiError(
+        403,
+        'reauthentication_required',
+        'This action requires a freshly reauthenticated dashboard session',
+      );
+    }
+    return req.userId!;
+  }
+
+  async function markSubmissionFailed(
+    operationId: string,
+    actorUserId: string,
+    reason: string,
+  ): Promise<void> {
+    try {
+      await store.transitionOperation({
+        id: operationId,
+        nextState: 'failed',
+        actorUserId,
+        source: ADMIN_OPERATION_SOURCE,
+        message: OPERATOR_SUBMISSION_FAILED_MESSAGE,
+        // Only the fixed error code is persisted: transport detail can carry
+        // deployment paths or command fragments.
+        metadata: { reason },
+        output: null,
+      });
+    } catch (error: unknown) {
+      console.error('Failed to record operator submission failure', {
+        operationId,
+        reason,
+        error,
+      });
+      if (isDatabaseError(error)) {
+        throw createDatabaseUnavailableError();
+      }
+      throw new ApiError(
+        503,
+        'operation_state_uncertain',
+        'The operator submission failed, but its durable operation state could not be recorded',
+      );
+    }
+  }
+
+  async function recordUncertainSubmission(
+    operationId: string,
+    actorUserId: string,
+    reason: OperatorClientErrorCode,
+  ): Promise<void> {
+    try {
+      await store.recordAuditEvent({
+        actorUserId,
+        action: 'admin_operation.submission_uncertain',
+        source: ADMIN_OPERATION_SOURCE,
+        outcome: 'queued',
+        metadata: {
+          operationId,
+          state: 'queued',
+          reason,
+          message: OPERATOR_SUBMISSION_UNCERTAIN_MESSAGE,
+        },
+      });
+    } catch (error: unknown) {
+      console.error('Failed to record uncertain operator submission', {
+        operationId,
+        reason,
+        error,
+      });
+    }
+  }
+
+  async function submitOperation(
+    req: ReauthenticatedAdminRequest,
+    res: Response,
+    spec: OperationSpec,
+  ): Promise<void> {
+    const userId = await requireReauthenticatedAdmin(req);
+    if (spec.confirmation) {
+      try {
+        requireConfirmation(spec.confirmation.expected, spec.confirmation.provided);
+      } catch {
+        throw new ApiError(
+          400,
+          'confirmation_mismatch',
+          'Confirmation text does not match the requested action',
+        );
+      }
+    }
+    await spec.beforeCreate?.();
+    const operationId = generateOperationId();
+
+    // Queued record first: an operator submission must never run without an
+    // audited operation row to attribute it to.
+    const operation = await store.createOperation({
+      id: operationId,
+      requestedBy: userId,
+      type: spec.type,
+      summary: spec.summary,
+      source: ADMIN_OPERATION_SOURCE,
+      metadata: spec.metadata,
+    });
+
+    if (!operatorClient) {
+      await markSubmissionFailed(operationId, userId, 'operator_unavailable');
+      throw new ApiError(
+        503,
+        'operator_unavailable',
+        'The operator service is not configured for this deployment',
+      );
+    }
+
+    try {
+      await operatorClient.submit(spec.buildOperatorRequest(operationId));
+    } catch (error: unknown) {
+      if (error instanceof OperatorClientError) {
+        if (UNCERTAIN_SUBMISSION_FAILURE_CODES.has(error.code)) {
+          await recordUncertainSubmission(operationId, userId, error.code);
+        } else {
+          await markSubmissionFailed(operationId, userId, error.code);
+        }
+        throw new ApiError(error.status, error.code, error.message);
+      }
+      await markSubmissionFailed(operationId, userId, 'operator_submission_error');
+      throw error;
+    }
+
+    noStore(res);
+    res.status(202).json({ accepted: true, operation: serializeOperation(operation) });
+  }
+
+  function requireOperatorQueryClient(): OperatorQueryClient {
+    if (!operatorQueryClient) {
+      throw new ApiError(503, 'operator_unavailable', 'The operator service is not configured');
+    }
+    return operatorQueryClient;
+  }
+
+  async function loadDeploymentStatus(): Promise<DeploymentStatusResult> {
+    const result = await requireOperatorQueryClient().query({ type: 'deployment_status' });
+    if (
+      typeof result !== 'object' ||
+      result === null ||
+      !('currentRevision' in result) ||
+      !('rollbackRevision' in result) ||
+      !('candidates' in result)
+    ) {
+      throw new ApiError(503, 'operator_invalid_response', 'The operator service returned an unusable response');
+    }
+    return result as DeploymentStatusResult;
+  }
+
+  router.get(
+    '/operations',
+    asyncHandler(async (req: ReauthenticatedAdminRequest, res) => {
+      await requireReauthenticatedAdmin(req);
+      const limit = parseListLimit((req.query as Record<string, unknown>).limit);
+      const { operations } = await store.listOperations({ limit });
+      noStore(res);
+      res.status(200).json({ operations: operations.map(serializeOperation) });
+    }),
+  );
+
+  router.get(
+    '/operations/:operationId',
+    asyncHandler(async (req: ReauthenticatedAdminRequest, res) => {
+      await requireReauthenticatedAdmin(req);
+      const operationId = requireOperationId(req.params.operationId);
+      const operation = await store.getOperation(operationId);
+      if (!operation) {
+        throw new ApiError(404, 'operation_not_found', 'No such admin operation');
+      }
+      noStore(res);
+      res.status(200).json({ operation: serializeOperation(operation) });
+    }),
+  );
+
+  router.get(
+    '/operations/:operationId/events',
+    asyncHandler(async (req: ReauthenticatedAdminRequest, res) => {
+      await requireReauthenticatedAdmin(req);
+      const operationId = requireOperationId(req.params.operationId);
+      const existing = await store.getOperation(operationId);
+      if (!existing) {
+        throw new ApiError(404, 'operation_not_found', 'No such admin operation');
+      }
+
+      res.status(200);
+      res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+      res.setHeader('Cache-Control', 'no-store');
+      res.setHeader('Connection', 'keep-alive');
+      res.setHeader('X-Accel-Buffering', 'no');
+      res.flushHeaders();
+
+      const parsedLastEventId = Number(req.header('last-event-id'));
+      let lastEventId = Number.isInteger(parsedLastEventId) ? parsedLastEventId : 0;
+      let closed = false;
+      let polling = false;
+
+      const heartbeat = setInterval(() => {
+        if (!res.writableEnded) {
+          res.write(': heartbeat\n\n');
+        }
+      }, heartbeatIntervalMs);
+      const poller = setInterval(() => {
+        void poll();
+      }, pollIntervalMs);
+      const durationLimit = setTimeout(() => {
+        writeSseEvent(res, 'timeout', { operationId });
+        close();
+      }, maxStreamDurationMs);
+
+      function close(): void {
+        if (closed) {
+          return;
+        }
+        closed = true;
+        clearInterval(heartbeat);
+        clearInterval(poller);
+        clearTimeout(durationLimit);
+        if (!res.writableEnded) {
+          res.end();
+        }
+      }
+
+      async function poll(): Promise<void> {
+        if (closed || polling) {
+          return;
+        }
+        polling = true;
+        try {
+          const events = await store.listOperationEvents(operationId);
+          for (const event of events) {
+            if (event.id <= lastEventId) {
+              continue;
+            }
+            lastEventId = event.id;
+            writeSseEvent(
+              res,
+              'operation_event',
+              {
+                id: event.id,
+                operationId: event.operationId,
+                state: event.state,
+                message: event.message,
+                metadata: event.metadata,
+                createdAt: event.createdAt,
+              },
+              event.id,
+            );
+          }
+
+          const current = await store.getOperation(operationId);
+          if (!current || current.state === 'succeeded' || current.state === 'failed') {
+            writeSseEvent(res, 'complete', {
+              operationId,
+              state: current?.state ?? 'failed',
+            });
+            close();
+          }
+        } catch (error: unknown) {
+          console.error('Admin operation event stream failed', { operationId, error });
+          close();
+        } finally {
+          polling = false;
+        }
+      }
+
+      req.on('close', close);
+      res.on('close', close);
+
+      await poll();
+    }),
+  );
+
+  router.post(
+    '/operations/service-restart',
+    asyncHandler(async (req: ReauthenticatedAdminRequest, res) => {
+      const { service, confirmation } = parseBody(
+        serviceRestartBodySchema,
+        req.body,
+        'service must be one of: sync-server, postgres',
+      );
+      await submitOperation(req, res, {
+        type: 'service_restart',
+        summary: `Restart ${service} service`,
+        metadata: { service },
+        confirmation: {
+          expected: confirmationFor.serviceRestart(service),
+          provided: confirmation,
+        },
+        buildOperatorRequest: (operationId) => ({
+          operationId,
+          type: 'service_restart',
+          service,
+        }),
+      });
+    }),
+  );
+
+  router.post(
+    '/operations/deploy',
+    asyncHandler(async (req: ReauthenticatedAdminRequest, res) => {
+      const { revision, confirmation } = parseBody(
+        deployBodySchema,
+        req.body,
+        'revision must be a 40-character lowercase hexadecimal commit sha',
+      );
+      await submitOperation(req, res, {
+        type: 'deployment_apply',
+        summary: `Deploy revision ${revision}`,
+        metadata: { revision },
+        confirmation: {
+          expected: confirmationFor.deploy(revision),
+          provided: confirmation,
+        },
+        async beforeCreate() {
+          const deployment = await loadDeploymentStatus();
+          if (!deployment.candidates.some((candidate) => candidate.revision === revision)) {
+            throw new ApiError(
+              409,
+              'deployment_revision_not_allowed',
+              'The selected revision is not currently deployable',
+            );
+          }
+        },
+        buildOperatorRequest: (operationId) => ({
+          operationId,
+          type: 'deployment_apply',
+          revision,
+        }),
+      });
+    }),
+  );
+
+  router.post(
+    '/operations/rollback',
+    asyncHandler(async (req: ReauthenticatedAdminRequest, res) => {
+      const { revision, confirmation } = parseBody(
+        deployBodySchema,
+        req.body,
+        'revision must be a 40-character lowercase hexadecimal commit sha',
+      );
+      await submitOperation(req, res, {
+        type: 'deployment_rollback',
+        summary: `Rollback to revision ${revision}`,
+        metadata: { revision },
+        confirmation: {
+          expected: confirmationFor.rollback(revision),
+          provided: confirmation,
+        },
+        async beforeCreate() {
+          const deployment = await loadDeploymentStatus();
+          if (deployment.rollbackRevision !== revision) {
+            throw new ApiError(
+              409,
+              'rollback_revision_not_allowed',
+              'The selected revision is not the currently eligible rollback target',
+            );
+          }
+        },
+        buildOperatorRequest: (operationId) => ({
+          operationId,
+          type: 'deployment_rollback',
+          revision,
+        }),
+      });
+    }),
+  );
+
+  router.post(
+    '/operations/backups',
+    asyncHandler(async (req: ReauthenticatedAdminRequest, res) => {
+      await submitOperation(req, res, {
+        type: 'backup_create',
+        summary: 'Create database backup',
+        metadata: {},
+        buildOperatorRequest: (operationId) => ({ operationId, type: 'backup_create' }),
+      });
+    }),
+  );
+
+  router.post(
+    '/operations/backups/:name/verify',
+    asyncHandler(async (req: ReauthenticatedAdminRequest, res) => {
+      const backupName = requireBackupName(req.params.name);
+      await submitOperation(req, res, {
+        type: 'backup_verify',
+        summary: `Verify backup ${backupName}`,
+        metadata: { backupName },
+        buildOperatorRequest: (operationId) => ({
+          operationId,
+          type: 'backup_verify',
+          backupName,
+        }),
+      });
+    }),
+  );
+
+  router.post(
+    '/operations/backups/:name/restore',
+    asyncHandler(async (req: ReauthenticatedAdminRequest, res) => {
+      const backupName = requireBackupName(req.params.name);
+      const { confirmation } = parseBody(
+        restoreBodySchema,
+        req.body,
+        'confirmation must match the selected backup restore action',
+      );
+      await submitOperation(req, res, {
+        type: 'backup_restore',
+        summary: `Restore backup ${backupName}`,
+        metadata: { backupName },
+        confirmation: {
+          expected: confirmationFor.restore(backupName),
+          provided: confirmation,
+        },
+        async beforeCreate() {
+          const backup = await store.getBackupRecord(backupName);
+          if (!backup || backup.status !== 'verified') {
+            throw new ApiError(
+              409,
+              'backup_not_verified',
+              'Only currently verified backups can be restored',
+            );
+          }
+        },
+        buildOperatorRequest: (operationId) => ({
+          operationId,
+          type: 'backup_restore',
+          backupName,
+        }),
+      });
+    }),
+  );
+
+  return router;
+}
+
+
+/**
+ * Strict description of a backup artifact, mirroring the operator's own
+ * validated result schema (`@ariadne-dev/operator`). Every field is
+ * pattern-bounded, so this channel can only ever carry facts about a backup —
+ * never command output, a path, or free-form text. A callback that supplies
+ * anything else is rejected outright rather than partially recorded.
+ */
+const callbackBackupSchema = z
+  .object({
+    filename: z.string().regex(BACKUP_ARTIFACT_PATTERN),
+    sha256: z.string().regex(/^[0-9a-f]{64}$/),
+    sizeBytes: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
+    createdAt: z.string().regex(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/),
+    message: z
+      .string()
+      .min(1)
+      .max(200)
+      .regex(/^[A-Za-z0-9 ._:,;()-]+$/)
+      .optional(),
+  })
+  .strict();
+
+const callbackBodySchema = z
+  .object({
+    operationId: z.string().regex(OPERATION_ID_PATTERN),
+    state: z.enum(['running', 'succeeded', 'failed']),
+    message: z.string().min(1).max(2000).optional(),
+    output: z.string().nullable().optional(),
+    metadata: z.record(z.union([z.string(), z.number(), z.boolean(), z.null()])).optional(),
+    backup: callbackBackupSchema.optional(),
+  })
+  .strict();
+
+type CallbackBackup = z.infer<typeof callbackBackupSchema>;
+
+/**
+ * Maps a terminal operator result onto the backup artifact status it implies.
+ *
+ * A failed `backup_create` has no artifact to record — nothing was published —
+ * while a failed verification or restore must still be attributed to the
+ * backup it acted on, which is why those failures produce a row.
+ */
+function backupRecordStatus(
+  type: AdminOperationType,
+  state: 'succeeded' | 'failed',
+): BackupRecordStatus | null {
+  switch (type) {
+    case 'backup_create':
+      return state === 'succeeded' ? 'created' : null;
+    case 'backup_verify':
+      return state === 'succeeded' ? 'verified' : 'verify_failed';
+    case 'backup_restore':
+      return state === 'succeeded' ? 'restored' : 'restore_failed';
+    default:
+      return null;
+  }
+}
+
+function buildBackupRecord(
+  type: AdminOperationType,
+  state: 'running' | 'succeeded' | 'failed',
+  backup: CallbackBackup | undefined,
+  observedAt: string,
+): UpsertBackupRecordInput | undefined {
+  if (!backup || state === 'running') {
+    return undefined;
+  }
+  const status = backupRecordStatus(type, state);
+  if (!status) {
+    return undefined;
+  }
+
+  return {
+    filename: backup.filename,
+    sha256: backup.sha256,
+    sizeBytes: backup.sizeBytes,
+    status,
+    createdAt: backup.createdAt,
+    // The operator reports identity, not clocks: a successful verification is
+    // timestamped when the web tier records it.
+    verifiedAt: status === 'verified' ? observedAt : null,
+    restoreVerificationMessage: backup.message ?? null,
+  };
+}
+
+export interface OperatorCallbackRouterOptions {
+  operationsStore: OperationsStore;
+  /**
+   * Returns the shared credential the root operator writes to the `/run`
+   * tmpfs, or `null` when none is provisioned. Read per request so a token
+   * regenerated after a reboot is picked up without a restart.
+   */
+  readCallbackToken(): Promise<string | null> | string | null;
+  /**
+   * Peer UID of the calling process when the platform exposes it, or `null`
+   * when it does not. Node has no portable `SO_PEERCRED` accessor, so this is
+   * an injection point: when a UID is available it must be root's.
+   */
+  verifyPeerUid?(socket: Socket | undefined): number | null;
+  /** Overridable only so tests can exercise the over-limit path cheaply. */
+  bodyLimit?: string;
+}
+
+/**
+ * The operator reports up to `DEFAULT_OUTPUT_TAIL_BYTES` (256 KiB) of command
+ * output in a terminal callback, and JSON string escaping inflates that by up
+ * to 6x for quote- or control-character-saturated output. The reporter keeps
+ * its serialized request within its own 1 MiB ceiling
+ * (`MAX_CALLBACK_REQUEST_BODY_BYTES` in `@ariadne-dev/operator`), truncating
+ * the tail further when escaping demands it; this route parses with headroom
+ * above that ceiling so a legally fitted body is never rejected, while still
+ * imposing a hard bound on anything larger. Every other route keeps
+ * `express.json()`'s 100 KB default, which is why this router is mounted ahead
+ * of the global parser in `app.ts`.
+ */
+export const OPERATOR_CALLBACK_REQUEST_BODY_LIMIT = '2mb';
+
+/**
+ * Wraps the route-scoped parser so an over-limit callback becomes a stable 413
+ * instead of a generic 500. The raw `body` body-parser attaches to the error is
+ * dropped first: operator output routinely contains deployment paths and
+ * command fragments that must never reach a log line or an error response.
+ */
+function createCallbackBodyParser(limit: string) {
+  const parser = express.json({ limit });
+
+  return (req: Request, res: Response, next: NextFunction): void => {
+    parser(req, res, (error?: unknown) => {
+      if (!error) {
+        next();
+        return;
+      }
+      if (isPayloadTooLargeError(error)) {
+        delete (error as { body?: unknown }).body;
+        next(
+          new ApiError(
+            413,
+            'callback_payload_too_large',
+            'Operator callback exceeds the maximum request body size',
+          ),
+        );
+        return;
+      }
+      next(error);
+    });
+  };
+}
+
+function timingSafeMatches(provided: string, expected: string): boolean {
+  const providedBytes = Buffer.from(provided, 'utf8');
+  const expectedBytes = Buffer.from(expected, 'utf8');
+  if (providedBytes.length !== expectedBytes.length) {
+    return false;
+  }
+  return timingSafeEqual(providedBytes, expectedBytes);
+}
+
+function callbackForbidden(): ApiError {
+  // One fixed message for every rejection reason: a caller must not learn
+  // whether the token, its length, or the peer identity was wrong.
+  return new ApiError(403, 'callback_forbidden', 'Operator callback credentials were rejected');
+}
+
+/**
+ * Result-reporting channel for the root-owned operator service.
+ *
+ * Mounted without the dashboard session middleware — the operator holds no JWT
+ * — and therefore authenticates only with the shared root-created credential
+ * (plus a peer UID check where the platform offers one). A callback may move
+ * exactly one operation (the id in its own URL) and only through transitions
+ * the operations store considers legal.
+ */
+export function createOperatorCallbackRouter(options: OperatorCallbackRouterOptions): Router {
+  const router = Router();
+  const store = options.operationsStore;
+  const parseCallbackBody = createCallbackBodyParser(
+    options.bodyLimit ?? OPERATOR_CALLBACK_REQUEST_BODY_LIMIT,
+  );
+
+  async function authenticate(req: Request): Promise<void> {
+    const expected = await options.readCallbackToken();
+    if (!expected) {
+      throw new ApiError(
+        503,
+        'callback_unavailable',
+        'No operator callback credential is provisioned for this deployment',
+      );
+    }
+
+    const peerUid = options.verifyPeerUid?.(req.socket) ?? null;
+    if (peerUid !== null && peerUid !== OPERATOR_CALLBACK_UID) {
+      throw callbackForbidden();
+    }
+
+    const provided = req.header(OPERATOR_CALLBACK_TOKEN_HEADER);
+    if (typeof provided !== 'string' || !timingSafeMatches(provided, expected)) {
+      throw callbackForbidden();
+    }
+  }
+
+  router.post(
+    '/operations/:operationId/callback',
+    parseCallbackBody,
+    asyncHandler(async (req, res) => {
+      await authenticate(req);
+
+      const operationId = requireOperationId(req.params.operationId);
+      const parsed = callbackBodySchema.safeParse(req.body ?? {});
+      if (!parsed.success) {
+        throw invalidRequest('callback payload is not a valid operation result');
+      }
+      if (parsed.data.operationId !== operationId) {
+        throw invalidRequest('a callback may only update its own operation');
+      }
+
+      const existing = await store.getOperation(operationId);
+      if (!existing) {
+        throw new ApiError(404, 'operation_not_found', 'No such admin operation');
+      }
+
+      const { state, message, output, metadata, backup } = parsed.data;
+
+      // Repeating a report is how the operator recovers from a callback whose
+      // response never arrived, so redelivery of a state the operation already
+      // holds is success, not an error — and must not append a second event.
+      // A *different* terminal state still conflicts and is refused below.
+      if (state === existing.state) {
+        noStore(res);
+        res.status(200).json({ operation: serializeOperation(existing) });
+        return;
+      }
+
+      try {
+        // A result that arrives without its start report still has to pass
+        // through `running` so the stored lifecycle stays complete.
+        if (state !== 'running' && existing.state === 'queued') {
+          await store.transitionOperation({
+            id: operationId,
+            nextState: 'running',
+            actorUserId: existing.requestedBy,
+            source: OPERATOR_CALLBACK_SOURCE,
+            message: 'Operation started',
+            metadata: { reportedBy: 'operator' },
+          });
+        }
+
+        const operation = await store.transitionOperation({
+          id: operationId,
+          nextState: state,
+          actorUserId: existing.requestedBy,
+          source: OPERATOR_CALLBACK_SOURCE,
+          message: message ?? `Operation ${state}`,
+          metadata: { ...(metadata ?? {}), reportedBy: 'operator' },
+          output: output === undefined ? undefined : output,
+          // Written inside the transition's own transaction, so the artifact
+          // record and the terminal state are always recorded together.
+          backupRecord: buildBackupRecord(
+            existing.type,
+            state,
+            backup,
+            new Date().toISOString(),
+          ),
+        });
+
+        noStore(res);
+        res.status(200).json({ operation: serializeOperation(operation) });
+      } catch (error: unknown) {
+        if (error instanceof OperationTransitionError) {
+          throw new ApiError(409, 'illegal_transition', 'Operation is already in a terminal state');
+        }
+        if (error instanceof AdminOperationNotFoundError) {
+          throw new ApiError(404, 'operation_not_found', 'No such admin operation');
+        }
+        throw error;
+      }
+    }),
+  );
+
+  return router;
+}

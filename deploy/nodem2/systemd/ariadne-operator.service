@@ -1,0 +1,65 @@
+# Privileged operator service for the tracked nodem2 deployment.
+#
+# Install as /etc/systemd/system/ariadne-operator.service (deploy/nodem2/scripts/install
+# does this). The service exposes only the typed request socket described in
+# packages/operator/src/protocol.ts and runs nothing but the fixed installed
+# scripts under /usr/local/lib/ariadne.
+[Unit]
+Description=Ariadne privileged operator
+Documentation=https://github.com/LAKSHYAKUMAR45/Ariadne
+After=docker.service
+Wants=docker.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/node /opt/ariadne/worktree/packages/operator/dist/index.js
+WorkingDirectory=/opt/ariadne/worktree/packages/operator
+User=root
+Group=ariadne-web
+UMask=0077
+Restart=always
+RestartSec=2
+
+# /run/ariadne is owned root:ariadne-web 0750 so only the web tier can reach
+# the request socket and the callback credential. Preserved across restarts so
+# a restart never invalidates the token the running web container holds.
+RuntimeDirectory=ariadne
+RuntimeDirectoryMode=0750
+RuntimeDirectoryPreserve=yes
+
+Environment=NODE_ENV=production
+Environment=OPERATOR_SOCKET_PATH=/run/ariadne/operator.sock
+Environment=OPERATOR_CALLBACK_URL=http://127.0.0.1:4300/api/v1/admin/operations
+Environment=OPERATOR_CALLBACK_TOKEN_PATH=/run/ariadne/operator-callback-token
+
+# Only the paths the allowlisted scripts genuinely mutate are writable:
+# the runtime directory, the backup root, the deployment state and worktree,
+# and the Docker socket. /etc/ariadne stays read-only — secrets and encryption
+# keys are never rewritten by an operator-driven action.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/run/ariadne
+ReadWritePaths=/run/docker.sock
+ReadWritePaths=/var/backups/ariadne
+ReadWritePaths=/var/lib/ariadne
+ReadWritePaths=/opt/ariadne
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectClock=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictNamespaces=true
+LockPersonality=true
+SystemCallArchitectures=native
+
+# The deployment trust path has no network dependency. AF_INET/AF_INET6 remain
+# available only because the operator reports durable results to the
+# sync-server callback on 127.0.0.1:4300. Docker and Compose are driven through
+# /run/docker.sock.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

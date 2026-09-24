@@ -2,9 +2,12 @@
 import { Command } from 'commander';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import type { TaskStore, TodoStatus } from '@ariadne-dev/core';
+import * as os from 'node:os';
+import type { CaptureResult, TaskStore, TodoStatus } from '@ariadne-dev/core';
 import {
   buildContext,
+  captureTaskFiles,
+  throwSanitizedTaskFileCaptureFailure,
   syncTaskGit,
   exportTaskMarkdown,
   searchWorkspace,
@@ -25,7 +28,8 @@ import { openWorkspaceStore, findWorkspaceRoot, stateDbPath } from './workspace.
 import { readCurrentTaskId, setCurrentTaskId } from './currentTask.js';
 import { withResolvedTask, withScopedStore } from './withTask.js';
 import { runTaskExec } from './exec.js';
-import { runSyncRegister, runSyncLogin, runSyncLogout, runSyncPush, runSyncPull, runSyncListRemote, runSyncUnlink, runSyncProfileList, runSyncProfileUse } from './syncCommands.js';
+import { runSyncRegister, runSyncLogin, runSyncSetup, runSyncLogout, runSyncPush, runSyncPull, runSyncListRemote, runSyncUnlink, runSyncProfileList, runSyncProfileUse } from './syncCommands.js';
+import { generateAriadneSkillAndAgent } from './skillTemplates.js';
 
 const program = new Command();
 program.name('ariadne').description('Chats are disposable, tasks are permanent.').version('0.1.0');
@@ -57,6 +61,43 @@ function withStore<T>(fn: (store: TaskStore) => T): T {
   } catch (err) {
     store.close();
     throw err;
+  }
+}
+
+function logCaptureResult(result: CaptureResult): void {
+  if (result.capture) {
+    const byteCount = result.capture.entries.reduce((total, entry) => total + entry.byteLength, 0);
+    console.log(`Capture ${result.capture.id}: ${result.capture.entries.length} file(s), ${byteCount} byte(s).`);
+  } else {
+    console.log('No eligible task files captured (0 file(s), 0 byte(s)).');
+  }
+
+  if (result.skipped.length === 0) {
+    return;
+  }
+
+  console.log('Skipped files:');
+  for (const skip of result.skipped) {
+    console.log(`- ${skip.path} (${skip.reason})`);
+  }
+}
+
+function runTaskFileCapture(
+  store: TaskStore,
+  taskId: string,
+  workspaceRoot: string,
+  request: { trigger: 'checkpoint' | 'explicit'; checkpointId?: string },
+): void {
+  try {
+    const result = captureTaskFiles(store, {
+      taskId,
+      workspace: workspaceRoot,
+      trigger: request.trigger,
+      checkpointId: request.checkpointId,
+    });
+    logCaptureResult(result);
+  } catch {
+    throwSanitizedTaskFileCaptureFailure(store, taskId, request.trigger === 'checkpoint' ? 'checkpoint' : 'explicit capture');
   }
 }
 
@@ -191,9 +232,19 @@ program
   .option('-t, --task <id>', 'Task id')
   .option('-l, --level <level>', 'micro|session|milestone', 'micro')
   .action((summary: string, opts: { task?: string; level: 'micro' | 'session' | 'milestone' }) => {
-    withResolvedTask(opts.task, (store, taskId) => {
+    withResolvedTask(opts.task, (store, taskId, workspaceRoot) => {
       const cp = store.createCheckpoint({ taskId, level: opts.level, summary });
       console.log(`Recorded ${cp.level} checkpoint ${cp.id}.`);
+      runTaskFileCapture(store, taskId, workspaceRoot, { trigger: 'checkpoint', checkpointId: cp.id });
+    });
+  });
+
+program
+  .command('capture [task-id]')
+  .description('Capture tracked, task-touched text files for the current (or given) task')
+  .action((taskId: string | undefined) => {
+    withResolvedTask(taskId, (store, resolvedTaskId, workspaceRoot) => {
+      runTaskFileCapture(store, resolvedTaskId, workspaceRoot, { trigger: 'explicit' });
     });
   });
 
@@ -206,9 +257,10 @@ program
   .description('Record a decision for the current (or --task) task')
   .option('-t, --task <id>', 'Task id')
   .option('-r, --rationale <rationale>', 'Why this decision was made')
-  .action((text: string, opts: { task?: string; rationale?: string }) => {
+  .option('--supersedes <id>', 'Mark this decision as replacing an earlier one (demotes it to "historical" in status/resume)')
+  .action((text: string, opts: { task?: string; rationale?: string; supersedes?: string }) => {
     withResolvedTask(opts.task, (store, taskId) => {
-      const created = store.recordDecision({ taskId, text, rationale: opts.rationale });
+      const created = store.recordDecision({ taskId, text, rationale: opts.rationale, supersedesId: opts.supersedes });
       console.log(`Recorded decision ${created.id}: ${created.text}`);
     });
   });
@@ -240,19 +292,21 @@ decisions
 
 decisions
   .command('edit <id>')
-  .description('Edit a decision\'s text and/or rationale (curation)')
+  .description('Edit a decision\'s text, rationale, and/or supersedes link (curation)')
   .option('--text <text>', 'New text')
   .option('--rationale <rationale>', 'New rationale (pass an empty string to clear it)')
+  .option('--supersedes <id>', 'Mark this decision as replacing another one (pass an empty string to clear it)')
   .option('-t, --task <id>', 'Task id the decision belongs to, if not in the current workspace')
-  .action((id: string, opts: { text?: string; rationale?: string; task?: string }) => {
-    if (opts.text === undefined && opts.rationale === undefined) {
-      console.error('Nothing to edit — pass --text and/or --rationale.');
+  .action((id: string, opts: { text?: string; rationale?: string; supersedes?: string; task?: string }) => {
+    if (opts.text === undefined && opts.rationale === undefined && opts.supersedes === undefined) {
+      console.error('Nothing to edit — pass --text, --rationale, and/or --supersedes.');
       process.exit(1);
     }
     withScopedStore(opts.task, (store) => {
       store.updateDecision(id, {
         text: opts.text,
         rationale: opts.rationale !== undefined ? (opts.rationale === '' ? null : opts.rationale) : undefined,
+        supersedesId: opts.supersedes !== undefined ? (opts.supersedes === '' ? null : opts.supersedes) : undefined,
       });
       console.log(`Decision ${id} updated.`);
     });
@@ -593,7 +647,7 @@ program
   .allowUnknownOption(true)
   .action(async (command: string, args: string[] = []) => {
     await withResolvedTask(undefined, async (store, taskId) => {
-      const exitCode = await runTaskExec(store, taskId, command, args);
+      const exitCode = await runTaskExec(store, taskId, command, args, { workspaceRoot: findWorkspaceRoot() });
       if (exitCode !== 0) process.exitCode = exitCode;
     });
   });
@@ -654,6 +708,25 @@ program
     withResolvedTask(opts.task, (store, taskId, workspaceRoot) => {
       printStatus(store, taskId, workspaceRoot, opts.budget);
     });
+  });
+
+program
+  .command('init')
+  .description('Bootstrap Ariadne in this workspace: creates .ariadne/state.db if needed, and generates a project-local Copilot skill + agent (.github/skills/ariadne, .github/agents/ariadne.agent.md) so any AI assistant here knows how to use it')
+  .option('--force', 'Overwrite the skill/agent files even if they already exist (e.g. to pick up template updates)')
+  .action((opts: { force?: boolean }) => {
+    const root = findWorkspaceRoot();
+    // Opening the store is enough to create .ariadne/state.db on a fresh workspace.
+    const store = openWorkspaceStore(root);
+    store.close();
+    console.log(`Workspace ready at ${root}`);
+
+    const results = generateAriadneSkillAndAgent(root, { force: opts.force });
+    for (const r of results) {
+      const label = r.action === 'skipped-exists' ? 'already exists, skipped (use --force to overwrite)' : r.action;
+      console.log(`  ${r.path}: ${label}`);
+    }
+    console.log('\nTry it out:\n  ariadne task new "My first task"\n  ariadne status');
   });
 
 program
@@ -830,6 +903,19 @@ program
 // ---------------------------------------------------------------------
 
 const sync = program.command('sync').description('Sync tasks/checkpoints with a self-hosted Ariadne sync server');
+
+sync
+  .command('setup [username]')
+  .description('Set up the project-configured SSH tunnel and log in on this machine')
+  .option('--register', 'Create the Ariadne cloud account before logging in (first machine only)')
+  .action(async (username: string | undefined, opts: { register?: boolean }) => {
+    try {
+      await runSyncSetup(findWorkspaceRoot(), username ?? os.userInfo().username, { register: opts.register });
+    } catch (err) {
+      console.error(err instanceof Error ? err.message : String(err));
+      process.exit(1);
+    }
+  });
 
 sync
   .command('register <username> <password>')

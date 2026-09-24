@@ -1,4 +1,11 @@
-import { describe, it, expect } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { execFileSync } from 'node:child_process';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import { inspect } from 'node:util';
+import * as core from '@ariadne-dev/core';
+import { TaskStore, closeRegistry, openWorkspaceStore, setCurrentTaskId } from '@ariadne-dev/core';
 import { program } from '../src/index.js';
 
 describe('ariadne CLI surface', () => {
@@ -17,11 +24,13 @@ describe('ariadne CLI surface', () => {
         'resume',
         'where',
         'search',
+        'capture',
         'git-sync',
         'export',
         'workspace',
         'backup',
         'restore',
+        'init',
       ]),
     );
   });
@@ -74,5 +83,285 @@ describe('ariadne CLI surface', () => {
 
     const searchCmd = program.commands.find((c) => c.name() === 'search')!;
     expect(searchCmd.options.some((o) => o.long === '--all-workspaces')).toBe(true);
+  });
+});
+
+describe('ariadne capture + checkpoint commands', () => {
+  let root: string;
+  let logSpy: ReturnType<typeof vi.spyOn>;
+  let originalCwd: string;
+  let previousRegistryPath: string | undefined;
+
+  function git(args: string[], cwd: string): string {
+    return execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
+  }
+
+  function initRepo(dir: string): void {
+    git(['init', '-q', '-b', 'main'], dir);
+    git(['config', 'user.email', 'test@example.com'], dir);
+    git(['config', 'user.name', 'Test'], dir);
+  }
+
+  function write(relPath: string, content: string): void {
+    const fullPath = path.join(root, relPath);
+    fs.mkdirSync(path.dirname(fullPath), { recursive: true });
+    fs.writeFileSync(fullPath, content, 'utf8');
+  }
+
+  function commitAll(message: string, force = false): string {
+    git(force ? ['add', '-f', '-A'] : ['add', '-A'], root);
+    git(['commit', '-q', '-m', message], root);
+    return git(['rev-parse', 'HEAD'], root);
+  }
+
+  function resetCommanderOptionState(cmd: import('commander').Command): void {
+    (cmd as unknown as { _optionValues: Record<string, unknown> })._optionValues = {};
+    (cmd as unknown as { _optionValueSources: Record<string, unknown> })._optionValueSources = {};
+    for (const sub of cmd.commands) resetCommanderOptionState(sub);
+  }
+
+  function loggedLines(): string[] {
+    return logSpy.mock.calls.map((args) => String(args[0]));
+  }
+
+  function createCurrentTask(title: string): string {
+    const store = openWorkspaceStore(root);
+    const task = store.createTask({ title });
+    setCurrentTaskId(task.id, root);
+    store.close();
+    return task.id;
+  }
+
+  beforeEach(() => {
+    resetCommanderOptionState(program);
+    root = fs.mkdtempSync(path.join(os.tmpdir(), 'ariadne-cli-capture-test-'));
+    initRepo(root);
+    previousRegistryPath = process.env.ARIADNE_REGISTRY_PATH;
+    process.env.ARIADNE_REGISTRY_PATH = path.join(root, 'registry.db');
+    closeRegistry();
+    logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    originalCwd = process.cwd();
+    process.chdir(root);
+  });
+
+  afterEach(() => {
+    process.chdir(originalCwd);
+    logSpy.mockRestore();
+    vi.restoreAllMocks();
+    process.env.ARIADNE_REGISTRY_PATH = previousRegistryPath;
+    closeRegistry();
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  it('captures files after a checkpoint is persisted', async () => {
+    const taskId = createCurrentTask('Checkpoint capture task');
+    write('src/app.ts', 'export const value = 1;\n');
+    commitAll('Add app');
+    write('src/app.ts', 'export const value = 2;\n');
+    let store = openWorkspaceStore(root);
+    store.touchFile({ taskId, path: 'src/app.ts', role: 'edited' });
+    store.close();
+
+    await program.parseAsync(['node', 'ariadne', 'checkpoint', 'Saved current state', '--level', 'micro']);
+
+    store = openWorkspaceStore(root);
+    const checkpoint = store.listCheckpoints(taskId)[0]!;
+    const capture = store.getTaskFileCaptures(taskId)[0]!;
+    store.close();
+
+    expect(capture.checkpointId).toBe(checkpoint.id);
+    expect(capture.entries.map((entry) => entry.path)).toEqual(['src/app.ts']);
+    expect(loggedLines()).toContainEqual(expect.stringContaining(`Capture ${capture.id}: 1 file(s),`));
+  });
+
+  it('creates checkpoints without capture errors in a non-Git workspace', async () => {
+    const taskId = createCurrentTask('Non-Git checkpoint task');
+    fs.rmSync(path.join(root, '.git'), { recursive: true, force: true });
+
+    await program.parseAsync(['node', 'ariadne', 'checkpoint', 'Saved without Git', '--level', 'micro']);
+
+    const store = openWorkspaceStore(root);
+    expect(store.listCheckpoints(taskId)).toHaveLength(1);
+    expect(store.getTaskFileCaptures(taskId)).toEqual([]);
+    expect(store.listErrors(taskId)).toEqual([]);
+    store.close();
+  });
+
+  it('does not capture when checkpoint creation fails', async () => {
+    const taskId = createCurrentTask('Failing checkpoint task');
+    vi.spyOn(TaskStore.prototype, 'createCheckpoint').mockImplementation(() => {
+      throw new Error('checkpoint write failed');
+    });
+
+    await expect(program.parseAsync(['node', 'ariadne', 'checkpoint', 'Will fail', '--level', 'micro'])).rejects.toThrow(
+      'checkpoint write failed',
+    );
+
+    const store = openWorkspaceStore(root);
+    expect(store.getTaskFileCaptures(taskId)).toEqual([]);
+    store.close();
+  });
+
+  it('records a generic task error and throws a sanitized checkpoint capture error', async () => {
+    const taskId = createCurrentTask('Checkpoint capture failure task');
+    const secretMarker = 'checkpoint-secret-marker';
+    vi.spyOn(core, 'captureTaskFiles').mockImplementation(() => {
+      throw new Error(`capture exploded with ${secretMarker}`);
+    });
+
+    await expect(program.parseAsync(['node', 'ariadne', 'checkpoint', 'Will fail', '--level', 'micro'])).rejects.toSatisfy(
+      (error: unknown) => {
+        expect(error).toBeInstanceOf(core.TaskFileCaptureFailureError);
+        expect((error as Error).message).toBe('Task file capture failed after checkpoint.');
+        expect(inspect(error, { depth: 8 })).not.toContain(secretMarker);
+        return true;
+      },
+    );
+
+    const store = openWorkspaceStore(root);
+    expect(store.listCheckpoints(taskId)).toHaveLength(1);
+    expect(store.getTaskFileCaptures(taskId)).toEqual([]);
+    expect(store.listErrors(taskId)).toMatchObject([
+      { message: 'Task file capture failed after checkpoint.' },
+    ]);
+    store.close();
+    expect(loggedLines().some((line) => line.startsWith('Capture '))).toBe(false);
+    expect(loggedLines()).not.toContain('No eligible task files captured (0 file(s), 0 byte(s)).');
+  });
+
+  it('surfaces sanitized checkpoint capture and failure-recording errors together without a success-shaped result', async () => {
+    const taskId = createCurrentTask('Checkpoint capture failure task');
+    const captureMarker = 'checkpoint-capture-secret-marker';
+    const recordMarker = 'checkpoint-record-secret-marker';
+    vi.spyOn(core, 'captureTaskFiles').mockImplementation(() => {
+      throw new Error(`capture exploded with ${captureMarker}`);
+    });
+    vi.spyOn(TaskStore.prototype, 'recordError').mockImplementation(() => {
+      throw new Error(`recordError write failed with ${recordMarker}`);
+    });
+
+    await expect(program.parseAsync(['node', 'ariadne', 'checkpoint', 'Will fail', '--level', 'micro'])).rejects.toSatisfy(
+      (error: unknown) => {
+        expect(error).toBeInstanceOf(core.TaskFileCaptureFailureAggregateError);
+        expect((error as Error).message).toBe(
+          'Task file capture failed after checkpoint, and Ariadne also failed to record that capture failure.',
+        );
+        expect((error as AggregateError).errors).toMatchObject([
+          { message: 'Task file capture failed after checkpoint.' },
+          { message: 'Ariadne failed to record the checkpoint capture failure.' },
+        ]);
+        const rendered = inspect(error, { depth: 8 });
+        expect(rendered).not.toContain(captureMarker);
+        expect(rendered).not.toContain(recordMarker);
+        return true;
+      },
+    );
+
+    const store = openWorkspaceStore(root);
+    expect(store.listCheckpoints(taskId)).toHaveLength(1);
+    expect(store.getTaskFileCaptures(taskId)).toEqual([]);
+    expect(store.listErrors(taskId)).toEqual([]);
+    store.close();
+    expect(loggedLines().some((line) => line.startsWith('Capture '))).toBe(false);
+    expect(loggedLines()).not.toContain('No eligible task files captured (0 file(s), 0 byte(s)).');
+  });
+
+  it('captures the active task with the explicit capture command', async () => {
+    const taskId = createCurrentTask('Explicit capture task');
+    write('notes.md', 'first version\n');
+    commitAll('Add notes');
+    write('notes.md', 'second version\n');
+    let store = openWorkspaceStore(root);
+    store.touchFile({ taskId, path: 'notes.md', role: 'edited' });
+    store.close();
+
+    await program.parseAsync(['node', 'ariadne', 'capture']);
+
+    store = openWorkspaceStore(root);
+    const capture = store.getTaskFileCaptures(taskId)[0]!;
+    store.close();
+
+    expect(capture.trigger).toBe('explicit');
+    expect(capture.entries.map((entry) => entry.path)).toEqual(['notes.md']);
+    expect(loggedLines()).toContainEqual(expect.stringContaining(`Capture ${capture.id}: 1 file(s),`));
+  });
+
+  it('records a generic task error and throws a sanitized explicit capture error', async () => {
+    const taskId = createCurrentTask('Explicit capture failure task');
+    const secretMarker = 'explicit-secret-marker';
+    vi.spyOn(core, 'captureTaskFiles').mockImplementation(() => {
+      throw new Error(`explicit capture exploded with ${secretMarker}`);
+    });
+
+    await expect(program.parseAsync(['node', 'ariadne', 'capture'])).rejects.toSatisfy((error: unknown) => {
+      expect(error).toBeInstanceOf(core.TaskFileCaptureFailureError);
+      expect((error as Error).message).toBe('Task file capture failed after explicit capture.');
+      expect(inspect(error, { depth: 8 })).not.toContain(secretMarker);
+      return true;
+    });
+
+    const store = openWorkspaceStore(root);
+    expect(store.getTaskFileCaptures(taskId)).toEqual([]);
+    expect(store.listErrors(taskId)).toMatchObject([
+      { message: 'Task file capture failed after explicit capture.' },
+    ]);
+    store.close();
+    expect(loggedLines().some((line) => line.startsWith('Capture '))).toBe(false);
+    expect(loggedLines()).not.toContain('No eligible task files captured (0 file(s), 0 byte(s)).');
+  });
+
+  it('surfaces sanitized explicit capture and failure-recording errors together without a success-shaped result', async () => {
+    const taskId = createCurrentTask('Explicit capture failure task');
+    const captureMarker = 'explicit-capture-secret-marker';
+    const recordMarker = 'explicit-record-secret-marker';
+    vi.spyOn(core, 'captureTaskFiles').mockImplementation(() => {
+      throw new Error(`explicit capture exploded with ${captureMarker}`);
+    });
+    vi.spyOn(TaskStore.prototype, 'recordError').mockImplementation(() => {
+      throw new Error(`recordError insert failed with ${recordMarker}`);
+    });
+
+    await expect(program.parseAsync(['node', 'ariadne', 'capture'])).rejects.toSatisfy((error: unknown) => {
+      expect(error).toBeInstanceOf(core.TaskFileCaptureFailureAggregateError);
+      expect((error as Error).message).toBe(
+        'Task file capture failed after explicit capture, and Ariadne also failed to record that capture failure.',
+      );
+      expect((error as AggregateError).errors).toMatchObject([
+        { message: 'Task file capture failed after explicit capture.' },
+        { message: 'Ariadne failed to record the explicit capture failure.' },
+      ]);
+      const rendered = inspect(error, { depth: 8 });
+      expect(rendered).not.toContain(captureMarker);
+      expect(rendered).not.toContain(recordMarker);
+      return true;
+    });
+
+    const store = openWorkspaceStore(root);
+    expect(store.getTaskFileCaptures(taskId)).toEqual([]);
+    expect(store.listErrors(taskId)).toEqual([]);
+    store.close();
+    expect(loggedLines().some((line) => line.startsWith('Capture '))).toBe(false);
+    expect(loggedLines()).not.toContain('No eligible task files captured (0 file(s), 0 byte(s)).');
+  });
+
+  it('prints skipped path reasons without leaking file contents', async () => {
+    const taskId = createCurrentTask('Skipped paths task');
+    write('keep.ts', 'export const keep = 1;\n');
+    write('.env', 'API_KEY=super-secret-value\n');
+    commitAll('Track files', true);
+    write('keep.ts', 'export const keep = 2;\n');
+    write('.env', 'API_KEY=super-secret-value-updated\n');
+    let store = openWorkspaceStore(root);
+    store.touchFile({ taskId, path: 'keep.ts', role: 'edited' });
+    store.touchFile({ taskId, path: '.env', role: 'edited' });
+    store.close();
+
+    await program.parseAsync(['node', 'ariadne', 'capture']);
+
+    const output = loggedLines().join('\n');
+    expect(output).toContain('Skipped files:');
+    expect(output).toContain('.env (always_excluded)');
+    expect(output).not.toContain('API_KEY=super-secret-value-updated');
+    expect(output).not.toContain('export const keep = 2;');
   });
 });

@@ -71,6 +71,94 @@ export const MIGRATIONS: Migration[] = [
       `);
     },
   },
+  {
+    version: 4,
+    description: 'Add updated_at columns to decisions/errors/open_questions/commands and backfill from created_at',
+    up: (db) => {
+      db.exec(`
+        ALTER TABLE decisions ADD COLUMN updated_at TEXT;
+        ALTER TABLE errors ADD COLUMN updated_at TEXT;
+        ALTER TABLE open_questions ADD COLUMN updated_at TEXT;
+        ALTER TABLE commands ADD COLUMN updated_at TEXT;
+        UPDATE decisions SET updated_at = created_at WHERE updated_at IS NULL;
+        UPDATE errors SET updated_at = created_at WHERE updated_at IS NULL;
+        UPDATE open_questions SET updated_at = created_at WHERE updated_at IS NULL;
+        UPDATE commands SET updated_at = created_at WHERE updated_at IS NULL;
+      `);
+    },
+  },
+  {
+    version: 5,
+    description: 'Add immutable task file capture tables with same-task reference integrity',
+    up: (db) => {
+      db.exec(`
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_commits_sha_task_id
+          ON commits(sha, task_id);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_checkpoints_id_task_id
+          ON checkpoints(id, task_id);
+
+        CREATE TABLE IF NOT EXISTS task_file_captures (
+          id TEXT PRIMARY KEY,
+          task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+          trigger TEXT NOT NULL CHECK (trigger IN ('git_commit', 'checkpoint', 'explicit')),
+          git_commit_sha TEXT,
+          checkpoint_id TEXT,
+          created_at TEXT NOT NULL,
+          synced_at TEXT,
+          failed_at TEXT,
+          failure_code TEXT,
+          CHECK (
+            (failed_at IS NULL AND failure_code IS NULL) OR
+            (failed_at IS NOT NULL AND failure_code IS NOT NULL)
+          ),
+          CHECK (
+            (trigger = 'git_commit' AND git_commit_sha IS NOT NULL AND checkpoint_id IS NULL) OR
+            (trigger = 'checkpoint' AND checkpoint_id IS NOT NULL AND git_commit_sha IS NULL) OR
+            (trigger = 'explicit' AND git_commit_sha IS NULL AND checkpoint_id IS NULL)
+          ),
+          FOREIGN KEY (git_commit_sha, task_id) REFERENCES commits(sha, task_id),
+          FOREIGN KEY (checkpoint_id, task_id) REFERENCES checkpoints(id, task_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_task_file_captures_task_created
+          ON task_file_captures(task_id, created_at);
+        CREATE INDEX IF NOT EXISTS idx_task_file_captures_task_pending
+          ON task_file_captures(task_id, synced_at, failed_at, created_at);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_task_file_captures_git_commit_once
+          ON task_file_captures(task_id, git_commit_sha)
+          WHERE trigger = 'git_commit' AND git_commit_sha IS NOT NULL;
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_task_file_captures_checkpoint_once
+          ON task_file_captures(task_id, checkpoint_id)
+          WHERE trigger = 'checkpoint' AND checkpoint_id IS NOT NULL;
+
+        CREATE TABLE IF NOT EXISTS task_file_capture_entries (
+          capture_id TEXT NOT NULL REFERENCES task_file_captures(id) ON DELETE CASCADE,
+          path TEXT NOT NULL,
+          content TEXT NOT NULL,
+          unified_diff TEXT NOT NULL,
+          byte_length INTEGER NOT NULL,
+          content_sha256 TEXT NOT NULL,
+          PRIMARY KEY (capture_id, path)
+        );
+        CREATE INDEX IF NOT EXISTS idx_task_file_capture_entries_capture
+          ON task_file_capture_entries(capture_id);
+      `);
+    },
+  },
+  {
+    version: 6,
+    description: 'Track commits whose file capture contained no eligible files',
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS task_file_capture_empty_commits (
+          task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+          git_commit_sha TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          PRIMARY KEY (task_id, git_commit_sha),
+          FOREIGN KEY (git_commit_sha, task_id) REFERENCES commits(sha, task_id)
+        );
+      `);
+    },
+  },
 ];
 
 function getSchemaVersion(db: Database.Database): number {

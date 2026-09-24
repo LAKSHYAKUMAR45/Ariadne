@@ -15,6 +15,7 @@ package's own README.*
 [7. VS Code + Copilot Chat](#7-using-the-vs-code-extension-copilot-chat) ·
 [8. Cross-workspace](#8-working-across-multiple-workspaces) ·
 [9. Cloud sync](#9-cloud-sync-optional-self-hosted) ·
+[9.1. Operations console](#91-operations-console) ·
 [10. Data & privacy](#10-data-privacy) ·
 [11. Troubleshooting](#11-troubleshooting) ·
 [12. Project status](#12-project-status)
@@ -328,11 +329,14 @@ Cross-workspace discovery (§8) only works *on one machine*. If you need
 tasks/checkpoints to follow you across machines, or to be shared with
 teammates, Ariadne optionally supports syncing to a self-hosted
 `@ariadne-dev/sync-server` instance (Express + Postgres, built and run by
-you or your team — there's no Ariadne-hosted cloud). This is entirely
-opt-in: nothing leaves your machine unless you explicitly run `ariadne
-sync` commands.
+you or your team — there's no Ariadne-hosted cloud). Each deployment has
+one shared team: the first account becomes the admin, later accounts join as
+members, and access stays within that team. This is entirely opt-in: nothing
+leaves your machine unless you explicitly run `ariadne sync` commands.
 
 ```bash
+ariadne sync setup [username]                  # project-configured SSH tunnel + login
+ariadne sync setup [username] --register       # first account creation only
 ariadne sync register <username> <password> --server https://your-sync-server   # first time only
 ariadne sync login <username> <password> --server https://your-sync-server     # subsequent machines/logins
 ariadne sync push                       # push local task/checkpoint changes
@@ -343,9 +347,21 @@ ariadne sync logout                     # forget the locally-stored token
 ```
 
 What to know:
+- **Project-configured secure setup:** `ariadne init` creates
+  `.github/ariadne-sync.json`. On each machine, `ariadne sync setup
+  [username]` reads it, verifies/installs a key for the configured SSH host,
+  checks the scanned host key against its pinned fingerprint, opens an owned
+  loopback-only SSH ControlMaster tunnel, securely prompts for the Ariadne
+  password, and stores the resulting profile. It never stores the SSH
+  password. `push`, `pull`, and `list-remote` automatically restart a stopped
+  tunnel and reject a local port occupied by an unrelated process.
+  Use `--register` only when creating the cloud account for the first time;
+  that first account becomes the singleton admin and later registrations join
+  as members.
 - **Scope:** `tasks`, `checkpoints`, `todos`, `decisions`, `errors`, `open
-  questions`, and `commands` all sync. `files`/`commits` stay local-only —
-  they're git/workspace-derived, not curated text content.
+  questions`, and `commands` all sync inside the singleton team.
+  `files`/`commits` stay local-only — they're git/workspace-derived, not
+  curated text content.
 - **`push`** sends every task that's new or changed since it was last
   synced (or just `--task <id>`), then pushes any not-yet-synced
   checkpoints/todos/decisions/errors/open questions/commands for those
@@ -356,15 +372,9 @@ What to know:
   just which user account pushed it — every sub-entity records its own
   `owner`/`workspaceLabel` independent of its parent task's, since a
   teammate can add content to a task they didn't originate.
-- **Todos sync bidirectionally**, just like tasks: editing a todo's text or
-  marking it done/blocked *after* it was first pushed is detected and
-  re-pushed on the next `sync push`.
-- **Decisions, errors, open questions, and commands sync create-once**
-  (like checkpoints): the first push of each is what reaches the server.
-  **Known limitation:** editing a decision's rationale, resolving an error
-  or open question, or editing a command's summary *after* its first push
-  does **not** automatically propagate to the server in this phase — only
-  the state at first push is captured remotely.
+- **Todos, decisions, errors, open questions, and commands sync
+  bidirectionally**, just like tasks: edits or state changes made after the
+  first push are detected and re-pushed on the next `sync push`.
 - **`pull`** applies remote changes to tasks *already linked* to this
   workspace (i.e., ones pushed from here before) and downloads any new
   checkpoints for them. By default it does not fabricate brand-new local
@@ -382,15 +392,18 @@ What to know:
   (owner + workspace label + status), including ones from workspaces
   you've never linked, without creating or changing anything locally. Use
   this to see what's out there *before* deciding whether to `pull
-  --import-new` it.
+  --import-new` it. In other words, it only browses the singleton team's
+  shared data; it never crosses into another team's space.
 - **`unlink <taskId>`** clears that task's `remote_id`/`synced_at` locally
   only — it never contacts the server, so the server-side row (if any) is
   left exactly as it was. Use it to undo an accidental `--import-new`, or
   to detach a task from sync entirely; a later `push` will treat the task
   as brand-new and create a fresh remote row.
-- **Access is flat:** any account on the server can read/write any synced
-  task — there's no per-task ACL. Treat the server as a shared, trusted
-  team space, not a permissions boundary.
+- **Access is shared within the team:** active members of the singleton
+  team can read/write any synced task — there's no per-task ACL or org
+  hierarchy. Treat the server as a shared, trusted team space, not a
+  permissions boundary. Inaccessible tasks are hidden with `404` rather
+  than exposed cross-team.
 - **Conflict handling is visible, with a flag to control it:** if a task
   or todo was edited both locally and on the server since the last sync,
   `sync pull` detects the differing field(s), prints a warning
@@ -398,8 +411,8 @@ What to know:
   resolves it — `remote-wins` by default (the server's value is kept
   locally), or `local-wins` if you pass `--on-conflict local-wins` (your
   local value is kept and will be re-pushed on the next `sync push`).
-  This only applies to tasks and todos, the two entity types with
-  bidirectional sync; see the create-once note above for the rest.
+  The same whole-row conflict policy applies to every mutable,
+  bidirectionally synced entity.
 - **No delete propagation (by design):** archiving a task *does* sync
   normally (`status` is just a synced field), but hard-deleting anything
   locally — a task, or a decision/error/open question via the curation
@@ -419,13 +432,67 @@ What to know:
   existed (a bare `serverUrl`/`token`/`username` at the top level of
   `sync-config.json`) are read transparently as an implicit `"default"`
   profile — no manual migration needed.
-- Credentials/token are stored locally at `~/.ariadne/sync-config.json`.
+- **Admin routes use a browser session, not the sync token:** the
+  `/api/v1/admin/*` dashboard routes authenticate with an `HttpOnly`
+  session cookie obtained from `POST /api/v1/admin/session`, require a CSRF
+  token and the configured `ADMIN_PUBLIC_ORIGIN` on every state change, and
+  reject the sync bearer JWT outright. The sync CLI is unaffected.
+- **Operations dashboard:** after the configured nodem2 tunnel is active, open
+  `http://127.0.0.1:14300/admin`. The complete eight-section console and its
+  current reauthentication/exact-confirmation rules are documented in
+  [§9.1 Operations console](#91-operations-console).
+- The JWT and profile metadata are stored locally at
+  `~/.ariadne/sync-config.json` with owner-only (`0600`) permissions.
 
 See [`docs/06-CLOUD-SYNC-DESIGN.md`](06-CLOUD-SYNC-DESIGN.md) for the
 product decisions behind this, [`docs/07-CLOUD-SYNC-API-CONTRACT.md`](07-CLOUD-SYNC-API-CONTRACT.md)
 for the schema/API contract, and
 [`packages/sync-server/README.md`](../packages/sync-server/README.md) for
 running your own server.
+
+## 9.1 Operations console
+
+The nodem2 deployment has one administrator account. After the project
+tunnel is running, open `http://127.0.0.1:14300/admin`; do not publish that
+loopback URL or replace it with a direct server address. The dashboard uses
+its own browser session and CSRF token, not the token used by `ariadne sync`.
+
+| Section | Use it for |
+| --- | --- |
+| **Overview** | Database, host, service, sync, task, member, backup, and operation summaries. An unavailable operator is shown as unavailable; it is not reported healthy. |
+| **Members** | Review membership and activate or deactivate non-admin members. The singleton admin cannot be changed through the network API. |
+| **Tasks** | Inspect the timeline and encrypted capture metadata, then view a selected snapshot or diff. Deleting a capture is guarded and records immutable file-history audit data. |
+| **Backups** | Create and verify backups, download only a verified artifact, and explain restore eligibility. A backup must be currently verified before it can be restored. |
+| **Services** | Inspect `sync-server`, `operator`, and PostgreSQL. Only `sync-server` and PostgreSQL can be restarted; the operator is deliberately outside browser restart control. |
+| **Deployments** | Inspect the current revision, rollback target, schema version, and trusted candidate SHAs. Deploy only a listed candidate and roll back only to the recorded target. |
+| **Logs** | Read paginated, redacted entries from only `sync-server`, `operator`, `deployment`, or `backup`, filtered by severity and time. |
+| **Audit** | Review append-only authentication, membership, file-history, backup, service, deployment, and restore events, including related operation IDs. |
+
+### Guarded changes
+
+All privileged mutations, including member changes, backup creation and
+verification, service restart, deployment, rollback, restore, and file-capture
+deletion, require a password reauthentication no more than five minutes old.
+Exact phrases are additionally required for `ACTIVATE`/`DEACTIVATE` member,
+`DELETE` capture, `RESTORE` backup, `RESTART` service, `DEPLOY`, and
+`ROLLBACK`. Backup creation and verification do not require an exact phrase.
+The server enforces these rules, so client-side controls are not a substitute.
+
+Wait for the operation's terminal `succeeded` or `failed` state and inspect
+the linked audit record after refresh or reconnect. Before restore, deploy,
+or rollback, the tracked workflow creates and verifies a fresh safety backup;
+restore additionally requires the selected recorded backup to be verified.
+Failed workflows retain their diagnostics and safety backup instead of
+reporting success.
+
+Use the console or the tracked scripts named in
+[`deploy/nodem2/README.md`](../deploy/nodem2/README.md). Do not request
+arbitrary commands, Docker socket access, service names, paths, journal
+expressions, or Git revisions: none is accepted by the web tier. Retrieve
+credentials only through the secure prompt or root-owned deployment files,
+and rotate them with the documented procedure. Never paste or display a
+password, secret, token, or private key in a terminal transcript, issue,
+chat, generated guidance, or documentation.
 
 ## 10. Data & privacy
 

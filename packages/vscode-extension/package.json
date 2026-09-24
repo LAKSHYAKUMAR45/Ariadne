@@ -32,9 +32,30 @@
     "ai agent",
     "productivity"
   ],
-  "activationEvents": [],
+  "activationEvents": [
+    "onCommand:ariadne.openPanel",
+    "onView:ariadne.launcherView"
+  ],
   "main": "./dist/native-bootstrap.js",
   "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "ariadne",
+          "title": "Ariadne",
+          "icon": "resources/activitybar.svg"
+        }
+      ]
+    },
+    "views": {
+      "ariadne": [
+        {
+          "id": "ariadne.launcherView",
+          "name": "Ariadne",
+          "type": "webview"
+        }
+      ]
+    },
     "chatParticipants": [
       {
         "id": "ariadne.chat",
@@ -72,9 +93,8 @@
         "title": "Ariadne: Select Workspace Folder"
       },
       {
-        "command": "ariadne.refreshTreeView",
-        "title": "Ariadne: Refresh Task Tree",
-        "icon": "$(refresh)"
+        "command": "ariadne.openPanel",
+        "title": "Ariadne: Open Panel"
       },
       {
         "command": "ariadne.syncPush",
@@ -93,33 +113,6 @@
         "title": "Ariadne: Run Graphify (code knowledge graph)"
       }
     ],
-    "viewsContainers": {
-      "activitybar": [
-        {
-          "id": "ariadne",
-          "title": "Ariadne",
-          "icon": "resources/icon.png"
-        }
-      ]
-    },
-    "views": {
-      "ariadne": [
-        {
-          "id": "ariadneTasks",
-          "name": "Tasks",
-          "contextualTitle": "Ariadne Tasks"
-        }
-      ]
-    },
-    "menus": {
-      "view/title": [
-        {
-          "command": "ariadne.refreshTreeView",
-          "when": "view == ariadneTasks",
-          "group": "navigation"
-        }
-      ]
-    },
     "configuration": {
       "title": "Ariadne",
       "properties": {

@@ -1,0 +1,163 @@
+#!/bin/sh
+# Transfers the singleton-team admin role to another active member.
+#
+#   transfer-admin <username>
+#
+# Root only. The whole transfer runs as one database transaction that locks the
+# singleton team and its membership rows, demotes the incumbent, promotes the
+# target, refuses to commit unless exactly one admin remains, and appends an
+# append-only admin audit event. The username is bound as a transaction-local
+# setting rather than spliced into SQL.
+set -eu
+umask 077
+
+SCRIPT_DIR=$(unset CDPATH; cd -- "$(dirname -- "$0")" && pwd)
+ARIADNE_LOG_TAG=ariadne-transfer-admin
+
+log() {
+    printf '[%s] %s\n' "$ARIADNE_LOG_TAG" "$1"
+}
+
+fail() {
+    printf '[%s] error: %s\n' "$ARIADNE_LOG_TAG" "$1" >&2
+    exit 1
+}
+
+ARIADNE_PRODUCTION_ROOT=/opt/ariadne
+ARIADNE_INSTALLED_LIB_DIR=/usr/local/lib/ariadne
+
+# See deploy/nodem2/scripts/install for the self-test contract: the flag is
+# refused for installed copies, for a missing prefix, and for any prefix that
+# names a system directory.
+if [ "${ARIADNE_ADMIN_SELFTEST:-}" = "1" ]; then
+    case "$SCRIPT_DIR" in
+        "$ARIADNE_PRODUCTION_ROOT" | "$ARIADNE_PRODUCTION_ROOT"/* | "$ARIADNE_INSTALLED_LIB_DIR" | "$ARIADNE_INSTALLED_LIB_DIR"/*)
+            fail "ARIADNE_ADMIN_SELFTEST=1 is refused for installed copies of this script"
+            ;;
+    esac
+
+    [ -n "${ARIADNE_ADMIN_PREFIX:-}" ] ||
+        fail "ARIADNE_ADMIN_SELFTEST=1 requires ARIADNE_ADMIN_PREFIX"
+    case "${ARIADNE_ADMIN_PREFIX:-}" in
+        /bin* | /boot* | /etc* | /lib* | /opt* | /root* | /run* | /sbin* | /srv* | /usr* | /var*)
+            fail "ARIADNE_ADMIN_PREFIX must not name a system directory"
+            ;;
+        /*/*) ;;
+        *) fail "ARIADNE_ADMIN_PREFIX must be an absolute path below the filesystem root" ;;
+    esac
+    ARIADNE_PREFIX="$ARIADNE_ADMIN_PREFIX"
+elif [ -n "${ARIADNE_ADMIN_SELFTEST:-}" ]; then
+    fail "ARIADNE_ADMIN_SELFTEST must not be set for a privileged invocation"
+else
+    [ -z "${ARIADNE_ADMIN_PREFIX:-}" ] ||
+        fail "ARIADNE_ADMIN_PREFIX must not be set: administration uses the fixed host paths"
+    PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+    export PATH
+    ARIADNE_PREFIX=""
+fi
+
+[ "$(id -u)" = "0" ] || fail "transfer-admin must run as root (uid 0)"
+
+[ "$#" -eq 1 ] || fail "usage: transfer-admin <username>"
+ARIADNE_TARGET_USERNAME=$1
+case "$ARIADNE_TARGET_USERNAME" in
+    "") fail "username must not be empty" ;;
+    *[!A-Za-z0-9._-]*) fail "username may contain only letters, digits, dots, dashes, and underscores" ;;
+esac
+[ "${#ARIADNE_TARGET_USERNAME}" -le 64 ] || fail "username is too long"
+
+ARIADNE_ETC_DIR="$ARIADNE_PREFIX/etc/ariadne"
+ARIADNE_COMPOSE_ENV_FILE="$ARIADNE_ETC_DIR/compose.env"
+ARIADNE_COMPOSE_FILE="$ARIADNE_PREFIX$ARIADNE_PRODUCTION_ROOT/worktree/deploy/nodem2/compose.yaml"
+ARIADNE_COMPOSE_PROJECT=ariadne-nodem2
+ARIADNE_DB_NAME=ariadne_sync
+ARIADNE_DB_USER=ariadne
+
+[ -f "$ARIADNE_COMPOSE_ENV_FILE" ] || fail "required file missing: $ARIADNE_COMPOSE_ENV_FILE"
+[ -f "$ARIADNE_COMPOSE_FILE" ] || fail "required file missing: $ARIADNE_COMPOSE_FILE"
+
+log "transferring the admin role to the requested member"
+
+# The username never appears in the statement text: psql quotes it into a
+# transaction-local setting that the transfer reads through current_setting().
+docker compose \
+    -f "$ARIADNE_COMPOSE_FILE" \
+    -p "$ARIADNE_COMPOSE_PROJECT" \
+    --env-file "$ARIADNE_COMPOSE_ENV_FILE" \
+    exec -T postgres psql \
+    --username "$ARIADNE_DB_USER" \
+    --dbname "$ARIADNE_DB_NAME" \
+    --no-psqlrc --quiet --no-align --tuples-only \
+    --single-transaction \
+    --set ON_ERROR_STOP=1 \
+    --set "target_username=$ARIADNE_TARGET_USERNAME" \
+    --file - <<'SQL' || fail "admin transfer failed; the previous admin is unchanged"
+SELECT set_config('ariadne.transfer_username', :'target_username', true);
+
+DO $transfer$
+DECLARE
+  singleton_team_id UUID;
+  target_user_id UUID;
+  current_admin_id UUID;
+  admin_count INTEGER;
+  requested_username TEXT := current_setting('ariadne.transfer_username');
+BEGIN
+  SELECT id INTO singleton_team_id FROM teams WHERE singleton_key = 'default' FOR UPDATE;
+  IF singleton_team_id IS NULL THEN
+    RAISE EXCEPTION 'the singleton team does not exist';
+  END IF;
+
+  PERFORM 1 FROM team_memberships WHERE team_id = singleton_team_id ORDER BY user_id FOR UPDATE;
+
+  SELECT m.user_id INTO target_user_id
+  FROM team_memberships m
+  JOIN users u ON u.id = m.user_id
+  WHERE m.team_id = singleton_team_id AND m.active AND u.username = requested_username;
+  IF target_user_id IS NULL THEN
+    RAISE EXCEPTION 'no active member of the singleton team has that username';
+  END IF;
+
+  SELECT m.user_id INTO current_admin_id
+  FROM team_memberships m
+  WHERE m.team_id = singleton_team_id AND m.role = 'admin';
+  IF current_admin_id IS NULL THEN
+    RAISE EXCEPTION 'the singleton team has no admin to transfer from';
+  END IF;
+  IF current_admin_id = target_user_id THEN
+    RAISE EXCEPTION 'the requested member is already the admin';
+  END IF;
+
+  UPDATE team_memberships SET role = 'member'
+  WHERE team_id = singleton_team_id AND user_id = current_admin_id;
+
+  UPDATE team_memberships SET role = 'admin'
+  WHERE team_id = singleton_team_id AND user_id = target_user_id AND active;
+
+  SELECT count(*) INTO admin_count
+  FROM team_memberships
+  WHERE team_id = singleton_team_id AND role = 'admin';
+  IF admin_count <> 1 THEN
+    RAISE EXCEPTION 'refusing to commit: the team would have % admins', admin_count;
+  END IF;
+
+  INSERT INTO admin_audit_events (actor_user_id, action, source, outcome, metadata)
+  VALUES (
+    -- The actor is the root operator on the host, which has no user row; both
+    -- sides of the transfer are recorded in the metadata instead.
+    NULL,
+    'admin.transfer',
+    'operator_cli',
+    'succeeded',
+    jsonb_build_object(
+      'fromUserId', current_admin_id,
+      'toUserId', target_user_id,
+      'teamId', singleton_team_id,
+      'performedBy', 'root_cli'
+    )
+  );
+END
+$transfer$;
+SQL
+
+log "admin transfer complete"
+log "the previous admin is now a member; both accounts must sign in again to refresh their sessions"

@@ -3,7 +3,7 @@ import { execFileSync } from 'node:child_process';
 
 vi.mock('node:child_process', () => ({ execFileSync: vi.fn() }));
 
-import { syncPush, syncPull, syncListRemote } from '../src/syncCommands.js';
+import { parseSyncProfiles, syncProfileList, syncPush, syncPull, syncListRemote } from '../src/syncCommands.js';
 
 /**
  * syncCommands.ts is a thin wrapper shelling out to the `ariadne` CLI
@@ -38,6 +38,19 @@ describe('vscode-extension sync commands (shell out to the ariadne CLI)', () => 
     vi.mocked(execFileSync).mockReturnValue('ok\n');
     syncListRemote({ cwd: '/ws', profile: 'team-b' });
     expect(execFileSync).toHaveBeenLastCalledWith('ariadne', ['sync', 'list-remote', '--profile', 'team-b'], expect.anything());
+  });
+
+  it('runs sync profile list through the CLI wrapper', () => {
+    const run = vi.fn(() => '* default https://sync.example\n  staging https://staging.example\n');
+    expect(syncProfileList({ cwd: '/repo', runCommand: run })).toContain('default');
+    expect(run).toHaveBeenCalledWith(['sync', 'profile', 'list'], '/repo');
+  });
+
+  it('parses current and non-current sync profiles from line-oriented output', () => {
+    expect(parseSyncProfiles('* default https://sync.example\n  staging https://staging.example\n')).toEqual([
+      { name: 'default', current: true, serverUrl: 'https://sync.example' },
+      { name: 'staging', current: false, serverUrl: 'https://staging.example' },
+    ]);
   });
 
   it('surfaces stderr from a failed CLI invocation as a normal Error', () => {

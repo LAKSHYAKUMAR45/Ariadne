@@ -1,0 +1,186 @@
+# Tracked production Compose stack for nodem2.
+#
+# Fixed deployment location: /opt/ariadne/worktree/deploy/nodem2/compose.yaml
+# Fixed project name:        ariadne-nodem2
+#
+# Always drive this file through deploy/nodem2/scripts/deploy (or the restart
+# scripts); they pin the file, project name, and env files. Secrets live only in
+# /etc/ariadne/compose.env and /etc/ariadne/sync-server.env (root-owned, 0600)
+# and are never interpolated into this file.
+#
+# Caution: plain `docker compose config` renders every env_file value into its
+# output, so it must never be piped into logs or shared. Only
+# `docker compose config --quiet` (what scripts/deploy runs) validates without
+# printing secrets.
+name: ariadne-nodem2
+
+services:
+  postgres:
+    image: postgres:16-bookworm
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-ariadne_sync}
+      POSTGRES_USER: ${POSTGRES_USER:-ariadne}
+      PGDATA: /var/lib/postgresql/data/pgdata
+    env_file:
+      # POSTGRES_PASSWORD only; `required: false` keeps `config` usable in CI,
+      # while scripts/deploy refuses to run when the file is missing.
+      - path: /etc/ariadne/compose.env
+        required: false
+    ports:
+      # Optional maintenance access, loopback only.
+      - "127.0.0.1:${POSTGRES_MAINTENANCE_PORT:-15432}:5432"
+    volumes:
+      - ariadne-pgdata:/var/lib/postgresql/data
+    tmpfs:
+      - /tmp:mode=1777,size=64m
+      - /var/run/postgresql:mode=0755,size=16m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      # Required by the postgres entrypoint to prepare PGDATA and drop to the
+      # postgres account.
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+      - SETGID
+      - SETUID
+    init: true
+    healthcheck:
+      test:
+        ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-ariadne} -d ${POSTGRES_DB:-ariadne_sync}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  migrate:
+    # Same immutable candidate image as the app; one-shot, never restarted.
+    image: ${SYNC_SERVER_IMAGE:-ariadne-sync-server:current}
+    build:
+      # Relative to this file, i.e. the root of the checked-out deployment
+      # worktree, so `docker compose build` really produces the candidate tag.
+      context: ../..
+      dockerfile: deploy/nodem2/sync-server.Dockerfile
+    command: ["node", "/app/dist/migrate.js"]
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file:
+      - path: /etc/ariadne/sync-server.env
+        required: false
+    volumes:
+      - /etc/ariadne/keys:/etc/ariadne/keys:ro
+    read_only: true
+    tmpfs:
+      - /tmp:mode=1777,size=32m
+      - /run:mode=0755,size=8m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      # Entrypoint-only: copy root-owned keys into the tmpfs handoff and drop to
+      # UID/GID 10001 before node starts. The node process keeps no capability.
+      - CHOWN
+      - SETGID
+      - SETUID
+    init: true
+
+  sync-server:
+    # Built and tagged by scripts/deploy as ariadne-sync-server:<commit-sha>;
+    # the migrate service above builds and runs the exact same image.
+    image: ${SYNC_SERVER_IMAGE:-ariadne-sync-server:current}
+    build:
+      context: ../..
+      dockerfile: deploy/nodem2/sync-server.Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      # Binds inside the container namespace only; the published port below is
+      # loopback-only on the host.
+      HOST: 0.0.0.0
+      PORT: "4300"
+      # Both live in the operator's runtime directory, which is bind-mounted as
+      # a directory below. Mounting the socket and the token individually would
+      # let Docker fabricate them as directories whenever a container starts
+      # before the operator has created them (every fresh boot, since /run is
+      # tmpfs), permanently shadowing the real files.
+      OPERATOR_SOCKET_PATH: /run/ariadne-operator/operator.sock
+      OPERATOR_CALLBACK_TOKEN_PATH: /run/ariadne-operator/operator-callback-token
+      DASHBOARD_DIST_DIR: /app/dashboard
+    env_file:
+      - path: /etc/ariadne/sync-server.env
+        required: false
+    ports:
+      - "127.0.0.1:4300:4300"
+    volumes:
+      - /etc/ariadne/keys:/etc/ariadne/keys:ro
+      # Host /run/ariadne is 0750 root:ariadne-web (gid 10001, the uid/gid this
+      # container runs as) and is created by /etc/tmpfiles.d/ariadne.conf before
+      # Docker starts, then re-asserted by the operator unit's RuntimeDirectory.
+      # Read-only: the container only connects to the socket and reads the
+      # token, and a read-only bind still permits connect() on a Unix socket.
+      # Mounted at a distinct path because the container's own tmpfs uses
+      # /run/ariadne/keys for the decrypted key handoff.
+      - /run/ariadne:/run/ariadne-operator:ro
+    read_only: true
+    tmpfs:
+      - /tmp:mode=1777,size=32m
+      - /run:mode=0755,size=8m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETGID
+      - SETUID
+    init: true
+
+  proxy:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    depends_on:
+      sync-server:
+        condition: service_healthy
+    ports:
+      - "${ARIADNE_PROXY_BIND_ADDRESS:-0.0.0.0}:${ARIADNE_PROXY_PORT:-14300}:8443"
+    volumes:
+      - ./proxy/nginx.conf:/etc/nginx/nginx.conf:ro
+      - /etc/ariadne/proxy/tls.crt:/etc/nginx/tls/tls.crt:ro
+      - /etc/ariadne/proxy/tls.key:/etc/nginx/tls/tls.key:ro
+    read_only: true
+    tmpfs:
+      - /var/cache/nginx:mode=0755,size=16m
+      - /var/run:mode=0755,size=1m
+      - /tmp:mode=1777,size=8m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - SETGID
+      - SETUID
+    init: true
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "wget --no-check-certificate --quiet --output-document=/dev/null https://127.0.0.1:8443/healthz",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+
+volumes:
+  ariadne-pgdata:
+    name: ariadne-nodem2-pgdata

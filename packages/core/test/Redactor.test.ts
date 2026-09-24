@@ -50,6 +50,29 @@ describe('Redactor', () => {
     expect(redact(long).length).toBe(MAX_REDACTED_LENGTH);
   });
 
+  it('appends a truncation marker (not a raw mid-string cut) when a command is too long', () => {
+    const long = 'echo ' + 'a'.repeat(1000);
+    const out = redact(long);
+    expect(out.endsWith('…[truncated]')).toBe(true);
+    // The kept content right before the marker should still be real "a"
+    // padding, not silently swapped for anything else — confirms we
+    // slice-then-append rather than mangling content.
+    const marker = ' …[truncated]';
+    expect(out.slice(0, out.length - marker.length).endsWith('a')).toBe(true);
+  });
+
+  it('collapses a multi-line command (e.g. a heredoc) to its first line plus a line-count summary', () => {
+    const heredoc = 'python - <<\'PY\'\nfrom pathlib import Path\nprint("hi")\nPY';
+    const out = redact(heredoc);
+    expect(out).toBe('python - <<\'PY\' …(+3 more lines)');
+    expect(out).not.toContain('\n');
+  });
+
+  it('singularizes the line-count summary for exactly one extra line', () => {
+    const out = redact('echo first\necho second');
+    expect(out).toBe('echo first …(+1 more line)');
+  });
+
   it('redactCommand is an alias for redact with default rules', () => {
     expect(redactCommand('--token=secret123')).toBe(redact('--token=secret123', DEFAULT_REDACTION_RULES));
   });

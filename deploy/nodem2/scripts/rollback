@@ -1,0 +1,144 @@
+#!/bin/sh
+# Rolls the tracked nodem2 deployment back to the exact recorded eligible SHA.
+#
+#   rollback <40-character-commit-sha>
+#
+# The requested revision must exactly match the root-owned rollback record. A
+# fresh verified safety backup is taken before any cutover, and the tracked
+# Compose file, migration job, and /healthz checks are reused from `deploy`.
+set -eu
+umask 077
+
+SCRIPT_DIR=$(unset CDPATH; cd -- "$(dirname -- "$0")" && pwd)
+# shellcheck source=deploy/nodem2/scripts/lib-common
+. "$SCRIPT_DIR/lib-common"
+ARIADNE_LOG_TAG=ariadne-rollback
+
+CANDIDATE_IMAGE=""
+PREVIOUS_REVISION=""
+APP_REPLACED=0
+
+rollback_app() {
+    if [ "$APP_REPLACED" -ne 1 ]; then
+        return 0
+    fi
+    log "rollback failed; restoring the previous current image tag"
+    if SYNC_SERVER_IMAGE="$ARIADNE_CURRENT_TAG" ariadne_compose up -d --no-deps sync-server; then
+        log "restored the previous current image tag"
+    else
+        log "warning: failed to restore the previous current image tag"
+    fi
+}
+
+restore_worktree() {
+    if [ -z "$PREVIOUS_REVISION" ]; then
+        return 0
+    fi
+    if ariadne_restore_worktree_revision "$PREVIOUS_REVISION"; then
+        log "restored the deployment worktree to the recorded running revision"
+    else
+        log "warning: failed to restore the deployment worktree to the recorded running revision"
+    fi
+}
+
+on_exit() {
+    status=$?
+    if [ "$status" -ne 0 ]; then
+        rollback_app
+        restore_worktree
+    fi
+    exit "$status"
+}
+
+[ "$#" -eq 1 ] || fail "usage: rollback <40-character-commit-sha>"
+REVISION=$1
+case "$REVISION" in
+    *[!0-9a-f]* | "") fail "revision must be a full 40-character lowercase hex commit sha" ;;
+esac
+[ "${#REVISION}" -eq 40 ] || fail "revision must be a full 40-character lowercase hex commit sha"
+
+require_deployment_inputs
+[ -d "$ARIADNE_WORKTREE/.git" ] || [ -f "$ARIADNE_WORKTREE/.git" ] ||
+    fail "deployment worktree is missing: $ARIADNE_WORKTREE"
+mkdir -p "$ARIADNE_STATE_DIR"
+
+[ -f "$ARIADNE_STATE_DIR/rollback-revision" ] ||
+    fail "no eligible rollback revision is recorded"
+ELIGIBLE_REVISION=$(head -n 1 "$ARIADNE_STATE_DIR/rollback-revision" | tr -d ' \t\r\n')
+case "$ELIGIBLE_REVISION" in
+    *[!0-9a-f]* | "") fail "no eligible rollback revision is recorded" ;;
+esac
+[ "${#ELIGIBLE_REVISION}" -eq 40 ] || fail "no eligible rollback revision is recorded"
+[ "$REVISION" = "$ELIGIBLE_REVISION" ] ||
+    fail "requested revision does not match the recorded eligible rollback revision"
+
+trap on_exit EXIT INT TERM
+
+PREVIOUS_REVISION=$(ariadne_current_revision | tr -d ' \t\r\n') ||
+    fail "current revision is unavailable"
+
+log "creating a pre-rollback safety backup"
+ariadne_create_backup
+SAFETY_BACKUP="$ARIADNE_CREATED_BACKUP"
+
+log "verifying the safety backup before rollback"
+ariadne_checksum_matches "$SAFETY_BACKUP" ||
+    fail "the safety backup failed checksum verification; nothing was changed"
+ariadne_dump_is_readable "$ARIADNE_BACKUP_DIR/$SAFETY_BACKUP.dump" ||
+    fail "the safety backup could not be listed; nothing was changed"
+ariadne_record_backup_metadata "$SAFETY_BACKUP" verified "verified: pre-rollback safety backup"
+
+git -C "$ARIADNE_WORKTREE" cat-file -e "$REVISION^{commit}" 2>/dev/null ||
+    fail "revision is not a known commit in the trusted worktree"
+
+log "checking out the recorded rollback revision in $ARIADNE_WORKTREE"
+git -C "$ARIADNE_WORKTREE" checkout --detach --force "$REVISION" ||
+    fail "failed to check out the recorded rollback revision"
+if [ -n "$(git -C "$ARIADNE_WORKTREE" status --porcelain)" ]; then
+    fail "deployment worktree is dirty after checkout; refusing to roll back"
+fi
+
+CANDIDATE_IMAGE="$ARIADNE_IMAGE_REPO:$REVISION"
+
+log "validating Compose configuration"
+SYNC_SERVER_IMAGE="$CANDIDATE_IMAGE" ariadne_compose config --quiet ||
+    fail "Compose configuration is invalid"
+
+log "building candidate image for revision $REVISION"
+SYNC_SERVER_IMAGE="$CANDIDATE_IMAGE" ariadne_compose build sync-server ||
+    fail "candidate image build failed"
+
+log "starting database"
+SYNC_SERVER_IMAGE="$CANDIDATE_IMAGE" ariadne_compose up -d --wait postgres ||
+    fail "postgres failed to become healthy"
+
+log "running migrations"
+SYNC_SERVER_IMAGE="$CANDIDATE_IMAGE" ariadne_compose run --rm --no-deps migrate ||
+    fail "migrations failed; app was not replaced"
+
+log "starting candidate sync-server"
+APP_REPLACED=1
+SYNC_SERVER_IMAGE="$CANDIDATE_IMAGE" ariadne_compose up -d --no-deps sync-server ||
+    fail "candidate sync-server failed to start"
+
+log "verifying health endpoint"
+ariadne_wait_for_health || fail "health verification failed after rollback"
+
+APP_REPLACED=0
+docker tag "$CANDIDATE_IMAGE" "$ARIADNE_CURRENT_TAG" ||
+    fail "failed to update the $ARIADNE_CURRENT_TAG tag"
+
+printf '%s\n' "$REVISION" >"$ARIADNE_STATE_DIR/current-revision" ||
+    fail "failed to record the current deployment revision"
+chmod 600 "$ARIADNE_STATE_DIR/current-revision" ||
+    fail "failed to secure the current deployment revision"
+if [ -n "$PREVIOUS_REVISION" ] && [ "$PREVIOUS_REVISION" != "$REVISION" ]; then
+    printf '%s\n' "$PREVIOUS_REVISION" >"$ARIADNE_STATE_DIR/rollback-revision" ||
+        fail "failed to record the eligible rollback revision"
+    chmod 600 "$ARIADNE_STATE_DIR/rollback-revision" ||
+        fail "failed to secure the eligible rollback revision"
+else
+    rm -f "$ARIADNE_STATE_DIR/rollback-revision"
+fi
+
+log "rollback to revision $REVISION succeeded"

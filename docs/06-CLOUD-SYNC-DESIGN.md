@@ -1,12 +1,13 @@
-# Ariadne — Cloud Sync / Team Task Graph (Design Draft v0.2 — Decisions Locked, Ready for Phase 0)
+# Ariadne — Cloud Sync / Team Task Graph (Design Draft v0.2 — Decisions Locked)
 
-**Status: design decided, no implementation yet.** This document turns "cloud
-sync / team-shared task graph" from a one-line roadmap bullet into a
-concrete-enough proposal that a future session (or a human) can build from.
+**Status: design decided for the singleton-team internal deployment.** This
+document turns "cloud sync / team-shared task graph" from a one-line roadmap
+bullet into a concrete-enough proposal that a future session (or a human)
+can build from.
 **Update (v0.2):** all six open questions from v0.1's §6 have been answered
 for this project's actual deployment context — **internal use only, no
-external/paying users** — see §6 below. Phase 0 (server-side schema + API
-contract, as its own doc) can now start.
+external/paying users** — see §6 below. The server-side schema + API
+contract now captures that singleton-team model in detail.
 
 
 ## 1. Why This Is Different From Everything Else Shipped So Far
@@ -34,10 +35,11 @@ For these reasons this feature should not be built opportunistically the way
 the others were — it needs an explicit go/no-go and answers to §6 first.
 
 ## 2. Goals (decided: build this)
-- Let a **team** (internal users only, on a self-hosted server — see §6) see
-  and update a shared subset of task state (goal, status, todos, decisions,
-  checkpoints) across machines/users, not just one developer's local
-  workspace.
+- Let one **team** (internal users only, on a self-hosted server — see §6)
+  see and update a shared subset of task state (goal, status, todos,
+  decisions, checkpoints) across machines/users, not just one developer's
+  local workspace. The first successful registration becomes that team's
+  admin; later registrations join the same team as members.
 - Preserve the "SQLite is the local source of truth" principle
   (`docs/03-DATA-MODEL.md` §1) for **offline-first** operation — sync should
   be an optional, best-effort overlay, not a hard dependency for local usage.
@@ -50,9 +52,9 @@ the others were — it needs an explicit go/no-go and answers to §6 first.
 - Real-time collaborative editing (e.g. simultaneous cursors in one
   checkpoint) — tasks/checkpoints are append-mostly, not documents; this
   doesn't need CRDT-level guarantees.
-- Role-based/org-hierarchy permission systems — per §6, any valid account on
-  the internal server can read+write any shared task (flat model). Revisit
-  only if this tool is ever opened up beyond internal use.
+- Role-based/org-hierarchy permission systems — per §6, this deployment has
+  exactly one shared team. Revisit only if the tool is ever opened up beyond
+  internal use and needs multiple teams or org boundaries.
 - Multi-tenant hosting, billing, or public sign-up — this is an internally
   operated server for a known set of users, not a hosted product.
 
@@ -88,10 +90,10 @@ the others were — it needs an explicit go/no-go and answers to §6 first.
    task that belongs to a remote-backed group, so the existing
    `task_link_groups` table (already in the shared local registry) is a
    plausible foundation for "which tasks are shared, and with whom" rather
-   than a wholly new table. Given §6's flat-access model (any valid account
-   can see/edit any shared task), this group is closer to "which tasks are
-   published to the server" than a permissioned membership list — no ACL
-   logic needed inside the group itself for v1.
+   than a wholly new table. Given §6's singleton-team model (only active
+   members of that team can see/edit shared tasks), this group is closer to
+   "which tasks are published to the server" than a permissioned membership
+   list — no per-task ACL logic needed inside the group itself for v1.
 6. **Deletion is local-only (§6).** `ariadne task archive`/deleting a local
    task never issues a delete call to the server; the server is additive-only
    from the client's perspective in v1 (simplifies the API surface — no
@@ -100,10 +102,10 @@ the others were — it needs an explicit go/no-go and answers to §6 first.
 
 ## 5. Phasing
 1. **Phase 0 — Server schema + API contract.** All vendor/product decisions
-   are now made (§6) — this phase is just writing the actual server-side
-   schema (users, tasks, checkpoints, todos, decisions, open questions,
-   commands, files) and REST/RPC API contract as its own doc (this document
-   deliberately stops short of that level of detail).
+   are now made (§6) — the paired contract doc now records the actual
+   server-side schema (users, tasks, checkpoints, todos, decisions, open
+   questions, commands, files) and REST/RPC API surface, while this document
+   stays at the decision/rationale level.
 2. **Phase 1 — Read-only sync.** `ariadne sync push` uploads; a very small
    web view or `ariadne sync pull --readonly` proves the round trip works
    end to end (auth, transport, one entity type — start with just tasks +
@@ -128,6 +130,18 @@ draft's general-purpose framing.
   bcrypt/argon2, never plaintext) rather than GitHub OAuth or a bespoke
   token-link scheme. Simple to implement and sufficient for an internal,
   known-user-set deployment.
+- **Membership model: one team, one admin.** The server keeps a single
+  shared team per deployment. The first registration becomes that team's
+  admin; later registrations join as active members. All sync routes check
+  active membership before allowing reads or writes.
+- **Network admin is immutable through the normal admin API.** The
+  `/api/v1/admin/*` member-management surface can toggle other members'
+  active state, but it cannot promote, demote, or deactivate the singleton
+  admin. Root-only admin transfer belongs in the separate operator flow
+  planned elsewhere.
+- **404 hides inaccessible resources.** Sync endpoints intentionally return
+  `404` for tasks that are outside the caller's team or otherwise not
+  visible, so the API does not leak cross-team existence.
 - **Pricing/business model: free — no pricing needed.** Internal tool, no
   external/paying users, so no billing, metering, or plan tiers to design.
 - **Data retention & deletion: server-side data is additive/indefinite.**
@@ -136,11 +150,11 @@ draft's general-purpose framing.
   API-surface consequence: no delete endpoint needed for v1). If a hard
   server-side deletion/GC need arises later (e.g. disk usage), it can be a
   separate admin-only operation, not part of the client-facing sync protocol.
-- **Scope of "team": flat, no boundaries.** Any valid account on the internal
-  server can see and edit any shared task — no per-task ACLs, invite lists,
-  or org/group structure for v1. This is the simplest possible model and
-  matches an internal, trusted-user deployment; revisit only if this is ever
-  exposed beyond the current internal audience.
+- **Scope of "team": one shared internal team.** Any active member of the
+  singleton team can see and edit the shared tasks for that team — no
+  per-task ACLs, invite lists, or org/group structure for v1. This is the
+  simplest possible model and matches an internal, trusted-user deployment;
+  revisit only if this is ever exposed beyond the current internal audience.
 - **Redaction over the wire: no extra restriction beyond existing
   `Redactor.ts` secret-stripping.** Unlike v0.1's draft (which scoped the
   synced entity set down to exclude raw commands/files entirely, out of
@@ -155,5 +169,5 @@ draft's general-purpose framing.
 
 ## 7. Status
 All open questions from v0.1 are now resolved for this deployment (§6) —
-Phase 0 (§5.1: server schema + API contract as its own doc) is unblocked and
-can start whenever this is prioritized.
+the paired server schema + API contract now reflects those decisions, and
+this document remains the rationale layer for them.

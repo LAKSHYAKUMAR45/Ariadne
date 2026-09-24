@@ -1,0 +1,67 @@
+#!/bin/sh
+# Container entrypoint for the sync-server image.
+#
+# Startup runs briefly as root only to read the canonical root-owned 0600 keys
+# mounted read-only at /etc/ariadne/keys, copy the key bytes into a private
+# in-memory (tmpfs) runtime directory owned by the service account, and then
+# permanently drop to the configured non-root UID/GID via setpriv before exec'ing
+# the Node process. The Node process therefore never runs as root and retains no
+# inheritable capabilities. Host key ownership and permissions are never changed.
+set -eu
+umask 077
+
+CANONICAL_KEY_DIR=/etc/ariadne/keys
+RUNTIME_KEY_PARENT=/run/ariadne
+RUNTIME_KEY_DIR="$RUNTIME_KEY_PARENT/keys"
+APP_UID="${ARIADNE_APP_UID:-10001}"
+APP_GID="${ARIADNE_APP_GID:-10001}"
+
+fail() {
+    printf '[ariadne-entrypoint] error: %s\n' "$1" >&2
+    exit 1
+}
+
+[ "$#" -ge 1 ] || fail "no command was provided"
+
+if [ "$(id -u)" -ne 0 ]; then
+    # Already unprivileged (for example `docker run --user`): the keys must be
+    # directly readable by this user, so no handoff is possible or needed.
+    exec "$@"
+fi
+
+[ "${ENCRYPTION_KEY_DIR:-}" = "$RUNTIME_KEY_DIR" ] ||
+    fail "ENCRYPTION_KEY_DIR must be $RUNTIME_KEY_DIR inside this image"
+[ -d "$CANONICAL_KEY_DIR" ] || fail "canonical key directory is missing: $CANONICAL_KEY_DIR"
+[ -f "$CANONICAL_KEY_DIR/active-key-id" ] ||
+    fail "canonical key directory has no active-key-id file"
+
+mkdir -p "$RUNTIME_KEY_PARENT"
+chmod 0700 "$RUNTIME_KEY_PARENT"
+rm -rf "$RUNTIME_KEY_DIR"
+mkdir "$RUNTIME_KEY_DIR"
+
+copied=0
+for source in "$CANONICAL_KEY_DIR/active-key-id" "$CANONICAL_KEY_DIR"/*.key; do
+    [ -f "$source" ] || continue
+    target="$RUNTIME_KEY_DIR/$(basename "$source")"
+    : >"$target"
+    chmod 0600 "$target"
+    cat "$source" >"$target"
+    copied=$((copied + 1))
+done
+[ "$copied" -ge 2 ] || fail "no encryption key files were available to hand off"
+
+chmod 0700 "$RUNTIME_KEY_DIR"
+# Ownership transfer is last: afterwards root no longer owns these paths, and
+# the service account owns the whole handoff path so it can traverse it.
+chown -R "$APP_UID:$APP_GID" "$RUNTIME_KEY_DIR"
+chown "$APP_UID:$APP_GID" "$RUNTIME_KEY_PARENT"
+
+# Permanent, irreversible drop to the service account before the app starts.
+exec setpriv \
+    --reuid="$APP_UID" \
+    --regid="$APP_GID" \
+    --clear-groups \
+    --inh-caps=-all \
+    --no-new-privs \
+    "$@"

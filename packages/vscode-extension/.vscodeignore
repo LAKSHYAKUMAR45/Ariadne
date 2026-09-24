@@ -15,8 +15,10 @@ node_modules/**
 src/**
 test/**
 .vscode-test/**
+webview-ui/**
 *.ts
 !dist/**/*.d.ts
+!dist/webview/**
 tsconfig.json
 esbuild.js
 

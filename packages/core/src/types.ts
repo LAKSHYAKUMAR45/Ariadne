@@ -7,6 +7,7 @@ export type TaskStatus = 'active' | 'paused' | 'done' | 'archived';
 export type CheckpointLevel = 'micro' | 'session' | 'milestone';
 export type FileRole = 'edited' | 'read' | 'created' | 'deleted';
 export type TodoStatus = 'pending' | 'done' | 'blocked';
+export type FileCaptureTrigger = 'git_commit' | 'checkpoint' | 'explicit';
 
 export interface Task {
   id: string;
@@ -58,6 +59,47 @@ export interface TaskFile {
   lastTouched: string;
 }
 
+export interface TaskFileCapture {
+  id: string;
+  taskId: string;
+  trigger: FileCaptureTrigger;
+  gitCommitSha: string | null;
+  checkpointId: string | null;
+  createdAt: string;
+  syncedAt: string | null;
+  failedAt: string | null;
+  failureCode: string | null;
+}
+
+export interface TaskFileCaptureEntry {
+  captureId: string;
+  path: string;
+  content: string;
+  unifiedDiff: string;
+  byteLength: number;
+  contentSha256: string;
+}
+
+export interface NewTaskFileCaptureEntry {
+  path: string;
+  content: string;
+  unifiedDiff: string;
+  byteLength: number;
+  contentSha256: string;
+}
+
+export interface TaskFileCaptureWithEntries extends TaskFileCapture {
+  entries: TaskFileCaptureEntry[];
+}
+
+export interface CreateTaskFileCaptureInput {
+  taskId: string;
+  trigger: FileCaptureTrigger;
+  gitCommitSha?: string | null;
+  checkpointId?: string | null;
+  entries: NewTaskFileCaptureEntry[];
+}
+
 export interface Commit {
   sha: string;
   taskId: string;
@@ -81,6 +123,7 @@ export interface Decision {
   rationale: string | null;
   supersedesId: string | null;
   createdAt: string;
+  updatedAt: string;
   remoteId: string | null;
   syncedAt: string | null;
 }
@@ -119,6 +162,7 @@ export interface Command {
   exitCode: number | null;
   summary: string | null;
   createdAt: string;
+  updatedAt: string;
   remoteId: string | null;
   syncedAt: string | null;
 }
@@ -137,6 +181,7 @@ export interface TaskError {
   resolved: boolean;
   resolution: string | null;
   createdAt: string;
+  updatedAt: string;
   remoteId: string | null;
   syncedAt: string | null;
 }
@@ -154,6 +199,7 @@ export interface OpenQuestion {
   text: string;
   resolved: boolean;
   createdAt: string;
+  updatedAt: string;
   remoteId: string | null;
   syncedAt: string | null;
 }

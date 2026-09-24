@@ -1,0 +1,14 @@
+# Runs the daily backup at 02:15 local time.
+[Unit]
+Description=Daily Ariadne PostgreSQL backup
+Documentation=https://github.com/LAKSHYAKUMAR45/Ariadne
+
+[Timer]
+Unit=ariadne-backup.service
+OnCalendar=*-*-* 02:15:00
+Persistent=true
+RandomizedDelaySec=300
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

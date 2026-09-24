@@ -122,4 +122,164 @@ describe('MIGRATIONS (real app migrations)', () => {
 
     db.close();
   });
+
+  it('v4 adds updated_at to decisions/errors/open_questions/commands and backfills existing rows from created_at', () => {
+    const db = freshDb();
+    runMigrations(db, MIGRATIONS.filter((m) => m.version <= 3));
+
+    db.prepare(`INSERT INTO tasks (id, title, status, created_at, updated_at) VALUES ('t1', 'Task', 'active', '2020-01-01', '2020-01-01')`).run();
+    db.prepare(`INSERT INTO decisions (id, task_id, text, created_at) VALUES ('d1', 't1', 'Decide', '2020-01-02')`).run();
+    db.prepare(`INSERT INTO errors (id, task_id, message, resolved, created_at) VALUES ('e1', 't1', 'Oops', 0, '2020-01-03')`).run();
+    db.prepare(`INSERT INTO open_questions (id, task_id, text, resolved, created_at) VALUES ('q1', 't1', 'Why?', 0, '2020-01-04')`).run();
+    db.prepare(`INSERT INTO commands (id, task_id, cmd_redacted, created_at) VALUES ('c1', 't1', 'npm test', '2020-01-05')`).run();
+
+    runMigrations(db, MIGRATIONS.filter((m) => m.version <= 4));
+
+    const version = db.prepare(`SELECT value FROM schema_meta WHERE key = 'schema_version'`).get() as { value: string };
+    expect(version.value).toBe('4');
+    expect(() => db.prepare(`SELECT updated_at FROM decisions`).all()).not.toThrow();
+    expect(() => db.prepare(`SELECT updated_at FROM errors`).all()).not.toThrow();
+    expect(() => db.prepare(`SELECT updated_at FROM open_questions`).all()).not.toThrow();
+    expect(() => db.prepare(`SELECT updated_at FROM commands`).all()).not.toThrow();
+
+    expect((db.prepare(`SELECT created_at, updated_at FROM decisions WHERE id = 'd1'`).get() as { created_at: string; updated_at: string }).updated_at).toBe('2020-01-02');
+    expect((db.prepare(`SELECT created_at, updated_at FROM errors WHERE id = 'e1'`).get() as { created_at: string; updated_at: string }).updated_at).toBe('2020-01-03');
+    expect((db.prepare(`SELECT created_at, updated_at FROM open_questions WHERE id = 'q1'`).get() as { created_at: string; updated_at: string }).updated_at).toBe('2020-01-04');
+    expect((db.prepare(`SELECT created_at, updated_at FROM commands WHERE id = 'c1'`).get() as { created_at: string; updated_at: string }).updated_at).toBe('2020-01-05');
+
+    db.close();
+  });
+
+  it('v5 adds immutable task file captures with same-task reference integrity', () => {
+    const db = freshDb();
+    runMigrations(db, MIGRATIONS.filter((m) => m.version <= 4));
+
+    db.prepare(
+      `INSERT INTO tasks (id, title, status, created_at, updated_at) VALUES ('t1', 'Task', 'active', '2020-01-01', '2020-01-01')`,
+    ).run();
+    db.prepare(
+      `INSERT INTO tasks (id, title, status, created_at, updated_at) VALUES ('t2', 'Other task', 'active', '2020-01-01', '2020-01-01')`,
+    ).run();
+    db.prepare(
+      `INSERT INTO checkpoints (id, task_id, level, summary, created_at) VALUES ('cp1', 't1', 'micro', 'checkpoint', '2020-01-02')`,
+    ).run();
+    db.prepare(
+      `INSERT INTO checkpoints (id, task_id, level, summary, created_at) VALUES ('cp2', 't2', 'micro', 'other checkpoint', '2020-01-02')`,
+    ).run();
+    db.prepare(
+      `INSERT INTO commits (sha, task_id, message, created_at) VALUES ('commit-1', 't1', 'capture commit', '2020-01-02')`,
+    ).run();
+    db.prepare(
+      `INSERT INTO decisions (id, task_id, text, created_at, updated_at) VALUES ('d1', 't1', 'Decide', '2020-01-03', '2020-01-03')`,
+    ).run();
+    runMigrations(db, MIGRATIONS.filter((m) => m.version <= 5));
+
+    const version = db.prepare(`SELECT value FROM schema_meta WHERE key = 'schema_version'`).get() as { value: string };
+    expect(version.value).toBe('5');
+    expect((db.prepare(`SELECT COUNT(*) AS count FROM tasks`).get() as { count: number }).count).toBe(2);
+    expect((db.prepare(`SELECT COUNT(*) AS count FROM checkpoints`).get() as { count: number }).count).toBe(2);
+    expect((db.prepare(`SELECT COUNT(*) AS count FROM decisions`).get() as { count: number }).count).toBe(1);
+
+    db.prepare(
+      `INSERT INTO task_file_captures (id, task_id, trigger, git_commit_sha, checkpoint_id, created_at, synced_at)
+       VALUES ('cap-g1', 't1', 'git_commit', 'commit-1', NULL, '2020-01-04', NULL)`,
+    ).run();
+    expect(() =>
+      db.prepare(
+        `INSERT INTO task_file_captures (id, task_id, trigger, git_commit_sha, checkpoint_id, created_at, synced_at)
+         VALUES ('cap-g2', 't1', 'git_commit', 'commit-1', NULL, '2020-01-05', NULL)`,
+      ).run(),
+    ).toThrow(/UNIQUE/);
+    expect(() =>
+      db.prepare(
+        `INSERT INTO task_file_captures (id, task_id, trigger, git_commit_sha, checkpoint_id, created_at, synced_at)
+         VALUES ('cap-g3', 't1', 'git_commit', 'missing-commit', NULL, '2020-01-05', NULL)`,
+      ).run(),
+    ).toThrow(/FOREIGN KEY/);
+    expect(() =>
+      db.prepare(
+        `INSERT INTO task_file_captures (id, task_id, trigger, git_commit_sha, checkpoint_id, created_at, synced_at)
+         VALUES ('cap-g4', 't2', 'git_commit', 'commit-1', NULL, '2020-01-05', NULL)`,
+      ).run(),
+    ).toThrow(/FOREIGN KEY/);
+
+    db.prepare(
+      `INSERT INTO task_file_captures (id, task_id, trigger, git_commit_sha, checkpoint_id, created_at, synced_at)
+       VALUES ('cap-c1', 't1', 'checkpoint', NULL, 'cp1', '2020-01-06', NULL)`,
+    ).run();
+    expect(() =>
+      db.prepare(
+        `INSERT INTO task_file_captures (id, task_id, trigger, git_commit_sha, checkpoint_id, created_at, synced_at)
+         VALUES ('cap-c2', 't1', 'checkpoint', NULL, 'cp1', '2020-01-07', NULL)`,
+      ).run(),
+    ).toThrow(/UNIQUE/);
+    expect(() =>
+      db.prepare(
+        `INSERT INTO task_file_captures (id, task_id, trigger, git_commit_sha, checkpoint_id, created_at, synced_at)
+         VALUES ('cap-c3', 't1', 'checkpoint', NULL, 'missing-checkpoint', '2020-01-07', NULL)`,
+      ).run(),
+    ).toThrow(/FOREIGN KEY/);
+    expect(() =>
+      db.prepare(
+        `INSERT INTO task_file_captures (id, task_id, trigger, git_commit_sha, checkpoint_id, created_at, synced_at)
+         VALUES ('cap-c4', 't2', 'checkpoint', NULL, 'cp1', '2020-01-07', NULL)`,
+      ).run(),
+    ).toThrow(/FOREIGN KEY/);
+
+    expect(() =>
+      db.prepare(
+        `INSERT INTO task_file_captures (id, task_id, trigger, git_commit_sha, checkpoint_id, created_at, synced_at)
+         VALUES ('cap-e1', 't1', 'explicit', NULL, NULL, '2020-01-08', NULL)`,
+      ).run(),
+    ).not.toThrow();
+    expect(() =>
+      db.prepare(
+        `INSERT INTO task_file_captures (id, task_id, trigger, git_commit_sha, checkpoint_id, created_at, synced_at)
+         VALUES ('cap-e2', 't1', 'explicit', NULL, NULL, '2020-01-09', NULL)`,
+      ).run(),
+    ).not.toThrow();
+
+    expect(() =>
+      db.prepare(
+        `INSERT INTO task_file_capture_entries (capture_id, path, content, unified_diff, byte_length, content_sha256)
+         VALUES ('cap-e1', 'src/index.ts', 'content', '@@ -0,0 +1 @@', 7, 'sha256')`,
+      ).run(),
+    ).not.toThrow();
+    expect(
+      db.prepare(`SELECT path, content_sha256 FROM task_file_capture_entries WHERE capture_id = 'cap-e1'`).get(),
+    ).toEqual({ path: 'src/index.ts', content_sha256: 'sha256' });
+
+    db.close();
+  });
+
+  it('v6 records commits that produced no eligible capture without duplicating markers', () => {
+    const db = freshDb();
+    runMigrations(db, MIGRATIONS.filter((m) => m.version <= 5));
+
+    db.prepare(
+      `INSERT INTO tasks (id, title, status, created_at, updated_at) VALUES ('t1', 'Task', 'active', '2020-01-01', '2020-01-01')`,
+    ).run();
+    db.prepare(
+      `INSERT INTO commits (sha, task_id, message, created_at) VALUES ('commit-1', 't1', 'excluded files', '2020-01-02')`,
+    ).run();
+
+    runMigrations(db, MIGRATIONS);
+
+    const version = db.prepare(`SELECT value FROM schema_meta WHERE key = 'schema_version'`).get() as { value: string };
+    expect(version.value).toBe('6');
+    expect(() =>
+      db.prepare(
+        `INSERT INTO task_file_capture_empty_commits (task_id, git_commit_sha, created_at)
+         VALUES ('t1', 'commit-1', '2020-01-03')`,
+      ).run(),
+    ).not.toThrow();
+    expect(() =>
+      db.prepare(
+        `INSERT INTO task_file_capture_empty_commits (task_id, git_commit_sha, created_at)
+         VALUES ('t1', 'commit-1', '2020-01-04')`,
+      ).run(),
+    ).toThrow(/UNIQUE/);
+
+    db.close();
+  });
 });

@@ -1,0 +1,207 @@
+#!/bin/sh
+# Deploys one trusted revision of the Ariadne sync-server to nodem2.
+#
+#   deploy <40-character-commit-sha>
+#
+# The revision must already be reachable from the fixed root-managed local ref
+# (refs/ariadne/deploy). The script validates Compose configuration, builds an
+# immutable candidate image, runs migrations as a one-shot job, replaces the
+# app, verifies /healthz, and rolls back to the previously deployed image on
+# failure.
+set -eu
+umask 077
+
+SCRIPT_DIR=$(unset CDPATH; cd -- "$(dirname -- "$0")" && pwd)
+# shellcheck source=deploy/nodem2/scripts/lib-common
+. "$SCRIPT_DIR/lib-common"
+
+CANDIDATE_IMAGE=""
+PREVIOUS_IMAGE=""
+PREVIOUS_REVISION=""
+APP_REPLACED=0
+OPERATOR_BUILD_STARTED=0
+PROXY_TOUCHED=0
+
+on_exit() {
+    status=$?
+    if [ "$status" -ne 0 ] && [ "$APP_REPLACED" -eq 1 ]; then
+        rollback
+        status=1
+    fi
+    if [ "$status" -ne 0 ] &&
+        { [ "$OPERATOR_BUILD_STARTED" -eq 1 ] || [ "$PROXY_TOUCHED" -eq 1 ]; }; then
+        restore_release_components || true
+        status=1
+    fi
+    exit "$status"
+}
+
+rollback() {
+    if [ -z "$PREVIOUS_IMAGE" ]; then
+        log "rollback skipped: no previous image was recorded"
+        return 0
+    fi
+    log "rolling back sync-server to the previously deployed image"
+    if SYNC_SERVER_IMAGE="$PREVIOUS_IMAGE" ariadne_compose up -d --no-deps sync-server; then
+        log "rollback complete"
+    else
+        log "rollback failed; sync-server requires manual recovery"
+    fi
+}
+
+restore_release_components() {
+    if [ -z "$PREVIOUS_REVISION" ] ||
+        ! ariadne_restore_worktree_revision "$PREVIOUS_REVISION"; then
+        log "release component rollback failed: previous worktree revision is unavailable"
+        return 1
+    fi
+
+    if [ "$OPERATOR_BUILD_STARTED" -eq 1 ]; then
+        log "restoring operator build for the previous revision"
+        if ! (
+            cd "$ARIADNE_WORKTREE"
+            pnpm --filter @ariadne-dev/operator build
+        ) || ! systemctl restart ariadne-operator.service; then
+            log "operator rollback failed; operator requires manual recovery"
+            return 1
+        fi
+    fi
+
+    if [ "$PROXY_TOUCHED" -eq 1 ]; then
+        if grep -Eq '^  proxy:$' "$ARIADNE_COMPOSE_FILE"; then
+            log "restoring the previous Ariadne HTTPS proxy"
+            if ! SYNC_SERVER_IMAGE="$PREVIOUS_IMAGE" \
+                ariadne_compose up -d --no-deps --wait proxy; then
+                log "proxy rollback failed; proxy requires manual recovery"
+                return 1
+            fi
+        else
+            log "removing the candidate-only Ariadne HTTPS proxy"
+            docker rm -f ariadne-nodem2-proxy-1 >/dev/null 2>&1 || true
+        fi
+    fi
+    return 0
+}
+
+[ "$#" -eq 1 ] || fail "usage: deploy <40-character-commit-sha>"
+REVISION=$1
+case "$REVISION" in
+    *[!0-9a-f]* | "") fail "revision must be a full 40-character lowercase hex commit sha" ;;
+esac
+[ "${#REVISION}" -eq 40 ] || fail "revision must be a full 40-character lowercase hex commit sha"
+
+require_deployment_inputs
+require_file "$ARIADNE_PROXY_CERT"
+require_file "$ARIADNE_PROXY_KEY"
+[ -d "$ARIADNE_WORKTREE/.git" ] || [ -f "$ARIADNE_WORKTREE/.git" ] ||
+    fail "deployment worktree is missing: $ARIADNE_WORKTREE"
+mkdir -p "$ARIADNE_STATE_DIR"
+
+trap on_exit EXIT INT TERM
+
+log "verifying revision against $ARIADNE_TRUSTED_REF"
+if [ -n "$(git -C "$ARIADNE_WORKTREE" status --porcelain)" ]; then
+    fail "deployment worktree is dirty; refusing to deploy modified source"
+fi
+
+TRUSTED_TIP=$(git -C "$ARIADNE_WORKTREE" rev-parse --verify --quiet "$ARIADNE_TRUSTED_REF^{commit}") ||
+    fail "trusted ref $ARIADNE_TRUSTED_REF is not available"
+[ -n "$TRUSTED_TIP" ] || fail "trusted ref $ARIADNE_TRUSTED_REF is not available"
+PREVIOUS_REVISION=$(ariadne_current_revision | tr -d ' \t\r\n') ||
+    fail "current revision is unavailable"
+
+git -C "$ARIADNE_WORKTREE" cat-file -e "$REVISION^{commit}" 2>/dev/null ||
+    fail "revision is not a known commit in the trusted worktree"
+git -C "$ARIADNE_WORKTREE" merge-base --is-ancestor "$REVISION" "$TRUSTED_TIP" ||
+    fail "revision is not reachable from the trusted ref $ARIADNE_TRUSTED_REF"
+
+log "checking out the trusted revision in $ARIADNE_WORKTREE"
+git -C "$ARIADNE_WORKTREE" checkout --detach --force "$REVISION" ||
+    fail "failed to check out the trusted revision"
+CHECKED_OUT=$(git -C "$ARIADNE_WORKTREE" rev-parse HEAD)
+[ "$CHECKED_OUT" = "$REVISION" ] || fail "checked out revision does not match the requested revision"
+if [ -n "$(git -C "$ARIADNE_WORKTREE" status --porcelain)" ]; then
+    fail "deployment worktree is dirty after checkout; refusing to deploy"
+fi
+
+CANDIDATE_IMAGE="$ARIADNE_IMAGE_REPO:$REVISION"
+
+PREVIOUS_IMAGE=$(docker image inspect --format '{{.Id}}' "$ARIADNE_CURRENT_TAG" 2>/dev/null || true)
+if [ -n "$PREVIOUS_IMAGE" ]; then
+    printf '%s\n' "$PREVIOUS_IMAGE" >"$ARIADNE_STATE_DIR/rollback-image"
+    chmod 600 "$ARIADNE_STATE_DIR/rollback-image"
+    log "recorded rollback image target"
+else
+    log "no previous image is tagged $ARIADNE_CURRENT_TAG; rollback will be unavailable"
+fi
+
+log "validating Compose configuration"
+SYNC_SERVER_IMAGE="$CANDIDATE_IMAGE" ariadne_compose config --quiet ||
+    fail "Compose configuration is invalid"
+
+log "building candidate image for revision $REVISION"
+SYNC_SERVER_IMAGE="$CANDIDATE_IMAGE" ariadne_compose build sync-server ||
+    fail "candidate image build failed"
+
+log "starting database"
+SYNC_SERVER_IMAGE="$CANDIDATE_IMAGE" ariadne_compose up -d --wait postgres ||
+    fail "postgres failed to become healthy"
+
+log "running migrations"
+SYNC_SERVER_IMAGE="$CANDIDATE_IMAGE" ariadne_compose run --rm --no-deps migrate ||
+    fail "migrations failed; app was not replaced"
+
+log "starting candidate sync-server"
+APP_REPLACED=1
+SYNC_SERVER_IMAGE="$CANDIDATE_IMAGE" ariadne_compose up -d --no-deps sync-server ||
+    fail "candidate sync-server failed to start"
+
+log "verifying health endpoint"
+healthy=0
+if ariadne_wait_for_health; then
+    healthy=1
+fi
+
+if [ "$healthy" -ne 1 ]; then
+    if [ -z "$PREVIOUS_IMAGE" ]; then
+        APP_REPLACED=0
+        fail "health verification failed and no previous image is available for rollback"
+    fi
+    fail "health verification failed; starting rollback"
+fi
+
+log "starting Ariadne HTTPS proxy"
+PROXY_TOUCHED=1
+SYNC_SERVER_IMAGE="$CANDIDATE_IMAGE" ariadne_compose up -d --no-deps --wait proxy ||
+    fail "Ariadne HTTPS proxy failed to become healthy"
+
+log "building tracked operator"
+OPERATOR_BUILD_STARTED=1
+(
+    cd "$ARIADNE_WORKTREE"
+    pnpm --filter @ariadne-dev/operator build
+) || fail "operator build failed"
+
+log "restarting operator with the reviewed build"
+systemctl restart ariadne-operator.service ||
+    fail "operator restart failed"
+
+docker tag "$CANDIDATE_IMAGE" "$ARIADNE_CURRENT_TAG" ||
+    fail "failed to update the $ARIADNE_CURRENT_TAG rollback pointer"
+
+printf '%s\n' "$REVISION" >"$ARIADNE_STATE_DIR/current-revision" ||
+    fail "failed to record the current deployment revision"
+chmod 600 "$ARIADNE_STATE_DIR/current-revision" ||
+    fail "failed to secure the current deployment revision"
+if [ -n "$PREVIOUS_REVISION" ] && [ "$PREVIOUS_REVISION" != "$REVISION" ]; then
+    printf '%s\n' "$PREVIOUS_REVISION" >"$ARIADNE_STATE_DIR/rollback-revision" ||
+        fail "failed to record the eligible rollback revision"
+    chmod 600 "$ARIADNE_STATE_DIR/rollback-revision" ||
+        fail "failed to secure the eligible rollback revision"
+else
+    rm -f "$ARIADNE_STATE_DIR/rollback-revision"
+fi
+APP_REPLACED=0
+OPERATOR_BUILD_STARTED=0
+PROXY_TOUCHED=0
+log "deployment of revision $REVISION succeeded"

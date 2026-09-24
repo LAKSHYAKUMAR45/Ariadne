@@ -1,0 +1,64 @@
+#!/bin/sh
+# Removes expired backups from the fixed backup root.
+#
+#   prune-backups
+#
+# Only complete, correctly named triplets are considered, retention is derived
+# from the validated filename timestamp (never from metadata, which is treated
+# as untrusted data and is never sourced), and the newest valid backup is kept
+# unconditionally. Orphaned temporary files older than one day are removed.
+set -eu
+umask 077
+
+SCRIPT_DIR=$(unset CDPATH; cd -- "$(dirname -- "$0")" && pwd)
+# shellcheck source=deploy/nodem2/scripts/lib-common
+. "$SCRIPT_DIR/lib-common"
+ARIADNE_LOG_TAG=ariadne-backup-prune
+
+[ "$#" -eq 0 ] || fail "usage: prune-backups (takes no arguments)"
+
+[ -d "$ARIADNE_BACKUP_DIR" ] || exit 0
+
+NOW=$(date -u +%s) || fail "failed to read the clock"
+case "$NOW" in
+    "" | *[!0-9]*) fail "failed to read the clock" ;;
+esac
+CUTOFF=$((NOW - ARIADNE_BACKUP_RETENTION_DAYS * 86400))
+
+NEWEST=$(ariadne_newest_backup)
+
+for dump in "$ARIADNE_BACKUP_DIR"/ariadne-*.dump; do
+    [ -f "$dump" ] || continue
+    base=$(basename "$dump" .dump)
+    stamp=${base#ariadne-}
+
+    case "$stamp" in
+        ????????T??????Z) ;;
+        *) continue ;;
+    esac
+    case "$stamp" in
+        *[!0-9TZ]*) continue ;;
+    esac
+
+    # Incomplete sets are evidence of a failed run and are never deleted here.
+    [ -f "$ARIADNE_BACKUP_DIR/$base.sha256" ] || continue
+    [ -f "$ARIADNE_BACKUP_DIR/$base.json" ] || continue
+
+    [ "$base" != "$NEWEST" ] || continue
+
+    iso="$(printf '%s' "$stamp" | cut -c1-4)-$(printf '%s' "$stamp" | cut -c5-6)-$(printf '%s' "$stamp" | cut -c7-8)T$(printf '%s' "$stamp" | cut -c10-11):$(printf '%s' "$stamp" | cut -c12-13):$(printf '%s' "$stamp" | cut -c14-15)Z"
+    taken=$(date -u -d "$iso" +%s 2>/dev/null) || continue
+    case "$taken" in
+        "" | *[!0-9]*) continue ;;
+    esac
+
+    [ "$taken" -lt "$CUTOFF" ] || continue
+
+    rm -f "$ARIADNE_BACKUP_DIR/$base.dump" \
+        "$ARIADNE_BACKUP_DIR/$base.sha256" \
+        "$ARIADNE_BACKUP_DIR/$base.json"
+    log "pruned expired backup $base.dump"
+done
+
+find "$ARIADNE_BACKUP_DIR" -maxdepth 1 -type f -name 'ariadne-*.tmp' \
+    -mtime "+$((ARIADNE_BACKUP_TMP_RETENTION_DAYS - 1))" -delete 2>/dev/null || true
