@@ -181,6 +181,24 @@ export type {
   KnowledgeOperationStatus,
   ListKnowledgeOperationsOptions,
 } from './knowledge/KnowledgeOperationLog.js';
+export {
+  KNOWLEDGE_REVIEW_ACTIONS,
+  createKnowledgeReview,
+  listKnowledgeReviews,
+  resolveKnowledgeReview,
+  reopenKnowledgeReview,
+  bulkResolveKnowledgeReviews,
+} from './knowledge/KnowledgeReview.js';
+export type {
+  BulkResolveKnowledgeReviewsResult,
+  CreateKnowledgeReviewInput,
+  KnowledgeReviewAction,
+  KnowledgeReviewEvidence,
+  KnowledgeReviewRecord,
+  ListKnowledgeReviewsOptions,
+  ReopenKnowledgeReviewInput,
+  ResolveKnowledgeReviewInput,
+} from './knowledge/KnowledgeReview.js';
 export type {
   KnowledgeProjectId,
   KnowledgeSourceId,
