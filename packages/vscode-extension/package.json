@@ -43,7 +43,7 @@
         {
           "id": "ariadne",
           "title": "Ariadne",
-          "icon": "resources/icon.png"
+          "icon": "resources/activitybar.svg"
         }
       ]
     },

@@ -266,7 +266,7 @@ describe('chat participant error handling', () => {
 
     expect(packageJson.activationEvents).toContain('onView:ariadne.launcherView');
     expect(packageJson.contributes?.viewsContainers?.activitybar).toContainEqual(
-      expect.objectContaining({ id: 'ariadne', title: 'Ariadne', icon: 'resources/icon.png' }),
+      expect.objectContaining({ id: 'ariadne', title: 'Ariadne', icon: 'resources/activitybar.svg' }),
     );
     expect(packageJson.contributes?.views?.ariadne).toContainEqual(
       expect.objectContaining({ id: 'ariadne.launcherView', name: 'Ariadne' }),
