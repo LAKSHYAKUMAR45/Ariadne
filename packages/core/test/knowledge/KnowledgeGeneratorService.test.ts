@@ -93,4 +93,34 @@ describe('KnowledgeGeneratorService', () => {
     expect(database.prepare('SELECT COUNT(*) AS count FROM knowledge_page_versions').get()).toEqual({ count: 1 });
     expect(database.prepare('SELECT status FROM knowledge_jobs WHERE id = ?').get('job_2')).toEqual({ status: 'failed' });
   });
+
+  it('rejects page slugs that would write outside the output root', async () => {
+    const outputRoot = mkdtempSync(join(process.cwd(), '.knowledge-generator-test-'));
+    directories.push(outputRoot);
+    const database = createDatabase(outputRoot);
+    database
+      .prepare(
+        `INSERT INTO knowledge_jobs
+         (id, project_id, job_kind, status, payload_json, requested_at)
+         VALUES (?, ?, ?, 'queued', ?, ?)`,
+      )
+      .run(
+        'job_traversal',
+        'project_1',
+        'generate',
+        JSON.stringify({
+          outputRoot,
+          pages: [{ type: 'concept', title: 'Traversal', slug: '../../outside', content: 'Generated' }],
+        }),
+        '2026-01-03T00:00:00.000Z',
+      );
+
+    await expect(new KnowledgeGeneratorService(database).runKnowledgeGeneration('job_traversal')).rejects.toThrow(
+      /workspace|output root/i,
+    );
+    expect(existsSync(join(outputRoot, '..', 'outside.md'))).toBe(false);
+    expect(database.prepare('SELECT status FROM knowledge_jobs WHERE id = ?').get('job_traversal')).toEqual({
+      status: 'failed',
+    });
+  });
 });

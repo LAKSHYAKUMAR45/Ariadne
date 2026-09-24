@@ -85,6 +85,21 @@ export { ensureGitignored } from './gitignore.js';
 export { searchWorkspace } from './Search.js';
 export type { SearchCategory, SearchMatch, SearchResult, SearchOptions } from './Search.js';
 export {
+  buildKnowledgeSearchContext,
+  lexicalScore,
+  searchKnowledge,
+} from './knowledge/KnowledgeSearch.js';
+export type {
+  KnowledgeSearchCitation,
+  KnowledgeSearchContext,
+  KnowledgeSearchContextOptions,
+  KnowledgeSearchGraphExpansion,
+  KnowledgeSearchMode,
+  KnowledgeSearchOptions,
+  KnowledgeSearchResult,
+  KnowledgeSearchResultKind,
+} from './knowledge/KnowledgeSearch.js';
+export {
   findWorkspaceRoot,
   stateDbPath,
   openWorkspaceStore,

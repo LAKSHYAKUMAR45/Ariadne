@@ -2,7 +2,7 @@ import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, re
 import path from 'node:path';
 import type Database from 'better-sqlite3';
 import { buildKnowledgeManifest, type KnowledgeManifest } from './KnowledgeManifest.js';
-import { createKnowledgeId } from './KnowledgeIds.js';
+import { createKnowledgeId, normalizeKnowledgePath } from './KnowledgeIds.js';
 import { KnowledgePageStore, type CreatePageVersionInput, type KnowledgePageVersion } from './KnowledgePageStore.js';
 import { KnowledgeRenderer, renderKnowledgeIndex, renderKnowledgeLog, renderKnowledgeOverview, type KnowledgeIndexEntry } from './KnowledgeRenderer.js';
 import type { KnowledgePageType, KnowledgeProvenanceRef } from './KnowledgeTypes.js';
@@ -88,24 +88,44 @@ function writeDurable(filePath: string, content: string): void {
   }
 }
 
+function resolveOutputPath(root: string, relativePath: string): { relativePath: string; absolutePath: string } {
+  if (relativePath.replace(/\\/g, '/').split('/').includes('..')) {
+    throw new Error('Knowledge generation output path must stay within the output root');
+  }
+  const normalizedPath = normalizeKnowledgePath(relativePath);
+  const absoluteRoot = path.resolve(root);
+  const absolutePath = path.resolve(absoluteRoot, normalizedPath);
+  const relativeToRoot = path.relative(absoluteRoot, absolutePath);
+  if (relativeToRoot === '' || relativeToRoot.startsWith('..') || path.isAbsolute(relativeToRoot)) {
+    throw new Error('Knowledge generation output path must stay within the output root');
+  }
+  return { relativePath: normalizedPath, absolutePath };
+}
+
+function pageRelativePath(input: KnowledgeGenerationPageInput): string {
+  return resolveOutputPath('/', `pages/${input.type}/${input.slug}.md`).relativePath;
+}
+
 function commitFiles(root: string, files: StagedFile[]): FileCommit {
   mkdirSync(root, { recursive: true });
   const token = `${process.pid}.${Date.now()}.${createKnowledgeId('generation').slice(-8)}`;
-  const stagingRoot = path.join(root, `.generation-${token}`);
-  const backupRoot = path.join(root, `.generation-backup-${token}`);
-  const targets = files.map(({ relativePath }) => path.join(root, relativePath));
+  const absoluteRoot = path.resolve(root);
+  const stagingRoot = path.join(absoluteRoot, `.generation-${token}`);
+  const backupRoot = path.join(absoluteRoot, `.generation-backup-${token}`);
+  const staged = files.map((file) => ({ ...file, ...resolveOutputPath(absoluteRoot, file.relativePath) }));
+  const targets = staged.map(({ absolutePath }) => absolutePath);
   const backups: Array<{ target: string; backup: string }> = [];
   try {
-    for (const file of files) writeDurable(path.join(stagingRoot, file.relativePath), file.content);
+    for (const file of staged) writeDurable(path.join(stagingRoot, file.relativePath), file.content);
     for (const target of targets) {
       if (!existsSync(target)) continue;
-      const backup = path.join(backupRoot, path.relative(root, target));
+      const backup = path.join(backupRoot, path.relative(absoluteRoot, target));
       mkdirSync(path.dirname(backup), { recursive: true });
       renameSync(target, backup);
       backups.push({ target, backup });
     }
-    for (const file of files) {
-      const target = path.join(root, file.relativePath);
+    for (const file of staged) {
+      const target = file.absolutePath;
       mkdirSync(path.dirname(target), { recursive: true });
       renameSync(path.join(stagingRoot, file.relativePath), target);
     }
@@ -121,7 +141,7 @@ function commitFiles(root: string, files: StagedFile[]): FileCommit {
       rmSync(backupRoot, { recursive: true, force: true });
     };
     return {
-      files: files.map(({ relativePath }) => relativePath),
+      files: staged.map(({ relativePath }) => relativePath),
       finalize: () => {
         rmSync(stagingRoot, { recursive: true, force: true });
         rmSync(backupRoot, { recursive: true, force: true });
@@ -184,11 +204,12 @@ export class KnowledgeGeneratorService {
     const outputRoot = path.resolve(payload.outputRoot ?? path.join(project.workspace_root, '.ariadne', 'knowledge'));
     const manifest = buildKnowledgeManifest(project.id, generatedAt);
     const pageStore = new KnowledgePageStore(this.db);
-    const renderedPages: Array<{ input: KnowledgeGenerationPageInput; pageId: string; version: number; markdown: string }> = [];
+    const renderedPages: Array<{ input: KnowledgeGenerationPageInput; pageId: string; version: number; markdown: string; relativePath: string }> = [];
 
     try {
       for (const input of payload.pages) {
         if (!input.content.trim()) throw new Error(`Knowledge page content must not be empty: ${input.slug}`);
+        const relativePath = pageRelativePath(input);
         const pageId = input.pageId ?? createKnowledgeId('page', `${project.id}:${input.slug}`);
         const version = pageStore.getNextVersionNumber(project.id, pageId as never);
         const markdown = this.renderer.renderKnowledgePage({
@@ -204,7 +225,7 @@ export class KnowledgeGeneratorService {
           generatedAt,
           version,
         });
-        renderedPages.push({ input, pageId, version, markdown });
+        renderedPages.push({ input, pageId, version, markdown, relativePath });
       }
     } catch (error) {
       this.failJob(jobId, error);
@@ -227,8 +248,8 @@ export class KnowledgeGeneratorService {
       ? readFileSync(path.join(outputRoot, 'log.md'), 'utf8')
       : '';
     const stagedFiles: StagedFile[] = [
-      ...renderedPages.map(({ input, markdown }) => ({
-        relativePath: `pages/${input.type}/${input.slug}.md`,
+      ...renderedPages.map(({ markdown, relativePath }) => ({
+        relativePath,
         content: markdown,
       })),
       { relativePath: 'index.md', content: renderKnowledgeIndex(entries) },
@@ -242,7 +263,7 @@ export class KnowledgeGeneratorService {
     try {
       fileCommit = commitFiles(outputRoot, stagedFiles);
       const versions = this.db.transaction(() =>
-        renderedPages.map(({ input, pageId, markdown }) => {
+        renderedPages.map(({ input, pageId, markdown, relativePath }) => {
           const versionInput: CreatePageVersionInput = {
             projectId: project.id,
             pageId: pageId as never,
@@ -250,7 +271,7 @@ export class KnowledgeGeneratorService {
             title: input.title,
             slug: input.slug,
             content: markdown,
-            contentPath: `pages/${input.type}/${input.slug}.md`,
+            contentPath: relativePath,
             summary: input.summary,
             sourceVersionIds: input.sourceVersionIds,
             provenance: input.provenance,
