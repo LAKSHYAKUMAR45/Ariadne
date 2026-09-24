@@ -218,17 +218,20 @@ describe('TasksPage', () => {
 
     await user.click(await screen.findByRole('button', { name: /build cloud dashboard/i }));
 
-    await user.click(await screen.findByRole('button', { name: 'Download context' }));
+    await user.click(await screen.findByText('Export'));
+    await user.click(screen.getByRole('menuitem', { name: 'Download context' }));
     expect(clickSpy).toHaveBeenCalledTimes(1);
     expect(createObjectURL).toHaveBeenCalledTimes(1);
     expect(revokeObjectURL).toHaveBeenCalledWith('blob:mock-url');
     expect(await screen.findByText('Context downloaded.')).toBeVisible();
 
-    await user.click(screen.getByRole('button', { name: 'Copy for Copilot Chat' }));
+    await user.click(screen.getByText('Export'));
+    await user.click(screen.getByRole('menuitem', { name: 'Copy for Copilot Chat' }));
     expect(writeText).toHaveBeenLastCalledWith(expect.stringContaining('# Build cloud dashboard'));
     expect(await screen.findByText('Copied context for Copilot Chat.')).toBeVisible();
 
-    await user.click(screen.getByRole('button', { name: 'Copy Copilot CLI command' }));
+    await user.click(screen.getByText('Export'));
+    await user.click(screen.getByRole('menuitem', { name: 'Copy Copilot CLI command' }));
     expect(writeText).toHaveBeenLastCalledWith(expect.stringContaining('copilot -i "$(cat <<\'ARIADNE_CONTEXT_EOF\''));
     expect(await screen.findByText('Copied Copilot CLI command.')).toBeVisible();
   });

@@ -280,6 +280,11 @@ export function TasksPage() {
   const selectedTask = tasks.find((task) => task.taskId === selectedTaskId) ?? null;
   const [contextActionError, setContextActionError] = useState<string | null>(null);
   const [contextActionFeedback, setContextActionFeedback] = useState<string | null>(null);
+  const exportMenuRef = useRef<HTMLDetailsElement>(null);
+
+  const closeExportMenu = useCallback(() => {
+    if (exportMenuRef.current) exportMenuRef.current.open = false;
+  }, []);
 
   const downloadTaskContext = useCallback(() => {
     if (!selectedTask) return;
@@ -578,17 +583,44 @@ export function TasksPage() {
             </div>
             <div className="pane-actions">
               {selectedTask ? (
-                <>
-                  <button className="quiet-action" type="button" onClick={downloadTaskContext}>
-                    Download context
-                  </button>
-                  <button className="quiet-action" type="button" onClick={() => void copyTaskContextForChat()}>
-                    Copy for Copilot Chat
-                  </button>
-                  <button className="quiet-action" type="button" onClick={() => void copyTaskContextCliCommand()}>
-                    Copy Copilot CLI command
-                  </button>
-                </>
+                <details className="export-menu" ref={exportMenuRef}>
+                  <summary className="quiet-action export-menu__trigger">Export</summary>
+                  <div className="export-menu__list" role="menu">
+                    <button
+                      className="export-menu__item"
+                      type="button"
+                      role="menuitem"
+                      onClick={() => {
+                        closeExportMenu();
+                        downloadTaskContext();
+                      }}
+                    >
+                      Download context
+                    </button>
+                    <button
+                      className="export-menu__item"
+                      type="button"
+                      role="menuitem"
+                      onClick={() => {
+                        closeExportMenu();
+                        void copyTaskContextForChat();
+                      }}
+                    >
+                      Copy for Copilot Chat
+                    </button>
+                    <button
+                      className="export-menu__item"
+                      type="button"
+                      role="menuitem"
+                      onClick={() => {
+                        closeExportMenu();
+                        void copyTaskContextCliCommand();
+                      }}
+                    >
+                      Copy Copilot CLI command
+                    </button>
+                  </div>
+                </details>
               ) : null}
               {selectedTaskId ? (
                 <button className="quiet-action pane-toggle" type="button" onClick={() => setActivePane('tasks')}>
