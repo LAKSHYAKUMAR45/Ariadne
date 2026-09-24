@@ -78,6 +78,11 @@ and let any assistant read and write to it.
   `ariadne graphify query "how does auth work"`) and, best-effort, logs
   the invocation as a checkpoint against the current task. Requires
   `graphify` on `PATH` (`uv tool install graphifyy`).
+- **Core-first knowledge workspace** — local project/source/page/provenance
+  storage, bounded search and graph traversal, review queues, deterministic
+  task-history projections, and portable Markdown/Obsidian-compatible export.
+  The CLI and MCP server use the same core tables; provider-backed research and
+  chat are explicit, opt-in integration points rather than hosted defaults.
 - **Three interchangeable surfaces, one shared core** — CLI, MCP server,
   and VS Code chat participant all read/write the exact same
   `@ariadne-dev/core` data, so nothing is surface-specific or out of sync.
@@ -115,8 +120,10 @@ dashboard.
 
 New to Ariadne? Read [`docs/05-USER-GUIDE.md`](docs/05-USER-GUIDE.md) for a
 practical walkthrough of installing and using all three surfaces. See
-[`docs/`](docs/) for the full design docs (product requirements,
-architecture, data model, and roadmap).
+[`docs/knowledge-wiki.md`](docs/knowledge-wiki.md) for the knowledge workspace
+reference and [`docs/knowledge-migration.md`](docs/knowledge-migration.md) for
+archive/Obsidian migration details. See [`docs/`](docs/) for the full design
+docs (product requirements, architecture, data model, and roadmap).
 
 ## Packages
 
@@ -224,6 +231,25 @@ and operates on the workspace that actually owns it — no need to `cd` there
 first. `task list --all-workspaces` and `search <query> --all-workspaces`
 list/search every workspace you've ever used Ariadne in, not just the
 current one. See "Cross-workspace task discovery" below.
+
+### Using the knowledge workspace
+
+The knowledge workspace is local-first and currently used through the CLI or
+MCP server:
+
+```bash
+ariadne knowledge project create "Project wiki" --roots src,docs
+ariadne knowledge project-task <task-id> --project <project-id> --trigger checkpoint
+ariadne knowledge ingest file <project-id> docs/02-ARCHITECTURE.md
+ariadne knowledge search <project-id> "storage boundary"
+ariadne knowledge export <project-id> knowledge-export --obsidian
+```
+
+See [`docs/knowledge-wiki.md`](docs/knowledge-wiki.md) for the command and
+provider boundaries, and [`docs/knowledge-migration.md`](docs/knowledge-migration.md)
+for validated archive import/export. Provider-backed chat/research and
+provider configuration UX are active/in-progress surfaces; no provider is
+implicitly contacted.
 
 ### Cross-workspace task discovery
 
@@ -336,8 +362,13 @@ in the editor.
 
 ## Project status
 
-Early / pre-release. The CLI, MCP server, and VS Code extension are all
-functional and tested. Expect rough edges — see each package's README for
+Early / pre-release. The task CLI, MCP server, and VS Code extension are
+functional and tested. The core-first knowledge workspace is implemented for
+local projects, sources, pages, search, graph, reviews, queueing, projections,
+and archive/Obsidian export. Provider-backed research/chat execution,
+persistent provider setup, live Obsidian synchronization, and a dedicated
+knowledge UI are not shipped; treat them as active/in-progress surfaces.
+Expect rough edges — see the package READMEs and knowledge documentation for
 known limitations.
 
 ## Contributing
