@@ -74,6 +74,8 @@ describe('buildWebviewState', () => {
 describe('handleWebviewMessage', () => {
   it('builds a reverse chronological activity timeline for the current task', () => {
     const { store, task } = makeStore();
+    const resolvedQuestion = store.recordOpenQuestion({ taskId: task.id, text: 'Was the first pass approved?' });
+    store.resolveOpenQuestion(resolvedQuestion.id);
     store.recordCommand({ taskId: task.id, cmdRedacted: 'pnpm test', exitCode: 0 });
     store.recordCommit({ taskId: task.id, sha: 'abcdef1234567890', message: 'feat: timeline' });
 
@@ -84,6 +86,9 @@ describe('handleWebviewMessage', () => {
 
     expect(response.ok).toBe(true);
     if (response.ok) {
+      const items = (response.data as { items: Array<{ kind: string; title: string; detail?: string; createdAt: string }> }).items;
+      const kinds = items.map((item) => item.kind);
+      const createdAt = items.map((item) => item.createdAt);
       expect(response.data).toMatchObject({
         items: expect.arrayContaining([
           expect.objectContaining({ kind: 'command', title: 'pnpm test', status: 'success' }),
@@ -93,8 +98,12 @@ describe('handleWebviewMessage', () => {
           expect.objectContaining({ kind: 'decision', targetTab: 'decisions' }),
           expect.objectContaining({ kind: 'error', targetTab: 'errors', status: 'error' }),
           expect.objectContaining({ kind: 'question', targetTab: 'questions' }),
+          expect.objectContaining({ kind: 'question', title: 'Was the first pass approved?', detail: 'Resolved', status: 'success' }),
         ]),
       });
+      expect(createdAt).toEqual([...createdAt].sort((left, right) => right.localeCompare(left)));
+      expect(kinds.indexOf('commit')).toBeLessThan(kinds.indexOf('checkpoint'));
+      expect(kinds.indexOf('command')).toBeLessThan(kinds.indexOf('checkpoint'));
     }
     store.close();
   });
@@ -162,21 +171,39 @@ describe('handleWebviewMessage', () => {
 
   it('returns a markdown context preview with a caller-selected token budget', () => {
     const { store, task } = makeStore();
+    store.recordCommand({ taskId: task.id, cmdRedacted: 'pnpm install', summary: 'installed dependencies', exitCode: 0 });
+    store.recordCommand({ taskId: task.id, cmdRedacted: 'pnpm test', summary: 'tests passed', exitCode: 0 });
+    store.recordCommand({ taskId: task.id, cmdRedacted: 'pnpm build', summary: 'bundle failed', exitCode: 1 });
 
     const response = handleWebviewMessage(
       { store, currentTaskId: task.id, workspaceRoot: '/repo' },
-      { id: 'context', type: 'context.preview', payload: { tokenBudget: 1200 } },
+      { id: 'context', type: 'context.preview', payload: { tokenBudget: 20 } },
     );
 
     expect(response.ok).toBe(true);
     if (response.ok) {
       expect(response.data).toMatchObject({
         preview: {
-          tokenBudget: 1200,
+          tokenBudget: 20,
           markdown: expect.stringContaining('Webview task'),
           context: expect.objectContaining({ taskId: task.id, workspaceRoot: '/repo' }),
+          sections: expect.arrayContaining([
+            expect.objectContaining({ id: 'summary', label: 'Summary' }),
+            expect.objectContaining({ id: 'todos', label: 'Todos' }),
+            expect.objectContaining({ id: 'questions', label: 'Questions' }),
+            expect.objectContaining({ id: 'errors', label: 'Errors' }),
+            expect.objectContaining({ id: 'decisions', label: 'Decisions' }),
+            expect.objectContaining({ id: 'files', label: 'Files' }),
+            expect.objectContaining({ id: 'commits', label: 'Commits' }),
+            expect.objectContaining({ id: 'commands', label: 'Commands', truncatedCount: expect.any(Number) }),
+          ]),
         },
       });
+      const preview = response.data as { preview: { context: { truncated: Record<string, number> }; sections: Array<{ id: string; truncatedCount?: number }> } };
+      expect(preview.preview.context.truncated.commands).toBeGreaterThan(0);
+      expect(preview.preview.sections.find((section) => section.id === 'commands')?.truncatedCount).toBe(
+        preview.preview.context.truncated.commands,
+      );
     }
     store.close();
   });

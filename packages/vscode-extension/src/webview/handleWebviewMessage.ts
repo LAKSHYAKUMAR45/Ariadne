@@ -134,6 +134,7 @@ function buildQuestionActivityItem(question: ReturnType<TaskStore['listOpenQuest
     id: `question:${question.id}`,
     kind: 'question',
     title: truncateText(question.text),
+    detail: question.resolved ? 'Resolved' : undefined,
     createdAt: question.createdAt,
     entityId: question.id,
     targetTab: 'questions',
