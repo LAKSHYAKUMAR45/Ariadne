@@ -74,6 +74,7 @@ interface AdminUserRow {
   username: string;
   password_hash: string;
   is_active_admin: boolean;
+  role: 'admin' | 'member' | null;
 }
 
 /**
@@ -88,7 +89,12 @@ async function findAdminCandidate(pool: Pool, username: string): Promise<AdminUs
             EXISTS (
               SELECT 1 FROM team_memberships m
                WHERE m.user_id = u.id AND m.active = true AND m.role = 'admin'
-            ) AS is_active_admin
+            ) AS is_active_admin,
+            (
+              SELECT m.role FROM team_memberships m
+               WHERE m.user_id = u.id AND m.active = true
+               LIMIT 1
+            ) AS role
        FROM users u
       WHERE u.username = $1`,
     [username],
@@ -190,12 +196,13 @@ export function createAdminAuthRouter(pool: Pool, options: AdminAuthRouterOption
         csrfToken: created.csrfToken,
         expiresAt: created.session.expiresAt,
         reauthenticatedUntil: created.session.reauthenticatedUntil,
+        role: candidate.role ?? 'member',
       });
     }),
   );
 
   // Everything below this line is session-authenticated.
-  router.use(requireAdminSession(pool));
+  router.use(requireAdminSession(pool, { allowMember: true }));
   router.use(requireCsrf({ allowedOrigin }));
 
   router.get(
@@ -210,6 +217,7 @@ export function createAdminAuthRouter(pool: Pool, options: AdminAuthRouterOption
         username,
         csrfToken,
         reauthenticatedUntil: session.reauthenticatedUntil,
+        role: session.role,
       });
     }),
   );
