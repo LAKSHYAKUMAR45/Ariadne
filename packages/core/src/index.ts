@@ -198,6 +198,16 @@ export type {
   RegisterKnowledgeSourceInput,
   KnowledgeSourceVersionRecord,
 } from './knowledge/KnowledgeSourceStore.js';
+export { scanKnowledgeSources } from './knowledge/KnowledgeSourceScanner.js';
+export type { SourceCandidate } from './knowledge/KnowledgeSourceScanner.js';
+export { shouldIngestSource } from './knowledge/SourcePolicy.js';
+export type { SourceDecision, SourceDecisionAction, SourceDecisionReason, SourcePolicy } from './knowledge/SourcePolicy.js';
+export { KnowledgeReconciliation, reconcileChangedSource, reconcileDeletedSource } from './knowledge/KnowledgeReconciliation.js';
+export type {
+  KnowledgeReconciliationOptions,
+  ReconciliationRunOptions,
+  SourceReconciliationResult,
+} from './knowledge/KnowledgeReconciliation.js';
 export {
   KNOWLEDGE_MANIFEST_VERSION,
   buildKnowledgeManifest,
@@ -450,3 +460,39 @@ export type {
   KnowledgeResearchGap,
   ProviderRequiredKnowledgeGeneration,
 } from './knowledge/KnowledgeAnalysis.js';
+export {
+  KnowledgeChatService,
+} from './knowledge/KnowledgeChat.js';
+export type {
+  CreateKnowledgeConversationInput,
+  KnowledgeChatEvent,
+  KnowledgeChatMessageRecord,
+  KnowledgeChatProvider,
+  KnowledgeChatProviderMessage,
+  KnowledgeChatProviderRequest,
+  KnowledgeChatRole,
+  KnowledgeChatServiceOptions,
+  KnowledgeConversationRecord,
+  ListKnowledgeConversationsOptions,
+  ListKnowledgeMessagesOptions,
+  RegenerateKnowledgeChatInput,
+  SaveKnowledgeChatMessageToPageInput,
+  StreamKnowledgeChatInput,
+} from './knowledge/KnowledgeChat.js';
+export {
+  KnowledgeResearchService,
+  ResearchConfirmationRequiredError,
+  ResearchProviderRequiredError,
+  ResearchProviderTimeoutError,
+  ResearchRateLimitError,
+  ResearchRequestCancelledError,
+} from './knowledge/KnowledgeResearch.js';
+export type {
+  CreateResearchRequestInput,
+  KnowledgeResearchServiceOptions,
+  ResearchRequest,
+  ResearchRequestStatus,
+  ResearchRunResult,
+  ResearchSynthesisPage,
+} from './knowledge/KnowledgeResearch.js';
+export type { ResearchProvider, ResearchResult } from './knowledge/research/ResearchProviders.js';

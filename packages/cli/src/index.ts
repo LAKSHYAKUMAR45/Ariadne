@@ -23,6 +23,9 @@ import {
   runGraphify,
   summarizeGraphifyRun,
   GRAPHIFY_INSTALL_HINT,
+  openDatabase,
+  projectTaskKnowledge,
+  createOrResumeTaskFromKnowledgeInsight,
 } from '@ariadne-dev/core';
 import { openWorkspaceStore, findWorkspaceRoot, stateDbPath } from './workspace.js';
 import { readCurrentTaskId, setCurrentTaskId } from './currentTask.js';
@@ -30,6 +33,7 @@ import { withResolvedTask, withScopedStore } from './withTask.js';
 import { runTaskExec } from './exec.js';
 import { runSyncRegister, runSyncLogin, runSyncSetup, runSyncLogout, runSyncPush, runSyncPull, runSyncListRemote, runSyncUnlink, runSyncProfileList, runSyncProfileUse } from './syncCommands.js';
 import { generateAriadneSkillAndAgent } from './skillTemplates.js';
+import { registerKnowledgeCommands } from './knowledgeCommands.js';
 
 const program = new Command();
 program.name('ariadne').description('Chats are disposable, tasks are permanent.').version('0.1.0');
@@ -221,6 +225,61 @@ task
       console.log(`Task ${taskId} updated: "${updated.title}"${updated.goal ? ` (goal: ${updated.goal})` : ''}`);
     });
   });
+
+// ---------------------------------------------------------------------
+// knowledge
+// ---------------------------------------------------------------------
+
+const knowledge = program.command('knowledge').description('Link Ariadne tasks with generated knowledge');
+
+knowledge
+  .command('project-task [task-id]')
+  .description('Explicitly project task history into knowledge source/provenance records')
+  .requiredOption('-p, --project <id>', 'Knowledge project id')
+  .option('--trigger <trigger>', 'explicit|checkpoint|build', 'explicit')
+  .action((taskId: string | undefined, opts: { project: string; trigger: 'explicit' | 'checkpoint' | 'build' }) => {
+    withResolvedTask(taskId, (store, resolvedTaskId, resolvedWorkspaceRoot) => {
+      const db = openDatabase(stateDbPath(resolvedWorkspaceRoot));
+      try {
+        const result = projectTaskKnowledge(db, store, {
+          projectId: opts.project,
+          taskId: resolvedTaskId,
+          trigger: opts.trigger,
+          workspaceRoot: resolvedWorkspaceRoot,
+        });
+        console.log(`Projected task ${result.taskId} to knowledge source ${result.sourceId} (${result.sourceVersionId}).`);
+      } finally {
+        db.close();
+      }
+    });
+  });
+
+knowledge
+  .command('task-from-insight <insight-id>')
+  .description('Create or resume an Ariadne task from a knowledge insight')
+  .requiredOption('-p, --project <id>', 'Knowledge project id')
+  .option('--title <title>', 'Title for a newly created task')
+  .action((insightId: string, opts: { project: string; title?: string }) => {
+    const workspaceRoot = findWorkspaceRoot();
+    const db = openDatabase(stateDbPath(workspaceRoot));
+    const store = openWorkspaceStore(workspaceRoot);
+    try {
+      const result = createOrResumeTaskFromKnowledgeInsight(db, store, {
+        projectId: opts.project,
+        insightId,
+        title: opts.title,
+        workspaceRoot,
+      });
+      setCurrentTaskId(result.task.id, workspaceRoot);
+      const verb = result.action === 'created' ? 'Created' : 'Resumed';
+      console.log(`${verb} task ${result.task.id} from knowledge insight ${insightId}.`);
+    } finally {
+      store.close();
+      db.close();
+    }
+  });
+
+registerKnowledgeCommands(program);
 
 // ---------------------------------------------------------------------
 // checkpoint

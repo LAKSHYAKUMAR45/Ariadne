@@ -277,6 +277,14 @@ export class KnowledgeGraph {
     return row ? toNode(row) : null;
   }
 
+  /** Lists every node in a project, ordered by label then ID for stable CLI/API output. */
+  listGraphNodes(projectId: string): KnowledgeGraphNodeRecord[] {
+    requireText(projectId, 'project ID');
+    return (this.db.prepare(`SELECT * FROM knowledge_graph_nodes WHERE project_id = ?`).all(projectId) as NodeRow[])
+      .map(toNode)
+      .sort((left, right) => left.label.localeCompare(right.label) || left.id.localeCompare(right.id));
+  }
+
   listGraphEdges(projectId: string): KnowledgeGraphEdgeRecord[] {
     return (this.db.prepare(`SELECT * FROM knowledge_graph_edges WHERE project_id = ?`).all(projectId) as EdgeRow[])
       .map(toEdge)
