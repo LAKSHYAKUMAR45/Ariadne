@@ -46,6 +46,10 @@ function readOptionalString(value: unknown): string | null | undefined {
   return typeof value === 'string' ? value : undefined;
 }
 
+function readNonEmptyText(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim().length > 0 ? value : undefined;
+}
+
 function readBoolean(value: unknown): boolean | undefined {
   return typeof value === 'boolean' ? value : undefined;
 }
@@ -556,6 +560,34 @@ function handleContextPreview(deps: WebviewDispatcherDeps, message: WebviewReque
   };
 }
 
+async function handleContextCopy(deps: WebviewDispatcherDeps, message: WebviewRequest): Promise<WebviewResponse> {
+  if (!deps.copyText) return errorResponse(message.id, 'Clipboard copy is not configured.');
+  const payload = getPayload(message);
+  const markdown = readNonEmptyText(payload.markdown);
+  if (!markdown) return errorResponse(message.id, 'context.copy requires payload.markdown.');
+  await deps.copyText(markdown);
+  return {
+    id: message.id,
+    ok: true,
+    data: { copied: true },
+    state: buildWebviewState(deps),
+  };
+}
+
+async function handleContextOpen(deps: WebviewDispatcherDeps, message: WebviewRequest): Promise<WebviewResponse> {
+  if (!deps.openMarkdown) return errorResponse(message.id, 'Markdown preview is not configured.');
+  const payload = getPayload(message);
+  const markdown = readNonEmptyText(payload.markdown);
+  if (!markdown) return errorResponse(message.id, 'context.open requires payload.markdown.');
+  await deps.openMarkdown('Ariadne Context Preview', markdown);
+  return {
+    id: message.id,
+    ok: true,
+    data: { opened: true },
+    state: buildWebviewState(deps),
+  };
+}
+
 function handleTodoCreate(deps: WebviewDispatcherDeps, message: WebviewRequest): WebviewResponse {
   const taskId = requireCurrentTaskId(deps, message.id);
   if (typeof taskId !== 'string') return taskId;
@@ -896,7 +928,7 @@ function handleExportMarkdown(deps: WebviewDispatcherDeps, message: WebviewReque
   };
 }
 
-export function handleWebviewMessage(deps: WebviewDispatcherDeps, message: WebviewRequest): WebviewResponse {
+export async function handleWebviewMessage(deps: WebviewDispatcherDeps, message: WebviewRequest): Promise<WebviewResponse> {
   try {
     switch (message.type) {
       case WebviewRequestTypes.StateGet:
@@ -919,6 +951,10 @@ export function handleWebviewMessage(deps: WebviewDispatcherDeps, message: Webvi
         return handleContextGet(deps, message);
       case WebviewRequestTypes.ContextPreview:
         return handleContextPreview(deps, message);
+      case WebviewRequestTypes.ContextCopy:
+        return await handleContextCopy(deps, message);
+      case WebviewRequestTypes.ContextOpen:
+        return await handleContextOpen(deps, message);
       case WebviewRequestTypes.TasksList:
         return handleTasksList(deps, message);
       case WebviewRequestTypes.TodoCreate:

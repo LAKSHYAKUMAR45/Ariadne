@@ -17,6 +17,8 @@ export interface AriadnePanelDeps {
   logError: (context: string, err: unknown) => string;
   refreshHost: () => void;
   openExportedMarkdown: (filePath: string) => Promise<void>;
+  copyText: (text: string) => Promise<void> | void;
+  openMarkdown: (title: string, markdown: string) => Promise<void> | void;
 }
 
 let panel: vscode.WebviewPanel | undefined;
@@ -166,7 +168,7 @@ async function handleWebviewRequest(message: unknown): Promise<void> {
       return;
     }
 
-    const response = handleWebviewMessage(
+    const response = await handleWebviewMessage(
       {
         store,
         currentTaskId: selectedWorkspaceRoot ? store.getCurrentTaskId() : panelDeps.getCurrentTaskId(),
@@ -193,6 +195,8 @@ async function handleWebviewRequest(message: unknown): Promise<void> {
           },
         },
         writeExport: writeExportMarkdown,
+        copyText: panelDeps.copyText,
+        openMarkdown: panelDeps.openMarkdown,
       },
       message,
     );

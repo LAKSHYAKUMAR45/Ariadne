@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useState } from 'react';
 import type { FormEvent } from 'react';
 import type { Task, WebviewState } from '@host/messages';
 import type { AriadneBridge } from '../bridge';
@@ -13,23 +13,6 @@ interface OverviewPanelProps {
   highlightCheckpointId?: string;
 }
 
-/**
- * Mirrors the shape of `ContextPackage` from `@ariadne-dev/core`'s ContextBuilder,
- * duplicated locally (structurally, not imported) so the webview-ui package
- * doesn't need a build-time dependency on core just for display typing.
- */
-interface ContextSnapshot {
-  latestSummary: string | null;
-  openQuestions: string[];
-  openTodos: string[];
-  blockedTodos: string[];
-  unresolvedErrors: string[];
-  recentFiles: Array<{ path: string; role: string }>;
-  recentCommits: Array<{ sha: string; message: string | null }>;
-  recentCommands: Array<{ cmd: string; exitCode: number | null }>;
-  decisions: string[];
-}
-
 const lifecycleActions: Array<{ status: Task['status']; label: string }> = [
   { status: 'active', label: 'Reopen as active' },
   { status: 'paused', label: 'Pause task' },
@@ -42,8 +25,6 @@ export default function OverviewPanel({ state, bridge, onBusy, onError, highligh
   useHighlightScroll(highlightCheckpointId);
 
   const currentTask = state.currentTask;
-  const currentTaskIdRef = useRef(currentTask?.id);
-  currentTaskIdRef.current = currentTask?.id;
   const checkpoints = [...state.checkpoints].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   const latestCheckpoint = checkpoints[0];
 
@@ -52,15 +33,11 @@ export default function OverviewPanel({ state, bridge, onBusy, onError, highligh
   const [goalDraft, setGoalDraft] = useState(currentTask?.goal ?? '');
   const [checkpointSummary, setCheckpointSummary] = useState('');
   const [checkpointLevel, setCheckpointLevel] = useState<'micro' | 'session' | 'milestone'>('micro');
-  const [context, setContext] = useState<ContextSnapshot | null>(null);
-  const [contextTaskId, setContextTaskId] = useState<string | null>(null);
 
   useEffect(() => {
     setIsEditing(false);
     setTitleDraft(currentTask?.title ?? '');
     setGoalDraft(currentTask?.goal ?? '');
-    setContext(null);
-    setContextTaskId(null);
   }, [currentTask?.id]);
 
   if (!currentTask) {
@@ -92,16 +69,6 @@ export default function OverviewPanel({ state, bridge, onBusy, onError, highligh
   async function setStatus(status: Task['status'], label: string): Promise<void> {
     await runRequest(label, async () => {
       await bridge.request('task.setStatus', { id: selectedTask.id, status });
-    });
-  }
-
-  async function resumeContext(): Promise<void> {
-    const requestedTaskId = selectedTask.id;
-    await runRequest('Resuming context…', async () => {
-      const result = await bridge.request<{ context: ContextSnapshot }>('context.get');
-      if (requestedTaskId !== currentTaskIdRef.current) return;
-      setContext(result.context);
-      setContextTaskId(requestedTaskId);
     });
   }
 
@@ -172,9 +139,6 @@ export default function OverviewPanel({ state, bridge, onBusy, onError, highligh
                 {action.label}
               </button>
             ))}
-          <button type="button" onClick={() => void resumeContext()}>
-            Resume context
-          </button>
         </div>
       </section>
 
@@ -243,40 +207,10 @@ export default function OverviewPanel({ state, bridge, onBusy, onError, highligh
         )}
       </section>
 
-      <section aria-label="Activity">
-        <h3>Activity</h3>
-        {context && contextTaskId === selectedTask.id ? (
-          <div>
-            {context.latestSummary ? <p>{context.latestSummary}</p> : null}
-            <h4>Recent commands</h4>
-            {context.recentCommands.length === 0 ? (
-              <p>No recent commands recorded.</p>
-            ) : (
-              <ul>
-                {context.recentCommands.map((command, index) => (
-                  <li key={`${command.cmd}-${index}`}>
-                    <code>{command.cmd}</code>{' '}
-                    <span>{command.exitCode === null ? '(unknown exit)' : `(exit ${command.exitCode})`}</span>
-                  </li>
-                ))}
-              </ul>
-            )}
-            <h4>Recent commits</h4>
-            {context.recentCommits.length === 0 ? (
-              <p>No recent commits recorded.</p>
-            ) : (
-              <ul>
-                {context.recentCommits.map((commit) => (
-                  <li key={commit.sha}>
-                    <code>{commit.sha.slice(0, 7)}</code> {commit.message ?? '(no message)'}
-                  </li>
-                ))}
-              </ul>
-            )}
-          </div>
-        ) : (
-          <p>Click "Resume context" to load recent activity for this task.</p>
-        )}
+      <section aria-label="Workflow handoff">
+        <h3>Workflow handoff</h3>
+        <p>Use the Activity tab for timeline history and capture health.</p>
+        <p>Use the Context tab to preview, copy, or open the current task handoff package.</p>
       </section>
     </div>
   );

@@ -39,6 +39,8 @@ export const WebviewRequestTypes = {
   CheckpointCreate: 'checkpoint.create',
   ContextGet: 'context.get',
   ContextPreview: 'context.preview',
+  ContextCopy: 'context.copy',
+  ContextOpen: 'context.open',
   TasksList: 'tasks.list',
   TodoCreate: 'todo.create',
   TodoUpdateText: 'todo.updateText',
@@ -156,6 +158,7 @@ export type WebviewRequest =
     })
   | (WebviewRequestBase<'context.get'> & { payload?: { tokenBudget?: number } })
   | (WebviewRequestBase<'context.preview'> & { payload?: { tokenBudget?: number } })
+  | (WebviewRequestBase<'context.copy' | 'context.open'> & { payload: { markdown: string } })
   | (WebviewRequestBase<'todo.create'> & { payload: Record<string, unknown> })
   | (WebviewRequestBase<'todo.updateText' | 'todo.setStatus' | 'todo.delete'> & { payload: Record<string, unknown> })
   | (WebviewRequestBase<'decision.create' | 'decision.update' | 'decision.delete'> & { payload: Record<string, unknown> })
@@ -208,6 +211,8 @@ export interface WebviewDispatcherDeps {
   setCurrentTaskIdForWorkspace?: (id: string, workspaceRoot: string) => void;
   sync?: SyncActions;
   writeExport?: (taskId: string, markdown: string) => string;
+  copyText?: (text: string) => Promise<void> | void;
+  openMarkdown?: (title: string, markdown: string) => Promise<void> | void;
 }
 
 export type WebviewResponse =

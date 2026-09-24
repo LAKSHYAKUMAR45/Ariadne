@@ -72,14 +72,14 @@ describe('buildWebviewState', () => {
 });
 
 describe('handleWebviewMessage', () => {
-  it('builds a reverse chronological activity timeline for the current task', () => {
+  it('builds a reverse chronological activity timeline for the current task', async () => {
     const { store, task } = makeStore();
     const resolvedQuestion = store.recordOpenQuestion({ taskId: task.id, text: 'Was the first pass approved?' });
     store.resolveOpenQuestion(resolvedQuestion.id);
     store.recordCommand({ taskId: task.id, cmdRedacted: 'pnpm test', exitCode: 0 });
     store.recordCommit({ taskId: task.id, sha: 'abcdef1234567890', message: 'feat: timeline' });
 
-    const response = handleWebviewMessage(
+    const response = await handleWebviewMessage(
       { store, currentTaskId: task.id, workspaceRoot: '/repo' },
       { id: 'activity', type: 'activity.list' },
     );
@@ -108,12 +108,12 @@ describe('handleWebviewMessage', () => {
     store.close();
   });
 
-  it('returns capture health using explicit host capabilities and task state', () => {
+  it('returns capture health using explicit host capabilities and task state', async () => {
     const { store, task } = makeStore();
     store.updateTaskBranch(task.id, 'feat/current');
     store.recordCommand({ taskId: task.id, cmdRedacted: 'pnpm build', exitCode: 1 });
 
-    const response = handleWebviewMessage(
+    const response = await handleWebviewMessage(
       {
         store,
         currentTaskId: task.id,
@@ -148,20 +148,20 @@ describe('handleWebviewMessage', () => {
     store.close();
   });
 
-  it('returns empty activity and unknown health when no task is selected', () => {
+  it('returns empty activity and unknown health when no task is selected', async () => {
     const store = new TaskStore(':memory:');
 
-    expect(handleWebviewMessage({ store, workspaceRoot: '/repo' }, { id: 'activity-empty', type: 'activity.list' })).toMatchObject({
+    await expect(handleWebviewMessage({ store, workspaceRoot: '/repo' }, { id: 'activity-empty', type: 'activity.list' })).resolves.toMatchObject({
       id: 'activity-empty',
       ok: true,
       data: { items: [], truncated: false },
     });
-    expect(handleWebviewMessage({ store, workspaceRoot: '/repo' }, { id: 'health-empty', type: 'capture.health' })).toMatchObject({
+    await expect(handleWebviewMessage({ store, workspaceRoot: '/repo' }, { id: 'health-empty', type: 'capture.health' })).resolves.toMatchObject({
       id: 'health-empty',
       ok: true,
       data: { health: expect.objectContaining({ branchMatches: 'unknown', warnings: expect.arrayContaining([expect.stringContaining('No current task')]) }) },
     });
-    expect(handleWebviewMessage({ store, workspaceRoot: '/repo' }, { id: 'context-empty', type: 'context.preview' })).toEqual({
+    await expect(handleWebviewMessage({ store, workspaceRoot: '/repo' }, { id: 'context-empty', type: 'context.preview' })).resolves.toEqual({
       id: 'context-empty',
       ok: false,
       error: 'No current Ariadne task is selected.',
@@ -169,13 +169,13 @@ describe('handleWebviewMessage', () => {
     store.close();
   });
 
-  it('returns a markdown context preview with a caller-selected token budget', () => {
+  it('returns a markdown context preview with a caller-selected token budget', async () => {
     const { store, task } = makeStore();
     store.recordCommand({ taskId: task.id, cmdRedacted: 'pnpm install', summary: 'installed dependencies', exitCode: 0 });
     store.recordCommand({ taskId: task.id, cmdRedacted: 'pnpm test', summary: 'tests passed', exitCode: 0 });
     store.recordCommand({ taskId: task.id, cmdRedacted: 'pnpm build', summary: 'bundle failed', exitCode: 1 });
 
-    const response = handleWebviewMessage(
+    const response = await handleWebviewMessage(
       { store, currentTaskId: task.id, workspaceRoot: '/repo' },
       { id: 'context', type: 'context.preview', payload: { tokenBudget: 20 } },
     );
@@ -208,12 +208,44 @@ describe('handleWebviewMessage', () => {
     store.close();
   });
 
-  it('creates a task and selects it for the webview', () => {
+  it('copies and opens context markdown through injected host helpers', async () => {
+    const { store, task } = makeStore();
+    const copyText = vi.fn();
+    const openMarkdown = vi.fn();
+
+    const copyResponse = await handleWebviewMessage(
+      { store, currentTaskId: task.id, workspaceRoot: '/repo', copyText, openMarkdown },
+      { id: 'context-copy', type: 'context.copy', payload: { markdown: '# Context\nCopied' } },
+    );
+    expect(copyResponse).toEqual({
+      id: 'context-copy',
+      ok: true,
+      data: { copied: true },
+      state: expect.any(Object),
+    });
+    expect(copyText).toHaveBeenCalledWith('# Context\nCopied');
+
+    const openResponse = await handleWebviewMessage(
+      { store, currentTaskId: task.id, workspaceRoot: '/repo', copyText, openMarkdown },
+      { id: 'context-open', type: 'context.open', payload: { markdown: '# Context\nOpened' } },
+    );
+    expect(openResponse).toEqual({
+      id: 'context-open',
+      ok: true,
+      data: { opened: true },
+      state: expect.any(Object),
+    });
+    expect(openMarkdown).toHaveBeenCalledWith('Ariadne Context Preview', '# Context\nOpened');
+
+    store.close();
+  });
+
+  it('creates a task and selects it for the webview', async () => {
     const cleanupRegistry = setupRegistry();
     const workspace = makeWorkspace('task-create');
     const setCurrentTaskId = vi.fn();
 
-    const response = handleWebviewMessage(
+    const response = await handleWebviewMessage(
       { store: workspace.store, workspaceRoot: workspace.root, setCurrentTaskId },
       { id: 'task-create', type: 'task.create', payload: { title: 'New task', goal: 'Ship P1' } },
     );
@@ -229,25 +261,25 @@ describe('handleWebviewMessage', () => {
     cleanupRegistry();
   });
 
-  it('edits a task and applies lifecycle status transitions', () => {
+  it('edits a task and applies lifecycle status transitions', async () => {
     const cleanupRegistry = setupRegistry();
     const workspace = makeWorkspace('task-lifecycle');
     const task = workspace.store.getTask(workspace.taskId)!;
 
-    const edit = handleWebviewMessage(
+    const edit = await handleWebviewMessage(
       { store: workspace.store, currentTaskId: task.id, workspaceRoot: workspace.root },
       { id: 'task-edit', type: 'task.update', payload: { title: 'Renamed', goal: 'Updated goal' } },
     );
     expect(edit.ok).toBe(true);
 
-    const status = handleWebviewMessage(
+    const status = await handleWebviewMessage(
       { store: workspace.store, currentTaskId: task.id, workspaceRoot: workspace.root },
       { id: 'task-status', type: 'task.setStatus', payload: { status: 'paused' } },
     );
     expect(status.ok).toBe(true);
     expect(workspace.store.getTask(task.id)).toMatchObject({ title: 'Renamed', goal: 'Updated goal', status: 'paused' });
 
-    const done = handleWebviewMessage(
+    const done = await handleWebviewMessage(
       { store: workspace.store, currentTaskId: task.id, workspaceRoot: workspace.root },
       { id: 'task-done', type: 'task.setStatus', payload: { id: task.id, status: 'done' } },
     );
@@ -257,10 +289,10 @@ describe('handleWebviewMessage', () => {
     cleanupRegistry();
   });
 
-  it('creates a checkpoint and returns it in refreshed state', () => {
+  it('creates a checkpoint and returns it in refreshed state', async () => {
     const cleanupRegistry = setupRegistry();
     const workspace = makeWorkspace('checkpoint-create');
-    const response = handleWebviewMessage(
+    const response = await handleWebviewMessage(
       { store: workspace.store, currentTaskId: workspace.taskId, workspaceRoot: workspace.root },
       { id: 'checkpoint-create', type: 'checkpoint.create', payload: { summary: 'P1 contract complete', level: 'session' } },
     );
@@ -274,12 +306,12 @@ describe('handleWebviewMessage', () => {
     cleanupRegistry();
   });
 
-  it('returns ContextBuilder resume data and includes it with markdown export', () => {
+  it('returns ContextBuilder resume data and includes it with markdown export', async () => {
     const cleanupRegistry = setupRegistry();
     const workspace = makeWorkspace('context-export');
     workspace.store.createCheckpoint({ taskId: workspace.taskId, level: 'session', summary: 'Resume from here' });
 
-    const context = handleWebviewMessage(
+    const context = await handleWebviewMessage(
       { store: workspace.store, currentTaskId: workspace.taskId, workspaceRoot: workspace.root },
       { id: 'context', type: 'context.get', payload: { tokenBudget: 500 } },
     );
@@ -296,7 +328,7 @@ describe('handleWebviewMessage', () => {
     });
 
     const exportPath = path.join(workspace.root, 'task.md');
-    const exported = handleWebviewMessage(
+    const exported = await handleWebviewMessage(
       { store: workspace.store, currentTaskId: workspace.taskId, workspaceRoot: workspace.root, writeExport: () => exportPath },
       { id: 'export-context', type: 'export.markdown' },
     );
@@ -313,10 +345,10 @@ describe('handleWebviewMessage', () => {
     cleanupRegistry();
   });
 
-  it('creates, edits, completes, reopens, and deletes todos', () => {
+  it('creates, edits, completes, reopens, and deletes todos', async () => {
     const cleanupRegistry = setupRegistry();
     const workspace = makeWorkspace('todo-crud');
-    const add = handleWebviewMessage(
+    const add = await handleWebviewMessage(
       { store: workspace.store, currentTaskId: workspace.taskId, workspaceRoot: workspace.root },
       { id: '1', type: 'todo.create', payload: { text: 'Add bridge' } },
     );
@@ -324,17 +356,17 @@ describe('handleWebviewMessage', () => {
     const created = workspace.store.listTodos(workspace.taskId).find((todo) => todo.text === 'Add bridge');
     expect(created).toBeDefined();
 
-    handleWebviewMessage(
+    await handleWebviewMessage(
       { store: workspace.store, currentTaskId: workspace.taskId, workspaceRoot: workspace.root },
       { id: '2', type: 'todo.updateText', payload: { id: created!.id, text: 'Add typed bridge' } },
     );
-    handleWebviewMessage(
+    await handleWebviewMessage(
       { store: workspace.store, currentTaskId: workspace.taskId, workspaceRoot: workspace.root },
       { id: '3', type: 'todo.setStatus', payload: { id: created!.id, status: 'done' } },
     );
     expect(workspace.store.listTodos(workspace.taskId).find((todo) => todo.id === created!.id)?.status).toBe('done');
 
-    handleWebviewMessage(
+    await handleWebviewMessage(
       { store: workspace.store, currentTaskId: workspace.taskId, workspaceRoot: workspace.root },
       { id: '4', type: 'todo.delete', payload: { id: created!.id } },
     );
@@ -343,11 +375,11 @@ describe('handleWebviewMessage', () => {
     cleanupRegistry();
   });
 
-  it('rejects invalid todo statuses instead of coercing them', () => {
+  it('rejects invalid todo statuses instead of coercing them', async () => {
     const cleanupRegistry = setupRegistry();
     const workspace = makeWorkspace('todo-status');
     const created = workspace.store.listTodos(workspace.taskId)[0];
-    const response = handleWebviewMessage(
+    const response = await handleWebviewMessage(
       { store: workspace.store, currentTaskId: workspace.taskId, workspaceRoot: workspace.root },
       { id: 'bad-status', type: 'todo.setStatus', payload: { id: created.id, status: 'finished' } },
     );
@@ -362,14 +394,14 @@ describe('handleWebviewMessage', () => {
     cleanupRegistry();
   });
 
-  it('switches to a task from another registered workspace', () => {
+  it('switches to a task from another registered workspace', async () => {
     const cleanupRegistry = setupRegistry();
     const current = makeWorkspace('current');
     const other = makeWorkspace('other');
     const setCurrentTaskId = vi.fn();
     const setCurrentTaskIdForWorkspace = vi.fn();
 
-    const response = handleWebviewMessage(
+    const response = await handleWebviewMessage(
       {
         store: current.store,
         currentTaskId: current.taskId,
@@ -394,10 +426,10 @@ describe('handleWebviewMessage', () => {
     cleanupRegistry();
   });
 
-  it('rejects unknown task ids', () => {
+  it('rejects unknown task ids', async () => {
     const cleanupRegistry = setupRegistry();
     const workspace = makeWorkspace('unknown-task');
-    const response = handleWebviewMessage(
+    const response = await handleWebviewMessage(
       { store: workspace.store, currentTaskId: workspace.taskId, workspaceRoot: workspace.root },
       { id: 'switch-missing', type: 'task.switch', payload: { id: 'missing-task' } },
     );
@@ -407,14 +439,14 @@ describe('handleWebviewMessage', () => {
     cleanupRegistry();
   });
 
-  it('keeps local task switching working', () => {
+  it('keeps local task switching working', async () => {
     const cleanupRegistry = setupRegistry();
     const workspace = makeWorkspace('local-switch');
     const second = workspace.store.createTask({ title: 'local task 2', goal: 'Stay local' });
     const setCurrentTaskId = vi.fn();
     const setCurrentTaskIdForWorkspace = vi.fn();
 
-    const response = handleWebviewMessage(
+    const response = await handleWebviewMessage(
       {
         store: workspace.store,
         currentTaskId: workspace.taskId,
@@ -438,10 +470,10 @@ describe('handleWebviewMessage', () => {
     cleanupRegistry();
   });
 
-  it('returns an error response instead of throwing when a task is required', () => {
+  it('returns an error response instead of throwing when a task is required', async () => {
     const cleanupRegistry = setupRegistry();
     const store = openWorkspaceStore(fs.mkdtempSync(path.join(os.tmpdir(), 'ariadne-webview-missing-')));
-    const response = handleWebviewMessage(
+    const response = await handleWebviewMessage(
       { store, currentTaskId: undefined, workspaceRoot: undefined },
       { id: 'missing', type: 'todo.create', payload: { text: 'No task' } },
     );
@@ -450,25 +482,25 @@ describe('handleWebviewMessage', () => {
     cleanupRegistry();
   });
 
-  it('runs sync and export through injected host actions', () => {
+  it('runs sync and export through injected host actions', async () => {
     const cleanupRegistry = setupRegistry();
     const workspace = makeWorkspace('sync-export');
     const syncPush = vi.fn(() => 'pushed');
     const writeExport = vi.fn(() => '/repo/.ariadne/export/task.md');
 
-    expect(
+    await expect(
       handleWebviewMessage(
         { store: workspace.store, currentTaskId: workspace.taskId, workspaceRoot: workspace.root, sync: { push: syncPush, pull: vi.fn(), listRemote: vi.fn() }, writeExport },
         { id: 'sync', type: 'sync.push' },
       ),
-    ).toMatchObject({ id: 'sync', ok: true, data: { output: 'pushed' } });
+    ).resolves.toMatchObject({ id: 'sync', ok: true, data: { output: 'pushed' } });
 
-    expect(
+    await expect(
       handleWebviewMessage(
         { store: workspace.store, currentTaskId: workspace.taskId, workspaceRoot: workspace.root, sync: { push: syncPush, pull: vi.fn(), listRemote: vi.fn() }, writeExport },
         { id: 'export', type: 'export.markdown' },
       ),
-    ).toMatchObject({ id: 'export', ok: true, data: { path: '/repo/.ariadne/export/task.md' } });
+    ).resolves.toMatchObject({ id: 'export', ok: true, data: { path: '/repo/.ariadne/export/task.md' } });
     workspace.close();
     cleanupRegistry();
   });

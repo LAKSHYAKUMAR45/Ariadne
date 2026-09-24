@@ -64,6 +64,11 @@ async function openExportedMarkdown(filePath: string): Promise<void> {
   await vscode.window.showTextDocument(doc, { preview: true });
 }
 
+async function openMarkdownDocument(_title: string, markdown: string): Promise<void> {
+  const doc = await vscode.workspace.openTextDocument({ content: markdown, language: 'markdown' });
+  await vscode.window.showTextDocument(doc, { preview: true });
+}
+
 export function activate(context: vscode.ExtensionContext): void {
   output = vscode.window.createOutputChannel('Ariadne');
   context.subscriptions.push(output);
@@ -93,6 +98,8 @@ export function activate(context: vscode.ExtensionContext): void {
         logError,
         refreshHost: refreshStatusBar,
         openExportedMarkdown,
+        copyText: (text: string) => Promise.resolve(vscode.env.clipboard.writeText(text)),
+        openMarkdown: openMarkdownDocument,
       }),
     ),
   );

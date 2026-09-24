@@ -96,7 +96,19 @@ describe('App', () => {
     expect(screen.getByRole('button', { name: 'Sync to Cloud' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Export to Markdown' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Overview' })).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByRole('button', { name: 'Activity' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Context' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /Panel task/ })).toBeInTheDocument();
+  });
+
+  it('switches to the activity and context tabs', async () => {
+    render(<App bridge={bridge()} initialState={baseState} />);
+
+    await userEvent.click(screen.getByRole('button', { name: 'Activity' }));
+    expect(screen.getByRole('button', { name: 'Activity' })).toHaveAttribute('aria-pressed', 'true');
+
+    await userEvent.click(screen.getByRole('button', { name: 'Context' }));
+    expect(screen.getByRole('button', { name: 'Context' })).toHaveAttribute('aria-pressed', 'true');
   });
 
   it('switches tabs without routing', async () => {

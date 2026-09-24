@@ -4,6 +4,8 @@ import { describe, expect, it, vi } from 'vitest';
 import { within } from '@testing-library/react';
 import type { AriadneBridge } from '../bridge';
 import type { Checkpoint, SearchResult, Task, TaskFileCaptureWithEntries, WebviewState } from '@host/messages';
+import ActivityPanel from './ActivityPanel';
+import ContextPanel from './ContextPanel';
 import OverviewPanel from './OverviewPanel';
 import FilesPanel from './FilesPanel';
 import SearchPanel from './SearchPanel';
@@ -207,18 +209,123 @@ describe('UtilityPanels', () => {
     );
   });
 
-  it('loads and displays activity via context.get when resuming context', async () => {
+  it('points users to the dedicated activity and context tabs', () => {
     const harness = createBridge();
     render(<OverviewPanel state={baseState} bridge={harness} onBusy={() => undefined} onError={() => undefined} />);
 
-    expect(screen.getByText(/Click "Resume context"/)).toBeInTheDocument();
+    expect(screen.getByText('Use the Activity tab for timeline history and capture health.')).toBeInTheDocument();
+    expect(screen.getByText('Use the Context tab to preview, copy, or open the current task handoff package.')).toBeInTheDocument();
+  });
 
-    await userEvent.click(screen.getByRole('button', { name: 'Resume context' }));
+  it('loads activity and filters timeline rows by kind', async () => {
+    const onNavigate = vi.fn();
+    const harness = createBridge({
+      request: vi.fn(async (type: string) => {
+        if (type === 'activity.list') {
+          return {
+            items: [
+              { id: 'command:1', kind: 'command', title: 'pnpm test', createdAt: '2026-09-23T10:10:00.000Z', status: 'success' },
+              {
+                id: 'error:1',
+                kind: 'error',
+                title: 'Build failed',
+                createdAt: '2026-09-23T10:09:00.000Z',
+                targetTab: 'errors',
+                entityId: 'error-1',
+                status: 'error',
+              },
+            ],
+          };
+        }
+        if (type === 'capture.health') {
+          return {
+            health: {
+              workspaceRoot: '/repo',
+              currentTaskId: task.id,
+              currentTaskTitle: task.title,
+              passiveCaptureEnabled: true,
+              shellIntegrationAvailable: true,
+              gitExtensionAvailable: true,
+              branchMatches: true,
+              unresolvedErrors: 0,
+              warnings: [],
+            },
+          };
+        }
+        return {};
+      }) as BridgeHarness['request'],
+    });
 
-    await waitFor(() => expect(harness.request).toHaveBeenCalledWith('context.get'));
-    expect(await screen.findByText('Session summary')).toBeInTheDocument();
-    expect(screen.getByText('pnpm test')).toBeInTheDocument();
-    expect(screen.getByText(/fix: sync panel/)).toBeInTheDocument();
+    render(
+      <ActivityPanel
+        bridge={harness}
+        taskId={task.id}
+        onNavigate={onNavigate}
+        onBusy={() => undefined}
+        onError={() => undefined}
+      />,
+    );
+
+    expect(await screen.findByText('pnpm test')).toBeInTheDocument();
+    expect(screen.getByText('Passive capture enabled')).toBeInTheDocument();
+    expect(screen.getByText('/repo')).toBeInTheDocument();
+    expect(screen.getByText('No unresolved errors')).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole('button', { name: 'Errors' }));
+
+    expect(screen.queryByText('pnpm test')).not.toBeInTheDocument();
+    expect(screen.getByText('Build failed')).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole('button', { name: /Open activity item: Build failed/i }));
+    expect(onNavigate).toHaveBeenCalledWith({ tabId: 'errors', entityId: 'error-1' });
+  });
+
+  it('previews context with a budget and offers copy/open actions', async () => {
+    const harness = createBridge({
+      request: vi.fn(async (type: string, payload?: unknown) => {
+        if (type === 'context.preview') {
+          return {
+            preview: {
+              tokenBudget: (payload as { tokenBudget: number }).tokenBudget,
+              markdown: '# Context\nUtility panels',
+              sections: [{ id: 'summary', label: 'Summary', count: 1 }],
+              context: {
+                taskId: task.id,
+                goal: task.goal,
+                branch: task.branch,
+                workspaceRoot: '/repo',
+                latestSummary: 'Session summary',
+                openQuestions: [],
+                openTodos: [],
+                blockedTodos: [],
+                unresolvedErrors: [],
+                recentFiles: [],
+                recentCommits: [],
+                recentCommands: [],
+                decisions: [],
+                truncated: {},
+              },
+            },
+          };
+        }
+        return {};
+      }) as BridgeHarness['request'],
+    });
+
+    render(<ContextPanel bridge={harness} taskId={task.id} onBusy={() => undefined} onError={() => undefined} />);
+
+    await userEvent.clear(screen.getByLabelText('Token budget'));
+    await userEvent.type(screen.getByLabelText('Token budget'), '1200');
+    await userEvent.click(screen.getByRole('button', { name: 'Preview context' }));
+
+    expect(await screen.findByText('# Context')).toBeInTheDocument();
+    expect(screen.getByText('Summary: 1 included')).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole('button', { name: 'Copy context' }));
+    await waitFor(() => expect(harness.request).toHaveBeenCalledWith('context.copy', { markdown: '# Context\nUtility panels' }));
+
+    await userEvent.click(screen.getByRole('button', { name: 'Open as Markdown' }));
+    await waitFor(() => expect(harness.request).toHaveBeenCalledWith('context.open', { markdown: '# Context\nUtility panels' }));
   });
 
   it('highlights the checkpoint matching highlightCheckpointId', () => {

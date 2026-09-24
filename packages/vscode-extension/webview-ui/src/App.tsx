@@ -1,9 +1,11 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { CSSProperties, FormEvent } from 'react';
-import type { Task } from '@host/messages';
+import type { Task, WebviewTabId } from '@host/messages';
 import type { AriadneBridge } from './bridge';
 import type { WebviewState } from '@host/messages';
 import { DecisionsPanel, ErrorsPanel, QuestionsPanel, TodosPanel } from './panels/EntityPanels';
+import ActivityPanel from './panels/ActivityPanel';
+import ContextPanel from './panels/ContextPanel';
 import OverviewPanel from './panels/OverviewPanel';
 import FilesPanel from './panels/FilesPanel';
 import SearchPanel from './panels/SearchPanel';
@@ -22,7 +24,12 @@ const categoryTabMap: Record<SearchCategory, TabId> = {
   commit: 'files',
 };
 
-type TabId = 'overview' | 'todos' | 'decisions' | 'errors' | 'questions' | 'files' | 'search' | 'sync';
+type TabId = 'overview' | 'activity' | 'context' | 'todos' | 'decisions' | 'errors' | 'questions' | 'files' | 'search' | 'sync';
+
+interface NavigationTarget {
+  tabId: WebviewTabId;
+  entityId?: string;
+}
 
 interface AppProps {
   bridge: AriadneBridge;
@@ -36,6 +43,8 @@ interface Banner {
 
 const tabs: Array<{ id: TabId; label: string }> = [
   { id: 'overview', label: 'Overview' },
+  { id: 'activity', label: 'Activity' },
+  { id: 'context', label: 'Context' },
   { id: 'todos', label: 'Todos' },
   { id: 'decisions', label: 'Decisions' },
   { id: 'errors', label: 'Errors' },
@@ -63,6 +72,10 @@ function taskMatchesFilter(task: Task, filter: string): boolean {
   return [task.id, task.title, task.goal ?? '', task.branch ?? '', task.status].some((field) =>
     field.toLowerCase().includes(value),
   );
+}
+
+function isTabId(value: WebviewTabId): value is TabId {
+  return tabs.some((tab) => tab.id === value);
 }
 
 export default function App({ bridge, initialState }: AppProps) {
@@ -106,6 +119,10 @@ export default function App({ bridge, initialState }: AppProps) {
       setVisibleTasks(state?.tasks ?? []);
     }
   }, [allWorkspaces, state?.tasks]);
+
+  useEffect(() => {
+    setHighlightId(undefined);
+  }, [state?.currentTaskId]);
 
   const filteredTasks = useMemo(
     () => visibleTasks.filter((task) => taskMatchesFilter(task, taskFilter)),
@@ -160,6 +177,12 @@ export default function App({ bridge, initialState }: AppProps) {
     }
     setActiveTab(categoryTabMap[hit.category]);
     setHighlightId(hit.id);
+  }
+
+  function navigateToPanel(target: NavigationTarget): void {
+    if (!isTabId(target.tabId)) return;
+    setActiveTab(target.tabId);
+    setHighlightId(target.entityId);
   }
 
   function selectTab(tabId: TabId): void {
@@ -224,6 +247,24 @@ export default function App({ bridge, initialState }: AppProps) {
             onError={handlePanelError}
             highlightCheckpointId={highlightId}
           />
+        ) : (
+          <p>No task selected.</p>
+        );
+      case 'activity':
+        return state ? (
+          <ActivityPanel
+            bridge={bridge}
+            taskId={state.currentTaskId}
+            onNavigate={navigateToPanel}
+            onBusy={handleBusy}
+            onError={handlePanelError}
+          />
+        ) : (
+          <p>No task selected.</p>
+        );
+      case 'context':
+        return state ? (
+          <ContextPanel bridge={bridge} taskId={state.currentTaskId} onBusy={handleBusy} onError={handlePanelError} />
         ) : (
           <p>No task selected.</p>
         );

@@ -35,6 +35,14 @@ vi.mock('vscode', () => {
   return {
     Uri,
     ViewColumn: { One: 1 },
+    extensions: {
+      getExtension: () => undefined,
+    },
+    workspace: {
+      getConfiguration: () => ({
+        get: (_key: string, defaultValue: boolean) => defaultValue,
+      }),
+    },
     window: {
       createWebviewPanel: (...args: unknown[]) => mocks.createWebviewPanel(...args),
     },
@@ -119,6 +127,8 @@ describe('Ariadne webview panel', () => {
       logError: (_context: string, err: unknown) => String(err),
       refreshHost: () => {},
       openExportedMarkdown: mocks.openExportedMarkdown,
+      copyText: vi.fn(),
+      openMarkdown: vi.fn(),
     };
 
     openAriadnePanel({ extensionUri: { fsPath: '/extension' } } as never, deps);
@@ -141,6 +151,8 @@ describe('Ariadne webview panel', () => {
       logError: (_context: string, err: unknown) => (err instanceof Error ? err.message : String(err)),
       refreshHost: () => {},
       openExportedMarkdown: mocks.openExportedMarkdown,
+      copyText: vi.fn(),
+      openMarkdown: vi.fn(),
     };
 
     mocks.handleWebviewMessage.mockImplementation(() => {
@@ -167,6 +179,8 @@ describe('Ariadne webview panel', () => {
       logError: (_context: string, err: unknown) => (err instanceof Error ? err.message : String(err)),
       refreshHost: () => {},
       openExportedMarkdown: mocks.openExportedMarkdown,
+      copyText: vi.fn(),
+      openMarkdown: vi.fn(),
     };
 
     mocks.handleWebviewMessage.mockReturnValue({
@@ -211,6 +225,8 @@ describe('Ariadne webview panel', () => {
       logError: (_context: string, err: unknown) => (err instanceof Error ? err.message : String(err)),
       refreshHost: () => {},
       openExportedMarkdown: mocks.openExportedMarkdown,
+      copyText: vi.fn(),
+      openMarkdown: vi.fn(),
     };
 
     mocks.handleWebviewMessage.mockReturnValue({
@@ -255,6 +271,8 @@ describe('Ariadne webview panel', () => {
       logError: (_context: string, err: unknown) => (err instanceof Error ? err.message : String(err)),
       refreshHost: () => {},
       openExportedMarkdown: mocks.openExportedMarkdown,
+      copyText: vi.fn(),
+      openMarkdown: vi.fn(),
     };
 
     openAriadnePanel({ extensionUri: { fsPath: '/extension' } } as never, deps);
