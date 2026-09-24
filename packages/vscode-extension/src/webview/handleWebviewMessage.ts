@@ -1,3 +1,4 @@
+import * as path from 'node:path';
 import {
   DEFAULT_TOKEN_BUDGET,
   buildContext,
@@ -72,6 +73,24 @@ function isCheckpointLevel(value: unknown): value is CheckpointLevel {
 
 function errorResponse(id: string, error: string): WebviewResponse {
   return { id, ok: false, error };
+}
+
+function isWorkspaceRelativePath(value: string): boolean {
+  if (path.isAbsolute(value) || path.win32.isAbsolute(value)) {
+    return false;
+  }
+
+  const normalized = path.posix.normalize(value.replace(/\\/g, '/'));
+  if (normalized === '..' || normalized.startsWith('../')) {
+    return false;
+  }
+
+  const winNormalized = path.win32.normalize(value);
+  if (winNormalized === '..' || winNormalized.startsWith(`..${path.win32.sep}`)) {
+    return false;
+  }
+
+  return normalized.length > 0;
 }
 
 function truncateText(value: string, limit = 120): string {
@@ -588,6 +607,22 @@ async function handleContextOpen(deps: WebviewDispatcherDeps, message: WebviewRe
   };
 }
 
+async function handleFileOpen(deps: WebviewDispatcherDeps, message: WebviewRequest): Promise<WebviewResponse> {
+  if (!deps.openWorkspaceFile) return errorResponse(message.id, 'Workspace file opening is not configured.');
+  const payload = getPayload(message);
+  const filePath = readString(payload.path);
+  if (!filePath || !isWorkspaceRelativePath(filePath)) {
+    return errorResponse(message.id, 'file.open requires a workspace-relative path.');
+  }
+  await deps.openWorkspaceFile(filePath);
+  return {
+    id: message.id,
+    ok: true,
+    data: { opened: true },
+    state: buildWebviewState(deps),
+  };
+}
+
 function handleTodoCreate(deps: WebviewDispatcherDeps, message: WebviewRequest): WebviewResponse {
   const taskId = requireCurrentTaskId(deps, message.id);
   if (typeof taskId !== 'string') return taskId;
@@ -955,6 +990,8 @@ export async function handleWebviewMessage(deps: WebviewDispatcherDeps, message:
         return await handleContextCopy(deps, message);
       case WebviewRequestTypes.ContextOpen:
         return await handleContextOpen(deps, message);
+      case WebviewRequestTypes.FileOpen:
+        return await handleFileOpen(deps, message);
       case WebviewRequestTypes.TasksList:
         return handleTasksList(deps, message);
       case WebviewRequestTypes.TodoCreate:

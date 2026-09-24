@@ -212,9 +212,10 @@ describe('handleWebviewMessage', () => {
     const { store, task } = makeStore();
     const copyText = vi.fn();
     const openMarkdown = vi.fn();
+    const openWorkspaceFile = vi.fn();
 
     const copyResponse = await handleWebviewMessage(
-      { store, currentTaskId: task.id, workspaceRoot: '/repo', copyText, openMarkdown },
+      { store, currentTaskId: task.id, workspaceRoot: '/repo', copyText, openMarkdown, openWorkspaceFile } as never,
       { id: 'context-copy', type: 'context.copy', payload: { markdown: '# Context\nCopied' } },
     );
     expect(copyResponse).toEqual({
@@ -226,7 +227,7 @@ describe('handleWebviewMessage', () => {
     expect(copyText).toHaveBeenCalledWith('# Context\nCopied');
 
     const openResponse = await handleWebviewMessage(
-      { store, currentTaskId: task.id, workspaceRoot: '/repo', copyText, openMarkdown },
+      { store, currentTaskId: task.id, workspaceRoot: '/repo', copyText, openMarkdown, openWorkspaceFile } as never,
       { id: 'context-open', type: 'context.open', payload: { markdown: '# Context\nOpened' } },
     );
     expect(openResponse).toEqual({
@@ -237,6 +238,46 @@ describe('handleWebviewMessage', () => {
     });
     expect(openMarkdown).toHaveBeenCalledWith('Ariadne Context Preview', '# Context\nOpened');
 
+    const openFileResponse = await handleWebviewMessage(
+      { store, currentTaskId: task.id, workspaceRoot: '/repo', copyText, openMarkdown, openWorkspaceFile } as never,
+      { id: 'file-open', type: 'file.open', payload: { path: 'src/App.tsx' } } as never,
+    );
+    expect(openFileResponse).toEqual({
+      id: 'file-open',
+      ok: true,
+      data: { opened: true },
+      state: expect.any(Object),
+    });
+    expect(openWorkspaceFile).toHaveBeenCalledWith('src/App.tsx');
+
+    store.close();
+  });
+
+  it('rejects invalid or missing file.open paths before invoking the host adapter', async () => {
+    const { store, task } = makeStore();
+    const openWorkspaceFile = vi.fn();
+    const invalidCases = [
+      undefined,
+      '',
+      '../secret.txt',
+      '/etc/passwd',
+      'C:\\secret.txt',
+      'src/../../secret.txt',
+    ];
+
+    for (const invalidPath of invalidCases) {
+      const response = await handleWebviewMessage(
+        { store, currentTaskId: task.id, workspaceRoot: '/repo', openWorkspaceFile } as never,
+        { id: `file-open-${String(invalidPath)}`, type: 'file.open', payload: invalidPath === undefined ? {} : { path: invalidPath } } as never,
+      );
+      expect(response).toEqual({
+        id: `file-open-${String(invalidPath)}`,
+        ok: false,
+        error: 'file.open requires a workspace-relative path.',
+      });
+    }
+
+    expect(openWorkspaceFile).not.toHaveBeenCalled();
     store.close();
   });
 

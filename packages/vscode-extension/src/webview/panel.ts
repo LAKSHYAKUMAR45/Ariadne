@@ -17,8 +17,8 @@ export interface AriadnePanelDeps {
   logError: (context: string, err: unknown) => string;
   refreshHost: () => void;
   openExportedMarkdown: (filePath: string) => Promise<void>;
-  copyText: (text: string) => Promise<void> | void;
-  openMarkdown: (title: string, markdown: string) => Promise<void> | void;
+  copyText?: (text: string) => Promise<void> | void;
+  openMarkdown?: (title: string, markdown: string) => Promise<void> | void;
 }
 
 let panel: vscode.WebviewPanel | undefined;
@@ -146,6 +146,44 @@ function currentState(): WebviewState | undefined {
   });
 }
 
+function resolveSelectedWorkspaceRoot(): string | undefined {
+  return selectedWorkspaceRoot ?? panelDeps?.resolveWorkspaceRoot();
+}
+
+async function copyText(text: string): Promise<void> {
+  if (panelDeps?.copyText) {
+    await panelDeps.copyText(text);
+    return;
+  }
+  await vscode.env.clipboard.writeText(text);
+}
+
+async function openMarkdown(title: string, markdown: string): Promise<void> {
+  if (panelDeps?.openMarkdown) {
+    await panelDeps.openMarkdown(title, markdown);
+    return;
+  }
+  const doc = await vscode.workspace.openTextDocument({ language: 'markdown', content: markdown });
+  await vscode.window.showTextDocument(doc, { preview: true });
+}
+
+async function openWorkspaceFile(relativePath: string): Promise<void> {
+  const root = resolveSelectedWorkspaceRoot();
+  if (!root) {
+    throw new Error('No workspace root is selected.');
+  }
+
+  const resolved = path.resolve(root, relativePath);
+  const relative = path.relative(root, resolved);
+  if (relative.startsWith('..') || path.isAbsolute(relative)) {
+    throw new Error('file.open requires a workspace-relative path.');
+  }
+
+  const uri = vscode.Uri.file(resolved);
+  await vscode.workspace.fs.stat(uri);
+  await vscode.window.showTextDocument(uri, { preview: true });
+}
+
 function postStateUpdate(state?: WebviewState): void {
   if (!panel || !panelDeps) return;
   if (!state) return;
@@ -195,8 +233,9 @@ async function handleWebviewRequest(message: unknown): Promise<void> {
           },
         },
         writeExport: writeExportMarkdown,
-        copyText: panelDeps.copyText,
-        openMarkdown: panelDeps.openMarkdown,
+        copyText,
+        openMarkdown,
+        openWorkspaceFile,
       },
       message,
     );

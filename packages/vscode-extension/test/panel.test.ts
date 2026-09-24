@@ -5,11 +5,19 @@ const mocks = vi.hoisted(() => {
   const handleWebviewMessage = vi.fn();
   const createWebviewPanel = vi.fn();
   const openExportedMarkdown = vi.fn();
+  const clipboardWriteText = vi.fn();
+  const openTextDocument = vi.fn();
+  const showTextDocument = vi.fn();
+  const stat = vi.fn();
   return {
     buildWebviewState,
     handleWebviewMessage,
     createWebviewPanel,
     openExportedMarkdown,
+    clipboardWriteText,
+    openTextDocument,
+    showTextDocument,
+    stat,
   };
 });
 
@@ -42,9 +50,19 @@ vi.mock('vscode', () => {
       getConfiguration: () => ({
         get: (_key: string, defaultValue: boolean) => defaultValue,
       }),
+      openTextDocument: (...args: unknown[]) => mocks.openTextDocument(...args),
+      fs: {
+        stat: (...args: unknown[]) => mocks.stat(...args),
+      },
+    },
+    env: {
+      clipboard: {
+        writeText: (...args: unknown[]) => mocks.clipboardWriteText(...args),
+      },
     },
     window: {
       createWebviewPanel: (...args: unknown[]) => mocks.createWebviewPanel(...args),
+      showTextDocument: (...args: unknown[]) => mocks.showTextDocument(...args),
     },
   };
 });
@@ -68,6 +86,10 @@ function makePanel() {
       receiveMessage = listener;
       return { dispose: () => {} };
     },
+    receiveMessage: async (message: unknown) => {
+      receiveMessage?.(message);
+      await flush();
+    },
   };
 
   revealMock = vi.fn();
@@ -83,6 +105,31 @@ async function loadPanelModule() {
   return import('../src/webview/panel.js');
 }
 
+async function openPanelForTest(options?: { workspaceRoot?: string }) {
+  const { openAriadnePanel } = await loadPanelModule();
+  const vscode = await import('vscode');
+
+  const deps = {
+    openStoreForCurrentWorkspace: () => ({}) as never,
+    getCurrentTaskId: () => 'task-1',
+    setCurrentTask: () => {},
+    setCurrentTaskInWorkspace: () => {},
+    resolveWorkspaceRoot: () => options?.workspaceRoot,
+    output: { appendLine: (line: string) => outputLines.push(line) } as never,
+    logError: (_context: string, err: unknown) => (err instanceof Error ? err.message : String(err)),
+    refreshHost: () => {},
+    openExportedMarkdown: mocks.openExportedMarkdown,
+  } as never;
+
+  openAriadnePanel({ extensionUri: { fsPath: '/extension' } } as never, deps);
+
+  return {
+    panel: mocks.createWebviewPanel.mock.results[0]?.value,
+    postedMessages,
+    vscode,
+  };
+}
+
 describe('Ariadne webview panel', () => {
   beforeEach(() => {
     postedMessages = [];
@@ -93,6 +140,10 @@ describe('Ariadne webview panel', () => {
     mocks.handleWebviewMessage.mockReset();
     mocks.createWebviewPanel.mockReset();
     mocks.openExportedMarkdown.mockReset();
+    mocks.clipboardWriteText.mockReset();
+    mocks.openTextDocument.mockReset();
+    mocks.showTextDocument.mockReset();
+    mocks.stat.mockReset();
     mocks.buildWebviewState.mockReturnValue({
       workspaceRoot: '/workspace',
       currentTaskId: 'task-1',
@@ -108,6 +159,9 @@ describe('Ariadne webview panel', () => {
       counts: { pendingTodos: 0, unresolvedErrors: 0, openQuestions: 0 },
     });
     mocks.createWebviewPanel.mockImplementation(() => makePanel());
+    mocks.openTextDocument.mockResolvedValue({ uri: { fsPath: '/preview.md' } });
+    mocks.showTextDocument.mockResolvedValue(undefined);
+    mocks.stat.mockResolvedValue({ type: 1 });
   });
 
   afterEach(() => {
@@ -282,5 +336,99 @@ describe('Ariadne webview panel', () => {
     refreshAriadnePanel();
 
     expect(postedMessages).toContainEqual({ type: 'stateUpdate', state: refreshedState });
+  });
+
+  it('copies context markdown through the VS Code clipboard adapter', async () => {
+    mocks.handleWebviewMessage.mockImplementation(async (deps: { copyText?: (text: string) => Promise<void> }, message: { id: string; type: string; payload?: { markdown?: string } }) => {
+      if (message.type === 'context.copy') {
+        await deps.copyText?.(message.payload?.markdown ?? '');
+        return { id: message.id, ok: true, data: { copied: true } };
+      }
+      return { id: message.id, ok: true, data: {} };
+    });
+
+    const { panel, postedMessages: messages } = await openPanelForTest();
+
+    await panel.webview.receiveMessage({
+      id: 'copy-1',
+      type: 'context.copy',
+      payload: { markdown: '# Handoff' },
+    });
+
+    expect(mocks.clipboardWriteText).toHaveBeenCalledWith('# Handoff');
+    expect(messages).toContainEqual(expect.objectContaining({ id: 'copy-1', ok: true }));
+  });
+
+  it('opens a captured workspace file by relative path', async () => {
+    mocks.handleWebviewMessage.mockImplementation(
+      async (
+        deps: { openWorkspaceFile?: (relativePath: string) => Promise<void> },
+        message: { id: string; type: string; payload?: { path?: string } },
+      ) => {
+        if (message.type === 'file.open') {
+          await deps.openWorkspaceFile?.(message.payload?.path ?? '');
+          return { id: message.id, ok: true, data: { opened: true } };
+        }
+        return { id: message.id, ok: true, data: {} };
+      },
+    );
+
+    const { panel } = await openPanelForTest({ workspaceRoot: '/repo' });
+
+    await panel.webview.receiveMessage({
+      id: 'open-file-1',
+      type: 'file.open',
+      payload: { path: 'src/App.tsx' },
+    });
+
+    expect(mocks.showTextDocument).toHaveBeenCalledWith(expect.objectContaining({ fsPath: '/repo/src/App.tsx' }), { preview: true });
+  });
+
+  it('rejects invalid or missing captured file paths before opening', async () => {
+    mocks.handleWebviewMessage.mockImplementation(
+      async (
+        deps: { openWorkspaceFile?: (relativePath: string) => Promise<void> },
+        message: { id: string; type: string; payload?: { path?: string } },
+      ) => {
+        if (message.type === 'file.open') {
+          const filePath = message.payload?.path;
+          if (!filePath || filePath.startsWith('../')) {
+            return {
+              id: message.id,
+              ok: false,
+              error: 'file.open requires a workspace-relative path.',
+            };
+          }
+          await deps.openWorkspaceFile?.(filePath);
+          return { id: message.id, ok: true, data: { opened: true } };
+        }
+        return { id: message.id, ok: true, data: {} };
+      },
+    );
+
+    const { panel, postedMessages: messages } = await openPanelForTest({ workspaceRoot: '/repo' });
+
+    await panel.webview.receiveMessage({
+      id: 'open-file-invalid',
+      type: 'file.open',
+      payload: { path: '../secret.txt' },
+    });
+    await panel.webview.receiveMessage({
+      id: 'open-file-missing',
+      type: 'file.open',
+      payload: {},
+    });
+
+    expect(mocks.showTextDocument).not.toHaveBeenCalled();
+    expect(messages).toContainEqual({
+      id: 'open-file-invalid',
+      ok: false,
+      error: 'file.open requires a workspace-relative path.',
+    });
+    expect(messages).toContainEqual({
+      id: 'open-file-missing',
+      ok: false,
+      error: 'file.open requires a workspace-relative path.',
+    });
   });
 });
