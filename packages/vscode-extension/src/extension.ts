@@ -155,6 +155,29 @@ export function activate(context: vscode.ExtensionContext): void {
     ),
   );
 
+  for (const command of [
+    'ariadne.knowledgeOverview',
+    'ariadne.knowledgeSearch',
+    'ariadne.knowledgeRebuild',
+    'ariadne.knowledgeQueue',
+    'ariadne.knowledgeReviewAccept',
+    'ariadne.knowledgeReviewReject',
+  ]) {
+    context.subscriptions.push(
+      vscode.commands.registerCommand(command, async (reviewId?: string) => {
+        await vscode.commands.executeCommand('ariadne.openPanel');
+        if (command === 'ariadne.knowledgeReviewAccept' || command === 'ariadne.knowledgeReviewReject') {
+          const action = command.endsWith('Accept') ? 'accept' : 'reject';
+          void vscode.window.showInformationMessage(`Ariadne: use the Knowledge Review panel to ${action} ${reviewId ?? 'a review'}.`);
+        } else if (command === 'ariadne.knowledgeRebuild') {
+          void vscode.window.showInformationMessage('Ariadne: use the Knowledge Activity panel to monitor rebuild progress.');
+        } else if (command === 'ariadne.knowledgeQueue') {
+          void vscode.window.showInformationMessage('Ariadne: use the Knowledge Activity panel to inspect the queue.');
+        }
+      }),
+    );
+  }
+
   registerAriadneLauncherView(context, {
     getCurrentTask: () => {
       const taskId = getCurrentTaskId();

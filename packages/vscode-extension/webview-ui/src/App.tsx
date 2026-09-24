@@ -13,6 +13,11 @@ import ReviewPanel from './panels/ReviewPanel';
 import SearchPanel from './panels/SearchPanel';
 import type { SearchCategory, SearchHit } from './panels/SearchPanel';
 import SyncPanel from './panels/SyncPanel';
+import KnowledgeOverviewPanel from './panels/KnowledgeOverviewPanel';
+import KnowledgeSearchPanel from './panels/KnowledgeSearchPanel';
+import KnowledgeGraphPanel from './panels/KnowledgeGraphPanel';
+import KnowledgeReviewPanel from './panels/KnowledgeReviewPanel';
+import KnowledgeActivityPanel from './panels/KnowledgeActivityPanel';
 
 const categoryTabMap: Record<SearchCategory, TabId> = {
   title: 'overview',
@@ -26,7 +31,7 @@ const categoryTabMap: Record<SearchCategory, TabId> = {
   commit: 'files',
 };
 
-type TabId = 'overview' | 'activity' | 'context' | 'review' | 'graphify' | 'todos' | 'decisions' | 'errors' | 'questions' | 'files' | 'search' | 'sync';
+type TabId = 'overview' | 'activity' | 'context' | 'review' | 'graphify' | 'todos' | 'decisions' | 'errors' | 'questions' | 'files' | 'search' | 'sync' | 'knowledge-overview' | 'knowledge-search' | 'knowledge-graph' | 'knowledge-review' | 'knowledge-activity';
 
 interface NavigationTarget {
   tabId: WebviewTabId;
@@ -64,6 +69,11 @@ const tabs: Array<{ id: TabId; label: string }> = [
   { id: 'files', label: 'Files' },
   { id: 'search', label: 'Search' },
   { id: 'sync', label: 'Sync' },
+  { id: 'knowledge-overview', label: 'Knowledge' },
+  { id: 'knowledge-search', label: 'Knowledge Search' },
+  { id: 'knowledge-graph', label: 'Knowledge Graph' },
+  { id: 'knowledge-review', label: 'Knowledge Review' },
+  { id: 'knowledge-activity', label: 'Knowledge Activity' },
 ];
 
 function readError(error: unknown): string {
@@ -472,6 +482,16 @@ export default function App({ bridge, initialState }: AppProps) {
         return <SearchPanel bridge={bridge} initialResults={state?.searchResults ?? []} onNavigate={(hit) => void navigateToSearchHit(hit)} />;
       case 'sync':
         return <SyncPanel bridge={bridge} />;
+      case 'knowledge-overview':
+        return <KnowledgeOverviewPanel bridge={bridge} />;
+      case 'knowledge-search':
+        return <KnowledgeSearchPanel bridge={bridge} />;
+      case 'knowledge-graph':
+        return <KnowledgeGraphPanel bridge={bridge} />;
+      case 'knowledge-review':
+        return <KnowledgeReviewPanel bridge={bridge} />;
+      case 'knowledge-activity':
+        return <KnowledgeActivityPanel bridge={bridge} />;
       default:
         return null;
     }

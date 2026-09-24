@@ -35,6 +35,40 @@ export interface ChatCommandResult {
   newCurrentTaskId?: string;
 }
 
+export type KnowledgePanelCommand =
+  | 'open-overview'
+  | 'search'
+  | 'rebuild'
+  | 'queue-status'
+  | 'review-accept'
+  | 'review-reject';
+
+export interface KnowledgePanelCommandRequest {
+  type: string;
+  payload?: Record<string, unknown>;
+}
+
+/** Maps palette/chat-facing knowledge actions to the typed webview request names. */
+export function knowledgePanelCommand(
+  command: KnowledgePanelCommand,
+  args: { query?: string; reviewId?: string } = {},
+): KnowledgePanelCommandRequest {
+  switch (command) {
+    case 'open-overview':
+      return { type: 'knowledge.overview' };
+    case 'search':
+      return { type: 'knowledge.search', payload: { query: args.query?.trim() ?? '', mode: 'hybrid' } };
+    case 'rebuild':
+      return { type: 'knowledge.rebuild' };
+    case 'queue-status':
+      return { type: 'knowledge.queue' };
+    case 'review-accept':
+      return { type: 'knowledge.review.resolve', payload: { reviewId: args.reviewId, action: 'accept' } };
+    case 'review-reject':
+      return { type: 'knowledge.review.resolve', payload: { reviewId: args.reviewId, action: 'reject' } };
+  }
+}
+
 function requireTask(store: TaskStore, currentTaskId: string | undefined): string | undefined {
   if (!currentTaskId) return undefined;
   return store.getTask(currentTaskId) ? currentTaskId : undefined;
