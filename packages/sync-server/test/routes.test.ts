@@ -233,7 +233,6 @@ describe('sync-server: auth + sync routes', () => {
 
     it('rejects login attempt for SSO-provisioned user with NULL password_hash', async () => {
       // Directly insert a user with NULL password_hash (simulating SSO provisioning)
-      const pool = (app as any).locals.pool;
       const { rows } = await pool.query<{ id: string }>(
         'INSERT INTO users (username, password_hash) VALUES ($1, NULL) RETURNING id',
         ['sso-user']
