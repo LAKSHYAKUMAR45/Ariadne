@@ -62,7 +62,7 @@ describe('runMigrations', () => {
     const version = await pool.query<{ value: string }>(
       `SELECT value FROM schema_meta WHERE key = 'schema_version'`,
     );
-    expect(version.rows[0].value).toBe('11');
+    expect(version.rows[0].value).toBe('12');
 
     const dedupIndex = await pool.query<{ indexdef: string }>(
       `SELECT indexdef FROM pg_indexes
@@ -202,6 +202,7 @@ describe('runMigrations', () => {
         '0009_admin_sessions.sql',
         '0010_complete_admin_operations.sql',
         '0011_sso_codes.sql',
+        '0012_multi_admin.sql',
       ]);
 
       const secondRun = await runMigrations(pool);
@@ -216,7 +217,7 @@ describe('runMigrations', () => {
         `SELECT value FROM schema_meta WHERE key = 'schema_version'`,
       );
       expect(schemaVersion.rows).toHaveLength(1);
-      expect(schemaVersion.rows[0].value).toBe('11');
+      expect(schemaVersion.rows[0].value).toBe('12');
 
       const memberships = await pool.query(
         `SELECT u.username, m.role, m.active
@@ -240,7 +241,7 @@ describe('runMigrations', () => {
            VALUES ($1, $2, 'admin', true)`,
           [teamId, duplicateAdmin.rows[0].id],
         ),
-      ).rejects.toMatchObject({ code: '23505' });
+      ).resolves.toBeTruthy();
 
       const taskTeams = await pool.query<{ id: string; team_id: string | null }>(
         'SELECT id, team_id FROM tasks ORDER BY local_id ASC',
@@ -292,7 +293,7 @@ describe('runMigrations', () => {
     const version = await pool.query<{ value: string }>(
       `SELECT value FROM schema_meta WHERE key = 'schema_version'`,
     );
-    expect(version.rows[0].value).toBe('11');
+    expect(version.rows[0].value).toBe('12');
 
     const operationChecks = await pool.query<{ definition: string }>(
       `SELECT pg_get_constraintdef(oid) AS definition
@@ -418,6 +419,7 @@ describe('runMigrations', () => {
       expect(upgraded).toEqual([
         '0010_complete_admin_operations.sql',
         '0011_sso_codes.sql',
+        '0012_multi_admin.sql',
       ]);
 
       await expect(
@@ -458,7 +460,7 @@ describe('runMigrations', () => {
       const schemaVersion = await pool.query<{ value: string }>(
         `SELECT value FROM schema_meta WHERE key = 'schema_version'`,
       );
-      expect(schemaVersion.rows[0].value).toBe('11');
+      expect(schemaVersion.rows[0].value).toBe('12');
 
       const secondRun = await runMigrations(pool);
       expect(secondRun).toEqual([]);
