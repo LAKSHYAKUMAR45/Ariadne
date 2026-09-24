@@ -12,6 +12,7 @@ const mocks = vi.hoisted(() => {
   const isGraphifyInstalled = vi.fn();
   const runGraphifySync = vi.fn();
   const summarizeGraphifyRun = vi.fn();
+  const getCurrentBranch = vi.fn();
   return {
     buildWebviewState,
     handleWebviewMessage,
@@ -24,6 +25,7 @@ const mocks = vi.hoisted(() => {
     isGraphifyInstalled,
     runGraphifySync,
     summarizeGraphifyRun,
+    getCurrentBranch,
   };
 });
 
@@ -86,6 +88,7 @@ vi.mock('@ariadne-dev/core', async (importOriginal) => {
     isGraphifyInstalled: mocks.isGraphifyInstalled,
     runGraphifySync: mocks.runGraphifySync,
     summarizeGraphifyRun: mocks.summarizeGraphifyRun,
+    getCurrentBranch: mocks.getCurrentBranch,
   };
 });
 
@@ -163,6 +166,8 @@ describe('Ariadne webview panel', () => {
     mocks.isGraphifyInstalled.mockReset();
     mocks.runGraphifySync.mockReset();
     mocks.summarizeGraphifyRun.mockReset();
+    mocks.getCurrentBranch.mockReset();
+    mocks.getCurrentBranch.mockReturnValue('feat/branch');
     mocks.buildWebviewState.mockReturnValue({
       workspaceRoot: '/workspace',
       currentTaskId: 'task-1',
@@ -209,6 +214,36 @@ describe('Ariadne webview panel', () => {
 
     expect(mocks.createWebviewPanel).toHaveBeenCalledTimes(1);
     expect(revealMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not resolve the git branch for requests that never use it', async () => {
+    mocks.handleWebviewMessage.mockReturnValue({ id: 'req-1', ok: true, data: {} });
+
+    const { panel } = await openPanelForTest({ workspaceRoot: '/workspace' });
+
+    await panel.webview.receiveMessage({ id: 'req-1', type: 'todo.create', payload: { text: 'Add bridge' } });
+    await panel.webview.receiveMessage({ id: 'req-2', type: 'state.get' });
+    await panel.webview.receiveMessage({ id: 'req-3', type: 'search.query', payload: { query: 'bridge' } });
+
+    expect(mocks.getCurrentBranch).not.toHaveBeenCalled();
+    for (const call of mocks.handleWebviewMessage.mock.calls) {
+      expect(call[0].passiveCapture.currentBranch).toBeUndefined();
+    }
+  });
+
+  it('resolves the git branch only for capture health and review requests', async () => {
+    mocks.handleWebviewMessage.mockReturnValue({ id: 'req-1', ok: true, data: {} });
+
+    const { panel } = await openPanelForTest({ workspaceRoot: '/workspace' });
+
+    await panel.webview.receiveMessage({ id: 'req-1', type: 'capture.health' });
+    expect(mocks.getCurrentBranch).toHaveBeenCalledTimes(1);
+    expect(mocks.getCurrentBranch).toHaveBeenLastCalledWith('/workspace');
+    expect(mocks.handleWebviewMessage.mock.calls[0][0].passiveCapture.currentBranch).toBe('feat/branch');
+
+    await panel.webview.receiveMessage({ id: 'req-2', type: 'review.get' });
+    expect(mocks.getCurrentBranch).toHaveBeenCalledTimes(2);
+    expect(mocks.handleWebviewMessage.mock.calls[1][0].passiveCapture.currentBranch).toBe('feat/branch');
   });
 
   it('posts an error response when request handling throws', async () => {

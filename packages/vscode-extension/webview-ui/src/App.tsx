@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { CSSProperties, FormEvent, ReactElement } from 'react';
 import { TaskTemplates, type Task, type TaskTemplateId, type WebviewTabId } from '@host/messages';
 import type { AriadneBridge } from './bridge';
@@ -145,13 +145,13 @@ export default function App({ bridge, initialState }: AppProps) {
   );
   const showOnboarding = (state?.tasks.length ?? 0) === 0 || !state?.currentTask;
 
-  function handlePanelError(message: string): void {
+  const handlePanelError = useCallback((message: string): void => {
     setBanner(message ? { kind: 'error', message } : null);
-  }
+  }, []);
 
-  function handleBusy(label: string | undefined): void {
+  const handleBusy = useCallback((label: string | undefined): void => {
     setBusyLabel(label ?? null);
-  }
+  }, []);
 
   async function switchTask(taskId: string): Promise<boolean> {
     setBusyLabel(`Switching to ${taskId}…`);

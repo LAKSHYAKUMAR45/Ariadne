@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties } from 'react';
 import type { ActivityItem, ActivityKind, CaptureHealth, WebviewTabId } from '@host/messages';
 import type { AriadneBridge } from '../bridge';
+import { useStableCallback } from '../useStableCallback';
 
 type ActivityFilterId = 'all' | 'checkpoint' | 'todo' | 'decision' | 'error' | 'question' | 'file-capture' | 'commit' | 'command';
 
@@ -50,6 +51,8 @@ export default function ActivityPanel({ bridge, taskId, onNavigate, onBusy, onEr
   const [health, setHealth] = useState<CaptureHealth | null>(null);
   const [filter, setFilter] = useState<ActivityFilterId>('all');
   const generationRef = useRef(0);
+  const reportBusy = useStableCallback(onBusy);
+  const reportError = useStableCallback(onError);
 
   useEffect(() => {
     setFilter('all');
@@ -57,8 +60,8 @@ export default function ActivityPanel({ bridge, taskId, onNavigate, onBusy, onEr
 
   useEffect(() => {
     const generation = ++generationRef.current;
-    onError('');
-    onBusy('Loading activity…');
+    reportError('');
+    reportBusy('Loading activity…');
 
     void Promise.all([
       bridge.request<{ items: ActivityItem[] }>('activity.list'),
@@ -71,13 +74,13 @@ export default function ActivityPanel({ bridge, taskId, onNavigate, onBusy, onEr
       })
       .catch((error: unknown) => {
         if (generation !== generationRef.current) return;
-        onError(formatError(error));
+        reportError(formatError(error));
       })
       .finally(() => {
         if (generation !== generationRef.current) return;
-        onBusy(undefined);
+        reportBusy(undefined);
       });
-  }, [bridge, onBusy, onError, taskId]);
+  }, [bridge, reportBusy, reportError, taskId]);
 
   const visibleItems = useMemo(() => {
     const kinds = filters.find((entry) => entry.id === filter)?.kinds;

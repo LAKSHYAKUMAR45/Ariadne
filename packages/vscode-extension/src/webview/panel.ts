@@ -50,7 +50,20 @@ function isWebviewRequest(value: unknown): value is WebviewRequest {
   return isRecord(value) && typeof value.id === 'string' && typeof value.type === 'string';
 }
 
-function readPassiveCaptureState(workspaceRoot: string | undefined): {
+/**
+ * Request types whose responses include the current git branch. Resolving the
+ * branch spawns `git rev-parse` synchronously, so it must not run for every
+ * webview request.
+ */
+const BRANCH_AWARE_REQUEST_TYPES = new Set<string>([
+  WebviewRequestTypes.CaptureHealth,
+  WebviewRequestTypes.ReviewGet,
+]);
+
+function readPassiveCaptureState(
+  workspaceRoot: string | undefined,
+  options: { includeCurrentBranch: boolean },
+): {
   enabled: boolean;
   shellIntegrationAvailable: boolean;
   gitExtensionAvailable: boolean;
@@ -59,7 +72,8 @@ function readPassiveCaptureState(workspaceRoot: string | undefined): {
   const windowWithShellIntegration = vscode.window as unknown as {
     onDidEndTerminalShellExecution?: unknown;
   };
-  const currentBranch = workspaceRoot ? getCurrentBranch(workspaceRoot) ?? undefined : undefined;
+  const currentBranch =
+    options.includeCurrentBranch && workspaceRoot ? getCurrentBranch(workspaceRoot) ?? undefined : undefined;
   return {
     enabled: vscode.workspace.getConfiguration('ariadne').get<boolean>('passiveCapture.enabled', true),
     shellIntegrationAvailable: Boolean(windowWithShellIntegration.onDidEndTerminalShellExecution),
@@ -294,7 +308,9 @@ async function handleWebviewRequest(message: unknown): Promise<void> {
         store,
         currentTaskId: selectedWorkspaceRoot ? store.getCurrentTaskId() : panelDeps.getCurrentTaskId(),
         workspaceRoot,
-        passiveCapture: readPassiveCaptureState(workspaceRoot),
+        passiveCapture: readPassiveCaptureState(workspaceRoot, {
+          includeCurrentBranch: BRANCH_AWARE_REQUEST_TYPES.has(message.type),
+        }),
         setCurrentTaskId: panelDeps.setCurrentTask,
         setCurrentTaskIdForWorkspace: panelDeps.setCurrentTaskInWorkspace,
         sync: {

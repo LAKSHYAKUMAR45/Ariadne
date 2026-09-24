@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react';
+import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 import App from './App';
@@ -146,6 +146,18 @@ function bridge(overrides: Partial<BridgeHarness> = {}): BridgeHarness {
   };
 
   return harness;
+}
+
+function countRequests(harness: BridgeHarness, type: string): number {
+  return harness.request.mock.calls.filter((call: unknown[]) => call[0] === type).length;
+}
+
+async function settleAfterStateUpdates(harness: BridgeHarness, state: WebviewState): Promise<void> {
+  await act(async () => {
+    harness.emitState(state);
+    harness.emitState({ ...state });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  });
 }
 
 describe('App', () => {
@@ -354,6 +366,32 @@ describe('App', () => {
 
     expect(screen.getByRole('button', { name: 'Files' })).toHaveAttribute('aria-pressed', 'true');
     expect(screen.getByText(/Commit: abc1234/)).toBeInTheDocument();
+  });
+
+  it('does not re-request activity data when host state updates while the tab stays mounted', async () => {
+    const harness = bridge();
+    render(<App bridge={harness} initialState={baseState} />);
+
+    await userEvent.click(screen.getByRole('button', { name: 'Activity' }));
+    await waitFor(() => expect(countRequests(harness, 'activity.list')).toBe(1));
+    expect(countRequests(harness, 'capture.health')).toBe(1);
+
+    await settleAfterStateUpdates(harness, { ...baseState, tasks: [task1, task2] });
+
+    expect(countRequests(harness, 'activity.list')).toBe(1);
+    expect(countRequests(harness, 'capture.health')).toBe(1);
+  });
+
+  it('does not re-request review data when host state updates while the tab stays mounted', async () => {
+    const harness = bridge();
+    render(<App bridge={harness} initialState={baseState} />);
+
+    await userEvent.click(screen.getByRole('button', { name: 'Review' }));
+    await waitFor(() => expect(countRequests(harness, 'review.get')).toBe(1));
+
+    await settleAfterStateUpdates(harness, { ...baseState, tasks: [task1, task2] });
+
+    expect(countRequests(harness, 'review.get')).toBe(1);
   });
 
   it('shows an error banner when a bridge action fails', async () => {

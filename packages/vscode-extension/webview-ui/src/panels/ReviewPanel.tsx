@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import type { CSSProperties } from 'react';
 import type { ReviewCheck, ReviewSummary, WebviewTabId } from '@host/messages';
 import type { AriadneBridge } from '../bridge';
+import { useStableCallback } from '../useStableCallback';
 
 interface ReviewPanelProps {
   bridge: AriadneBridge;
@@ -45,6 +46,8 @@ export default function ReviewPanel({ bridge, taskId, onNavigate, onBusy, onErro
   const [review, setReview] = useState<ReviewSummary | null>(null);
   const generationRef = useRef(0);
   const activeRequestGenerationRef = useRef<number | null>(null);
+  const reportBusy = useStableCallback(onBusy);
+  const reportError = useStableCallback(onError);
 
   function invalidateReview(): void {
     const nextGeneration = generationRef.current + 1;
@@ -52,7 +55,7 @@ export default function ReviewPanel({ bridge, taskId, onNavigate, onBusy, onErro
     setReview(null);
     if (activeRequestGenerationRef.current !== null && activeRequestGenerationRef.current < nextGeneration) {
       activeRequestGenerationRef.current = null;
-      onBusy(undefined);
+      reportBusy(undefined);
     }
   }
 
@@ -60,14 +63,14 @@ export default function ReviewPanel({ bridge, taskId, onNavigate, onBusy, onErro
     invalidateReview();
 
     if (!taskId) {
-      onError('');
+      reportError('');
       return;
     }
 
     const generation = ++generationRef.current;
     activeRequestGenerationRef.current = generation;
-    onError('');
-    onBusy('Loading review…');
+    reportError('');
+    reportBusy('Loading review…');
 
     void bridge
       .request<{ review: ReviewSummary }>('review.get')
@@ -77,25 +80,25 @@ export default function ReviewPanel({ bridge, taskId, onNavigate, onBusy, onErro
       })
       .catch((error: unknown) => {
         if (generation !== generationRef.current) return;
-        onError(formatError(error));
+        reportError(formatError(error));
       })
       .finally(() => {
         if (activeRequestGenerationRef.current !== generation) return;
         activeRequestGenerationRef.current = null;
-        onBusy(undefined);
+        reportBusy(undefined);
       });
-  }, [bridge, onBusy, onError, taskId]);
+  }, [bridge, reportBusy, reportError, taskId]);
 
   async function markTaskDone(): Promise<void> {
     if (!review) return;
-    onError('');
-    onBusy('Marking task done…');
+    reportError('');
+    reportBusy('Marking task done…');
     try {
       await bridge.request('task.setStatus', { id: review.taskId, status: 'done' });
     } catch (error: unknown) {
-      onError(formatError(error));
+      reportError(formatError(error));
     } finally {
-      onBusy(undefined);
+      reportBusy(undefined);
     }
   }
 
