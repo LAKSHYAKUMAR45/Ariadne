@@ -359,6 +359,33 @@ describe('Ariadne webview panel', () => {
     expect(messages).toContainEqual(expect.objectContaining({ id: 'copy-1', ok: true }));
   });
 
+  it('opens context markdown through the VS Code markdown preview adapter', async () => {
+    mocks.handleWebviewMessage.mockImplementation(
+      async (
+        deps: { openMarkdown?: (title: string, markdown: string) => Promise<void> },
+        message: { id: string; type: string; payload?: { markdown?: string } },
+      ) => {
+        if (message.type === 'context.open') {
+          await deps.openMarkdown?.('Ariadne Context Preview', message.payload?.markdown ?? '');
+          return { id: message.id, ok: true, data: { opened: true } };
+        }
+        return { id: message.id, ok: true, data: {} };
+      },
+    );
+
+    const { panel, postedMessages: messages } = await openPanelForTest();
+
+    await panel.webview.receiveMessage({
+      id: 'open-context-1',
+      type: 'context.open',
+      payload: { markdown: '# Preview' },
+    });
+
+    expect(mocks.openTextDocument).toHaveBeenCalledWith({ language: 'markdown', content: '# Preview' });
+    expect(mocks.showTextDocument).toHaveBeenCalledWith(expect.objectContaining({ uri: { fsPath: '/preview.md' } }), { preview: true });
+    expect(messages).toContainEqual(expect.objectContaining({ id: 'open-context-1', ok: true }));
+  });
+
   it('opens a captured workspace file by relative path', async () => {
     mocks.handleWebviewMessage.mockImplementation(
       async (
@@ -382,6 +409,37 @@ describe('Ariadne webview panel', () => {
     });
 
     expect(mocks.showTextDocument).toHaveBeenCalledWith(expect.objectContaining({ fsPath: '/repo/src/App.tsx' }), { preview: true });
+  });
+
+  it('returns the standard bridge error response when opening a missing workspace file fails', async () => {
+    mocks.handleWebviewMessage.mockImplementation(
+      async (
+        deps: { openWorkspaceFile?: (relativePath: string) => Promise<void> },
+        message: { id: string; type: string; payload?: { path?: string } },
+      ) => {
+        if (message.type === 'file.open') {
+          await deps.openWorkspaceFile?.(message.payload?.path ?? '');
+          return { id: message.id, ok: true, data: { opened: true } };
+        }
+        return { id: message.id, ok: true, data: {} };
+      },
+    );
+    mocks.stat.mockRejectedValueOnce(new Error("ENOENT: no such file or directory, stat '/repo/src/Missing.tsx'"));
+
+    const { panel, postedMessages: messages } = await openPanelForTest({ workspaceRoot: '/repo' });
+
+    await panel.webview.receiveMessage({
+      id: 'open-file-missing-disk',
+      type: 'file.open',
+      payload: { path: 'src/Missing.tsx' },
+    });
+
+    expect(mocks.showTextDocument).not.toHaveBeenCalled();
+    expect(messages).toContainEqual({
+      id: 'open-file-missing-disk',
+      ok: false,
+      error: "ENOENT: no such file or directory, stat '/repo/src/Missing.tsx'",
+    });
   });
 
   it('rejects invalid or missing captured file paths before opening', async () => {
