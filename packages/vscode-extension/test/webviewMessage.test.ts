@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
-import { closeRegistry, openWorkspaceStore, type TaskStore } from '@ariadne-dev/core';
+import { TaskStore, closeRegistry, openWorkspaceStore, type TaskStore as WorkspaceTaskStore } from '@ariadne-dev/core';
 import { buildWebviewState, handleWebviewMessage } from '../src/webview/handleWebviewMessage.js';
 
 function setupRegistry(): () => void {
@@ -21,7 +21,7 @@ function setupRegistry(): () => void {
   };
 }
 
-function makeWorkspace(label: string): { root: string; store: TaskStore; taskId: string; close: () => void } {
+function makeWorkspace(label: string): { root: string; store: WorkspaceTaskStore; taskId: string; close: () => void } {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), `ariadne-webview-${label}-`));
   const store = openWorkspaceStore(root);
   const task = store.createTask({ title: `${label} task`, goal: 'Ship the panel' });
@@ -39,6 +39,17 @@ function makeWorkspace(label: string): { root: string; store: TaskStore; taskId:
       fs.rmSync(root, { recursive: true, force: true });
     },
   };
+}
+
+function makeStore(): { store: TaskStore; task: ReturnType<TaskStore['createTask']> } {
+  const store = new TaskStore(':memory:');
+  const task = store.createTask({ title: 'Webview task', goal: 'Webview task goal' });
+  store.createCheckpoint({ taskId: task.id, level: 'micro', summary: 'Webview task checkpoint' });
+  store.createTodo({ taskId: task.id, text: 'Write host tests' });
+  store.recordDecision({ taskId: task.id, text: 'Use a typed contract', rationale: 'Keep the host and webview aligned' });
+  store.recordError({ taskId: task.id, message: 'Host capture failed' });
+  store.recordOpenQuestion({ taskId: task.id, text: 'Which panel owns the preview?' });
+  return { store, task };
 }
 
 describe('buildWebviewState', () => {
@@ -61,6 +72,115 @@ describe('buildWebviewState', () => {
 });
 
 describe('handleWebviewMessage', () => {
+  it('builds a reverse chronological activity timeline for the current task', () => {
+    const { store, task } = makeStore();
+    store.recordCommand({ taskId: task.id, cmdRedacted: 'pnpm test', exitCode: 0 });
+    store.recordCommit({ taskId: task.id, sha: 'abcdef1234567890', message: 'feat: timeline' });
+
+    const response = handleWebviewMessage(
+      { store, currentTaskId: task.id, workspaceRoot: '/repo' },
+      { id: 'activity', type: 'activity.list' },
+    );
+
+    expect(response.ok).toBe(true);
+    if (response.ok) {
+      expect(response.data).toMatchObject({
+        items: expect.arrayContaining([
+          expect.objectContaining({ kind: 'command', title: 'pnpm test', status: 'success' }),
+          expect.objectContaining({ kind: 'commit', title: 'abcdef1', detail: 'feat: timeline', targetTab: 'files' }),
+          expect.objectContaining({ kind: 'checkpoint', targetTab: 'overview' }),
+          expect.objectContaining({ kind: 'todo', targetTab: 'todos' }),
+          expect.objectContaining({ kind: 'decision', targetTab: 'decisions' }),
+          expect.objectContaining({ kind: 'error', targetTab: 'errors', status: 'error' }),
+          expect.objectContaining({ kind: 'question', targetTab: 'questions' }),
+        ]),
+      });
+    }
+    store.close();
+  });
+
+  it('returns capture health using explicit host capabilities and task state', () => {
+    const { store, task } = makeStore();
+    store.updateTaskBranch(task.id, 'feat/current');
+    store.recordCommand({ taskId: task.id, cmdRedacted: 'pnpm build', exitCode: 1 });
+
+    const response = handleWebviewMessage(
+      {
+        store,
+        currentTaskId: task.id,
+        workspaceRoot: '/repo',
+        passiveCapture: {
+          enabled: true,
+          shellIntegrationAvailable: true,
+          gitExtensionAvailable: false,
+          currentBranch: 'main',
+        },
+      },
+      { id: 'health', type: 'capture.health' },
+    );
+
+    expect(response.ok).toBe(true);
+    if (response.ok) {
+      expect(response.data).toMatchObject({
+        health: {
+          workspaceRoot: '/repo',
+          currentTaskId: task.id,
+          passiveCaptureEnabled: true,
+          shellIntegrationAvailable: true,
+          gitExtensionAvailable: false,
+          branchMatches: false,
+          taskBranch: 'feat/current',
+          currentBranch: 'main',
+          unresolvedErrors: 1,
+          warnings: expect.arrayContaining([expect.stringContaining('branch')]),
+        },
+      });
+    }
+    store.close();
+  });
+
+  it('returns empty activity and unknown health when no task is selected', () => {
+    const store = new TaskStore(':memory:');
+
+    expect(handleWebviewMessage({ store, workspaceRoot: '/repo' }, { id: 'activity-empty', type: 'activity.list' })).toMatchObject({
+      id: 'activity-empty',
+      ok: true,
+      data: { items: [], truncated: false },
+    });
+    expect(handleWebviewMessage({ store, workspaceRoot: '/repo' }, { id: 'health-empty', type: 'capture.health' })).toMatchObject({
+      id: 'health-empty',
+      ok: true,
+      data: { health: expect.objectContaining({ branchMatches: 'unknown', warnings: expect.arrayContaining([expect.stringContaining('No current task')]) }) },
+    });
+    expect(handleWebviewMessage({ store, workspaceRoot: '/repo' }, { id: 'context-empty', type: 'context.preview' })).toEqual({
+      id: 'context-empty',
+      ok: false,
+      error: 'No current Ariadne task is selected.',
+    });
+    store.close();
+  });
+
+  it('returns a markdown context preview with a caller-selected token budget', () => {
+    const { store, task } = makeStore();
+
+    const response = handleWebviewMessage(
+      { store, currentTaskId: task.id, workspaceRoot: '/repo' },
+      { id: 'context', type: 'context.preview', payload: { tokenBudget: 1200 } },
+    );
+
+    expect(response.ok).toBe(true);
+    if (response.ok) {
+      expect(response.data).toMatchObject({
+        preview: {
+          tokenBudget: 1200,
+          markdown: expect.stringContaining('Webview task'),
+          context: expect.objectContaining({ taskId: task.id, workspaceRoot: '/repo' }),
+        },
+      });
+    }
+    store.close();
+  });
+
   it('creates a task and selects it for the webview', () => {
     const cleanupRegistry = setupRegistry();
     const workspace = makeWorkspace('task-create');

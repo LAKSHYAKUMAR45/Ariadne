@@ -3,7 +3,7 @@ import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { buildWebviewState, handleWebviewMessage } from './handleWebviewMessage.js';
 import { WebviewRequestTypes, type WebviewRequest, type WebviewResponse, type WebviewState } from './messages.js';
-import type { TaskStore } from '@ariadne-dev/core';
+import { getCurrentBranch, type TaskStore } from '@ariadne-dev/core';
 import { syncPush, syncPull, syncListRemote } from '../syncCommands.js';
 import { getOrOpenStore } from '../storeCache.js';
 
@@ -29,6 +29,24 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function isWebviewRequest(value: unknown): value is WebviewRequest {
   return isRecord(value) && typeof value.id === 'string' && typeof value.type === 'string';
+}
+
+function readPassiveCaptureState(workspaceRoot: string | undefined): {
+  enabled: boolean;
+  shellIntegrationAvailable: boolean;
+  gitExtensionAvailable: boolean;
+  currentBranch?: string;
+} {
+  const windowWithShellIntegration = vscode.window as unknown as {
+    onDidEndTerminalShellExecution?: unknown;
+  };
+  const currentBranch = workspaceRoot ? getCurrentBranch(workspaceRoot) ?? undefined : undefined;
+  return {
+    enabled: vscode.workspace.getConfiguration('ariadne').get<boolean>('passiveCapture.enabled', true),
+    shellIntegrationAvailable: Boolean(windowWithShellIntegration.onDidEndTerminalShellExecution),
+    gitExtensionAvailable: Boolean(vscode.extensions.getExtension('vscode.git')),
+    currentBranch,
+  };
 }
 
 function nonce(): string {
@@ -153,6 +171,7 @@ async function handleWebviewRequest(message: unknown): Promise<void> {
         store,
         currentTaskId: selectedWorkspaceRoot ? store.getCurrentTaskId() : panelDeps.getCurrentTaskId(),
         workspaceRoot,
+        passiveCapture: readPassiveCaptureState(workspaceRoot),
         setCurrentTaskId: panelDeps.setCurrentTask,
         setCurrentTaskIdForWorkspace: panelDeps.setCurrentTaskInWorkspace,
         sync: {

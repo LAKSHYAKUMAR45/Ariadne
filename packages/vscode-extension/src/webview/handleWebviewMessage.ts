@@ -1,4 +1,5 @@
 import {
+  DEFAULT_TOKEN_BUDGET,
   buildContext,
   exportTaskMarkdown,
   listTasksAcrossWorkspaces,
@@ -7,6 +8,7 @@ import {
   openRegistry,
   openWorkspaceStoreReadOnly,
   searchWorkspace,
+  type ContextPackage,
   type Task,
   type TaskStore,
   type TaskStatus,
@@ -15,6 +17,9 @@ import {
 } from '@ariadne-dev/core';
 import {
   WebviewRequestTypes,
+  type ActivityItem,
+  type CaptureHealth,
+  type ContextSectionSummary,
   type SyncActions,
   type WebviewCounts,
   type WebviewDispatcherDeps,
@@ -63,6 +68,265 @@ function isCheckpointLevel(value: unknown): value is CheckpointLevel {
 
 function errorResponse(id: string, error: string): WebviewResponse {
   return { id, ok: false, error };
+}
+
+function truncateText(value: string, limit = 120): string {
+  return value.length <= limit ? value : `${value.slice(0, limit - 3)}...`;
+}
+
+function formatCommandDetail(summary: string | null, exitCode: number | null): string | undefined {
+  if (summary) return summary;
+  return exitCode === null ? undefined : `exit ${exitCode}`;
+}
+
+function buildCheckpointActivityItem(checkpoint: ReturnType<TaskStore['listCheckpoints']>[number]): ActivityItem {
+  return {
+    id: `checkpoint:${checkpoint.id}`,
+    kind: 'checkpoint',
+    title: truncateText(checkpoint.summary),
+    createdAt: checkpoint.createdAt,
+    entityId: checkpoint.id,
+    targetTab: 'overview',
+    status: 'info',
+  };
+}
+
+function buildTodoActivityItem(todo: ReturnType<TaskStore['listTodos']>[number]): ActivityItem {
+  return {
+    id: `todo:${todo.id}`,
+    kind: 'todo',
+    title: truncateText(todo.text),
+    createdAt: todo.createdAt,
+    entityId: todo.id,
+    targetTab: 'todos',
+    status: todo.status === 'done' ? 'success' : todo.status === 'blocked' ? 'warning' : 'info',
+  };
+}
+
+function buildDecisionActivityItem(decision: ReturnType<TaskStore['listDecisions']>[number]): ActivityItem {
+  return {
+    id: `decision:${decision.id}`,
+    kind: 'decision',
+    title: truncateText(decision.text),
+    detail: decision.rationale ?? undefined,
+    createdAt: decision.createdAt,
+    entityId: decision.id,
+    targetTab: 'decisions',
+    status: 'info',
+  };
+}
+
+function buildErrorActivityItem(error: ReturnType<TaskStore['listErrors']>[number]): ActivityItem {
+  return {
+    id: `error:${error.id}`,
+    kind: 'error',
+    title: truncateText(error.message),
+    detail: error.resolved ? error.resolution ?? 'Resolved' : undefined,
+    createdAt: error.createdAt,
+    entityId: error.id,
+    targetTab: 'errors',
+    status: error.resolved ? 'success' : 'error',
+  };
+}
+
+function buildQuestionActivityItem(question: ReturnType<TaskStore['listOpenQuestions']>[number]): ActivityItem {
+  return {
+    id: `question:${question.id}`,
+    kind: 'question',
+    title: truncateText(question.text),
+    createdAt: question.createdAt,
+    entityId: question.id,
+    targetTab: 'questions',
+    status: question.resolved ? 'success' : 'warning',
+  };
+}
+
+function buildFileCaptureActivityItem(capture: ReturnType<TaskStore['getTaskFileCaptures']>[number]): ActivityItem {
+  return {
+    id: `file-capture:${capture.id}`,
+    kind: 'file-capture',
+    title: `${capture.entries.length} captured file${capture.entries.length === 1 ? '' : 's'}`,
+    detail: capture.gitCommitSha ?? capture.trigger,
+    createdAt: capture.createdAt,
+    entityId: capture.id,
+    targetTab: 'files',
+    status: capture.failedAt ? 'error' : 'info',
+  };
+}
+
+function buildCommitActivityItem(commit: ReturnType<TaskStore['listCommits']>[number]): ActivityItem {
+  return {
+    id: `commit:${commit.sha}`,
+    kind: 'commit',
+    title: commit.sha.slice(0, 7),
+    detail: commit.message ?? undefined,
+    createdAt: commit.createdAt,
+    entityId: commit.sha,
+    targetTab: 'files',
+    status: 'info',
+  };
+}
+
+function buildCommandActivityItem(command: ReturnType<TaskStore['listCommands']>[number]): ActivityItem {
+  return {
+    id: `command:${command.id}`,
+    kind: 'command',
+    title: truncateText(command.cmdRedacted),
+    detail: formatCommandDetail(command.summary, command.exitCode),
+    createdAt: command.createdAt,
+    entityId: command.id,
+    status: command.exitCode === 0 ? 'success' : command.exitCode === null ? 'info' : 'error',
+  };
+}
+
+function buildActivityItems(store: TaskStore, taskId: string, limit = 200): { items: ActivityItem[]; truncated: boolean } {
+  const items: ActivityItem[] = [
+    ...store.listCheckpoints(taskId).map(buildCheckpointActivityItem),
+    ...store.listTodos(taskId).map(buildTodoActivityItem),
+    ...store.listDecisions(taskId).map(buildDecisionActivityItem),
+    ...store.listErrors(taskId).map(buildErrorActivityItem),
+    ...store.listOpenQuestions(taskId).map(buildQuestionActivityItem),
+    ...store.getTaskFileCaptures(taskId).map(buildFileCaptureActivityItem),
+    ...store.listCommits(taskId, 100).map(buildCommitActivityItem),
+    ...store.listCommands(taskId, 100).map(buildCommandActivityItem),
+  ];
+  const sorted = items.sort((left, right) => {
+    const byTime = right.createdAt.localeCompare(left.createdAt);
+    return byTime === 0 ? left.id.localeCompare(right.id) : byTime;
+  });
+  return { items: sorted.slice(0, limit), truncated: sorted.length > limit };
+}
+
+function sumCounts(...counts: Array<number | undefined>): number | undefined {
+  const total = counts.reduce<number>((sum, count) => sum + (count ?? 0), 0);
+  return total > 0 ? total : undefined;
+}
+
+function buildContextSectionSummary(
+  id: string,
+  label: string,
+  count: number,
+  ...truncatedCounts: Array<number | undefined>
+): ContextSectionSummary {
+  const truncatedCount = sumCounts(...truncatedCounts);
+  return truncatedCount === undefined ? { id, label, count } : { id, label, count, truncatedCount };
+}
+
+function pushSection(lines: string[], heading: string, entries: string[], empty: string): void {
+  lines.push(`## ${heading}`);
+  lines.push('');
+  if (entries.length === 0) {
+    lines.push(empty);
+  } else {
+    for (const entry of entries) {
+      lines.push(`- ${entry}`);
+    }
+  }
+  lines.push('');
+}
+
+export function formatContextPreview(context: ContextPackage): { markdown: string; sections: ContextSectionSummary[] } {
+  const summaryEntries = [
+    context.goal ? `Goal: ${context.goal}` : undefined,
+    context.latestSummary ? `Latest checkpoint: ${context.latestSummary}` : undefined,
+    context.branch ? `Task branch: ${context.branch}` : undefined,
+    context.workspaceRoot ? `Workspace root: ${context.workspaceRoot}` : undefined,
+  ].filter((entry): entry is string => Boolean(entry));
+
+  const todoEntries = [
+    ...context.openTodos.map((todo) => `[pending] ${todo}`),
+    ...context.blockedTodos.map((todo) => `[blocked] ${todo}`),
+  ];
+  const questionEntries = context.openQuestions;
+  const errorEntries = context.unresolvedErrors;
+  const decisionEntries = context.decisions;
+  const fileEntries = context.recentFiles.map((file) => `\`${file.path}\` (${file.role})`);
+  const commitEntries = context.recentCommits.map((commit) => `\`${commit.sha.slice(0, 7)}\`${commit.message ? ` ${commit.message}` : ''}`);
+  const commandEntries = context.recentCommands.map((command) => {
+    const exit = command.exitCode === null ? '' : ` (exit ${command.exitCode})`;
+    return `\`${command.cmd}\`${exit}`;
+  });
+
+  const sections: ContextSectionSummary[] = [
+    buildContextSectionSummary('summary', 'Summary', summaryEntries.length),
+    buildContextSectionSummary('todos', 'Todos', todoEntries.length, context.truncated.pendingTodos, context.truncated.blockedTodos, context.truncated.resolvedTodos),
+    buildContextSectionSummary('questions', 'Questions', questionEntries.length, context.truncated.openQuestions),
+    buildContextSectionSummary('errors', 'Errors', errorEntries.length, context.truncated.unresolvedErrors),
+    buildContextSectionSummary('decisions', 'Decisions', decisionEntries.length, context.truncated.decisions, context.truncated.historicalDecisions),
+    buildContextSectionSummary('files', 'Files', fileEntries.length, context.truncated.recentFiles),
+    buildContextSectionSummary('commits', 'Commits', commitEntries.length, context.truncated.recentCommits),
+    buildContextSectionSummary('commands', 'Commands', commandEntries.length, context.truncated.commands),
+  ];
+
+  const lines: string[] = ['# Ariadne Context Preview', ''];
+  lines.push(`- Task ID: ${context.taskId}`);
+  if (context.workspaceRoot) lines.push(`- Workspace root: ${context.workspaceRoot}`);
+  if (context.branch) lines.push(`- Task branch: ${context.branch}`);
+  lines.push('');
+
+  pushSection(lines, 'Summary', summaryEntries, '_No summary context included._');
+  pushSection(lines, 'Todos', todoEntries, '_No todo context included._');
+  pushSection(lines, 'Questions', questionEntries, '_No question context included._');
+  pushSection(lines, 'Errors', errorEntries, '_No error context included._');
+  pushSection(lines, 'Decisions', decisionEntries, '_No decision context included._');
+  pushSection(lines, 'Files', fileEntries, '_No file context included._');
+  pushSection(lines, 'Commits', commitEntries, '_No commit context included._');
+  pushSection(lines, 'Commands', commandEntries, '_No command context included._');
+
+  return { markdown: lines.join('\n').trim(), sections };
+}
+
+function buildCaptureHealth(deps: WebviewDispatcherDeps): CaptureHealth {
+  const task = deps.currentTaskId ? deps.store.getTask(deps.currentTaskId) : undefined;
+  const passiveCapture = deps.passiveCapture;
+  const warnings: string[] = [];
+  const currentBranch = passiveCapture?.currentBranch;
+  const taskBranch = task?.branch;
+
+  let branchMatches: boolean | 'unknown' = 'unknown';
+  if (taskBranch && currentBranch) {
+    branchMatches = taskBranch === currentBranch;
+    if (!branchMatches) {
+      warnings.push(
+        `Current branch "${currentBranch}" does not match the task branch "${taskBranch}".`,
+      );
+    }
+  }
+
+  if (!task) {
+    warnings.push('No current task is selected for this workspace.');
+  }
+  if (!passiveCapture?.enabled) {
+    warnings.push('Passive capture is disabled.');
+  }
+  if (!passiveCapture?.shellIntegrationAvailable) {
+    warnings.push('Shell integration is unavailable, so terminal commands will not be captured.');
+  }
+  if (!passiveCapture?.gitExtensionAvailable) {
+    warnings.push('The built-in Git extension is unavailable, so commit capture is limited.');
+  }
+
+  const unresolvedErrors = task ? deps.store.listErrors(task.id).filter((error) => !error.resolved).length : 0;
+  const lastFileCapture = task ? deps.store.getTaskFileCaptures(task.id)[0] : undefined;
+  const lastCommand = task ? deps.store.listCommands(task.id, 1)[0] : undefined;
+  const lastCommit = task ? deps.store.listCommits(task.id, 1)[0] : undefined;
+
+  return {
+    workspaceRoot: deps.workspaceRoot,
+    currentTaskId: task?.id ?? deps.currentTaskId,
+    currentTaskTitle: task?.title,
+    passiveCaptureEnabled: passiveCapture?.enabled ?? false,
+    shellIntegrationAvailable: passiveCapture?.shellIntegrationAvailable ?? false,
+    gitExtensionAvailable: passiveCapture?.gitExtensionAvailable ?? false,
+    branchMatches,
+    currentBranch,
+    taskBranch,
+    lastFileCapture: lastFileCapture ? buildFileCaptureActivityItem(lastFileCapture) : undefined,
+    lastCommand: lastCommand ? buildCommandActivityItem(lastCommand) : undefined,
+    lastCommit: lastCommit ? buildCommitActivityItem(lastCommit) : undefined,
+    unresolvedErrors,
+    warnings,
+  };
 }
 
 function requireCurrentTaskId(deps: WebviewDispatcherDeps, id: string): string | WebviewResponse {
@@ -177,6 +441,27 @@ function handleTasksList(deps: WebviewDispatcherDeps, message: WebviewRequest): 
   return { id: message.id, ok: true, data: { tasks }, state: buildWebviewState(deps) };
 }
 
+function handleActivityList(deps: WebviewDispatcherDeps, message: WebviewRequest): WebviewResponse {
+  if (!deps.currentTaskId) {
+    return { id: message.id, ok: true, data: { items: [], truncated: false }, state: buildWebviewState(deps) };
+  }
+  return {
+    id: message.id,
+    ok: true,
+    data: buildActivityItems(deps.store, deps.currentTaskId),
+    state: buildWebviewState(deps),
+  };
+}
+
+function handleCaptureHealth(deps: WebviewDispatcherDeps, message: WebviewRequest): WebviewResponse {
+  return {
+    id: message.id,
+    ok: true,
+    data: { health: buildCaptureHealth(deps) },
+    state: buildWebviewState(deps),
+  };
+}
+
 function handleTaskCreate(deps: WebviewDispatcherDeps, message: WebviewRequest): WebviewResponse {
   const payload = getPayload(message);
   const title = readString(payload.title);
@@ -250,6 +535,24 @@ function handleContextGet(deps: WebviewDispatcherDeps, message: WebviewRequest):
   }
   const context = buildContext(deps.store, taskId, { ...(tokenBudget === undefined ? {} : { tokenBudget }), workspaceRoot: deps.workspaceRoot });
   return { id: message.id, ok: true, data: { context }, state: buildWebviewState({ ...deps, currentTaskId: taskId }) };
+}
+
+function handleContextPreview(deps: WebviewDispatcherDeps, message: WebviewRequest): WebviewResponse {
+  const taskId = requireCurrentTaskId(deps, message.id);
+  if (typeof taskId !== 'string') return taskId;
+  const payload = getPayload(message);
+  const tokenBudget = payload.tokenBudget === undefined ? DEFAULT_TOKEN_BUDGET : readNumber(payload.tokenBudget);
+  if (payload.tokenBudget !== undefined && tokenBudget === undefined) {
+    return errorResponse(message.id, 'context.preview requires payload.tokenBudget to be a finite number.');
+  }
+  const context = buildContext(deps.store, taskId, { tokenBudget, workspaceRoot: deps.workspaceRoot });
+  const { markdown, sections } = formatContextPreview(context);
+  return {
+    id: message.id,
+    ok: true,
+    data: { preview: { context, markdown, tokenBudget, sections } },
+    state: buildWebviewState({ ...deps, currentTaskId: taskId }),
+  };
 }
 
 function handleTodoCreate(deps: WebviewDispatcherDeps, message: WebviewRequest): WebviewResponse {
@@ -597,6 +900,10 @@ export function handleWebviewMessage(deps: WebviewDispatcherDeps, message: Webvi
     switch (message.type) {
       case WebviewRequestTypes.StateGet:
         return { id: message.id, ok: true, data: buildWebviewState(deps) };
+      case WebviewRequestTypes.ActivityList:
+        return handleActivityList(deps, message);
+      case WebviewRequestTypes.CaptureHealth:
+        return handleCaptureHealth(deps, message);
       case WebviewRequestTypes.TaskCreate:
         return handleTaskCreate(deps, message);
       case WebviewRequestTypes.TaskUpdate:
@@ -609,6 +916,8 @@ export function handleWebviewMessage(deps: WebviewDispatcherDeps, message: Webvi
         return handleCheckpointCreate(deps, message);
       case WebviewRequestTypes.ContextGet:
         return handleContextGet(deps, message);
+      case WebviewRequestTypes.ContextPreview:
+        return handleContextPreview(deps, message);
       case WebviewRequestTypes.TasksList:
         return handleTasksList(deps, message);
       case WebviewRequestTypes.TodoCreate:

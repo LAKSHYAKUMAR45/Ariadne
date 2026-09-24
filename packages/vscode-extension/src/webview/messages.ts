@@ -1,6 +1,7 @@
 import type {
   CheckpointLevel,
   Checkpoint,
+  ContextPackage,
   Decision,
   OpenQuestion,
   SearchResult,
@@ -29,12 +30,15 @@ export type {
 
 export const WebviewRequestTypes = {
   StateGet: 'state.get',
+  ActivityList: 'activity.list',
+  CaptureHealth: 'capture.health',
   TaskCreate: 'task.create',
   TaskUpdate: 'task.update',
   TaskSetStatus: 'task.setStatus',
   TaskSwitch: 'task.switch',
   CheckpointCreate: 'checkpoint.create',
   ContextGet: 'context.get',
+  ContextPreview: 'context.preview',
   TasksList: 'tasks.list',
   TodoCreate: 'todo.create',
   TodoUpdateText: 'todo.updateText',
@@ -69,8 +73,76 @@ export interface WebviewRequestBase<T extends WebviewRequestType = WebviewReques
   type: T;
 }
 
+export type WebviewTabId =
+  | 'overview'
+  | 'todos'
+  | 'decisions'
+  | 'errors'
+  | 'questions'
+  | 'files'
+  | 'search'
+  | 'sync'
+  | 'activity'
+  | 'context'
+  | 'review'
+  | 'graphify';
+
+export type ActivityKind =
+  | 'checkpoint'
+  | 'todo'
+  | 'decision'
+  | 'error'
+  | 'question'
+  | 'file-capture'
+  | 'commit'
+  | 'command';
+
+export interface ActivityItem {
+  id: string;
+  kind: ActivityKind;
+  title: string;
+  detail?: string;
+  createdAt: string;
+  entityId?: string;
+  targetTab?: WebviewTabId;
+  status?: 'info' | 'success' | 'warning' | 'error';
+}
+
+export interface CaptureHealth {
+  workspaceRoot?: string;
+  currentTaskId?: string;
+  currentTaskTitle?: string;
+  passiveCaptureEnabled: boolean;
+  shellIntegrationAvailable: boolean;
+  gitExtensionAvailable: boolean;
+  branchMatches: boolean | 'unknown';
+  currentBranch?: string;
+  taskBranch?: string | null;
+  lastFileCapture?: ActivityItem;
+  lastCommand?: ActivityItem;
+  lastCommit?: ActivityItem;
+  unresolvedErrors: number;
+  warnings: string[];
+}
+
+export interface ContextSectionSummary {
+  id: string;
+  label: string;
+  count: number;
+  truncatedCount?: number;
+}
+
+export interface ContextPreview {
+  context: ContextPackage;
+  markdown: string;
+  tokenBudget: number;
+  sections: ContextSectionSummary[];
+}
+
 export type WebviewRequest =
-  | (WebviewRequestBase<'state.get' | 'tasks.list' | 'sync.push' | 'sync.listRemote' | 'export.markdown'> & { payload?: undefined })
+  | (WebviewRequestBase<'state.get' | 'activity.list' | 'capture.health' | 'tasks.list' | 'sync.push' | 'sync.listRemote' | 'export.markdown'> & {
+      payload?: undefined;
+    })
   | (WebviewRequestBase<'task.create'> & {
       payload: { title: string; goal?: string | null; status?: TaskStatus; parentTaskId?: string | null; branch?: string | null };
     })
@@ -83,6 +155,7 @@ export type WebviewRequest =
       payload: { summary: string; level?: CheckpointLevel; parentCheckpointId?: string | null };
     })
   | (WebviewRequestBase<'context.get'> & { payload?: { tokenBudget?: number } })
+  | (WebviewRequestBase<'context.preview'> & { payload?: { tokenBudget?: number } })
   | (WebviewRequestBase<'todo.create'> & { payload: Record<string, unknown> })
   | (WebviewRequestBase<'todo.updateText' | 'todo.setStatus' | 'todo.delete'> & { payload: Record<string, unknown> })
   | (WebviewRequestBase<'decision.create' | 'decision.update' | 'decision.delete'> & { payload: Record<string, unknown> })
@@ -125,6 +198,12 @@ export interface WebviewDispatcherDeps {
   store: TaskStore;
   currentTaskId?: string;
   workspaceRoot?: string;
+  passiveCapture?: {
+    enabled: boolean;
+    shellIntegrationAvailable: boolean;
+    gitExtensionAvailable: boolean;
+    currentBranch?: string;
+  };
   setCurrentTaskId?: (id: string) => void;
   setCurrentTaskIdForWorkspace?: (id: string, workspaceRoot: string) => void;
   sync?: SyncActions;
