@@ -179,7 +179,7 @@ export function createAdminTasksRouter(pool: Pool, store: TaskHistoryStore): Rou
   }
 
   router.get(
-    '/tasks',
+    '/',
     asyncHandler(async (req: AuthenticatedRequest, res) => {
       const membership = await requireActiveMembership(pool, req.userId!);
       const { limit, offset } = parsePagination(req.query as Record<string, unknown>);
@@ -220,7 +220,7 @@ export function createAdminTasksRouter(pool: Pool, store: TaskHistoryStore): Rou
   );
 
   router.delete(
-    '/tasks/:taskId/file-captures/:captureId',
+    '/:taskId/file-captures/:captureId',
     asyncHandler(async (req: ReauthenticatedAdminRequest, res) => {
       // DELETE is admin-only, not member-accessible
       const membership = await requireSingletonAdmin(pool, req.userId!);
@@ -315,7 +315,7 @@ export function createAdminTasksRouter(pool: Pool, store: TaskHistoryStore): Rou
   );
 
   router.get(
-    '/tasks/:taskId/timeline',
+    '/:taskId/timeline',
     asyncHandler(async (req: AuthenticatedRequest, res) => {
       const { teamId, taskId } = await requireTaskAccess(req);
       const events: AdminTimelineEvent[] = [];
@@ -550,7 +550,7 @@ export function createAdminTasksRouter(pool: Pool, store: TaskHistoryStore): Rou
   );
 
   router.get(
-    '/tasks/:taskId/file-captures/:captureId/files/:path(*)',
+    '/:taskId/file-captures/:captureId/files/:path(*)',
     asyncHandler(async (req: AuthenticatedRequest, res) => {
       const { teamId, taskId } = await requireTaskAccess(req);
       const captureId = requireCaptureIdParam(req.params.captureId);

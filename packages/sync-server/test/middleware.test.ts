@@ -107,12 +107,10 @@ describe('sync-server: requireAdminSession allowMember option', () => {
       .set('X-CSRF-Token', csrfToken)
       .set('Origin', ALLOWED_ORIGIN);
 
-    // The middleware allows members through, but the handler itself may still
-    // reject members if it calls requireSingletonAdmin. However, the handler
-    // should NOT get a 401 from middleware - it should reach the handler.
-    // Since the handler calls requireSingletonAdmin, we expect 403.
-    expect(res.status).toBe(403);
-    expect(res.body.error.code).toBe('admin_required');
+    // The middleware allows members through, and this handler now also
+    // grants members read access (requireActiveMembership), so a member
+    // should get a normal 200 response, not a 401/403.
+    expect(res.status).toBe(200);
   });
 
   it('includes role in whoami response for admin', async () => {

@@ -176,7 +176,10 @@ export function createApp(pool: Pool, jwtSecret: string, options: CreateAppOptio
     requireCsrf({ allowedOrigin: adminPublicOrigin }),
   ];
 
-  app.use('/api/v1/admin', ...taskSession, createAdminTasksRouter(pool, taskHistoryStore));
+  // Mounted at a distinct sub-path (not the shared '/api/v1/admin' prefix) so
+  // its member-permissive session middleware never runs for unrelated
+  // /api/v1/admin/* routes (e.g. strict-admin-only /members, /backups).
+  app.use('/api/v1/admin/tasks', ...taskSession, createAdminTasksRouter(pool, taskHistoryStore));
   app.use('/api/v1/admin', ...adminSession, createAdminMembersRouter(pool));
   app.use('/api/v1/admin', ...adminSession, createMembersRouter(pool));
   app.use(
