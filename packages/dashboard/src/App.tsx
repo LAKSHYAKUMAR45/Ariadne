@@ -3,6 +3,9 @@ import { AuthProvider, useAuth } from './auth/AuthProvider';
 import { LoginPage } from './auth/LoginPage';
 import type { ConfirmationRequest } from './api/types';
 import { ConfirmationDialog } from './components/ConfirmationDialog';
+import { KnowledgeOverviewPage } from './knowledge/KnowledgeOverviewPage';
+import { KnowledgeReviewsPage } from './knowledge/KnowledgeReviewsPage';
+import { KnowledgeSearchPage } from './knowledge/KnowledgeSearchPage';
 import { MembersPage } from './members/MembersPage';
 import { AuditPage } from './operations/AuditPage';
 import { BackupsPage } from './operations/BackupsPage';
@@ -21,7 +24,10 @@ type Section =
   | 'services'
   | 'deployments'
   | 'logs'
-  | 'audit';
+  | 'audit'
+  | 'knowledge-overview'
+  | 'knowledge-search'
+  | 'knowledge-reviews';
 
 const sections: ReadonlyArray<{ id: Section; label: string; glyph: string }> = [
   { id: 'overview', label: 'Overview', glyph: 'OV' },
@@ -32,6 +38,9 @@ const sections: ReadonlyArray<{ id: Section; label: string; glyph: string }> = [
   { id: 'deployments', label: 'Deployments', glyph: 'DP' },
   { id: 'logs', label: 'Logs', glyph: 'LG' },
   { id: 'audit', label: 'Audit', glyph: 'AT' },
+  { id: 'knowledge-overview', label: 'Knowledge', glyph: 'KN' },
+  { id: 'knowledge-search', label: 'Search', glyph: 'SR' },
+  { id: 'knowledge-reviews', label: 'Reviews', glyph: 'RV' },
 ];
 
 const REAUTHENTICATION_REQUEST: ConfirmationRequest = {
@@ -138,6 +147,9 @@ function ConsoleShell() {
         {section === 'deployments' ? <DeploymentsPage /> : null}
         {section === 'logs' ? <LogsPage /> : null}
         {section === 'audit' ? <AuditPage /> : null}
+        {section === 'knowledge-overview' ? <KnowledgeOverviewPage /> : null}
+        {section === 'knowledge-search' ? <KnowledgeSearchPage /> : null}
+        {section === 'knowledge-reviews' ? <KnowledgeReviewsPage /> : null}
       </main>
       {reauthenticationRequired ? (
         <ConfirmationDialog

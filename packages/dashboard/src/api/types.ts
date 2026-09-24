@@ -295,3 +295,72 @@ export interface AuditResponse {
   events: AuditEvent[];
   nextCursor: string | null;
 }
+
+export type KnowledgeProjectStatus = 'active' | 'archived';
+
+export interface KnowledgeProjectSummary {
+  id: string;
+  name: string;
+  description: string | null;
+  status: KnowledgeProjectStatus;
+  sourceCount: number;
+  pageCount: number;
+  pendingReviewCount: number;
+  updatedAt: string;
+}
+
+export interface KnowledgeProjectsResponse {
+  projects: KnowledgeProjectSummary[];
+}
+
+export interface KnowledgeCitation {
+  pageId: string | null;
+  sourceId: string | null;
+  path: string | null;
+  url: string | null;
+  span: {
+    id: string;
+    startOffset: number;
+    endOffset: number;
+    label: string | null;
+  } | null;
+}
+
+export type KnowledgeSearchResultKind = 'page' | 'source' | 'task';
+
+export interface KnowledgeSearchResult {
+  id: string;
+  kind: KnowledgeSearchResultKind;
+  title: string;
+  snippet: string;
+  score: number;
+  citations: KnowledgeCitation[];
+}
+
+export interface KnowledgeSearchResponse {
+  projectId: string;
+  query: string;
+  results: KnowledgeSearchResult[];
+}
+
+export type KnowledgeReviewStatus = 'pending' | 'approved' | 'rejected' | 'dismissed';
+export type KnowledgeReviewAction = 'accept' | 'reject' | 'skip';
+
+export interface KnowledgeReview {
+  id: string;
+  projectId: string;
+  pageVersionId: string | null;
+  status: KnowledgeReviewStatus;
+  requestedAt: string;
+  reviewedAt: string | null;
+  reviewerId: string | null;
+  summary: string | null;
+}
+
+export interface KnowledgeReviewsResponse {
+  reviews: KnowledgeReview[];
+}
+
+export interface KnowledgeReviewMutationResponse {
+  review: KnowledgeReview;
+}

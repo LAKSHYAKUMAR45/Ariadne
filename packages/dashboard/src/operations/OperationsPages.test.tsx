@@ -75,8 +75,8 @@ describe('operations pages', () => {
               members: { total: 1, active: 1, inactive: 0, admins: 1, members: 0 },
               sync: { lastPushAt: null, lastPullAt: null },
               backup: {
-                latestAt: '2026-09-23T06:00:00.000Z',
-                latestVerifiedAt: '2026-09-23T06:05:00.000Z',
+                latestAt: new Date(Date.now() - 10 * 60 * 1000).toISOString(),
+                latestVerifiedAt: new Date(Date.now() - 5 * 60 * 1000).toISOString(),
                 status: 'verified',
               },
               operations: { running: 1, failedLast24h: 0 },
