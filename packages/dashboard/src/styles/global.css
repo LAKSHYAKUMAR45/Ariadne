@@ -10,7 +10,12 @@ body,
 }
 
 body {
-  background: var(--canvas);
+  /* Same top-of-page primary-tinted wash jcnr-triage uses on its body
+     (dashboard.css), so surfaces read consistently against the shared
+     Argon/Tabler palette in both light and dark mode. */
+  background:
+    linear-gradient(180deg, rgb(var(--blue-rgb) / 8%), rgb(255 255 255 / 0%)) 0 0 / 100% 80%,
+    var(--canvas);
   color: var(--text);
 }
 
@@ -106,8 +111,8 @@ a:focus-visible {
   justify-items: center;
   gap: 20px;
   background:
-    linear-gradient(90deg, rgb(90 167 255 / 3%) 1px, transparent 1px),
-    linear-gradient(rgb(90 167 255 / 3%) 1px, transparent 1px),
+    linear-gradient(90deg, rgb(var(--blue-rgb) / 3%) 1px, transparent 1px),
+    linear-gradient(rgb(var(--blue-rgb) / 3%) 1px, transparent 1px),
     var(--canvas);
   background-size: 32px 32px;
   color: var(--text-muted);
@@ -126,9 +131,9 @@ a:focus-visible {
   padding: clamp(48px, 8vw, 120px);
   border-right: 1px solid var(--line);
   background:
-    radial-gradient(circle at 18% 20%, rgb(47 134 232 / 14%), transparent 34%),
-    linear-gradient(90deg, rgb(90 167 255 / 3%) 1px, transparent 1px),
-    linear-gradient(rgb(90 167 255 / 3%) 1px, transparent 1px),
+    radial-gradient(circle at 18% 20%, rgb(var(--blue-rgb) / 14%), transparent 34%),
+    linear-gradient(90deg, rgb(var(--blue-rgb) / 3%) 1px, transparent 1px),
+    linear-gradient(rgb(var(--blue-rgb) / 3%) 1px, transparent 1px),
     var(--canvas);
   background-size: auto, 32px 32px, 32px 32px, auto;
 }
@@ -178,17 +183,17 @@ a:focus-visible {
   flex: 0 0 auto;
   border-radius: 50%;
   background: var(--green);
-  box-shadow: 0 0 0 4px rgb(71 209 140 / 10%);
+  box-shadow: 0 0 0 4px rgb(var(--green-rgb) / 10%);
 }
 
 .status-dot--warning {
   background: var(--amber);
-  box-shadow: 0 0 0 4px rgb(242 189 88 / 10%);
+  box-shadow: 0 0 0 4px rgb(var(--amber-rgb) / 10%);
 }
 
 .status-dot--bad {
   background: var(--red);
-  box-shadow: 0 0 0 4px rgb(255 107 114 / 10%);
+  box-shadow: 0 0 0 4px rgb(var(--red-rgb) / 10%);
 }
 
 .login-panel {
@@ -536,17 +541,17 @@ a:focus-visible {
 }
 
 .status-pill--good {
-  border-color: rgb(71 209 140 / 35%);
+  border-color: rgb(var(--green-rgb) / 35%);
   color: var(--green);
 }
 
 .status-pill--warning {
-  border-color: rgb(242 189 88 / 35%);
+  border-color: rgb(var(--amber-rgb) / 35%);
   color: var(--amber);
 }
 
 .status-pill--bad {
-  border-color: rgb(255 107 114 / 35%);
+  border-color: rgb(var(--red-rgb) / 35%);
   color: var(--red);
 }
 
@@ -576,7 +581,7 @@ a:focus-visible {
   flex: 0 0 auto;
   border-radius: 50%;
   background: var(--blue);
-  box-shadow: 0 0 0 7px rgb(90 167 255 / 10%);
+  box-shadow: 0 0 0 7px rgb(var(--blue-rgb) / 10%);
 }
 
 .metric-panel {
@@ -665,8 +670,8 @@ a:focus-visible {
 }
 
 .status-row--attention {
-  border-color: rgb(255 107 114 / 22%);
-  background: rgb(255 107 114 / 5%);
+  border-color: rgb(var(--red-rgb) / 22%);
+  background: rgb(var(--red-rgb) / 5%);
 }
 
 .status-row__copy {
@@ -764,14 +769,14 @@ a:focus-visible {
 }
 
 .notice--error {
-  border-color: rgb(255 107 114 / 45%);
-  background: rgb(255 107 114 / 8%);
+  border-color: rgb(var(--red-rgb) / 45%);
+  background: rgb(var(--red-rgb) / 8%);
   color: var(--danger-text);
 }
 
 .notice--success {
-  border-color: rgb(71 209 140 / 40%);
-  background: rgb(71 209 140 / 8%);
+  border-color: rgb(var(--green-rgb) / 40%);
+  background: rgb(var(--green-rgb) / 8%);
   color: var(--success-text);
 }
 
@@ -1500,12 +1505,12 @@ a:focus-visible {
 }
 
 .event-glyph--error {
-  border-color: rgb(255 107 114 / 55%);
+  border-color: rgb(var(--red-rgb) / 55%);
   color: var(--red);
 }
 
 .event-glyph--capture {
-  border-color: rgb(90 167 255 / 55%);
+  border-color: rgb(var(--blue-rgb) / 55%);
   color: var(--blue);
 }
 
@@ -1608,13 +1613,13 @@ a:focus-visible {
 }
 
 .destructive-action {
-  border-color: rgb(255 107 114 / 40%);
+  border-color: rgb(var(--red-rgb) / 40%);
   color: var(--danger-text);
 }
 
 .destructive-action:hover {
-  border-color: rgb(255 107 114 / 65%);
-  background: rgb(255 107 114 / 10%);
+  border-color: rgb(var(--red-rgb) / 65%);
+  background: rgb(var(--red-rgb) / 10%);
 }
 
 .file-content {

@@ -21,11 +21,15 @@
   --text-faint: #94a3b8;
   --text-watermark: #eef1f6;
   --blue: #5e72e4;
+  --blue-rgb: 94, 114, 228;
   --blue-strong: #4c5fd6;
   --blue-strong-hover: #3f52c9;
   --green: #2dce89;
+  --green-rgb: 45, 206, 137;
   --amber: #fbcf33;
+  --amber-rgb: 251, 207, 51;
   --red: #f5365c;
+  --red-rgb: 245, 54, 92;
   --danger-text: #c81e3f;
   --success-text: #1f8f5f;
   --avatar-bg: #dfe6fb;
@@ -33,30 +37,28 @@
   --shadow: 0 20px 27px rgb(17 24 39 / 6%);
 }
 
+/* jcnr-triage keeps its primary/success/warning/danger hues identical across
+   light and dark ([data-bs-theme="dark"] in dashboard.css only redefines
+   surface/border/text) - mirrored here by leaving --blue/--green/--amber/--red
+   (and their -rgb pairs) unset in this block so they inherit from :root. */
 [data-theme="dark"] {
   color-scheme: dark;
-  --canvas: #080d14;
-  --surface: #0d1520;
-  --surface-raised: #111c29;
-  --surface-selected: #17263a;
-  --surface-sunken: #09111b;
-  --surface-sunken-deep: #070c13;
-  --line: #223043;
-  --line-strong: #33455e;
-  --text: #edf4fb;
+  --canvas: #111827;
+  --surface: rgba(17, 24, 39, 0.9);
+  --surface-raised: #1b2436;
+  --surface-selected: #24314a;
+  --surface-sunken: #0d1520;
+  --surface-sunken-deep: #0a0f17;
+  --line: rgba(148, 163, 184, 0.2);
+  --line-strong: rgba(148, 163, 184, 0.35);
+  --text: #edf2ff;
   --text-strong: #f8fbff;
-  --text-muted: #8fa1b5;
-  --text-faint: #65758a;
-  --text-watermark: #172538;
-  --blue: #5aa7ff;
-  --blue-strong: #2f86e8;
-  --blue-strong-hover: #1f74d1;
-  --green: #47d18c;
-  --amber: #f2bd58;
-  --red: #ff6b72;
+  --text-muted: #aab6d3;
+  --text-faint: #7d8ba6;
+  --text-watermark: #1b2436;
   --danger-text: #ffb4b8;
   --success-text: #9cedc3;
-  --avatar-bg: #20334c;
+  --avatar-bg: #26324a;
   --radius: 8px;
   --shadow: 0 18px 50px rgb(0 0 0 / 28%);
 }
