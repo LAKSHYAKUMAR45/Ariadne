@@ -100,6 +100,29 @@ export type {
   KnowledgeSearchResultKind,
 } from './knowledge/KnowledgeSearch.js';
 export {
+  discoverKnowledgeSkills,
+  KnowledgeSkillRegistry,
+} from './knowledge/KnowledgeSkills.js';
+export type {
+  KnowledgeSkill,
+  KnowledgeSkillDiscovery,
+  KnowledgeSkillDiscoveryError,
+  KnowledgeSkillDiscoveryOptions,
+  KnowledgeSkillInput,
+  KnowledgeSkillInputRequest,
+  KnowledgeSkillRegistryOptions,
+  KnowledgeSkillScope,
+  SelectedKnowledgeSkill,
+} from './knowledge/KnowledgeSkills.js';
+export { KnowledgeOutputStore } from './knowledge/KnowledgeOutputs.js';
+export type {
+  CreateKnowledgeOutputInput,
+  KnowledgeOutput,
+  KnowledgeOutputOverwritePolicy,
+  KnowledgeOutputPreview,
+  KnowledgeOutputStoreOptions,
+} from './knowledge/KnowledgeOutputs.js';
+export {
   findWorkspaceRoot,
   stateDbPath,
   openWorkspaceStore,
@@ -297,3 +320,4 @@ export type {
   KnowledgeResearchGap,
   ProviderRequiredKnowledgeGeneration,
 } from './knowledge/KnowledgeAnalysis.js';
+export {
