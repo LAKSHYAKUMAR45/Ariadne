@@ -114,7 +114,7 @@ function ConsoleShell() {
               {item.label}
             </button>
           ))}
-          <a className="nav-item" href="https://nodem2:8090/">
+          <a className="nav-item" href="http://nodem2:8090/">
             <span className="nav-glyph" aria-hidden="true">↗</span>
             Back to jcnr-triage
           </a>

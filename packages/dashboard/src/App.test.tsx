@@ -159,7 +159,7 @@ describe('Ariadne operations console', () => {
     expect(screen.queryByRole('button', { name: 'Audit' })).not.toBeInTheDocument();
     expect(
       screen.getByRole('link', { name: 'Back to jcnr-triage' }),
-    ).toHaveAttribute('href', 'https://nodem2:8090/');
+    ).toHaveAttribute('href', 'http://nodem2:8090/');
 
     await user.click(screen.getByRole('button', { name: 'Tasks' }));
     expect(screen.getByRole('heading', { name: 'Task history' })).toBeVisible();
@@ -193,7 +193,7 @@ describe('Ariadne operations console', () => {
     expect(screen.getByRole('button', { name: 'Audit' })).toBeVisible();
     expect(
       screen.getByRole('link', { name: 'Back to jcnr-triage' }),
-    ).toHaveAttribute('href', 'https://nodem2:8090/');
+    ).toHaveAttribute('href', 'http://nodem2:8090/');
   });
 
   it('logs out from the console and returns to the login screen', async () => {
