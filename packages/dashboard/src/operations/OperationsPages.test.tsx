@@ -36,6 +36,7 @@ function sessionBody(overrides: Partial<{ reauthenticatedUntil: string | null }>
   return {
     userId: 'admin-id',
     username: 'admin',
+    role: 'admin' as const,
     csrfToken: 'csrf-token',
     reauthenticatedUntil: null,
     ...overrides,

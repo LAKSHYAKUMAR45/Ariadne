@@ -83,6 +83,7 @@ export function isAdminSession(value: unknown): value is AdminSession {
   return (
     isNonEmptyString(value.userId) &&
     isNonEmptyString(value.username) &&
+    (value.role === 'admin' || value.role === 'member' || value.role === null) &&
     isNonEmptyString(value.csrfToken) &&
     isNullableString(value.reauthenticatedUntil) &&
     (value.expiresAt === undefined || isTimestamp(value.expiresAt))

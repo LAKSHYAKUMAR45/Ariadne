@@ -16,6 +16,7 @@ function sessionBody() {
   return {
     userId: 'admin-id',
     username: 'admin',
+    role: 'admin' as const,
     csrfToken: 'csrf-token',
     reauthenticatedUntil: null,
   };

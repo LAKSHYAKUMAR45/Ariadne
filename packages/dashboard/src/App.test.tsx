@@ -12,6 +12,31 @@ function json(body: unknown, status = 200): Response {
   });
 }
 
+function sessionBody(role: 'admin' | 'member' = 'admin', reauthenticatedUntil: string | null = null) {
+  return {
+    userId: 'admin-id',
+    username: 'admin',
+    role,
+    reauthenticatedUntil,
+    csrfToken: 'csrf-token',
+  };
+}
+
+function overviewBody() {
+  return {
+    generatedAt: '2026-09-23T08:00:00.000Z',
+    database: { status: 'healthy', healthy: true, latencyMs: 4 },
+    host: null,
+    databaseSizeBytes: 512,
+    tasks: { total: 0, active: 0, updatedLast24h: 0 },
+    members: { total: 2, active: 1, inactive: 1, admins: 1, members: 1 },
+    sync: { lastPushAt: null, lastPullAt: null },
+    backup: { latestAt: null, latestVerifiedAt: null, status: 'unavailable' },
+    operations: { running: 0, failedLast24h: 0 },
+    components: { database: { healthy: true }, operator: { healthy: true } },
+  };
+}
+
 afterEach(() => {
   vi.unstubAllGlobals();
 });
@@ -37,14 +62,7 @@ describe('Ariadne operations console', () => {
       vi.fn((input: RequestInfo | URL) => {
         const url = String(input);
         if (url === '/api/v1/admin/session') {
-          return Promise.resolve(
-            json({
-              userId: 'admin-id',
-              username: 'admin',
-              reauthenticatedUntil: null,
-              csrfToken: 'csrf-token',
-            }),
-          );
+          return Promise.resolve(json(sessionBody()));
         }
         if (url === '/api/v1/admin/overview') {
           return Promise.resolve(
@@ -109,15 +127,81 @@ describe('Ariadne operations console', () => {
     expect(screen.getByText('Activate ops-member')).toBeVisible();
   });
 
+  it('hides non-Tasks navigation entries for a member-role session and keeps the back-link visible', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url === '/api/v1/admin/session') {
+          return Promise.resolve(json(sessionBody('member')));
+        }
+        if (url === '/api/v1/admin/overview') {
+          return Promise.resolve(json(overviewBody()));
+        }
+        if (url === '/api/v1/admin/tasks?limit=100') {
+          return Promise.resolve(json({ tasks: [], hasMore: false, nextOffset: null }));
+        }
+        return Promise.resolve(new Response(null, { status: 404 }));
+      }),
+    );
+    const user = userEvent.setup();
+
+    render(<App />);
+
+    expect(await screen.findByText('nodem2 / production')).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Tasks' })).toBeVisible();
+    expect(screen.queryByRole('button', { name: 'Overview' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Members' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Backups' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Services' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Deployments' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Logs' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Audit' })).not.toBeInTheDocument();
+    expect(
+      screen.getByRole('link', { name: 'Back to jcnr-triage' }),
+    ).toHaveAttribute('href', 'https://nodem2:8090/');
+
+    await user.click(screen.getByRole('button', { name: 'Tasks' }));
+    expect(screen.getByRole('heading', { name: 'Task history' })).toBeVisible();
+  });
+
+  it('shows every navigation entry for an admin-role session including the back-link', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url === '/api/v1/admin/session') {
+          return Promise.resolve(json(sessionBody('admin')));
+        }
+        if (url === '/api/v1/admin/overview') {
+          return Promise.resolve(json(overviewBody()));
+        }
+        return Promise.resolve(new Response(null, { status: 404 }));
+      }),
+    );
+
+    render(<App />);
+
+    expect(await screen.findByText('nodem2 / production')).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Overview' })).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Members' })).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Tasks' })).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Backups' })).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Services' })).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Deployments' })).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Logs' })).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Audit' })).toBeVisible();
+    expect(
+      screen.getByRole('link', { name: 'Back to jcnr-triage' }),
+    ).toHaveAttribute('href', 'https://nodem2:8090/');
+  });
+
   it('logs out from the console and returns to the login screen', async () => {
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(
         json({
-          userId: 'admin-id',
-          username: 'admin',
-          reauthenticatedUntil: null,
-          csrfToken: 'csrf-token',
+          ...sessionBody(),
         }),
       )
       .mockResolvedValueOnce(
@@ -157,12 +241,7 @@ describe('Ariadne operations console', () => {
       const url = String(input);
       if (url === '/api/v1/admin/session') {
         return Promise.resolve(
-          json({
-            userId: 'admin-id',
-            username: 'admin',
-            reauthenticatedUntil: '2026-09-23T08:05:00.000Z',
-            csrfToken: 'csrf-token',
-          }),
+        json(sessionBody('admin', '2026-09-23T08:05:00.000Z')),
         );
       }
       if (url === '/api/v1/admin/overview') {

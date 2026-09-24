@@ -344,6 +344,7 @@ a:focus-visible {
   font-size: 13px;
   font-weight: 650;
   text-align: left;
+  text-decoration: none;
   cursor: pointer;
 }
 

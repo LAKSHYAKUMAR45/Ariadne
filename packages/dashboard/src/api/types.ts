@@ -23,6 +23,7 @@ export interface ConfirmationRequest {
 export interface AdminSession {
   userId: string;
   username: string;
+  role: 'admin' | 'member' | null;
   csrfToken: string;
   reauthenticatedUntil: string | null;
   expiresAt?: string;
