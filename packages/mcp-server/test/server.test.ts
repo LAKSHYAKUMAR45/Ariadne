@@ -54,6 +54,30 @@ describe('createAriadneMcpServer', () => {
           'git_sync',
           'export_task',
           'graphify_run',
+          'knowledge_chat',
+          'knowledge_export',
+          'knowledge_graph_neighborhood',
+          'knowledge_graph_path',
+          'knowledge_import',
+          'knowledge_page_create',
+          'knowledge_page_get',
+          'knowledge_page_list',
+          'knowledge_project_archive',
+          'knowledge_project_create',
+          'knowledge_project_list',
+          'knowledge_project_task',
+          'knowledge_queue_cancel',
+          'knowledge_queue_enqueue',
+          'knowledge_queue_list',
+          'knowledge_research',
+          'knowledge_review_list',
+          'knowledge_review_resolve',
+          'knowledge_search',
+          'knowledge_source_delete',
+          'knowledge_source_get',
+          'knowledge_source_list',
+          'knowledge_source_register',
+          'knowledge_task_from_insight',
           'sync_push',
           'sync_pull',
           'sync_list_remote',
@@ -61,6 +85,33 @@ describe('createAriadneMcpServer', () => {
 
         ].sort(),
       );
+    } finally {
+      store.close();
+      fs.rmSync(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('requires explicit confirmation for task/knowledge mutations', async () => {
+    const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'ariadne-mcp-server-test-'));
+    const store = new TaskStore(':memory:');
+    try {
+      const server = createAriadneMcpServer({ workspaceRoot, store });
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const registered = (server as any)._registeredTools as Record<
+        string,
+        { handler: (args: Record<string, unknown>) => Promise<{ isError?: boolean; content: Array<{ text: string }> }> }
+      >;
+
+      const projectResult = await registered.knowledge_project_task.handler({ projectId: 'project-1' });
+      const insightResult = await registered.knowledge_task_from_insight.handler({
+        projectId: 'project-1',
+        insightId: 'insight-1',
+      });
+
+      expect(projectResult.isError).toBe(true);
+      expect(projectResult.content[0].text).toBe('Knowledge mutation requires confirm=true');
+      expect(insightResult.isError).toBe(true);
+      expect(insightResult.content[0].text).toBe('Knowledge mutation requires confirm=true');
     } finally {
       store.close();
       fs.rmSync(workspaceRoot, { recursive: true, force: true });

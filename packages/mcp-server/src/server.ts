@@ -22,6 +22,12 @@ const CHECKPOINT_LEVEL = z.enum(['micro', 'session', 'milestone']);
 const TODO_STATUS = z.enum(['pending', 'done', 'blocked']);
 const KNOWLEDGE_PROJECTION_TRIGGER = z.enum(['explicit', 'checkpoint', 'build']);
 
+function requireKnowledgeWrite(confirm: boolean | undefined): void {
+  if (confirm !== true) {
+    throw new Error('Knowledge mutation requires confirm=true');
+  }
+}
+
 /**
  * Builds an MCP server exposing Ariadne's task state as tools, per
  * docs/02-ARCHITECTURE.md section 3. Every tool is a thin wrapper over the
@@ -145,10 +151,12 @@ export function createAriadneMcpServer(options?: {
         projectId: z.string(),
         taskId: z.string().optional(),
         trigger: KNOWLEDGE_PROJECTION_TRIGGER.optional(),
+        confirm: z.boolean().optional(),
       },
     },
     async (args) => {
       try {
+        requireKnowledgeWrite(args.confirm);
         return jsonResult(tools.knowledgeProjectTask(knowledgeDb, store, workspaceRoot, args));
       } catch (err) {
         return errorResult(err);
@@ -161,10 +169,16 @@ export function createAriadneMcpServer(options?: {
     {
       title: 'Create or resume task from insight',
       description: 'Creates a new Ariadne task for a knowledge insight, or resumes the existing linked task.',
-      inputSchema: { projectId: z.string(), insightId: z.string(), title: z.string().optional() },
+      inputSchema: {
+        projectId: z.string(),
+        insightId: z.string(),
+        title: z.string().optional(),
+        confirm: z.boolean().optional(),
+      },
     },
     async (args) => {
       try {
+        requireKnowledgeWrite(args.confirm);
         return jsonResult(tools.knowledgeTaskFromInsight(knowledgeDb, store, workspaceRoot, args));
       } catch (err) {
         return errorResult(err);

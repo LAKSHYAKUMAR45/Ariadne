@@ -34,6 +34,8 @@ import {
   GRAPHIFY_INSTALL_HINT,
   projectTaskKnowledge,
   createOrResumeTaskFromKnowledgeInsight,
+  openDatabase,
+  stateDbPath,
 } from '@ariadne-dev/core';
 import type { DatabaseType } from '@ariadne-dev/core';
 import type { GraphifyResult } from '@ariadne-dev/core';
@@ -200,10 +202,18 @@ export function knowledgeProjectTask(
   workspaceRoot: string,
   args: KnowledgeProjectTaskArgs,
 ): ReturnType<typeof projectTaskKnowledge> {
-  return projectTaskKnowledge(db, store, {
-    projectId: args.projectId,
-    taskId: args.taskId ?? resolveTaskId(store, workspaceRoot, undefined),
-    trigger: args.trigger ?? 'explicit',
+  return withTaskStore(store, workspaceRoot, args.taskId, (resolvedStore, taskId, resolvedWorkspaceRoot) => {
+    const projectionDb = resolvedWorkspaceRoot === workspaceRoot ? db : openDatabase(stateDbPath(resolvedWorkspaceRoot));
+    try {
+      return projectTaskKnowledge(projectionDb, resolvedStore, {
+        projectId: args.projectId,
+        taskId,
+        trigger: args.trigger ?? 'explicit',
+        workspaceRoot: resolvedWorkspaceRoot,
+      });
+    } finally {
+      if (projectionDb !== db) projectionDb.close();
+    }
   });
 }
 
@@ -219,7 +229,7 @@ export function knowledgeTaskFromInsight(
   workspaceRoot: string,
   args: KnowledgeTaskFromInsightArgs,
 ): ReturnType<typeof createOrResumeTaskFromKnowledgeInsight> {
-  const result = createOrResumeTaskFromKnowledgeInsight(db, store, args);
+  const result = createOrResumeTaskFromKnowledgeInsight(db, store, { ...args, workspaceRoot });
   setCurrentTaskId(result.task.id, workspaceRoot);
   return result;
 }
