@@ -407,7 +407,7 @@ export default function App({ bridge, initialState }: AppProps) {
           <p>No task selected.</p>
         );
       case 'graphify':
-        return <GraphifyPanel bridge={bridge} onBusy={handleBusy} onError={handlePanelError} />;
+        return <GraphifyPanel bridge={bridge} workspaceRoot={state?.workspaceRoot} onBusy={handleBusy} onError={handlePanelError} />;
       case 'todos':
         return state ? (
           <TodosPanel

@@ -236,6 +236,16 @@ function truncateGraphifyOutput(output: string): { output: string; truncated: bo
 }
 
 function runGraphifyForPanel(payload: GraphifyRequestPayload, workspaceRoot: string | undefined, output: vscode.OutputChannel): GraphifyRunResult {
+  if (!workspaceRoot) {
+    return {
+      available: false,
+      args: [],
+      output: 'Open a workspace folder to run Graphify.',
+      exitCode: 1,
+      truncated: false,
+    };
+  }
+
   if (!isGraphifyInstalled()) {
     return {
       available: false,

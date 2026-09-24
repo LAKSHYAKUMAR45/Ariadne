@@ -865,12 +865,25 @@ describe('UtilityPanels', () => {
       }) as BridgeHarness['request'],
     });
 
-    render(<GraphifyPanel bridge={harness} onBusy={() => undefined} onError={() => undefined} />);
+    render(<GraphifyPanel bridge={harness} workspaceRoot="/repo" onBusy={() => undefined} onError={() => undefined} />);
 
     await userEvent.click(screen.getByRole('tab', { name: 'Query' }));
     await userEvent.type(screen.getByLabelText('Graphify query'), 'how does auth work');
     await userEvent.click(screen.getByRole('button', { name: 'Run query' }));
 
     expect(await screen.findByText('Auth uses middleware.')).toBeInTheDocument();
+  });
+
+  it('disables graphify actions when no workspace is selected', async () => {
+    const harness = createBridge();
+
+    render(<GraphifyPanel bridge={harness} workspaceRoot={undefined} onBusy={() => undefined} onError={() => undefined} />);
+
+    expect(screen.getByText('Open a workspace folder to run Graphify.')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Run update' })).toBeDisabled();
+
+    await userEvent.click(screen.getByRole('tab', { name: 'Query' }));
+    expect(screen.getByRole('button', { name: 'Run query' })).toBeDisabled();
+    expect(harness.request).not.toHaveBeenCalledWith('graphify.run', expect.anything());
   });
 });

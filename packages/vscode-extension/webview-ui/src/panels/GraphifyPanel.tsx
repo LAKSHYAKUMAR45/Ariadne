@@ -5,6 +5,7 @@ import type { GraphifyRequestPayload, GraphifyRunResult } from '@host/messages';
 
 interface GraphifyPanelProps {
   bridge: AriadneBridge;
+  workspaceRoot?: string;
   onBusy(label: string | undefined): void;
   onError(message: string): void;
 }
@@ -22,15 +23,21 @@ function readError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-export default function GraphifyPanel({ bridge, onBusy, onError }: GraphifyPanelProps) {
+export default function GraphifyPanel({ bridge, workspaceRoot, onBusy, onError }: GraphifyPanelProps) {
   const [mode, setMode] = useState<GraphifyMode>('update');
   const [query, setQuery] = useState('');
   const [from, setFrom] = useState('');
   const [to, setTo] = useState('');
   const [target, setTarget] = useState('');
   const [result, setResult] = useState<GraphifyRunResult | null>(null);
+  const canRun = Boolean(workspaceRoot);
 
   async function run(payload: GraphifyRequestPayload): Promise<void> {
+    if (!canRun) {
+      onError('Open a workspace folder to run Graphify.');
+      return;
+    }
+
     const busyLabels: Record<GraphifyMode, string> = {
       update: 'Running graphify update…',
       query: 'Running graphify query…',
@@ -56,7 +63,7 @@ export default function GraphifyPanel({ bridge, onBusy, onError }: GraphifyPanel
         return (
           <div style={styles.form}>
             <p style={styles.helperText}>Rebuild the local code graph for the selected workspace.</p>
-            <button type="button" onClick={() => void run({ mode: 'update' })} style={styles.primaryButton}>
+            <button type="button" onClick={() => void run({ mode: 'update' })} style={styles.primaryButton} disabled={!canRun}>
               Run update
             </button>
           </div>
@@ -68,7 +75,7 @@ export default function GraphifyPanel({ bridge, onBusy, onError }: GraphifyPanel
               <span>Graphify query</span>
               <input value={query} onChange={(event) => setQuery(event.target.value)} aria-label="Graphify query" style={styles.input} />
             </label>
-            <button type="button" onClick={() => void run({ mode: 'query', query })} style={styles.primaryButton}>
+            <button type="button" onClick={() => void run({ mode: 'query', query })} style={styles.primaryButton} disabled={!canRun}>
               Run query
             </button>
           </div>
@@ -84,7 +91,7 @@ export default function GraphifyPanel({ bridge, onBusy, onError }: GraphifyPanel
               <span>Graphify to</span>
               <input value={to} onChange={(event) => setTo(event.target.value)} aria-label="Graphify to" style={styles.input} />
             </label>
-            <button type="button" onClick={() => void run({ mode: 'path', from, to })} style={styles.primaryButton}>
+            <button type="button" onClick={() => void run({ mode: 'path', from, to })} style={styles.primaryButton} disabled={!canRun}>
               Run path
             </button>
           </div>
@@ -101,7 +108,7 @@ export default function GraphifyPanel({ bridge, onBusy, onError }: GraphifyPanel
                 style={styles.input}
               />
             </label>
-            <button type="button" onClick={() => void run({ mode: 'explain', target })} style={styles.primaryButton}>
+            <button type="button" onClick={() => void run({ mode: 'explain', target })} style={styles.primaryButton} disabled={!canRun}>
               Run explain
             </button>
           </div>
@@ -134,6 +141,7 @@ export default function GraphifyPanel({ bridge, onBusy, onError }: GraphifyPanel
         aria-labelledby={`graphify-tab-${mode}`}
         style={styles.panel}
       >
+        {!canRun ? <p role="alert" style={styles.installHint}>Open a workspace folder to run Graphify.</p> : null}
         {renderForm()}
       </section>
 

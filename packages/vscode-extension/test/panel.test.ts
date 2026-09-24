@@ -550,7 +550,103 @@ describe('Ariadne webview panel', () => {
     );
   });
 
-  it('runs graphify through the host adapter and truncates panel output', async () => {
+  it('returns a clear host result when no workspace root is available for graphify', async () => {
+    mocks.isGraphifyInstalled.mockReturnValue(true);
+    mocks.handleWebviewMessage.mockImplementation(
+      (deps: { graphify?: { run: (payload: unknown, workspaceRoot?: string) => unknown } }, message: { id: string; type: string; payload?: unknown }) => {
+        if (message.type === 'graphify.run') {
+          return { id: message.id, ok: true, data: { result: deps.graphify?.run(message.payload, undefined) } };
+        }
+        return { id: message.id, ok: true, data: {} };
+      },
+    );
+
+    const { panel, postedMessages: messages } = await openPanelForTest();
+
+    await panel.webview.receiveMessage({
+      id: 'graphify-no-workspace',
+      type: 'graphify.run',
+      payload: { mode: 'update' },
+    });
+
+    expect(mocks.runGraphifySync).not.toHaveBeenCalled();
+    expect(messages).toContainEqual(
+      expect.objectContaining({
+        id: 'graphify-no-workspace',
+        ok: true,
+        data: {
+          result: {
+            available: false,
+            args: [],
+            output: 'Open a workspace folder to run Graphify.',
+            exitCode: 1,
+            truncated: false,
+          },
+        },
+      }),
+    );
+  });
+
+  it.each([
+    {
+      name: 'update mode',
+      payload: { mode: 'update' },
+      expectedArgs: ['update', '.'],
+    },
+    {
+      name: 'query mode',
+      payload: { mode: 'query', query: 'how does auth work' },
+      expectedArgs: ['query', 'how does auth work'],
+    },
+    {
+      name: 'path mode',
+      payload: { mode: 'path', from: 'AuthController', to: 'AuthService' },
+      expectedArgs: ['path', 'AuthController', 'AuthService'],
+    },
+    {
+      name: 'explain mode',
+      payload: { mode: 'explain', target: 'AuthController' },
+      expectedArgs: ['explain', 'AuthController'],
+    },
+  ])('maps $name payloads to graphify argv in the host adapter', async ({ payload, expectedArgs }) => {
+    mocks.isGraphifyInstalled.mockReturnValue(true);
+    mocks.runGraphifySync.mockReturnValue({ exitCode: 0, stdout: 'ok', stderr: '' });
+    mocks.summarizeGraphifyRun.mockReturnValue('Graphify completed');
+    mocks.handleWebviewMessage.mockImplementation(
+      (deps: { graphify?: { run: (payload: unknown, workspaceRoot?: string) => unknown } }, message: { id: string; type: string; payload?: unknown }) => {
+        if (message.type === 'graphify.run') {
+          return { id: message.id, ok: true, data: { result: deps.graphify?.run(message.payload, '/repo') } };
+        }
+        return { id: message.id, ok: true, data: {} };
+      },
+    );
+
+    const { panel, postedMessages: messages } = await openPanelForTest({ workspaceRoot: '/repo' });
+
+    await panel.webview.receiveMessage({
+      id: `graphify-${payload.mode}`,
+      type: 'graphify.run',
+      payload,
+    });
+
+    expect(mocks.runGraphifySync).toHaveBeenCalledWith(expectedArgs, { cwd: '/repo' });
+    expect(messages).toContainEqual(
+      expect.objectContaining({
+        id: `graphify-${payload.mode}`,
+        ok: true,
+        data: {
+          result: expect.objectContaining({
+            available: true,
+            args: expectedArgs,
+            exitCode: 0,
+            checkpointSummary: 'Graphify completed',
+          }),
+        },
+      }),
+    );
+  });
+
+  it('truncates graphify panel output while logging the full host output', async () => {
     const longOutput = `${'A'.repeat(20_050)}\nsecond line`;
     mocks.isGraphifyInstalled.mockReturnValue(true);
     mocks.runGraphifySync.mockReturnValue({ exitCode: 0, stdout: longOutput, stderr: '' });
@@ -572,7 +668,6 @@ describe('Ariadne webview panel', () => {
       payload: { mode: 'query', query: 'how does auth work' },
     });
 
-    expect(mocks.runGraphifySync).toHaveBeenCalledWith(['query', 'how does auth work'], { cwd: '/repo' });
     expect(outputLines.some((line) => line.includes(longOutput))).toBe(true);
     expect(messages).toContainEqual(
       expect.objectContaining({
