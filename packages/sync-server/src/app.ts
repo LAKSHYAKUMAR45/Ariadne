@@ -33,6 +33,7 @@ import { createSyncRouter } from './routes/sync.js';
 import { createTaskHistoryRouter } from './routes/taskHistory.js';
 import { createTaskHistoryStore } from './taskHistoryStore.js';
 import { createInternalSsoRouter } from './routes/internalSso.js';
+import { createSsoCallbackRouter } from './routes/ssoCallback.js';
 
 export interface CreateAppOptions {
   /** Required: the server must never run without a loaded keyring. */
@@ -144,6 +145,10 @@ export function createApp(pool: Pool, jwtSecret: string, options: CreateAppOptio
   // Mounted after the global JSON parser so the body is available for validation.
   const ssoSharedSecret = options?.ssoSharedSecret ?? '';
   app.use('/internal/sso', createInternalSsoRouter(pool, ssoSharedSecret));
+
+  // Public SSO callback endpoint. The browser is redirected here with an opaque code
+  // that is exchanged exactly once for an admin session cookie.
+  app.use('/sso/callback', createSsoCallbackRouter(pool, { cookieSecure: adminCookieSecure }));
 
   app.use('/api/v1/auth', createAuthRouter(pool, jwtSecret));
 
