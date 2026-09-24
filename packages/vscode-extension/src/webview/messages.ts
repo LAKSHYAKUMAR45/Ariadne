@@ -65,6 +65,7 @@ export const WebviewRequestTypes = {
   FilesList: 'files.list',
   FilesGetCapture: 'files.getCapture',
   SearchRun: 'search.run',
+  SyncProfileList: 'sync.profileList',
   SyncPush: 'sync.push',
   SyncPull: 'sync.pull',
   SyncListRemote: 'sync.listRemote',
@@ -221,6 +222,12 @@ export interface ReviewSummary {
   canMarkDone: boolean;
 }
 
+export interface SyncProfile {
+  name: string;
+  current: boolean;
+  serverUrl?: string;
+}
+
 export interface GraphifyRequestPayload {
   mode: 'update' | 'query' | 'path' | 'explain';
   query?: string;
@@ -239,7 +246,7 @@ export interface GraphifyRunResult {
 }
 
 export type WebviewRequest =
-  | (WebviewRequestBase<'state.get' | 'activity.list' | 'capture.health' | 'review.get' | 'tasks.list' | 'sync.push' | 'sync.listRemote' | 'export.markdown'> & {
+  | (WebviewRequestBase<'state.get' | 'activity.list' | 'capture.health' | 'review.get' | 'tasks.list' | 'sync.profileList' | 'sync.push' | 'sync.listRemote' | 'export.markdown'> & {
       payload?: undefined;
     })
   | (WebviewRequestBase<'task.create'> & {
@@ -294,6 +301,7 @@ export interface WebviewState {
 }
 
 export interface SyncActions {
+  profileList: () => string;
   push: () => string;
   pull: (options?: { importNew?: boolean; onConflict?: 'remote-wins' | 'local-wins' }) => string;
   listRemote: () => string;
@@ -303,11 +311,6 @@ export interface WebviewDispatcherDeps {
   store: TaskStore;
   currentTaskId?: string;
   workspaceRoot?: string;
-  sessionStatus?: {
-    lastSyncPush?: string;
-    lastSyncPull?: string;
-    lastExport?: string;
-  };
   passiveCapture?: {
     enabled: boolean;
     shellIntegrationAvailable: boolean;

@@ -16,6 +16,7 @@ import {
   type CheckpointLevel,
   type TodoStatus,
 } from '@ariadne-dev/core';
+import { parseSyncProfiles } from '../syncCommands.js';
 import {
   WebviewRequestTypes,
   type ActivityItem,
@@ -24,6 +25,7 @@ import {
   type GraphifyRequestPayload,
   type ReviewCheck,
   type ReviewSummary,
+  type SyncProfile,
   type SyncActions,
   type TaskTemplateId,
   TaskTemplates,
@@ -460,38 +462,20 @@ function buildReviewSummary(deps: WebviewDispatcherDeps, taskId: string): Review
             detail: `Current branch "${currentBranch}" does not match task branch "${taskBranch}".`,
             action: { label: 'Open activity', tabId: 'activity' },
           },
-    deps.sessionStatus?.lastSyncPush || deps.sessionStatus?.lastSyncPull
-      ? {
-          id: 'sync-status',
-          label: 'Sync status',
-          status: 'pass',
-          detail: deps.sessionStatus.lastSyncPush
-            ? `Last sync push: ${deps.sessionStatus.lastSyncPush}`
-            : `Last sync pull: ${deps.sessionStatus!.lastSyncPull}`,
-          action: { label: 'Open sync', tabId: 'sync' },
-        }
-      : {
-          id: 'sync-status',
-          label: 'Sync status',
-          status: 'unknown',
-          detail: 'No sync action has run in this panel session.',
-          action: { label: 'Open sync', tabId: 'sync' },
-        },
-    deps.sessionStatus?.lastExport
-      ? {
-          id: 'export-status',
-          label: 'Export status',
-          status: 'pass',
-          detail: `Last export: ${deps.sessionStatus.lastExport}`,
-          action: { label: 'Open context', tabId: 'context' },
-        }
-      : {
-          id: 'export-status',
-          label: 'Export status',
-          status: 'unknown',
-          detail: 'No Markdown export has run in this panel session.',
-          action: { label: 'Open context', tabId: 'context' },
-        },
+    {
+      id: 'sync-status',
+      label: 'Sync status',
+      status: 'unknown',
+      detail: 'No persisted sync evidence is available yet.',
+      action: { label: 'Open sync', tabId: 'sync' },
+    },
+    {
+      id: 'export-status',
+      label: 'Export status',
+      status: 'unknown',
+      detail: 'No persisted export evidence is available yet.',
+      action: { label: 'Open context', tabId: 'context' },
+    },
   ];
 
   return {
@@ -1139,6 +1123,13 @@ function handleSyncPush(deps: WebviewDispatcherDeps, message: WebviewRequest): W
   return { id: message.id, ok: true, data: { output: deps.sync.push() }, state: buildWebviewState(deps) };
 }
 
+function handleSyncProfileList(deps: WebviewDispatcherDeps, message: WebviewRequest): WebviewResponse {
+  if (!deps.sync) return errorResponse(message.id, 'Sync actions are not configured.');
+  const output = deps.sync.profileList();
+  const profiles: SyncProfile[] = parseSyncProfiles(output);
+  return { id: message.id, ok: true, data: { output, profiles }, state: buildWebviewState(deps) };
+}
+
 function handleSyncPull(deps: WebviewDispatcherDeps, message: WebviewRequest): WebviewResponse {
   if (!deps.sync) return errorResponse(message.id, 'Sync actions are not configured.');
   const payload = getPayload(message);
@@ -1306,6 +1297,8 @@ export async function handleWebviewMessage(deps: WebviewDispatcherDeps, message:
         return handleSearchRun(deps, message);
       case WebviewRequestTypes.SyncPush:
         return handleSyncPush(deps, message);
+      case WebviewRequestTypes.SyncProfileList:
+        return handleSyncProfileList(deps, message);
       case WebviewRequestTypes.SyncPull:
         return handleSyncPull(deps, message);
       case WebviewRequestTypes.SyncListRemote:

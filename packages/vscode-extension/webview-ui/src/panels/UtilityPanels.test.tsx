@@ -185,6 +185,8 @@ function createBridge(overrides: Partial<BridgeHarness> = {}): BridgeHarness {
         return { output: 'pull output' };
       case 'sync.listRemote':
         return { output: 'remote output' };
+      case 'sync.profileList':
+        return { profiles: [], output: '' };
       case 'context.get':
         return {
           context: {
@@ -789,25 +791,30 @@ describe('UtilityPanels', () => {
     const harness = createBridge();
     render(<SyncPanel bridge={harness} />);
 
-    await userEvent.click(screen.getByRole('button', { name: 'Push' }));
+    await screen.findByText('No sync profiles detected.');
+
+    await userEvent.click(screen.getByRole('button', { name: 'Push local changes' }));
     await waitFor(() => expect(harness.request).toHaveBeenCalledWith('sync.push'));
 
-    await userEvent.click(screen.getByRole('button', { name: 'Pull' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Pull remote changes' }));
     await waitFor(() =>
       expect(harness.request).toHaveBeenCalledWith('sync.pull', {
         importNew: false,
       }),
     );
 
-    await userEvent.click(screen.getByRole('button', { name: 'List remote' }));
+    await userEvent.click(screen.getByRole('button', { name: 'List remote tasks' }));
     await waitFor(() => expect(harness.request).toHaveBeenCalledWith('sync.listRemote'));
 
-    expect(screen.getByLabelText('Sync output')).toHaveTextContent('remote output');
+    expect(screen.getByText('Raw output: list remote tasks (completed)')).toBeInTheDocument();
+    expect(screen.getByLabelText('Raw sync command output')).toHaveTextContent('remote output');
   });
 
   it('requires confirmation before pulling with import-new', async () => {
     const harness = createBridge();
     render(<SyncPanel bridge={harness} />);
+
+    await screen.findByText('No sync profiles detected.');
 
     await userEvent.click(screen.getByRole('button', { name: 'Pull import-new' }));
     expect(harness.request).not.toHaveBeenCalledWith('sync.pull', { importNew: true });
@@ -828,23 +835,47 @@ describe('UtilityPanels', () => {
   it('shows sign-in guidance when a sync action fails with an auth-shaped error', async () => {
     const harness = createBridge({
       request: vi.fn(async () => {
-        throw new Error('401 unauthorized: token expired');
+        throw new Error('ariadne sync push failed: not logged in');
       }),
     });
     render(<SyncPanel bridge={harness} />);
 
-    await userEvent.click(screen.getByRole('button', { name: 'Push' }));
-    expect(await screen.findByRole('alert')).toHaveTextContent('ariadne sync setup');
+    await userEvent.click(screen.getByRole('button', { name: 'Push local changes' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('ariadne sync login');
   });
 
   it('shows a clear idle/running/last-action status', async () => {
     const harness = createBridge();
     render(<SyncPanel bridge={harness} />);
 
-    expect(screen.getByLabelText('Sync status')).toHaveTextContent('Idle');
+    expect(screen.getByLabelText('Sync status')).toHaveTextContent('Running profile list');
 
-    await userEvent.click(screen.getByRole('button', { name: 'Push' }));
-    await waitFor(() => expect(screen.getByLabelText('Sync status')).toHaveTextContent('Last action: sync.push completed'));
+    await screen.findByText('No sync profiles detected.');
+    await userEvent.click(screen.getByRole('button', { name: 'Push local changes' }));
+    await waitFor(() => expect(screen.getByLabelText('Sync status')).toHaveTextContent('Last action: push local changes completed'));
+  });
+
+  it('loads sync profiles and labels auth failures with setup guidance', async () => {
+    const harness = createBridge({
+      request: vi.fn(async (type: string) => {
+        if (type === 'sync.profileList') {
+          return {
+            profiles: [{ name: 'default', current: true, serverUrl: 'https://sync.example' }],
+            output: '* default https://sync.example',
+          };
+        }
+        if (type === 'sync.push') {
+          throw new Error('ariadne sync push failed: not logged in');
+        }
+        return {};
+      }) as BridgeHarness['request'],
+    });
+
+    render(<SyncPanel bridge={harness} />);
+
+    expect(await screen.findByText('default')).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: 'Push local changes' }));
+    expect(await screen.findByText(/Run `ariadne sync login`/)).toBeInTheDocument();
   });
 
   it('runs a graphify query and displays bounded output', async () => {

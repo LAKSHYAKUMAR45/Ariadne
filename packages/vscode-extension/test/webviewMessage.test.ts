@@ -4,6 +4,7 @@ import path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { TaskStore, closeRegistry, openWorkspaceStore, type TaskStore as WorkspaceTaskStore } from '@ariadne-dev/core';
 import { buildWebviewState, handleWebviewMessage } from '../src/webview/handleWebviewMessage.js';
+import type { SyncProfile } from '../src/webview/messages.js';
 
 function setupRegistry(): () => void {
   const previous = process.env.ARIADNE_REGISTRY_PATH;
@@ -271,14 +272,18 @@ describe('handleWebviewMessage', () => {
     store.close();
   });
 
-  it('reports sync and export review status transitions from unknown to pass using sessionStatus', async () => {
+  it('keeps sync and export review status unknown without persisted evidence', async () => {
     const { store, task } = makeStore();
 
-    const unknownResponse = await handleWebviewMessage(
-      { store, currentTaskId: task.id, workspaceRoot: '/repo' },
+    const response = await handleWebviewMessage(
+      {
+        store,
+        currentTaskId: task.id,
+        workspaceRoot: '/repo',
+      },
       { id: 'review-status-unknown', type: 'review.get' } as never,
     );
-    expect(unknownResponse).toMatchObject({
+    expect(response).toMatchObject({
       ok: true,
       data: {
         review: {
@@ -286,47 +291,47 @@ describe('handleWebviewMessage', () => {
             expect.objectContaining({
               id: 'sync-status',
               status: 'unknown',
-              detail: 'No sync action has run in this panel session.',
+              detail: 'No persisted sync evidence is available yet.',
             }),
             expect.objectContaining({
               id: 'export-status',
               status: 'unknown',
-              detail: 'No Markdown export has run in this panel session.',
+              detail: 'No persisted export evidence is available yet.',
             }),
           ]),
         },
       },
     });
 
-    const passResponse = await handleWebviewMessage(
+    store.close();
+  });
+
+  it('lists sync profiles through the injected host action and parser', async () => {
+    const { store, task } = makeStore();
+    const profileList = vi.fn(
+      () => '* default https://sync.example\n  staging https://staging.example\n  bad line with trailing junk here\n',
+    );
+
+    const response = await handleWebviewMessage(
       {
         store,
         currentTaskId: task.id,
         workspaceRoot: '/repo',
-        sessionStatus: {
-          lastSyncPull: '2026-09-23T20:00:00.000Z',
-          lastExport: '2026-09-23T20:01:00.000Z',
-        },
+        sync: { push: vi.fn(), pull: vi.fn(), listRemote: vi.fn(), profileList },
       },
-      { id: 'review-status-pass', type: 'review.get' } as never,
+      { id: 'sync-profiles', type: 'sync.profileList' } as never,
     );
-    expect(passResponse).toMatchObject({
+
+    expect(profileList).toHaveBeenCalledTimes(1);
+    expect(response).toMatchObject({
+      id: 'sync-profiles',
       ok: true,
       data: {
-        review: {
-          checks: expect.arrayContaining([
-            expect.objectContaining({
-              id: 'sync-status',
-              status: 'pass',
-              detail: 'Last sync pull: 2026-09-23T20:00:00.000Z',
-            }),
-            expect.objectContaining({
-              id: 'export-status',
-              status: 'pass',
-              detail: 'Last export: 2026-09-23T20:01:00.000Z',
-            }),
-          ]),
-        },
+        output: '* default https://sync.example\n  staging https://staging.example\n  bad line with trailing junk here\n',
+        profiles: [
+          { name: 'default', current: true, serverUrl: 'https://sync.example' },
+          { name: 'staging', current: false, serverUrl: 'https://staging.example' },
+        ] satisfies SyncProfile[],
       },
     });
 

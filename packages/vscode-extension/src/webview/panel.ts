@@ -18,7 +18,7 @@ import {
   summarizeGraphifyRun,
   type TaskStore,
 } from '@ariadne-dev/core';
-import { syncPush, syncPull, syncListRemote } from '../syncCommands.js';
+import { syncProfileList, syncPush, syncPull, syncListRemote } from '../syncCommands.js';
 import { getOrOpenStore } from '../storeCache.js';
 
 export interface AriadnePanelDeps {
@@ -38,11 +38,6 @@ export interface AriadnePanelDeps {
 let panel: vscode.WebviewPanel | undefined;
 let panelDeps: AriadnePanelDeps | undefined;
 let selectedWorkspaceRoot: string | undefined;
-let panelSessionStatus: {
-  lastSyncPush?: string;
-  lastSyncPull?: string;
-  lastExport?: string;
-} = {};
 
 const GRAPHIFY_PANEL_OUTPUT_LIMIT = 20_000;
 const GRAPHIFY_TRUNCATION_SUFFIX = '\n\n[truncated for panel view]';
@@ -299,11 +294,14 @@ async function handleWebviewRequest(message: unknown): Promise<void> {
         store,
         currentTaskId: selectedWorkspaceRoot ? store.getCurrentTaskId() : panelDeps.getCurrentTaskId(),
         workspaceRoot,
-        sessionStatus: panelSessionStatus,
         passiveCapture: readPassiveCaptureState(workspaceRoot),
         setCurrentTaskId: panelDeps.setCurrentTask,
         setCurrentTaskIdForWorkspace: panelDeps.setCurrentTaskInWorkspace,
         sync: {
+          profileList: () => {
+            if (!workspaceRoot) throw new Error('Ariadne needs an open folder/workspace for sync profile list.');
+            return syncProfileList({ cwd: workspaceRoot });
+          },
           push: () => {
             if (!workspaceRoot) throw new Error('Ariadne needs an open folder/workspace for sync push.');
             return syncPush({ cwd: workspaceRoot });
@@ -331,17 +329,6 @@ async function handleWebviewRequest(message: unknown): Promise<void> {
       },
       message,
     );
-
-    if (response.ok) {
-      const timestamp = new Date().toISOString();
-      if (message.type === WebviewRequestTypes.SyncPush) {
-        panelSessionStatus = { ...panelSessionStatus, lastSyncPush: timestamp };
-      } else if (message.type === WebviewRequestTypes.SyncPull) {
-        panelSessionStatus = { ...panelSessionStatus, lastSyncPull: timestamp };
-      } else if (message.type === WebviewRequestTypes.ExportMarkdown) {
-        panelSessionStatus = { ...panelSessionStatus, lastExport: timestamp };
-      }
-    }
 
     void panel.webview.postMessage(response);
     if (response.state) {
@@ -386,7 +373,6 @@ export function openAriadnePanel(context: vscode.ExtensionContext, deps: Ariadne
     panel = undefined;
     panelDeps = undefined;
     selectedWorkspaceRoot = undefined;
-    panelSessionStatus = {};
   });
 
   postStateUpdate(currentState());
