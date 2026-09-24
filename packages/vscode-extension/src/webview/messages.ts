@@ -33,6 +33,7 @@ export const WebviewRequestTypes = {
   ActivityList: 'activity.list',
   CaptureHealth: 'capture.health',
   TaskCreate: 'task.create',
+  TaskCreateFromTemplate: 'task.createFromTemplate',
   TaskUpdate: 'task.update',
   TaskSetStatus: 'task.setStatus',
   TaskSwitch: 'task.switch',
@@ -89,6 +90,60 @@ export type WebviewTabId =
   | 'context'
   | 'review'
   | 'graphify';
+
+export type TaskTemplateId = 'feature' | 'bugfix' | 'review' | 'research' | 'incident';
+
+export interface TaskTemplateDecision {
+  text: string;
+  rationale?: string;
+}
+
+export interface TaskTemplate {
+  id: TaskTemplateId;
+  label: string;
+  description: string;
+  todos: string[];
+  questions: string[];
+  decisions?: TaskTemplateDecision[];
+}
+
+export const TaskTemplates: Record<TaskTemplateId, TaskTemplate> = {
+  feature: {
+    id: 'feature',
+    label: 'Feature',
+    description: 'Plan and deliver a scoped product or engineering change.',
+    todos: ['Clarify acceptance criteria', 'Implement the smallest complete change', 'Add or update tests', 'Update related docs'],
+    questions: ['What user-visible behavior defines success?'],
+  },
+  bugfix: {
+    id: 'bugfix',
+    label: 'Bugfix',
+    description: 'Triage a regression, protect it with tests, and verify the fix.',
+    todos: ['Reproduce the bug', 'Add regression coverage', 'Verify the fix'],
+    questions: ['What exact user-visible behavior is broken?'],
+  },
+  review: {
+    id: 'review',
+    label: 'Review',
+    description: 'Inspect a change, validate it, and record findings.',
+    todos: ['Inspect the relevant diff', 'Run targeted validation', 'Document findings or approval'],
+    questions: ['What risk should this review focus on?'],
+  },
+  research: {
+    id: 'research',
+    label: 'Research',
+    description: 'Investigate options and leave a recommendation behind.',
+    todos: ['Map existing implementation', 'Compare viable approaches', 'Record recommendation'],
+    questions: ['What decision should this research unblock?'],
+  },
+  incident: {
+    id: 'incident',
+    label: 'Incident',
+    description: 'Capture impact, root cause, and the mitigation path.',
+    todos: ['Capture symptoms and impact', 'Identify root cause', 'Record mitigation and follow-up'],
+    questions: ['Who or what is currently impacted?'],
+  },
+};
 
 export type ActivityKind =
   | 'checkpoint'
@@ -148,6 +203,9 @@ export type WebviewRequest =
     })
   | (WebviewRequestBase<'task.create'> & {
       payload: { title: string; goal?: string | null; status?: TaskStatus; parentTaskId?: string | null; branch?: string | null };
+    })
+  | (WebviewRequestBase<'task.createFromTemplate'> & {
+      payload: { title: string; goal?: string | null; templateId: TaskTemplateId };
     })
   | (WebviewRequestBase<'task.update'> & {
       payload: { id?: string; title?: string; goal?: string | null; branch?: string | null };
@@ -220,7 +278,7 @@ export interface WebviewDispatcherDeps {
 
 export type WebviewResponse =
   | { id: string; ok: true; data: unknown; state?: WebviewState }
-  | { id: string; ok: false; error: string };
+  | { id: string; ok: false; error: string; state?: WebviewState };
 
 export type HostToWebviewMessage =
   | { type: 'stateUpdate'; state: WebviewState }

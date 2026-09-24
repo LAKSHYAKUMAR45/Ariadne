@@ -185,6 +185,32 @@ describe('App', () => {
     );
   });
 
+  it('shows onboarding when no task exists and creates a templated task', async () => {
+    const request = vi.fn(async (_type: string, payload?: unknown) => payload ?? {});
+    render(
+      <App
+        bridge={{ request, subscribe: vi.fn(() => () => undefined) }}
+        initialState={{ ...baseState, currentTaskId: undefined, currentTask: undefined, tasks: [] }}
+      />,
+    );
+
+    expect(screen.getByText('Start your first Ariadne task')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Import or sync tasks' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Open context help' })).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: 'Create task' }));
+    await userEvent.type(screen.getByLabelText('New task title'), 'Fix login bug');
+    await userEvent.selectOptions(screen.getByLabelText('Task template'), 'bugfix');
+    await userEvent.click(screen.getByRole('button', { name: 'Create task from template' }));
+
+    await waitFor(() =>
+      expect(request).toHaveBeenCalledWith('task.createFromTemplate', {
+        title: 'Fix login bug',
+        goal: null,
+        templateId: 'bugfix',
+      }),
+    );
+  });
+
   it('navigates to a search result tab and highlights the matching entity', async () => {
     const harness = bridge({
       request: makeRequestMock(async (type) => {

@@ -302,6 +302,48 @@ describe('handleWebviewMessage', () => {
     cleanupRegistry();
   });
 
+  it('creates a task from a built-in template and seeds its entities', async () => {
+    const store = new TaskStore(':memory:');
+
+    const response = await handleWebviewMessage(
+      { store, workspaceRoot: '/repo', setCurrentTaskId: vi.fn() },
+      { id: 'template', type: 'task.createFromTemplate', payload: { title: 'Fix login bug', goal: 'Resolve auth regression', templateId: 'bugfix' } } as never,
+    );
+
+    expect(response.ok).toBe(true);
+    const created = (response as { ok: true; data: { task: Task } }).data.task;
+    expect(created.title).toBe('Fix login bug');
+    expect(store.listTodos(created.id).map((todo) => todo.text)).toEqual(
+      expect.arrayContaining(['Reproduce the bug', 'Add regression coverage', 'Verify the fix']),
+    );
+    expect(store.listOpenQuestions(created.id).map((question) => question.text)).toEqual(
+      expect.arrayContaining(['What exact user-visible behavior is broken?']),
+    );
+    expect(store.getCurrentTaskId()).toBe(created.id);
+    store.close();
+  });
+
+  it('surfaces template seeding failure with the created task state', async () => {
+    const store = new TaskStore(':memory:');
+    const createTodo = vi.spyOn(store, 'createTodo').mockImplementationOnce(() => {
+      throw new Error('seed write failed');
+    });
+
+    const response = await handleWebviewMessage(
+      { store, workspaceRoot: '/repo', setCurrentTaskId: vi.fn() },
+      { id: 'template-fail', type: 'task.createFromTemplate', payload: { title: 'Broken seed', templateId: 'feature' } } as never,
+    );
+
+    expect(response).toMatchObject({
+      id: 'template-fail',
+      ok: false,
+      error: expect.stringContaining('Task was created but template seeding failed'),
+      state: expect.objectContaining({ currentTask: expect.objectContaining({ title: 'Broken seed' }) }),
+    });
+    createTodo.mockRestore();
+    store.close();
+  });
+
   it('edits a task and applies lifecycle status transitions', async () => {
     const cleanupRegistry = setupRegistry();
     const workspace = makeWorkspace('task-lifecycle');

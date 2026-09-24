@@ -22,6 +22,8 @@ import {
   type CaptureHealth,
   type ContextSectionSummary,
   type SyncActions,
+  type TaskTemplateId,
+  TaskTemplates,
   type WebviewCounts,
   type WebviewDispatcherDeps,
   type WebviewRequest,
@@ -69,6 +71,10 @@ function isTaskStatus(value: unknown): value is TaskStatus {
 
 function isCheckpointLevel(value: unknown): value is CheckpointLevel {
   return value === 'micro' || value === 'session' || value === 'milestone';
+}
+
+function isTaskTemplateId(value: unknown): value is TaskTemplateId {
+  return typeof value === 'string' && value in TaskTemplates;
 }
 
 function errorResponse(id: string, error: string): WebviewResponse {
@@ -503,6 +509,55 @@ function handleTaskCreate(deps: WebviewDispatcherDeps, message: WebviewRequest):
   deps.store.setCurrentTaskId(created.id);
   deps.setCurrentTaskId?.(created.id);
   return { id: message.id, ok: true, data: created, state: buildWebviewState({ ...deps, currentTaskId: created.id }) };
+}
+
+function handleTaskCreateFromTemplate(deps: WebviewDispatcherDeps, message: WebviewRequest): WebviewResponse {
+  const payload = getPayload(message);
+  const title = readString(payload.title);
+  if (!title) return errorResponse(message.id, 'task.createFromTemplate requires payload.title.');
+  if (!isTaskTemplateId(payload.templateId)) {
+    return errorResponse(message.id, 'task.createFromTemplate requires payload.templateId to be feature, bugfix, review, research, or incident.');
+  }
+
+  const template = TaskTemplates[payload.templateId];
+  const created = deps.store.createTask({
+    title,
+    goal: readOptionalString(payload.goal),
+  });
+  deps.store.setCurrentTaskId(created.id);
+  deps.setCurrentTaskId?.(created.id);
+
+  const seeded = { todos: 0, questions: 0, decisions: 0 };
+
+  try {
+    for (const todo of template.todos) {
+      deps.store.createTodo({ taskId: created.id, text: todo });
+      seeded.todos += 1;
+    }
+    for (const question of template.questions) {
+      deps.store.recordOpenQuestion({ taskId: created.id, text: question });
+      seeded.questions += 1;
+    }
+    for (const decision of template.decisions ?? []) {
+      deps.store.recordDecision({ taskId: created.id, text: decision.text, rationale: decision.rationale });
+      seeded.decisions += 1;
+    }
+  } catch (error) {
+    const messageText = error instanceof Error ? error.message : String(error);
+    return {
+      id: message.id,
+      ok: false,
+      error: `Task was created but template seeding failed: ${messageText}`,
+      state: buildWebviewState({ ...deps, currentTaskId: created.id }),
+    };
+  }
+
+  return {
+    id: message.id,
+    ok: true,
+    data: { task: created, seeded },
+    state: buildWebviewState({ ...deps, currentTaskId: created.id }),
+  };
 }
 
 function handleTaskUpdate(deps: WebviewDispatcherDeps, message: WebviewRequest): WebviewResponse {
@@ -974,6 +1029,8 @@ export async function handleWebviewMessage(deps: WebviewDispatcherDeps, message:
         return handleCaptureHealth(deps, message);
       case WebviewRequestTypes.TaskCreate:
         return handleTaskCreate(deps, message);
+      case WebviewRequestTypes.TaskCreateFromTemplate:
+        return handleTaskCreateFromTemplate(deps, message);
       case WebviewRequestTypes.TaskUpdate:
         return handleTaskUpdate(deps, message);
       case WebviewRequestTypes.TaskSetStatus:

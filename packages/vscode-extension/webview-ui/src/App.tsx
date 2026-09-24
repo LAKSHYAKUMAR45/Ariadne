@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { CSSProperties, FormEvent } from 'react';
-import type { Task, WebviewTabId } from '@host/messages';
+import { TaskTemplates, type Task, type TaskTemplateId, type WebviewTabId } from '@host/messages';
 import type { AriadneBridge } from './bridge';
 import type { WebviewState } from '@host/messages';
 import { DecisionsPanel, ErrorsPanel, QuestionsPanel, TodosPanel } from './panels/EntityPanels';
@@ -40,6 +40,8 @@ interface Banner {
   kind: 'error' | 'info';
   message: string;
 }
+
+type TaskTemplateSelection = 'none' | TaskTemplateId;
 
 const tabs: Array<{ id: TabId; label: string }> = [
   { id: 'overview', label: 'Overview' },
@@ -90,6 +92,7 @@ export default function App({ bridge, initialState }: AppProps) {
   const [isCreatingTask, setIsCreatingTask] = useState(false);
   const [newTaskTitle, setNewTaskTitle] = useState('');
   const [newTaskGoal, setNewTaskGoal] = useState('');
+  const [newTaskTemplate, setNewTaskTemplate] = useState<TaskTemplateSelection>('none');
 
   useEffect(() => {
     const unsubscribe = bridge.subscribe((nextState) => {
@@ -128,6 +131,7 @@ export default function App({ bridge, initialState }: AppProps) {
     () => visibleTasks.filter((task) => taskMatchesFilter(task, taskFilter)),
     [taskFilter, visibleTasks],
   );
+  const showOnboarding = (state?.tasks.length ?? 0) === 0 || !state?.currentTask;
 
   function handlePanelError(message: string): void {
     setBanner(message ? { kind: 'error', message } : null);
@@ -158,15 +162,77 @@ export default function App({ bridge, initialState }: AppProps) {
     setBusyLabel('Creating task…');
     setBanner(null);
     try {
-      await bridge.request('task.create', { title, goal: newTaskGoal.trim() || null });
+      const goal = newTaskGoal.trim() || null;
+      if (newTaskTemplate === 'none') {
+        await bridge.request('task.create', { title, goal });
+      } else {
+        await bridge.request('task.createFromTemplate', {
+          title,
+          goal,
+          templateId: newTaskTemplate,
+        });
+      }
       setNewTaskTitle('');
       setNewTaskGoal('');
+      setNewTaskTemplate('none');
       setIsCreatingTask(false);
     } catch (error) {
       setBanner({ kind: 'error', message: readError(error) });
     } finally {
       setBusyLabel(null);
     }
+  }
+
+  function cancelCreateTask(): void {
+    setIsCreatingTask(false);
+    setNewTaskTemplate('none');
+  }
+
+  function renderCreateTaskForm(): JSX.Element {
+    const submitLabel = newTaskTemplate === 'none' ? 'Create task' : 'Create task from template';
+
+    return (
+      <form onSubmit={(event) => void createTask(event)} aria-label="New task" style={styles.newTaskForm}>
+        <input
+          aria-label="New task title"
+          placeholder="Task title"
+          value={newTaskTitle}
+          onChange={(event) => setNewTaskTitle(event.target.value)}
+          style={styles.filterInput}
+        />
+        <input
+          aria-label="New task goal"
+          placeholder="Task goal (optional)"
+          value={newTaskGoal}
+          onChange={(event) => setNewTaskGoal(event.target.value)}
+          style={styles.filterInput}
+        />
+        <label style={styles.fieldLabel}>
+          <span>Task template</span>
+          <select
+            aria-label="Task template"
+            value={newTaskTemplate}
+            onChange={(event) => setNewTaskTemplate(event.target.value as TaskTemplateSelection)}
+            style={styles.selectInput}
+          >
+            <option value="none">none</option>
+            {Object.values(TaskTemplates).map((template) => (
+              <option key={template.id} value={template.id}>
+                {template.id}
+              </option>
+            ))}
+          </select>
+        </label>
+        <div style={styles.actionsRow}>
+          <button type="submit" style={styles.toolbarButton}>
+            {submitLabel}
+          </button>
+          <button type="button" onClick={cancelCreateTask} style={styles.toolbarButton}>
+            Cancel
+          </button>
+        </div>
+      </form>
+    );
   }
 
   async function navigateToSearchHit(hit: SearchHit): Promise<void> {
@@ -239,7 +305,31 @@ export default function App({ bridge, initialState }: AppProps) {
   const tabContent = (() => {
     switch (activeTab) {
       case 'overview':
-        return state ? (
+        return showOnboarding ? (
+          <section style={styles.onboardingCard} aria-label="Onboarding">
+            <div style={styles.onboardingHeader}>
+              <h3 style={styles.onboardingTitle}>Start your first Ariadne task</h3>
+              <p style={styles.subtleText}>
+                Create a task from scratch or use a template to seed the work with the right starting prompts.
+              </p>
+            </div>
+            <div style={styles.actionsRow}>
+              <button type="button" onClick={() => setActiveTab('sync')} style={styles.toolbarButton}>
+                Import or sync tasks
+              </button>
+              <button type="button" onClick={() => setActiveTab('context')} style={styles.toolbarButton}>
+                Open context help
+              </button>
+            </div>
+            {isCreatingTask ? (
+              renderCreateTaskForm()
+            ) : (
+              <button type="button" onClick={() => setIsCreatingTask(true)} style={styles.primaryButton}>
+                Create task
+              </button>
+            )}
+          </section>
+        ) : state ? (
           <OverviewPanel
             state={state}
             bridge={bridge}
@@ -368,41 +458,18 @@ export default function App({ bridge, initialState }: AppProps) {
               aria-label="Filter tasks"
               style={styles.filterInput}
             />
-            {isCreatingTask ? (
-              <form onSubmit={(event) => void createTask(event)} aria-label="New task" style={styles.newTaskForm}>
-                <input
-                  aria-label="New task title"
-                  placeholder="Task title"
-                  value={newTaskTitle}
-                  onChange={(event) => setNewTaskTitle(event.target.value)}
-                  style={styles.filterInput}
-                />
-                <input
-                  aria-label="New task goal"
-                  placeholder="Task goal (optional)"
-                  value={newTaskGoal}
-                  onChange={(event) => setNewTaskGoal(event.target.value)}
-                  style={styles.filterInput}
-                />
-                <div style={styles.actionsRow}>
-                  <button type="submit" style={styles.toolbarButton}>
-                    Create task
-                  </button>
-                  <button type="button" onClick={() => setIsCreatingTask(false)} style={styles.toolbarButton}>
-                    Cancel
-                  </button>
-                </div>
-              </form>
-            ) : (
+            {isCreatingTask && !showOnboarding ? (
+              renderCreateTaskForm()
+            ) : !showOnboarding ? (
               <button type="button" onClick={() => setIsCreatingTask(true)} style={styles.toolbarButton}>
                 New task
               </button>
-            )}
+            ) : null}
           </div>
 
           <div style={styles.taskList}>
             {filteredTasks.length === 0 ? (
-              <p style={styles.emptyState}>No tasks match the current filter.</p>
+              <p style={styles.emptyState}>{showOnboarding ? 'No tasks yet. Create one or sync an existing task.' : 'No tasks match the current filter.'}</p>
             ) : (
               filteredTasks.map((task) => {
                 const active = task.id === state?.currentTaskId;
@@ -549,6 +616,23 @@ const styles: Record<string, CSSProperties> = {
   actionsRow: {
     display: 'flex',
     gap: '0.5rem',
+    flexWrap: 'wrap',
+  },
+  fieldLabel: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '0.375rem',
+    color: '#cbd5e1',
+    fontSize: '0.875rem',
+  },
+  selectInput: {
+    width: '100%',
+    border: '1px solid #334155',
+    borderRadius: '0.5rem',
+    background: '#0f172a',
+    color: '#e2e8f0',
+    padding: '0.5rem 0.75rem',
+    boxSizing: 'border-box',
   },
   taskList: {
     display: 'flex',
@@ -578,6 +662,10 @@ const styles: Record<string, CSSProperties> = {
   emptyState: {
     color: '#94a3b8',
     margin: 0,
+  },
+  subtleText: {
+    margin: 0,
+    color: '#cbd5e1',
   },
   content: {
     display: 'flex',
@@ -610,5 +698,32 @@ const styles: Record<string, CSSProperties> = {
   },
   sectionTitle: {
     marginTop: 0,
+  },
+  onboardingCard: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '1rem',
+    padding: '1rem',
+    border: '1px solid #334155',
+    borderRadius: '0.75rem',
+    background: '#0f172a',
+  },
+  onboardingHeader: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '0.5rem',
+  },
+  onboardingTitle: {
+    margin: 0,
+    fontSize: '1.25rem',
+  },
+  primaryButton: {
+    border: '1px solid #2563eb',
+    background: '#2563eb',
+    color: '#eff6ff',
+    borderRadius: '0.5rem',
+    padding: '0.625rem 1rem',
+    cursor: 'pointer',
+    alignSelf: 'flex-start',
   },
 };
