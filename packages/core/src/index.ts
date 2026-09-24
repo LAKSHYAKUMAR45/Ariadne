@@ -145,3 +145,21 @@ export type {
   AriadneEventName,
   PluginHooks,
 } from './PluginRegistry.js';
+export { createKnowledgeId, normalizeKnowledgePath } from './knowledge/KnowledgeIds.js';
+export type {
+  KnowledgeProjectId,
+  KnowledgeSourceId,
+  KnowledgePageId,
+  KnowledgeJobId,
+  KnowledgeReviewId,
+  KnowledgeGraphNodeId,
+  KnowledgePageType,
+  KnowledgeSourceKind,
+  KnowledgeJobStatus,
+  KnowledgeReviewStatus,
+  KnowledgeEdgeEvidence,
+  KnowledgeProvenanceKind,
+  KnowledgeProvenanceRef,
+  KnowledgePageRecord,
+  KnowledgeSourceRecord,
+} from './knowledge/KnowledgeTypes.js';
