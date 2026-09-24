@@ -25,12 +25,29 @@ interface SyncActionState {
   output: string;
 }
 
+interface SyncProfileListProps {
+  profiles: SyncProfile[];
+}
+
 const ACTION_LABELS: Record<SyncActionKey, string> = {
   profileList: 'profile list',
   push: 'push local changes',
   pull: 'pull remote changes',
   listRemote: 'list remote tasks',
 };
+
+function SyncProfileList({ profiles }: SyncProfileListProps) {
+  return (
+    <ul>
+      {profiles.map((profile) => (
+        <li key={`${profile.name}:${profile.serverUrl ?? ''}`}>
+          <span>{profile.name}</span>
+          {profile.serverUrl ? <span>{` — ${profile.serverUrl}`}</span> : null}
+        </li>
+      ))}
+    </ul>
+  );
+}
 
 export default function SyncPanel({ bridge }: SyncPanelProps) {
   const [profiles, setProfiles] = useState<SyncProfile[]>([]);
@@ -124,8 +141,7 @@ export default function SyncPanel({ bridge }: SyncPanelProps) {
       {currentProfiles[0] ? (
         <section aria-label="Current sync profile">
           <h3>Current profile</h3>
-          <p>{currentProfiles[0].name}</p>
-          {currentProfiles[0].serverUrl ? <p>{currentProfiles[0].serverUrl}</p> : null}
+          <SyncProfileList profiles={currentProfiles} />
         </section>
       ) : (
         <p>No sync profiles detected.</p>
@@ -136,14 +152,7 @@ export default function SyncPanel({ bridge }: SyncPanelProps) {
       {otherProfiles.length > 0 ? (
         <section aria-label="Other sync profiles">
           <h3>Other profiles</h3>
-          <ul>
-            {otherProfiles.map((profile) => (
-              <li key={profile.name}>
-                <span>{profile.name}</span>
-                {profile.serverUrl ? <span>{` — ${profile.serverUrl}`}</span> : null}
-              </li>
-            ))}
-          </ul>
+          <SyncProfileList profiles={otherProfiles} />
         </section>
       ) : null}
 

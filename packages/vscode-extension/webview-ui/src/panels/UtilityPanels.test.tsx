@@ -878,6 +878,35 @@ describe('UtilityPanels', () => {
     expect(await screen.findByText(/Run `ariadne sync login`/)).toBeInTheDocument();
   });
 
+  it('keeps multiple current profiles visible while warning about conflicting current markers', async () => {
+    const harness = createBridge({
+      request: vi.fn(async (type: string) => {
+        if (type === 'sync.profileList') {
+          return {
+            profiles: [
+              { name: 'default', current: true, serverUrl: 'https://sync.example' },
+              { name: 'staging', current: true, serverUrl: 'https://staging.example' },
+              { name: 'backup', current: false, serverUrl: 'https://backup.example' },
+            ],
+            output: [
+              '* default https://sync.example',
+              '* staging https://staging.example',
+              '  backup https://backup.example',
+            ].join('\n'),
+          };
+        }
+        return {};
+      }) as BridgeHarness['request'],
+    });
+
+    render(<SyncPanel bridge={harness} />);
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Multiple current profiles reported.');
+    expect(screen.getByRole('region', { name: 'Current sync profile' })).toHaveTextContent('default');
+    expect(screen.getByRole('region', { name: 'Current sync profile' })).toHaveTextContent('staging');
+    expect(screen.getByRole('region', { name: 'Other sync profiles' })).toHaveTextContent('backup');
+  });
+
   it('runs a graphify query and displays bounded output', async () => {
     const harness = createBridge({
       request: vi.fn(async (type: string) => {
