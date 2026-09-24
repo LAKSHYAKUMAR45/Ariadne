@@ -56,12 +56,6 @@ export default function ActivityPanel({ bridge, taskId, onNavigate, onBusy, onEr
   }, [taskId]);
 
   useEffect(() => {
-    if (!taskId) {
-      setItems([]);
-      setHealth(null);
-      return;
-    }
-
     const generation = ++generationRef.current;
     onError('');
     onBusy('Loading activity…');

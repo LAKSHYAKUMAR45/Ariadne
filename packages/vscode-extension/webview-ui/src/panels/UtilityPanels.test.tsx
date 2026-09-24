@@ -112,6 +112,16 @@ type BridgeHarness = AriadneBridge & {
   request: ReturnType<typeof vi.fn>;
 };
 
+function createDeferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((nextResolve, nextReject) => {
+    resolve = nextResolve;
+    reject = nextReject;
+  });
+  return { promise, resolve, reject };
+}
+
 function createBridge(overrides: Partial<BridgeHarness> = {}): BridgeHarness {
   const request = vi.fn(async (type: string, payload?: unknown) => {
     switch (type) {
@@ -326,6 +336,211 @@ describe('UtilityPanels', () => {
 
     await userEvent.click(screen.getByRole('button', { name: 'Open as Markdown' }));
     await waitFor(() => expect(harness.request).toHaveBeenCalledWith('context.open', { markdown: '# Context\nUtility panels' }));
+  });
+
+  it('does not render a stale context preview after the token budget changes', async () => {
+    const firstPreview = createDeferred<{
+      preview: {
+        tokenBudget: number;
+        markdown: string;
+        sections: Array<{ id: string; label: string; count: number }>;
+        context: {
+          taskId: string;
+          goal: string | null;
+          branch: string | null;
+          workspaceRoot: string;
+          latestSummary: string;
+          openQuestions: never[];
+          openTodos: never[];
+          blockedTodos: never[];
+          unresolvedErrors: never[];
+          recentFiles: never[];
+          recentCommits: never[];
+          recentCommands: never[];
+          decisions: never[];
+          truncated: Record<string, never>;
+        };
+      };
+    }>();
+
+    const harness = createBridge({
+      request: vi.fn(async (type: string, payload?: unknown) => {
+        if (type === 'context.preview') {
+          const tokenBudget = (payload as { tokenBudget: number }).tokenBudget;
+          if (tokenBudget === 4000) {
+            return firstPreview.promise;
+          }
+          return {
+            preview: {
+              tokenBudget,
+              markdown: `# Context\nBudget ${tokenBudget}`,
+              sections: [{ id: 'summary', label: 'Summary', count: 1 }],
+              context: {
+                taskId: task.id,
+                goal: task.goal,
+                branch: task.branch,
+                workspaceRoot: '/repo',
+                latestSummary: 'Session summary',
+                openQuestions: [],
+                openTodos: [],
+                blockedTodos: [],
+                unresolvedErrors: [],
+                recentFiles: [],
+                recentCommits: [],
+                recentCommands: [],
+                decisions: [],
+                truncated: {},
+              },
+            },
+          };
+        }
+        return {};
+      }) as BridgeHarness['request'],
+    });
+
+    render(<ContextPanel bridge={harness} taskId={task.id} onBusy={() => undefined} onError={() => undefined} />);
+
+    await userEvent.click(screen.getByRole('button', { name: 'Preview context' }));
+    await userEvent.clear(screen.getByLabelText('Token budget'));
+    await userEvent.type(screen.getByLabelText('Token budget'), '1200');
+
+    firstPreview.resolve({
+      preview: {
+        tokenBudget: 4000,
+        markdown: '# Context\nBudget 4000',
+        sections: [{ id: 'summary', label: 'Summary', count: 1 }],
+        context: {
+          taskId: task.id,
+          goal: task.goal,
+          branch: task.branch,
+          workspaceRoot: '/repo',
+          latestSummary: 'Session summary',
+          openQuestions: [],
+          openTodos: [],
+          blockedTodos: [],
+          unresolvedErrors: [],
+          recentFiles: [],
+          recentCommits: [],
+          recentCommands: [],
+          decisions: [],
+          truncated: {},
+        },
+      },
+    });
+
+    await waitFor(() => expect(screen.queryByText('Budget 4000')).not.toBeInTheDocument());
+    expect(screen.getByText('Preview the current task handoff package to inspect or share it.')).toBeInTheDocument();
+  });
+
+  it('clears busy when an in-flight context preview is invalidated by a budget change', async () => {
+    const firstPreview = createDeferred<{
+      preview: {
+        tokenBudget: number;
+        markdown: string;
+        sections: Array<{ id: string; label: string; count: number }>;
+        context: {
+          taskId: string;
+          goal: string | null;
+          branch: string | null;
+          workspaceRoot: string;
+          latestSummary: string;
+          openQuestions: never[];
+          openTodos: never[];
+          blockedTodos: never[];
+          unresolvedErrors: never[];
+          recentFiles: never[];
+          recentCommits: never[];
+          recentCommands: never[];
+          decisions: never[];
+          truncated: Record<string, never>;
+        };
+      };
+    }>();
+    const onBusy = vi.fn();
+
+    const harness = createBridge({
+      request: vi.fn(async (type: string) => {
+        if (type === 'context.preview') {
+          return firstPreview.promise;
+        }
+        return {};
+      }) as BridgeHarness['request'],
+    });
+
+    render(<ContextPanel bridge={harness} taskId={task.id} onBusy={onBusy} onError={() => undefined} />);
+
+    await userEvent.click(screen.getByRole('button', { name: 'Preview context' }));
+    await waitFor(() => expect(onBusy).toHaveBeenCalledWith('Previewing context…'));
+
+    await userEvent.clear(screen.getByLabelText('Token budget'));
+    await userEvent.type(screen.getByLabelText('Token budget'), '1200');
+
+    await waitFor(() => expect(onBusy).toHaveBeenLastCalledWith(undefined));
+
+    firstPreview.resolve({
+      preview: {
+        tokenBudget: 4000,
+        markdown: '# Context\nBudget 4000',
+        sections: [{ id: 'summary', label: 'Summary', count: 1 }],
+        context: {
+          taskId: task.id,
+          goal: task.goal,
+          branch: task.branch,
+          workspaceRoot: '/repo',
+          latestSummary: 'Session summary',
+          openQuestions: [],
+          openTodos: [],
+          blockedTodos: [],
+          unresolvedErrors: [],
+          recentFiles: [],
+          recentCommits: [],
+          recentCommands: [],
+          decisions: [],
+          truncated: {},
+        },
+      },
+    });
+
+    await waitFor(() => expect(screen.queryByText('Budget 4000')).not.toBeInTheDocument());
+  });
+
+  it('renders capture health warnings when no current task is selected', async () => {
+    const harness = createBridge({
+      request: vi.fn(async (type: string) => {
+        if (type === 'activity.list') {
+          return { items: [] };
+        }
+        if (type === 'capture.health') {
+          return {
+            health: {
+              workspaceRoot: '/repo',
+              passiveCaptureEnabled: false,
+              shellIntegrationAvailable: false,
+              gitExtensionAvailable: false,
+              branchMatches: 'unknown',
+              unresolvedErrors: 0,
+              warnings: ['No current task is selected for this workspace.'],
+            },
+          };
+        }
+        return {};
+      }) as BridgeHarness['request'],
+    });
+
+    render(
+      <ActivityPanel
+        bridge={harness}
+        taskId={undefined}
+        onNavigate={() => undefined}
+        onBusy={() => undefined}
+        onError={() => undefined}
+      />,
+    );
+
+    expect(await screen.findByText('Passive capture disabled')).toBeInTheDocument();
+    expect(screen.getByText('Branch unknown')).toBeInTheDocument();
+    expect(screen.getByText('No current task is selected for this workspace.')).toBeInTheDocument();
+    expect(screen.getByText('No current task selected')).toBeInTheDocument();
   });
 
   it('highlights the checkpoint matching highlightCheckpointId', () => {

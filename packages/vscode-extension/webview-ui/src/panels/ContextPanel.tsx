@@ -25,10 +25,23 @@ export default function ContextPanel({ bridge, taskId, onBusy, onError }: Contex
   const [budget, setBudget] = useState('4000');
   const [preview, setPreview] = useState<ContextPreview | null>(null);
   const generationRef = useRef(0);
+  const activeRequestGenerationRef = useRef<number | null>(null);
+
+  function invalidatePreview(): void {
+    const nextGeneration = generationRef.current + 1;
+    generationRef.current = nextGeneration;
+    setPreview(null);
+    if (
+      activeRequestGenerationRef.current !== null &&
+      activeRequestGenerationRef.current < nextGeneration
+    ) {
+      activeRequestGenerationRef.current = null;
+      onBusy(undefined);
+    }
+  }
 
   useEffect(() => {
-    generationRef.current += 1;
-    setPreview(null);
+    invalidatePreview();
   }, [taskId]);
 
   async function previewContext(): Promise<void> {
@@ -39,6 +52,7 @@ export default function ContextPanel({ bridge, taskId, onBusy, onError }: Contex
     }
 
     const generation = ++generationRef.current;
+    activeRequestGenerationRef.current = generation;
     onError('');
     onBusy('Previewing context…');
 
@@ -50,7 +64,8 @@ export default function ContextPanel({ bridge, taskId, onBusy, onError }: Contex
       if (generation !== generationRef.current) return;
       onError(formatError(error));
     } finally {
-      if (generation !== generationRef.current) return;
+      if (activeRequestGenerationRef.current !== generation) return;
+      activeRequestGenerationRef.current = null;
       onBusy(undefined);
     }
   }
@@ -98,7 +113,10 @@ export default function ContextPanel({ bridge, taskId, onBusy, onError }: Contex
             min="1"
             step="1"
             value={budget}
-            onChange={(event) => setBudget(event.target.value)}
+            onChange={(event) => {
+              setBudget(event.target.value);
+              invalidatePreview();
+            }}
             style={styles.input}
           />
         </label>
