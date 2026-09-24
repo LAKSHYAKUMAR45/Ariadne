@@ -42,6 +42,12 @@ interface Banner {
   message: string;
 }
 
+interface FilesNavigationHighlight {
+  path?: string;
+  captureId?: string;
+  commitSha?: string;
+}
+
 type TaskTemplateSelection = 'none' | TaskTemplateId;
 
 const tabs: Array<{ id: TabId; label: string }> = [
@@ -91,6 +97,7 @@ export default function App({ bridge, initialState }: AppProps) {
   const [allWorkspaces, setAllWorkspaces] = useState(false);
   const [visibleTasks, setVisibleTasks] = useState<Task[]>(initialState?.tasks ?? []);
   const [highlightId, setHighlightId] = useState<string | undefined>(undefined);
+  const [filesHighlight, setFilesHighlight] = useState<FilesNavigationHighlight>({});
   const [isCreatingTask, setIsCreatingTask] = useState(false);
   const [newTaskTitle, setNewTaskTitle] = useState('');
   const [newTaskGoal, setNewTaskGoal] = useState('');
@@ -127,6 +134,7 @@ export default function App({ bridge, initialState }: AppProps) {
 
   useEffect(() => {
     setHighlightId(undefined);
+    setFilesHighlight({});
   }, [state?.currentTaskId]);
 
   const filteredTasks = useMemo(
@@ -243,6 +251,22 @@ export default function App({ bridge, initialState }: AppProps) {
       const switched = await switchTask(hit.taskId);
       if (!switched) return;
     }
+
+    if (hit.category === 'file') {
+      setHighlightId(undefined);
+      setFilesHighlight({ path: hit.id });
+      setActiveTab('files');
+      return;
+    }
+
+    if (hit.category === 'commit') {
+      setHighlightId(undefined);
+      setFilesHighlight({ commitSha: hit.id });
+      setActiveTab('files');
+      return;
+    }
+
+    setFilesHighlight({});
     setActiveTab(categoryTabMap[hit.category]);
     setHighlightId(hit.id);
   }
@@ -250,12 +274,20 @@ export default function App({ bridge, initialState }: AppProps) {
   function navigateToPanel(target: NavigationTarget): void {
     if (!isTabId(target.tabId)) return;
     setActiveTab(target.tabId);
+    if (target.tabId === 'files') {
+      setHighlightId(undefined);
+      setFilesHighlight({ captureId: target.entityId });
+      return;
+    }
+
+    setFilesHighlight({});
     setHighlightId(target.entityId);
   }
 
   function selectTab(tabId: TabId): void {
     setActiveTab(tabId);
     setHighlightId(undefined);
+    setFilesHighlight({});
   }
 
   async function toggleAllWorkspaces(nextValue: boolean): Promise<void> {
@@ -421,7 +453,17 @@ export default function App({ bridge, initialState }: AppProps) {
           <p>No task selected.</p>
         );
       case 'files':
-        return state ? <FilesPanel bridge={bridge} captures={state.fileCaptures} /> : <p>No task selected.</p>;
+        return state ? (
+          <FilesPanel
+            bridge={bridge}
+            captures={state.fileCaptures}
+            highlightPath={filesHighlight.path}
+            highlightCaptureId={filesHighlight.captureId}
+            highlightCommitSha={filesHighlight.commitSha}
+          />
+        ) : (
+          <p>No task selected.</p>
+        );
       case 'search':
         return <SearchPanel bridge={bridge} initialResults={state?.searchResults ?? []} onNavigate={(hit) => void navigateToSearchHit(hit)} />;
       case 'sync':

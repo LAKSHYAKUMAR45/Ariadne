@@ -23,6 +23,18 @@ export interface SearchHit {
   createdAt: string;
 }
 
+function actionLabel(hit: SearchHit): string {
+  if (hit.category === 'file') {
+    return `Open file ${hit.id}`;
+  }
+
+  if (hit.category === 'commit') {
+    return `Open commit ${hit.id}`;
+  }
+
+  return `Open ${hit.category} result: ${hit.text}`;
+}
+
 function flattenResults(results: SearchResult[]): SearchHit[] {
   return results.flatMap((result) =>
     result.matches.map((match) => ({
@@ -106,24 +118,28 @@ export default function SearchPanel({ bridge, initialResults, onNavigate }: Sear
             <section key={group.category} aria-label={group.category}>
               <h4>{group.category}</h4>
               <ul>
-                {group.hits.map((hit, index) => (
-                  <li key={`${hit.taskId}-${hit.category}-${hit.createdAt}-${index}`}>
-                    <button
-                      type="button"
-                      onClick={() => onNavigate?.(hit)}
-                      aria-label={`Open ${hit.category} result: ${hit.text}`}
-                      style={{ display: 'block', textAlign: 'left', width: '100%' }}
-                    >
-                      <span style={{ display: 'block' }}>{hit.text}</span>
-                      <span style={{ display: 'block' }}>Task: {hit.taskId}</span>
-                      <span style={{ display: 'block' }}>
-                        <time dateTime={hit.createdAt}>{hit.createdAt}</time>
-                      </span>
-                      <span style={{ display: 'block' }}>{hit.taskTitle}</span>
-                      <span style={{ display: 'block' }}>{hit.taskStatus}</span>
-                    </button>
-                  </li>
-                ))}
+                {group.hits.map((hit, index) => {
+                  const label = actionLabel(hit);
+                  return (
+                    <li key={`${hit.taskId}-${hit.category}-${hit.createdAt}-${index}`}>
+                      <button
+                        type="button"
+                        onClick={() => onNavigate?.(hit)}
+                        aria-label={label}
+                        style={{ display: 'block', textAlign: 'left', width: '100%' }}
+                      >
+                        <span style={{ display: 'block' }}>{label}</span>
+                        {label !== hit.text ? <span style={{ display: 'block' }}>{hit.text}</span> : null}
+                        <span style={{ display: 'block' }}>Task: {hit.taskId}</span>
+                        <span style={{ display: 'block' }}>
+                          <time dateTime={hit.createdAt}>{hit.createdAt}</time>
+                        </span>
+                        <span style={{ display: 'block' }}>{hit.taskTitle}</span>
+                        <span style={{ display: 'block' }}>{hit.taskStatus}</span>
+                      </button>
+                    </li>
+                  );
+                })}
               </ul>
             </section>
           ))

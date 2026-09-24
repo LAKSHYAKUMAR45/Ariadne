@@ -3,7 +3,7 @@ import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 import App from './App';
 import type { AriadneBridge, AriadneRequestType } from './bridge';
-import type { Task, WebviewState } from '@host/messages';
+import type { SearchResult, Task, TaskFileCaptureWithEntries, WebviewState } from '@host/messages';
 
 const task1: Task = {
   id: 'task-1',
@@ -30,6 +30,63 @@ const task2: Task = {
   remoteId: null,
   syncedAt: null,
 };
+
+const fileCaptures: TaskFileCaptureWithEntries[] = [
+  {
+    id: 'capture-1',
+    taskId: task1.id,
+    trigger: 'explicit',
+    gitCommitSha: null,
+    checkpointId: null,
+    createdAt: '2026-09-23T00:00:00.000Z',
+    syncedAt: null,
+    failedAt: null,
+    failureCode: null,
+    entries: [
+      {
+        captureId: 'capture-1',
+        path: 'src/App.tsx',
+        content: 'console.log("updated");\n',
+        unifiedDiff: ['@@ -1,1 +1,1 @@', '-console.log("old");', '+console.log("updated");'].join('\n'),
+        byteLength: 24,
+        contentSha256: 'sha256-1',
+      },
+    ],
+  },
+  {
+    id: 'capture-2',
+    taskId: task1.id,
+    trigger: 'git_commit',
+    gitCommitSha: 'abc1234',
+    checkpointId: null,
+    createdAt: '2026-09-23T00:01:00.000Z',
+    syncedAt: '2026-09-23T00:02:00.000Z',
+    failedAt: null,
+    failureCode: null,
+    entries: [
+      {
+        captureId: 'capture-2',
+        path: 'src/FilesPanel.tsx',
+        content: 'export function FilesPanel() {}\n',
+        unifiedDiff: ['@@ -1,0 +1,1 @@', '+export function FilesPanel() {}'].join('\n'),
+        byteLength: 32,
+        contentSha256: 'sha256-2',
+      },
+    ],
+  },
+];
+
+const fileAndCommitSearchResults: SearchResult[] = [
+  {
+    taskId: task1.id,
+    taskTitle: task1.title,
+    taskStatus: task1.status,
+    matches: [
+      { category: 'file', id: 'src/App.tsx', text: 'src/App.tsx', createdAt: '2026-09-23T00:00:00.000Z' },
+      { category: 'commit', id: 'abc1234', text: 'abc1234', createdAt: '2026-09-23T00:01:00.000Z' },
+    ],
+  },
+];
 
 const baseState: WebviewState = {
   workspaceRoot: '/repo',
@@ -270,6 +327,32 @@ describe('App', () => {
     expect(screen.getByRole('button', { name: 'Todos' })).toHaveAttribute('aria-pressed', 'true');
     const highlighted = document.querySelector('[data-entity-id="todo-1"]');
     expect(highlighted).not.toBeNull();
+  });
+
+  it('routes file and commit search hits to the Files tab', async () => {
+    const harness = bridge();
+    render(
+      <App
+        bridge={harness}
+        initialState={{
+          ...baseState,
+          fileCaptures,
+          searchResults: fileAndCommitSearchResults,
+        }}
+      />,
+    );
+
+    await userEvent.click(screen.getByRole('button', { name: 'Search' }));
+    await userEvent.click(screen.getByRole('button', { name: /Open file src\/App\.tsx/i }));
+
+    expect(screen.getByRole('button', { name: 'Files' })).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByRole('button', { name: 'Open src/App.tsx' })).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole('button', { name: 'Search' }));
+    await userEvent.click(screen.getByRole('button', { name: /Open commit abc1234/i }));
+
+    expect(screen.getByRole('button', { name: 'Files' })).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByText(/Commit: abc1234/)).toBeInTheDocument();
   });
 
   it('shows an error banner when a bridge action fails', async () => {

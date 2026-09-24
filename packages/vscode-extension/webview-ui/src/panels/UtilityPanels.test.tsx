@@ -70,6 +70,48 @@ const captures: TaskFileCaptureWithEntries[] = [
       },
     ],
   },
+  {
+    id: 'capture-2',
+    taskId: task.id,
+    trigger: 'checkpoint',
+    gitCommitSha: null,
+    checkpointId: 'checkpoint-1',
+    createdAt: '2026-09-23T10:09:00.000Z',
+    syncedAt: null,
+    failedAt: '2026-09-23T10:09:30.000Z',
+    failureCode: 'capture_failed',
+    entries: [
+      {
+        captureId: 'capture-2',
+        path: 'src/SearchPanel.tsx',
+        content: 'export function SearchPanel() {}\n',
+        unifiedDiff: ['@@ -1,0 +1,1 @@', '+export function SearchPanel() {}'].join('\n'),
+        byteLength: 33,
+        contentSha256: 'sha256-2',
+      },
+    ],
+  },
+  {
+    id: 'capture-3',
+    taskId: task.id,
+    trigger: 'git_commit',
+    gitCommitSha: 'abc1234',
+    checkpointId: null,
+    createdAt: '2026-09-23T10:10:00.000Z',
+    syncedAt: '2026-09-23T10:10:30.000Z',
+    failedAt: null,
+    failureCode: null,
+    entries: [
+      {
+        captureId: 'capture-3',
+        path: 'src/FilesPanel.tsx',
+        content: 'export function FilesPanel() {}\n',
+        unifiedDiff: ['@@ -1,0 +1,1 @@', '+export function FilesPanel() {}'].join('\n'),
+        byteLength: 32,
+        contentSha256: 'sha256-3',
+      },
+    ],
+  },
 ];
 
 const searchResults: SearchResult[] = [
@@ -89,6 +131,12 @@ const searchResults: SearchResult[] = [
         id: 'src/App.tsx',
         text: 'src/App.tsx',
         createdAt: '2026-09-23T10:08:00.000Z',
+      },
+      {
+        category: 'commit',
+        id: 'abc1234',
+        text: 'abc1234',
+        createdAt: '2026-09-23T10:10:00.000Z',
       },
     ],
   },
@@ -651,6 +699,17 @@ describe('UtilityPanels', () => {
     expect(screen.getByLabelText('Unified diff')).toHaveTextContent('+console.log("updated");');
   });
 
+  it('filters captured files and opens an existing captured file', async () => {
+    const harness = createBridge();
+    render(<FilesPanel bridge={harness} captures={captures} highlightPath="src/App.tsx" />);
+
+    await userEvent.type(screen.getByRole('textbox', { name: 'Filter captured files' }), 'App');
+    expect(screen.getByText('src/App.tsx')).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: 'Open src/App.tsx' }));
+
+    await waitFor(() => expect(harness.request).toHaveBeenCalledWith('file.open', { path: 'src/App.tsx' }));
+  });
+
   it('submits search queries and groups results by category', async () => {
     const harness = createBridge();
     render(<SearchPanel bridge={harness} initialResults={[]} />);
@@ -695,6 +754,18 @@ describe('UtilityPanels', () => {
     expect(onNavigate).toHaveBeenCalledWith(
       expect.objectContaining({ id: 'decision-1', category: 'decision', taskId: task.id }),
     );
+  });
+
+  it('labels file and commit search hits as navigable to Files', async () => {
+    const onNavigate = vi.fn();
+    const harness = createBridge();
+    render(<SearchPanel bridge={harness} initialResults={searchResults} onNavigate={onNavigate} />);
+
+    await userEvent.click(screen.getByRole('button', { name: /Open file src\/App\.tsx/i }));
+    expect(onNavigate).toHaveBeenCalledWith(expect.objectContaining({ category: 'file', id: 'src/App.tsx' }));
+
+    await userEvent.click(screen.getByRole('button', { name: /Open commit abc1234/i }));
+    expect(onNavigate).toHaveBeenCalledWith(expect.objectContaining({ category: 'commit', id: 'abc1234' }));
   });
 
   it('submits all-workspaces searches when the toggle is enabled', async () => {
