@@ -69,6 +69,7 @@ export const WebviewRequestTypes = {
   SyncPull: 'sync.pull',
   SyncListRemote: 'sync.listRemote',
   ExportMarkdown: 'export.markdown',
+  GraphifyRun: 'graphify.run',
 } as const;
 
 export type WebviewRequestType = (typeof WebviewRequestTypes)[keyof typeof WebviewRequestTypes];
@@ -220,6 +221,23 @@ export interface ReviewSummary {
   canMarkDone: boolean;
 }
 
+export interface GraphifyRequestPayload {
+  mode: 'update' | 'query' | 'path' | 'explain';
+  query?: string;
+  from?: string;
+  to?: string;
+  target?: string;
+}
+
+export interface GraphifyRunResult {
+  available: boolean;
+  args: string[];
+  output: string;
+  exitCode: number;
+  checkpointSummary?: string;
+  truncated: boolean;
+}
+
 export type WebviewRequest =
   | (WebviewRequestBase<'state.get' | 'activity.list' | 'capture.health' | 'review.get' | 'tasks.list' | 'sync.push' | 'sync.listRemote' | 'export.markdown'> & {
       payload?: undefined;
@@ -251,7 +269,8 @@ export type WebviewRequest =
   | (WebviewRequestBase<'question.create' | 'question.update' | 'question.resolve' | 'question.reopen' | 'question.delete'> & {
       payload: Record<string, unknown>;
     })
-  | (WebviewRequestBase<'files.list' | 'files.getCapture' | 'search.run' | 'sync.pull'> & { payload?: Record<string, unknown> });
+  | (WebviewRequestBase<'files.list' | 'files.getCapture' | 'search.run' | 'sync.pull'> & { payload?: Record<string, unknown> })
+  | (WebviewRequestBase<'graphify.run'> & { payload: GraphifyRequestPayload });
 
 export interface WebviewCounts {
   pendingTodos: number;
@@ -302,6 +321,9 @@ export interface WebviewDispatcherDeps {
   copyText?: (text: string) => Promise<void> | void;
   openMarkdown?: (title: string, markdown: string) => Promise<void> | void;
   openWorkspaceFile?: (relativePath: string) => Promise<void> | void;
+  graphify?: {
+    run: (payload: GraphifyRequestPayload, workspaceRoot?: string) => GraphifyRunResult;
+  };
 }
 
 export type WebviewResponse =

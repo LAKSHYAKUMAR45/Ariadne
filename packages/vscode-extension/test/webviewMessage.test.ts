@@ -333,6 +333,65 @@ describe('handleWebviewMessage', () => {
     store.close();
   });
 
+  it('runs graphify through an injected host action and records a checkpoint', async () => {
+    const { store, task } = makeStore();
+    const runGraphify = vi.fn(() => ({
+      available: true,
+      args: ['query', 'how does auth work'],
+      output: 'Auth uses middleware.',
+      exitCode: 0,
+      checkpointSummary: 'Graphify query completed: how does auth work',
+      truncated: false,
+    }));
+
+    const response = await handleWebviewMessage(
+      { store, currentTaskId: task.id, workspaceRoot: '/repo', graphify: { run: runGraphify } },
+      { id: 'graphify', type: 'graphify.run', payload: { mode: 'query', query: 'how does auth work' } } as never,
+    );
+
+    expect(response.ok).toBe(true);
+    expect(runGraphify).toHaveBeenCalledWith({ mode: 'query', query: 'how does auth work' }, '/repo');
+    expect(response).toMatchObject({
+      data: {
+        result: {
+          available: true,
+          output: 'Auth uses middleware.',
+          exitCode: 0,
+          truncated: false,
+        },
+      },
+    });
+    expect(store.listCheckpoints(task.id).some((checkpoint) => checkpoint.summary.includes('Graphify query completed'))).toBe(true);
+    store.close();
+  });
+
+  it('does not checkpoint failed graphify runs', async () => {
+    const { store, task } = makeStore();
+    const before = store.listCheckpoints(task.id).length;
+    const response = await handleWebviewMessage(
+      {
+        store,
+        currentTaskId: task.id,
+        workspaceRoot: '/repo',
+        graphify: {
+          run: vi.fn(() => ({
+            available: true,
+            args: ['query', 'bad'],
+            output: 'boom',
+            exitCode: 1,
+            checkpointSummary: 'Graphify failed',
+            truncated: false,
+          })),
+        },
+      },
+      { id: 'graphify-fail', type: 'graphify.run', payload: { mode: 'query', query: 'bad' } } as never,
+    );
+
+    expect(response.ok).toBe(true);
+    expect(store.listCheckpoints(task.id)).toHaveLength(before);
+    store.close();
+  });
+
   it('returns empty activity and unknown health when no task is selected', async () => {
     const store = new TaskStore(':memory:');
 

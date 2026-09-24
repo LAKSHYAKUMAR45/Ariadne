@@ -21,6 +21,7 @@ import {
   type ActivityItem,
   type CaptureHealth,
   type ContextSectionSummary,
+  type GraphifyRequestPayload,
   type ReviewCheck,
   type ReviewSummary,
   type SyncActions,
@@ -1170,6 +1171,64 @@ function handleExportMarkdown(deps: WebviewDispatcherDeps, message: WebviewReque
   };
 }
 
+function parseGraphifyRequestPayload(message: WebviewRequest): GraphifyRequestPayload | WebviewResponse {
+  const payload = getPayload(message);
+  const mode = payload.mode;
+  if (mode !== 'update' && mode !== 'query' && mode !== 'path' && mode !== 'explain') {
+    return errorResponse(message.id, 'graphify.run requires payload.mode to be update, query, path, or explain.');
+  }
+
+  switch (mode) {
+    case 'update':
+      return { mode };
+    case 'query': {
+      const query = readString(payload.query);
+      if (!query) {
+        return errorResponse(message.id, 'graphify.run query mode requires payload.query.');
+      }
+      return { mode, query };
+    }
+    case 'path': {
+      const from = readString(payload.from);
+      const to = readString(payload.to);
+      if (!from || !to) {
+        return errorResponse(message.id, 'graphify.run path mode requires payload.from and payload.to.');
+      }
+      return { mode, from, to };
+    }
+    case 'explain': {
+      const target = readString(payload.target);
+      if (!target) {
+        return errorResponse(message.id, 'graphify.run explain mode requires payload.target.');
+      }
+      return { mode, target };
+    }
+  }
+}
+
+function handleGraphifyRun(deps: WebviewDispatcherDeps, message: WebviewRequest): WebviewResponse {
+  if (!deps.graphify) return errorResponse(message.id, 'Graphify is not configured.');
+
+  const payload = parseGraphifyRequestPayload(message);
+  if ('ok' in payload) return payload;
+
+  const result = deps.graphify.run(payload, deps.workspaceRoot);
+  if (result.available && result.exitCode === 0 && result.checkpointSummary && deps.currentTaskId && deps.store.getTask(deps.currentTaskId)) {
+    deps.store.createCheckpoint({
+      taskId: deps.currentTaskId,
+      level: 'micro',
+      summary: result.checkpointSummary,
+    });
+  }
+
+  return {
+    id: message.id,
+    ok: true,
+    data: { result },
+    state: buildWebviewState(deps),
+  };
+}
+
 export async function handleWebviewMessage(deps: WebviewDispatcherDeps, message: WebviewRequest): Promise<WebviewResponse> {
   try {
     switch (message.type) {
@@ -1253,6 +1312,8 @@ export async function handleWebviewMessage(deps: WebviewDispatcherDeps, message:
         return handleSyncListRemote(deps, message);
       case WebviewRequestTypes.ExportMarkdown:
         return handleExportMarkdown(deps, message);
+      case WebviewRequestTypes.GraphifyRun:
+        return handleGraphifyRun(deps, message);
       default:
         return errorResponse(
           (message as WebviewRequest).id,

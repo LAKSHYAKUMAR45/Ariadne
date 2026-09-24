@@ -8,6 +8,7 @@ import ActivityPanel from './ActivityPanel';
 import ContextPanel from './ContextPanel';
 import OverviewPanel from './OverviewPanel';
 import FilesPanel from './FilesPanel';
+import GraphifyPanel from './GraphifyPanel';
 import ReviewPanel from './ReviewPanel';
 import SearchPanel from './SearchPanel';
 import SyncPanel from './SyncPanel';
@@ -844,5 +845,32 @@ describe('UtilityPanels', () => {
 
     await userEvent.click(screen.getByRole('button', { name: 'Push' }));
     await waitFor(() => expect(screen.getByLabelText('Sync status')).toHaveTextContent('Last action: sync.push completed'));
+  });
+
+  it('runs a graphify query and displays bounded output', async () => {
+    const harness = createBridge({
+      request: vi.fn(async (type: string) => {
+        if (type === 'graphify.run') {
+          return {
+            result: {
+              available: true,
+              args: ['query', 'how does auth work'],
+              output: 'Auth uses middleware.',
+              exitCode: 0,
+              truncated: false,
+            },
+          };
+        }
+        return {};
+      }) as BridgeHarness['request'],
+    });
+
+    render(<GraphifyPanel bridge={harness} onBusy={() => undefined} onError={() => undefined} />);
+
+    await userEvent.click(screen.getByRole('tab', { name: 'Query' }));
+    await userEvent.type(screen.getByLabelText('Graphify query'), 'how does auth work');
+    await userEvent.click(screen.getByRole('button', { name: 'Run query' }));
+
+    expect(await screen.findByText('Auth uses middleware.')).toBeInTheDocument();
   });
 });

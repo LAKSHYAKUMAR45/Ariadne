@@ -2,8 +2,22 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { buildWebviewState, handleWebviewMessage } from './handleWebviewMessage.js';
-import { WebviewRequestTypes, type WebviewRequest, type WebviewResponse, type WebviewState } from './messages.js';
-import { getCurrentBranch, type TaskStore } from '@ariadne-dev/core';
+import {
+  WebviewRequestTypes,
+  type GraphifyRequestPayload,
+  type GraphifyRunResult,
+  type WebviewRequest,
+  type WebviewResponse,
+  type WebviewState,
+} from './messages.js';
+import {
+  GRAPHIFY_INSTALL_HINT,
+  getCurrentBranch,
+  isGraphifyInstalled,
+  runGraphifySync,
+  summarizeGraphifyRun,
+  type TaskStore,
+} from '@ariadne-dev/core';
 import { syncPush, syncPull, syncListRemote } from '../syncCommands.js';
 import { getOrOpenStore } from '../storeCache.js';
 
@@ -29,6 +43,9 @@ let panelSessionStatus: {
   lastSyncPull?: string;
   lastExport?: string;
 } = {};
+
+const GRAPHIFY_PANEL_OUTPUT_LIMIT = 20_000;
+const GRAPHIFY_TRUNCATION_SUFFIX = '\n\n[truncated for panel view]';
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -189,6 +206,62 @@ async function openWorkspaceFile(relativePath: string): Promise<void> {
   await vscode.window.showTextDocument(uri, { preview: true });
 }
 
+function buildGraphifyArgs(payload: GraphifyRequestPayload): string[] {
+  switch (payload.mode) {
+    case 'update':
+      return ['update', '.'];
+    case 'query':
+      return ['query', payload.query ?? ''];
+    case 'path':
+      return ['path', payload.from ?? '', payload.to ?? ''];
+    case 'explain':
+      return ['explain', payload.target ?? ''];
+  }
+}
+
+function formatGraphifyOutput(stdout: string, stderr: string): string {
+  const sections = [stdout.trim(), stderr.trim()].filter((section) => section.length > 0);
+  return sections.length > 0 ? sections.join('\n\n') : '(no output)';
+}
+
+function truncateGraphifyOutput(output: string): { output: string; truncated: boolean } {
+  if (output.length <= GRAPHIFY_PANEL_OUTPUT_LIMIT) {
+    return { output, truncated: false };
+  }
+
+  return {
+    output: `${output.slice(0, GRAPHIFY_PANEL_OUTPUT_LIMIT - GRAPHIFY_TRUNCATION_SUFFIX.length)}${GRAPHIFY_TRUNCATION_SUFFIX}`,
+    truncated: true,
+  };
+}
+
+function runGraphifyForPanel(payload: GraphifyRequestPayload, workspaceRoot: string | undefined, output: vscode.OutputChannel): GraphifyRunResult {
+  if (!isGraphifyInstalled()) {
+    return {
+      available: false,
+      args: [],
+      output: GRAPHIFY_INSTALL_HINT,
+      exitCode: 127,
+      truncated: false,
+    };
+  }
+
+  const args = buildGraphifyArgs(payload);
+  const result = runGraphifySync(args, { cwd: workspaceRoot });
+  const fullOutput = formatGraphifyOutput(result.stdout, result.stderr);
+  output.appendLine(`[${new Date().toISOString()}] graphify ${args.join(' ')}\n${fullOutput}`);
+  const boundedOutput = truncateGraphifyOutput(fullOutput);
+
+  return {
+    available: true,
+    args,
+    output: boundedOutput.output,
+    exitCode: result.exitCode,
+    truncated: boundedOutput.truncated,
+    ...(result.exitCode === 0 ? { checkpointSummary: summarizeGraphifyRun(args, result) } : {}),
+  };
+}
+
 function postStateUpdate(state?: WebviewState): void {
   if (!panel || !panelDeps) return;
   if (!state) return;
@@ -242,6 +315,9 @@ async function handleWebviewRequest(message: unknown): Promise<void> {
         copyText,
         openMarkdown,
         openWorkspaceFile,
+        graphify: {
+          run: (payload, root) => runGraphifyForPanel(payload, root, panelDeps!.output),
+        },
       },
       message,
     );

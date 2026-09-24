@@ -9,6 +9,9 @@ const mocks = vi.hoisted(() => {
   const openTextDocument = vi.fn();
   const showTextDocument = vi.fn();
   const stat = vi.fn();
+  const isGraphifyInstalled = vi.fn();
+  const runGraphifySync = vi.fn();
+  const summarizeGraphifyRun = vi.fn();
   return {
     buildWebviewState,
     handleWebviewMessage,
@@ -18,6 +21,9 @@ const mocks = vi.hoisted(() => {
     openTextDocument,
     showTextDocument,
     stat,
+    isGraphifyInstalled,
+    runGraphifySync,
+    summarizeGraphifyRun,
   };
 });
 
@@ -72,6 +78,16 @@ vi.mock('../src/webview/handleWebviewMessage.js', () => ({
   handleWebviewMessage: mocks.handleWebviewMessage,
   WebviewRequestTypes: { ExportMarkdown: 'export.markdown' },
 }));
+
+vi.mock('@ariadne-dev/core', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@ariadne-dev/core')>();
+  return {
+    ...actual,
+    isGraphifyInstalled: mocks.isGraphifyInstalled,
+    runGraphifySync: mocks.runGraphifySync,
+    summarizeGraphifyRun: mocks.summarizeGraphifyRun,
+  };
+});
 
 function makePanel() {
   const webview = {
@@ -144,6 +160,9 @@ describe('Ariadne webview panel', () => {
     mocks.openTextDocument.mockReset();
     mocks.showTextDocument.mockReset();
     mocks.stat.mockReset();
+    mocks.isGraphifyInstalled.mockReset();
+    mocks.runGraphifySync.mockReset();
+    mocks.summarizeGraphifyRun.mockReset();
     mocks.buildWebviewState.mockReturnValue({
       workspaceRoot: '/workspace',
       currentTaskId: 'task-1',
@@ -493,6 +512,84 @@ describe('Ariadne webview panel', () => {
       ok: false,
       error: "ENOENT: no such file or directory, stat '/repo/src/Missing.tsx'",
     });
+  });
+
+  it('returns the graphify install hint when the CLI is unavailable', async () => {
+    mocks.isGraphifyInstalled.mockReturnValue(false);
+    mocks.handleWebviewMessage.mockImplementation(
+      (deps: { graphify?: { run: (payload: unknown, workspaceRoot?: string) => unknown } }, message: { id: string; type: string; payload?: unknown }) => {
+        if (message.type === 'graphify.run') {
+          return { id: message.id, ok: true, data: { result: deps.graphify?.run(message.payload, '/repo') } };
+        }
+        return { id: message.id, ok: true, data: {} };
+      },
+    );
+
+    const { panel, postedMessages: messages } = await openPanelForTest({ workspaceRoot: '/repo' });
+
+    await panel.webview.receiveMessage({
+      id: 'graphify-missing',
+      type: 'graphify.run',
+      payload: { mode: 'query', query: 'how does auth work' },
+    });
+
+    expect(mocks.runGraphifySync).not.toHaveBeenCalled();
+    expect(messages).toContainEqual(
+      expect.objectContaining({
+        id: 'graphify-missing',
+        ok: true,
+        data: {
+          result: expect.objectContaining({
+            available: false,
+            args: [],
+            exitCode: 127,
+            truncated: false,
+          }),
+        },
+      }),
+    );
+  });
+
+  it('runs graphify through the host adapter and truncates panel output', async () => {
+    const longOutput = `${'A'.repeat(20_050)}\nsecond line`;
+    mocks.isGraphifyInstalled.mockReturnValue(true);
+    mocks.runGraphifySync.mockReturnValue({ exitCode: 0, stdout: longOutput, stderr: '' });
+    mocks.summarizeGraphifyRun.mockReturnValue('Graphify query completed');
+    mocks.handleWebviewMessage.mockImplementation(
+      (deps: { graphify?: { run: (payload: unknown, workspaceRoot?: string) => unknown } }, message: { id: string; type: string; payload?: unknown }) => {
+        if (message.type === 'graphify.run') {
+          return { id: message.id, ok: true, data: { result: deps.graphify?.run(message.payload, '/repo') } };
+        }
+        return { id: message.id, ok: true, data: {} };
+      },
+    );
+
+    const { panel, postedMessages: messages } = await openPanelForTest({ workspaceRoot: '/repo' });
+
+    await panel.webview.receiveMessage({
+      id: 'graphify-run',
+      type: 'graphify.run',
+      payload: { mode: 'query', query: 'how does auth work' },
+    });
+
+    expect(mocks.runGraphifySync).toHaveBeenCalledWith(['query', 'how does auth work'], { cwd: '/repo' });
+    expect(outputLines.some((line) => line.includes(longOutput))).toBe(true);
+    expect(messages).toContainEqual(
+      expect.objectContaining({
+        id: 'graphify-run',
+        ok: true,
+        data: {
+          result: expect.objectContaining({
+            available: true,
+            args: ['query', 'how does auth work'],
+            exitCode: 0,
+            truncated: true,
+            checkpointSummary: 'Graphify query completed',
+            output: expect.stringContaining('[truncated for panel view]'),
+          }),
+        },
+      }),
+    );
   });
 
   it('rejects invalid or missing captured file paths before opening', async () => {

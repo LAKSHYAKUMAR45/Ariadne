@@ -158,6 +158,7 @@ describe('App', () => {
     expect(screen.getByRole('button', { name: 'Activity' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Context' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Review' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Graphify' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /Panel task/ })).toBeInTheDocument();
   });
 

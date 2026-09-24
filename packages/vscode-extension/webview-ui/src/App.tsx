@@ -8,6 +8,7 @@ import ActivityPanel from './panels/ActivityPanel';
 import ContextPanel from './panels/ContextPanel';
 import OverviewPanel from './panels/OverviewPanel';
 import FilesPanel from './panels/FilesPanel';
+import GraphifyPanel from './panels/GraphifyPanel';
 import ReviewPanel from './panels/ReviewPanel';
 import SearchPanel from './panels/SearchPanel';
 import type { SearchCategory, SearchHit } from './panels/SearchPanel';
@@ -25,7 +26,7 @@ const categoryTabMap: Record<SearchCategory, TabId> = {
   commit: 'files',
 };
 
-type TabId = 'overview' | 'activity' | 'context' | 'review' | 'todos' | 'decisions' | 'errors' | 'questions' | 'files' | 'search' | 'sync';
+type TabId = 'overview' | 'activity' | 'context' | 'review' | 'graphify' | 'todos' | 'decisions' | 'errors' | 'questions' | 'files' | 'search' | 'sync';
 
 interface NavigationTarget {
   tabId: WebviewTabId;
@@ -55,6 +56,7 @@ const tabs: Array<{ id: TabId; label: string }> = [
   { id: 'activity', label: 'Activity' },
   { id: 'context', label: 'Context' },
   { id: 'review', label: 'Review' },
+  { id: 'graphify', label: 'Graphify' },
   { id: 'todos', label: 'Todos' },
   { id: 'decisions', label: 'Decisions' },
   { id: 'errors', label: 'Errors' },
@@ -404,6 +406,8 @@ export default function App({ bridge, initialState }: AppProps) {
         ) : (
           <p>No task selected.</p>
         );
+      case 'graphify':
+        return <GraphifyPanel bridge={bridge} onBusy={handleBusy} onError={handlePanelError} />;
       case 'todos':
         return state ? (
           <TodosPanel
