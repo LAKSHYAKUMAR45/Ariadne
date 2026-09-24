@@ -161,6 +161,17 @@ export {
   writeKnowledgeManifest,
 } from './knowledge/KnowledgeManifest.js';
 export type { KnowledgeManifest } from './knowledge/KnowledgeManifest.js';
+export {
+  KnowledgeQueue,
+  enqueueKnowledgeJob,
+  claimKnowledgeJob,
+} from './knowledge/KnowledgeQueue.js';
+export type {
+  EnqueueKnowledgeJobInput,
+  KnowledgeJobRecord,
+  KnowledgeProgressEvent,
+  KnowledgeQueueOptions,
+} from './knowledge/KnowledgeQueue.js';
 export { KnowledgeProvenance } from './knowledge/KnowledgeProvenance.js';
 export type { RecordKnowledgeProvenanceInput } from './knowledge/KnowledgeProvenance.js';
 export { KnowledgeOperationLog } from './knowledge/KnowledgeOperationLog.js';

@@ -1,5 +1,6 @@
 import type Database from 'better-sqlite3';
 import { KNOWLEDGE_SCHEMA_SQL } from './knowledge/knowledgeSchema.js';
+import { applyKnowledgeQueueMigration } from './knowledge/knowledgeMigrations.js';
 
 /**
  * Schema migration runner, closing the "no schema migrations" gap flagged
@@ -164,6 +165,11 @@ export const MIGRATIONS: Migration[] = [
     version: 7,
     description: 'Add additive knowledge-wiki tables for project-scoped sources, pages, graph, and operations',
     up: (db) => db.exec(KNOWLEDGE_SCHEMA_SQL),
+  },
+  {
+    version: 8,
+    description: 'Add leases, retries, and source-version deduplication to knowledge jobs',
+    up: (db) => applyKnowledgeQueueMigration(db),
   },
 ];
 

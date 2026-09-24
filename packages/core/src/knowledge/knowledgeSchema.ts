@@ -286,6 +286,7 @@ CREATE TABLE IF NOT EXISTS knowledge_jobs (
   id TEXT PRIMARY KEY,
   project_id TEXT NOT NULL REFERENCES knowledge_projects(id) ON DELETE CASCADE,
   job_kind TEXT NOT NULL,
+  source_version_id TEXT,
   status TEXT NOT NULL,
   payload_json TEXT NOT NULL,
   requested_at TEXT NOT NULL,
@@ -293,9 +294,16 @@ CREATE TABLE IF NOT EXISTS knowledge_jobs (
   completed_at TEXT,
   failure_code TEXT,
   failure_message TEXT,
+  retry_count INTEGER NOT NULL DEFAULT 0,
+  max_retries INTEGER NOT NULL DEFAULT 3,
+  worker_id TEXT,
+  lease_expires_at TEXT,
   UNIQUE (project_id, id)
 );
 CREATE INDEX IF NOT EXISTS idx_knowledge_jobs_project_status ON knowledge_jobs(project_id, status, requested_at);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_knowledge_jobs_source_version
+  ON knowledge_jobs(project_id, job_kind, source_version_id)
+  WHERE source_version_id IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS knowledge_job_events (
   id TEXT PRIMARY KEY,
