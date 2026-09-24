@@ -22,7 +22,6 @@ function renderSectionSummary(section: ContextPreview['sections'][number]): stri
 }
 
 export default function ContextPanel({ bridge, taskId, onBusy, onError }: ContextPanelProps) {
-  const [budget, setBudget] = useState('4000');
   const [preview, setPreview] = useState<ContextPreview | null>(null);
   const generationRef = useRef(0);
   const activeRequestGenerationRef = useRef<number | null>(null);
@@ -45,19 +44,16 @@ export default function ContextPanel({ bridge, taskId, onBusy, onError }: Contex
   }, [taskId]);
 
   async function previewContext(): Promise<void> {
-    const tokenBudget = Number(budget);
-    if (!Number.isFinite(tokenBudget)) {
-      onError('Token budget must be a finite number.');
-      return;
-    }
-
     const generation = ++generationRef.current;
     activeRequestGenerationRef.current = generation;
     onError('');
     onBusy('Previewing context…');
 
     try {
-      const result = await bridge.request<{ preview: ContextPreview }>('context.preview', { tokenBudget });
+      // No tokenBudget in the payload — the host applies its own sensible
+      // default (DEFAULT_TOKEN_BUDGET), so this panel doesn't need to expose
+      // a budget control the user has no real reason to tune.
+      const result = await bridge.request<{ preview: ContextPreview }>('context.preview', {});
       if (generation !== generationRef.current) return;
       setPreview(result.preview);
     } catch (error: unknown) {
@@ -96,6 +92,32 @@ export default function ContextPanel({ bridge, taskId, onBusy, onError }: Contex
     }
   }
 
+  async function openInChat(): Promise<void> {
+    if (!preview) return;
+    onError('');
+    onBusy('Opening in Copilot Chat…');
+    try {
+      await bridge.request('context.openInChat', { markdown: preview.markdown });
+    } catch (error: unknown) {
+      onError(formatError(error));
+    } finally {
+      onBusy(undefined);
+    }
+  }
+
+  async function openInCli(): Promise<void> {
+    if (!preview) return;
+    onError('');
+    onBusy('Opening in Copilot CLI…');
+    try {
+      await bridge.request('context.openInCli', { markdown: preview.markdown });
+    } catch (error: unknown) {
+      onError(formatError(error));
+    } finally {
+      onBusy(undefined);
+    }
+  }
+
   return (
     <div style={styles.root}>
       <form
@@ -105,21 +127,6 @@ export default function ContextPanel({ bridge, taskId, onBusy, onError }: Contex
         }}
         style={styles.controls}
       >
-        <label style={styles.field}>
-          Token budget
-          <input
-            aria-label="Token budget"
-            type="number"
-            min="1"
-            step="1"
-            value={budget}
-            onChange={(event) => {
-              setBudget(event.target.value);
-              invalidatePreview();
-            }}
-            style={styles.input}
-          />
-        </label>
         <div style={styles.actions}>
           <button type="submit" style={styles.button}>
             Preview context
@@ -129,6 +136,12 @@ export default function ContextPanel({ bridge, taskId, onBusy, onError }: Contex
           </button>
           <button type="button" onClick={() => void openContext()} disabled={!preview} style={styles.button}>
             Open as Markdown
+          </button>
+          <button type="button" onClick={() => void openInChat()} disabled={!preview} style={styles.button}>
+            Open in Copilot Chat
+          </button>
+          <button type="button" onClick={() => void openInCli()} disabled={!preview} style={styles.button}>
+            Open in Copilot CLI
           </button>
         </div>
       </form>
@@ -205,10 +218,10 @@ const styles: Record<string, CSSProperties> = {
   input: {
     width: '100%',
     maxWidth: '220px',
-    border: '1px solid #334155',
-    borderRadius: '0.5rem',
-    background: '#0f172a',
-    color: '#e2e8f0',
+    border: '1px solid var(--vscode-input-border, var(--vscode-panel-border))',
+    borderRadius: '4px',
+    background: 'var(--vscode-input-background)',
+    color: 'var(--vscode-input-foreground)',
     padding: '0.5rem 0.75rem',
     boxSizing: 'border-box',
   },
@@ -218,10 +231,10 @@ const styles: Record<string, CSSProperties> = {
     gap: '0.5rem',
   },
   button: {
-    border: '1px solid #334155',
-    background: '#1e293b',
-    color: '#e2e8f0',
-    borderRadius: '0.5rem',
+    border: '1px solid var(--vscode-panel-border, var(--vscode-widget-border))',
+    background: 'var(--vscode-button-secondaryBackground, var(--vscode-editorWidget-background))',
+    color: 'var(--vscode-foreground)',
+    borderRadius: '4px',
     padding: '0.5rem 0.875rem',
     cursor: 'pointer',
   },
@@ -245,14 +258,14 @@ const styles: Record<string, CSSProperties> = {
   preview: {
     margin: 0,
     padding: '0.75rem',
-    border: '1px solid #334155',
-    borderRadius: '0.75rem',
-    background: '#111827',
+    border: '1px solid var(--vscode-panel-border, var(--vscode-widget-border))',
+    borderRadius: '6px',
+    background: 'var(--vscode-sideBar-background, var(--vscode-editor-background))',
     whiteSpace: 'pre-wrap',
     wordBreak: 'break-word',
   },
   muted: {
     margin: 0,
-    color: '#94a3b8',
+    color: 'var(--vscode-descriptionForeground)',
   },
 };

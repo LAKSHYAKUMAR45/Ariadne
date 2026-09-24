@@ -27,6 +27,7 @@ import {
   searchAcrossWorkspaces,
   setTaskStatusWithRollup,
   redactCommand,
+  summarizeOutputTail,
   isGraphifyInstalled,
   runGraphify,
   summarizeGraphifyRun,
@@ -382,6 +383,17 @@ export interface CommandLogArgs {
   /** Exit code the command actually finished with (0 = success). */
   exitCode: number;
   taskId?: string;
+  /** Short label to store instead of the raw command line (e.g. "ran L4 usecase RED tests") — shown in `context`/`resume` in place of the (possibly long/truncated) command text. */
+  summary?: string;
+  /**
+   * A short excerpt of the command's actual stdout/stderr (the caller's own
+   * execution tool already saw this — Ariadne itself doesn't run anything
+   * here). Only used on a nonzero `exitCode`, folded into the auto-recorded
+   * error message so it reads as more than just the repeated command line;
+   * redacted and truncated to the last few lines the same way `ariadne
+   * exec`'s live-captured tail is.
+   */
+  outputTail?: string;
 }
 
 /**
@@ -413,9 +425,13 @@ export interface CommandLogArgs {
 export function commandLog(store: TaskStore, workspaceRoot: string, args: CommandLogArgs): Command {
   const cmdRedacted = redactCommand(args.command);
   return withTaskStore(store, workspaceRoot, args.taskId, (s, taskId, resolvedWorkspaceRoot) => {
-    const recorded = s.recordCommand({ taskId, cmdRedacted, exitCode: args.exitCode });
+    const recorded = s.recordCommand({ taskId, cmdRedacted, exitCode: args.exitCode, summary: args.summary });
     if (args.exitCode !== 0) {
-      s.recordError({ taskId, message: `Command failed (exit ${args.exitCode}): ${cmdRedacted}` });
+      const outputTail = args.outputTail ? summarizeOutputTail(args.outputTail) : undefined;
+      const message = outputTail
+        ? `Command failed (exit ${args.exitCode}): ${cmdRedacted}\n${outputTail}`
+        : `Command failed (exit ${args.exitCode}): ${cmdRedacted}`;
+      s.recordError({ taskId, message });
     } else {
       s.autoResolveMatchingCommandErrors(taskId, cmdRedacted);
       if (isGitCommitCommand(cmdRedacted)) {

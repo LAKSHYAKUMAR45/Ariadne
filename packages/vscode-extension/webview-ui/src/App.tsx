@@ -360,7 +360,7 @@ export default function App({ bridge, initialState }: AppProps) {
             {isCreatingTask ? (
               renderCreateTaskForm()
             ) : (
-              <button type="button" onClick={() => setIsCreatingTask(true)} style={styles.primaryButton}>
+              <button type="button" onClick={() => setIsCreatingTask(true)} className="ariadne-btn-primary" style={styles.primaryButton}>
                 Create task
               </button>
             )}
@@ -586,8 +586,8 @@ const styles: Record<string, CSSProperties> = {
   shell: {
     fontFamily:
       'Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
-    color: '#f4f7fb',
-    background: '#0f172a',
+    color: 'var(--vscode-foreground)',
+    background: 'var(--vscode-editor-background)',
     minHeight: '100vh',
     padding: '1rem',
     boxSizing: 'border-box',
@@ -605,7 +605,7 @@ const styles: Record<string, CSSProperties> = {
   },
   subtle: {
     margin: '0.25rem 0 0',
-    color: '#94a3b8',
+    color: 'var(--vscode-descriptionForeground)',
   },
   toolbar: {
     display: 'flex',
@@ -613,25 +613,25 @@ const styles: Record<string, CSSProperties> = {
     flexWrap: 'wrap',
   },
   toolbarButton: {
-    border: '1px solid #334155',
-    background: '#1e293b',
-    color: '#e2e8f0',
-    borderRadius: '0.5rem',
+    border: '1px solid var(--vscode-panel-border, var(--vscode-widget-border))',
+    background: 'var(--vscode-button-secondaryBackground, var(--vscode-editorWidget-background))',
+    color: 'var(--vscode-foreground)',
+    borderRadius: '4px',
     padding: '0.5rem 0.875rem',
     cursor: 'pointer',
   },
   errorBanner: {
-    borderRadius: '0.75rem',
+    borderRadius: '6px',
     padding: '0.75rem 1rem',
-    background: '#7f1d1d',
-    color: '#fecaca',
+    background: 'var(--vscode-inputValidation-errorBackground, var(--vscode-editorWidget-background))',
+    color: 'var(--vscode-inputValidation-errorForeground, var(--vscode-errorForeground))',
     marginBottom: '0.75rem',
   },
   infoBanner: {
-    borderRadius: '0.75rem',
+    borderRadius: '6px',
     padding: '0.75rem 1rem',
-    background: '#1e3a8a',
-    color: '#dbeafe',
+    background: 'var(--vscode-inputValidation-infoBackground, var(--vscode-editorWidget-background))',
+    color: 'var(--vscode-foreground)',
     marginBottom: '0.75rem',
   },
   main: {
@@ -641,9 +641,9 @@ const styles: Record<string, CSSProperties> = {
     minHeight: 'calc(100vh - 6rem)',
   },
   taskRail: {
-    border: '1px solid #334155',
-    borderRadius: '0.75rem',
-    background: '#111827',
+    border: '1px solid var(--vscode-panel-border, var(--vscode-widget-border))',
+    borderRadius: '6px',
+    background: 'var(--vscode-sideBar-background, var(--vscode-editor-background))',
     padding: '0.75rem',
     display: 'flex',
     flexDirection: 'column',
@@ -661,10 +661,10 @@ const styles: Record<string, CSSProperties> = {
   },
   filterInput: {
     width: '100%',
-    border: '1px solid #334155',
-    borderRadius: '0.5rem',
-    background: '#0f172a',
-    color: '#e2e8f0',
+    border: '1px solid var(--vscode-input-border, var(--vscode-panel-border))',
+    borderRadius: '4px',
+    background: 'var(--vscode-input-background)',
+    color: 'var(--vscode-input-foreground)',
     padding: '0.5rem 0.75rem',
     boxSizing: 'border-box',
   },
@@ -682,15 +682,15 @@ const styles: Record<string, CSSProperties> = {
     display: 'flex',
     flexDirection: 'column',
     gap: '0.375rem',
-    color: '#cbd5e1',
+    color: 'var(--vscode-descriptionForeground)',
     fontSize: '0.875rem',
   },
   selectInput: {
     width: '100%',
-    border: '1px solid #334155',
-    borderRadius: '0.5rem',
-    background: '#0f172a',
-    color: '#e2e8f0',
+    border: '1px solid var(--vscode-input-border, var(--vscode-panel-border))',
+    borderRadius: '4px',
+    background: 'var(--vscode-input-background)',
+    color: 'var(--vscode-input-foreground)',
     padding: '0.5rem 0.75rem',
     boxSizing: 'border-box',
   },
@@ -701,10 +701,10 @@ const styles: Record<string, CSSProperties> = {
     overflowY: 'auto',
   },
   taskButton: {
-    border: '1px solid #334155',
-    borderRadius: '0.75rem',
-    background: '#0f172a',
-    color: '#e2e8f0',
+    border: '1px solid var(--vscode-panel-border, var(--vscode-widget-border))',
+    borderRadius: '6px',
+    background: 'var(--vscode-editor-background)',
+    color: 'var(--vscode-foreground)',
     textAlign: 'left',
     padding: '0.75rem',
     display: 'flex',
@@ -713,19 +713,19 @@ const styles: Record<string, CSSProperties> = {
     cursor: 'pointer',
   },
   taskButtonActive: {
-    boxShadow: '0 0 0 1px #60a5fa inset',
+    boxShadow: '0 0 0 1px var(--vscode-focusBorder) inset',
   },
   taskMeta: {
     fontSize: '0.875rem',
-    color: '#94a3b8',
+    color: 'var(--vscode-descriptionForeground)',
   },
   emptyState: {
-    color: '#94a3b8',
+    color: 'var(--vscode-descriptionForeground)',
     margin: 0,
   },
   subtleText: {
     margin: 0,
-    color: '#cbd5e1',
+    color: 'var(--vscode-descriptionForeground)',
   },
   content: {
     display: 'flex',
@@ -738,21 +738,21 @@ const styles: Record<string, CSSProperties> = {
     gap: '0.5rem',
   },
   tabButton: {
-    border: '1px solid #334155',
-    borderRadius: '999px',
-    background: '#111827',
-    color: '#e2e8f0',
+    border: '1px solid var(--vscode-panel-border, var(--vscode-widget-border))',
+    borderRadius: '4px',
+    background: 'var(--vscode-sideBar-background, var(--vscode-editor-background))',
+    color: 'var(--vscode-foreground)',
     padding: '0.45rem 0.9rem',
     cursor: 'pointer',
   },
   tabButtonActive: {
-    background: '#1d4ed8',
-    boxShadow: '0 0 0 1px #60a5fa inset',
+    background: 'var(--vscode-button-background)',
+    boxShadow: '0 0 0 1px var(--vscode-focusBorder) inset',
   },
   panel: {
-    border: '1px solid #334155',
-    borderRadius: '0.75rem',
-    background: '#111827',
+    border: '1px solid var(--vscode-panel-border, var(--vscode-widget-border))',
+    borderRadius: '6px',
+    background: 'var(--vscode-sideBar-background, var(--vscode-editor-background))',
     padding: '1rem',
     minHeight: '20rem',
   },
@@ -764,9 +764,9 @@ const styles: Record<string, CSSProperties> = {
     flexDirection: 'column',
     gap: '1rem',
     padding: '1rem',
-    border: '1px solid #334155',
-    borderRadius: '0.75rem',
-    background: '#0f172a',
+    border: '1px solid var(--vscode-panel-border, var(--vscode-widget-border))',
+    borderRadius: '6px',
+    background: 'var(--vscode-editor-background)',
   },
   onboardingHeader: {
     display: 'flex',
@@ -778,10 +778,10 @@ const styles: Record<string, CSSProperties> = {
     fontSize: '1.25rem',
   },
   primaryButton: {
-    border: '1px solid #2563eb',
-    background: '#2563eb',
-    color: '#eff6ff',
-    borderRadius: '0.5rem',
+    border: '1px solid var(--vscode-button-background)',
+    background: 'var(--vscode-button-background)',
+    color: 'var(--vscode-button-foreground)',
+    borderRadius: '4px',
     padding: '0.625rem 1rem',
     cursor: 'pointer',
     alignSelf: 'flex-start',

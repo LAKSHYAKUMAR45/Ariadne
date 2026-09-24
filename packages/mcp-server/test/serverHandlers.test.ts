@@ -217,6 +217,37 @@ describe('createAriadneMcpServer tool handlers (success + error envelopes)', () 
     }
   });
 
+  it('command_log stores a caller-supplied summary alongside the command', async () => {
+    const { workspaceRoot, store, tools } = setup();
+    try {
+      await tools.task_new.handler({ title: 'Command log summary task' });
+      const result = await tools.command_log.handler({ command: 'npm test', exitCode: 0, summary: 'ran unit tests' });
+      const command = JSON.parse(result.content[0].text);
+      expect(command.summary).toBe('ran unit tests');
+    } finally {
+      cleanup(workspaceRoot, store);
+    }
+  });
+
+  it('command_log folds a redacted outputTail excerpt into the auto-recorded failure error message', async () => {
+    const { workspaceRoot, store, tools } = setup();
+    try {
+      await tools.task_new.handler({ title: 'Command log outputTail task' });
+      await tools.command_log.handler({
+        command: 'npm run build',
+        exitCode: 2,
+        outputTail: 'TypeError: Cannot read properties of undefined',
+      });
+      const ctxResult = await tools.get_context.handler({});
+      const ctx = JSON.parse(ctxResult.content[0].text);
+      expect(
+        ctx.unresolvedErrors.some((message: string) => message.includes('TypeError: Cannot read properties of undefined')),
+      ).toBe(true);
+    } finally {
+      cleanup(workspaceRoot, store);
+    }
+  });
+
   it('command_log returns an error envelope when no task is current and no taskId is given', async () => {
     const { workspaceRoot, store, tools } = setup();
     try {

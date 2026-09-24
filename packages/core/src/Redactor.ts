@@ -98,6 +98,56 @@ export function redact(text: string, rules: RedactionRule[] = DEFAULT_REDACTION_
   return result;
 }
 
+/**
+ * Applies the same rule-based secret redaction as `redact()`, but without
+ * its single-line collapse — for callers (e.g. a captured command's
+ * stdout/stderr tail) that want multi-line text scrubbed of secrets while
+ * keeping its line structure intact, typically so they can pick specific
+ * lines (like the *last* few) themselves instead of always getting the
+ * *first* line. Does not truncate length; callers bound that themselves.
+ */
+export function redactLines(text: string, rules: RedactionRule[] = DEFAULT_REDACTION_RULES): string {
+  let result = text;
+  for (const rule of rules) {
+    result = result.replace(rule.pattern, rule.replace as string);
+  }
+  return result;
+}
+
+/** Default number of trailing non-empty output lines `summarizeOutputTail` keeps. */
+export const OUTPUT_TAIL_MAX_LINES = 5;
+/** Default max length (chars) of the excerpt `summarizeOutputTail` returns. */
+export const OUTPUT_TAIL_MAX_CHARS = 400;
+
+/**
+ * Reduces a raw stdout/stderr blob (e.g. a captured command's combined
+ * output) to a short, secret-redacted excerpt of its last few non-empty
+ * lines — typically the actual "error: ..."/traceback line that a bare
+ * "Command failed (exit N): <cmd>" message otherwise omits entirely.
+ * Shared by the CLI's `ariadne exec` (which captures the tail live as the
+ * child process runs) and the MCP `command_log` tool (whose caller passes
+ * output it already captured), so both surfaces bound/redact this the same
+ * way. Returns undefined for empty/whitespace-only input.
+ */
+export function summarizeOutputTail(
+  text: string,
+  options: { maxLines?: number; maxChars?: number } = {},
+): string | undefined {
+  const maxLines = options.maxLines ?? OUTPUT_TAIL_MAX_LINES;
+  const maxChars = options.maxChars ?? OUTPUT_TAIL_MAX_CHARS;
+  const lines = redactLines(text)
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean);
+  if (lines.length === 0) return undefined;
+
+  let excerpt = lines.slice(-maxLines).join('\n');
+  if (excerpt.length > maxChars) {
+    excerpt = excerpt.slice(excerpt.length - maxChars);
+  }
+  return excerpt;
+}
+
 /** Back-compat alias matching the extension's original function name. */
 export function redactCommand(cmd: string): string {
   return redact(cmd);

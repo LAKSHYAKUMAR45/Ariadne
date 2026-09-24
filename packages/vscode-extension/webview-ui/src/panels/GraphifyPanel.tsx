@@ -63,7 +63,7 @@ export default function GraphifyPanel({ bridge, workspaceRoot, onBusy, onError }
         return (
           <div style={styles.form}>
             <p style={styles.helperText}>Rebuild the local code graph for the selected workspace.</p>
-            <button type="button" onClick={() => void run({ mode: 'update' })} style={styles.primaryButton} disabled={!canRun}>
+            <button type="button" onClick={() => void run({ mode: 'update' })} className="ariadne-btn-primary" style={styles.primaryButton} disabled={!canRun}>
               Run update
             </button>
           </div>
@@ -75,7 +75,7 @@ export default function GraphifyPanel({ bridge, workspaceRoot, onBusy, onError }
               <span>Graphify query</span>
               <input value={query} onChange={(event) => setQuery(event.target.value)} aria-label="Graphify query" style={styles.input} />
             </label>
-            <button type="button" onClick={() => void run({ mode: 'query', query })} style={styles.primaryButton} disabled={!canRun}>
+            <button type="button" onClick={() => void run({ mode: 'query', query })} className="ariadne-btn-primary" style={styles.primaryButton} disabled={!canRun}>
               Run query
             </button>
           </div>
@@ -91,7 +91,7 @@ export default function GraphifyPanel({ bridge, workspaceRoot, onBusy, onError }
               <span>Graphify to</span>
               <input value={to} onChange={(event) => setTo(event.target.value)} aria-label="Graphify to" style={styles.input} />
             </label>
-            <button type="button" onClick={() => void run({ mode: 'path', from, to })} style={styles.primaryButton} disabled={!canRun}>
+            <button type="button" onClick={() => void run({ mode: 'path', from, to })} className="ariadne-btn-primary" style={styles.primaryButton} disabled={!canRun}>
               Run path
             </button>
           </div>
@@ -108,7 +108,7 @@ export default function GraphifyPanel({ bridge, workspaceRoot, onBusy, onError }
                 style={styles.input}
               />
             </label>
-            <button type="button" onClick={() => void run({ mode: 'explain', target })} style={styles.primaryButton} disabled={!canRun}>
+            <button type="button" onClick={() => void run({ mode: 'explain', target })} className="ariadne-btn-primary" style={styles.primaryButton} disabled={!canRun}>
               Run explain
             </button>
           </div>
@@ -173,22 +173,22 @@ const styles: Record<string, CSSProperties> = {
     flexWrap: 'wrap',
   },
   tab: {
-    border: '1px solid #334155',
-    background: '#1e293b',
-    color: '#e2e8f0',
-    borderRadius: '0.5rem',
+    border: '1px solid var(--vscode-panel-border, var(--vscode-widget-border))',
+    background: 'var(--vscode-button-secondaryBackground, var(--vscode-editorWidget-background))',
+    color: 'var(--vscode-foreground)',
+    borderRadius: '4px',
     padding: '0.5rem 0.875rem',
     cursor: 'pointer',
   },
   tabActive: {
-    border: '1px solid #2563eb',
-    background: '#1d4ed8',
-    color: '#eff6ff',
+    border: '1px solid var(--vscode-button-background)',
+    background: 'var(--vscode-button-background)',
+    color: 'var(--vscode-button-foreground)',
   },
   panel: {
-    border: '1px solid #334155',
-    borderRadius: '0.75rem',
-    background: '#111827',
+    border: '1px solid var(--vscode-panel-border, var(--vscode-widget-border))',
+    borderRadius: '6px',
+    background: 'var(--vscode-sideBar-background, var(--vscode-editor-background))',
     padding: '1rem',
   },
   form: {
@@ -200,24 +200,24 @@ const styles: Record<string, CSSProperties> = {
     gap: '0.375rem',
   },
   input: {
-    border: '1px solid #334155',
-    borderRadius: '0.5rem',
-    background: '#0f172a',
-    color: '#e2e8f0',
+    border: '1px solid var(--vscode-input-border, var(--vscode-panel-border))',
+    borderRadius: '4px',
+    background: 'var(--vscode-input-background)',
+    color: 'var(--vscode-input-foreground)',
     padding: '0.625rem 0.75rem',
   },
   primaryButton: {
-    border: '1px solid #1d4ed8',
-    background: '#1d4ed8',
-    color: '#eff6ff',
-    borderRadius: '0.5rem',
+    border: '1px solid var(--vscode-button-background)',
+    background: 'var(--vscode-button-background)',
+    color: 'var(--vscode-button-foreground)',
+    borderRadius: '4px',
     padding: '0.625rem 1rem',
     cursor: 'pointer',
     justifySelf: 'start',
   },
   helperText: {
     margin: 0,
-    color: '#94a3b8',
+    color: 'var(--vscode-descriptionForeground)',
   },
   resultSection: {
     display: 'grid',
@@ -227,18 +227,18 @@ const styles: Record<string, CSSProperties> = {
     display: 'flex',
     gap: '0.75rem',
     flexWrap: 'wrap',
-    color: '#cbd5e1',
+    color: 'var(--vscode-descriptionForeground)',
   },
   installHint: {
     margin: 0,
-    color: '#fbbf24',
+    color: 'var(--vscode-editorWarning-foreground, #cca700)',
   },
   output: {
     margin: 0,
-    borderRadius: '0.75rem',
-    border: '1px solid #334155',
-    background: '#020617',
-    color: '#e2e8f0',
+    borderRadius: '6px',
+    border: '1px solid var(--vscode-panel-border, var(--vscode-widget-border))',
+    background: 'var(--vscode-textCodeBlock-background, var(--vscode-editor-background))',
+    color: 'var(--vscode-foreground)',
     padding: '1rem',
     whiteSpace: 'pre-wrap',
     overflowX: 'auto',

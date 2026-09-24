@@ -158,11 +158,27 @@ function registerTerminalCommandCapture(context: vscode.ExtensionContext): void 
         if (!ctx) return;
         const commandLine = e.execution.commandLine.value.trim();
         if (!commandLine) return;
-        getOrOpenStore(ctx.root).recordCommand({
-          taskId: ctx.taskId,
-          cmdRedacted: redactCommand(commandLine),
-          exitCode: e.exitCode ?? null,
-        });
+        const cmdRedacted = redactCommand(commandLine);
+        const exitCode = e.exitCode ?? null;
+        const store = getOrOpenStore(ctx.root);
+        store.recordCommand({ taskId: ctx.taskId, cmdRedacted, exitCode });
+
+        // Mirror `ariadne exec` / the MCP `command_log` tool: a nonzero
+        // exit records a matching unresolved error (and triggers the same
+        // "new error" micro checkpoint diagnostics capture already gets),
+        // while a clean exit auto-resolves any earlier unresolved error for
+        // this exact command — otherwise VS Code's passive terminal
+        // capture would silently miss failures that the CLI/MCP surfaces
+        // always record. `exitCode` is left as `undefined`/omitted on some
+        // shells with incomplete shell-integration reporting; treat that as
+        // "unknown", not success or failure.
+        if (typeof exitCode === 'number' && exitCode !== 0) {
+          const message = `Command failed (exit ${exitCode}): ${cmdRedacted}`;
+          store.recordError({ taskId: ctx.taskId, message });
+          checkpointOnError(store, ctx.taskId, message);
+        } else if (exitCode === 0) {
+          store.autoResolveMatchingCommandErrors(ctx.taskId, cmdRedacted);
+        }
       } catch (err) {
         log('terminal command', err);
       }

@@ -33,6 +33,8 @@ export interface AriadnePanelDeps {
   openExportedMarkdown: (filePath: string) => Promise<void>;
   copyText?: (text: string) => Promise<void> | void;
   openMarkdown?: (title: string, markdown: string) => Promise<void> | void;
+  openInCopilotChat?: (markdown: string) => Promise<void> | void;
+  openInCopilotCli?: (markdown: string) => Promise<void> | void;
 }
 
 let panel: vscode.WebviewPanel | undefined;
@@ -198,6 +200,16 @@ async function openMarkdown(title: string, markdown: string): Promise<void> {
   await vscode.window.showTextDocument(doc, { preview: true });
 }
 
+async function openInCopilotChat(markdown: string): Promise<void> {
+  if (!panelDeps?.openInCopilotChat) throw new Error('Copilot Chat handoff is not configured.');
+  await panelDeps.openInCopilotChat(markdown);
+}
+
+async function openInCopilotCli(markdown: string): Promise<void> {
+  if (!panelDeps?.openInCopilotCli) throw new Error('Copilot CLI handoff is not configured.');
+  await panelDeps.openInCopilotCli(markdown);
+}
+
 async function openWorkspaceFile(relativePath: string): Promise<void> {
   const root = resolveSelectedWorkspaceRoot();
   if (!root) {
@@ -338,6 +350,8 @@ async function handleWebviewRequest(message: unknown): Promise<void> {
         writeExport: writeExportMarkdown,
         copyText,
         openMarkdown,
+        openInCopilotChat,
+        openInCopilotCli,
         openWorkspaceFile,
         graphify: {
           run: (payload, root) => runGraphifyForPanel(payload, root, panelDeps!.output),

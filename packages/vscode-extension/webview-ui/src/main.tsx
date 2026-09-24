@@ -1,5 +1,6 @@
 import React from 'react';
 import { createRoot } from 'react-dom/client';
+import './webview.css';
 import App from './App';
 import { createVsCodeBridge } from './bridge';
 import type { WebviewState } from '@host/messages';

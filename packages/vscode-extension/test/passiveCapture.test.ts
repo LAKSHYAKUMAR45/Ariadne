@@ -165,6 +165,47 @@ describe('passive capture', () => {
     expect(commands[0].cmdRedacted).not.toContain('abc123');
   });
 
+  it('records an unresolved error for a nonzero-exit terminal command', () => {
+    terminalHandler!({
+      terminal: { shellIntegration: { cwd: { fsPath: root } } },
+      execution: { commandLine: { value: 'pnpm test' } },
+      exitCode: 1,
+    });
+
+    const errors = store.listErrors(taskId, { resolved: false });
+    expect(errors).toHaveLength(1);
+    expect(errors[0].message).toBe('Command failed (exit 1): pnpm test');
+  });
+
+  it('auto-resolves an earlier terminal-command error once the exact same command succeeds', () => {
+    terminalHandler!({
+      terminal: { shellIntegration: { cwd: { fsPath: root } } },
+      execution: { commandLine: { value: 'pnpm test' } },
+      exitCode: 1,
+    });
+    expect(store.listErrors(taskId, { resolved: false })).toHaveLength(1);
+
+    terminalHandler!({
+      terminal: { shellIntegration: { cwd: { fsPath: root } } },
+      execution: { commandLine: { value: 'pnpm test' } },
+      exitCode: 0,
+    });
+
+    expect(store.listErrors(taskId, { resolved: false })).toHaveLength(0);
+    expect(store.listErrors(taskId, { resolved: true })).toHaveLength(1);
+  });
+
+  it('does not record or resolve errors when the exit code is unknown', () => {
+    terminalHandler!({
+      terminal: { shellIntegration: { cwd: { fsPath: root } } },
+      execution: { commandLine: { value: 'pnpm test' } },
+      exitCode: undefined,
+    });
+
+    expect(store.listErrors(taskId, { resolved: false })).toHaveLength(0);
+    expect(store.listErrors(taskId, { resolved: true })).toHaveLength(0);
+  });
+
   it('does not capture when no current task is set for the workspace', () => {
     // Start a fresh root with no current task.
     const root2 = fs.mkdtempSync(path.join(os.tmpdir(), 'ariadne-passive-none-'));

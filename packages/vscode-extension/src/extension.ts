@@ -1,4 +1,7 @@
 import * as vscode from 'vscode';
+import * as path from 'node:path';
+import * as os from 'node:os';
+import { promises as fs } from 'node:fs';
 import {
   openStoreForCurrentWorkspace,
   getCurrentTaskId,
@@ -7,7 +10,7 @@ import {
   promptSelectWorkspaceFolder,
   resolveWorkspaceRoot,
 } from './workspace.js';
-import { setCurrentTaskId as setCurrentTaskInWorkspace } from '@ariadne-dev/core';
+import { setCurrentTaskId as setCurrentTaskInWorkspace, DEFAULT_TOKEN_BUDGET, buildContext } from '@ariadne-dev/core';
 import { handleChatCommand, progressMessageFor, formatStatusBarItem } from './commands.js';
 import { closeAllStores, closeStore } from './storeCache.js';
 import { registerPassiveCapture } from './passiveCapture.js';
@@ -15,6 +18,7 @@ import { findWorkspaceRoot } from '@ariadne-dev/core';
 import { syncPush, syncPull, syncListRemote } from './syncCommands.js';
 import { openAriadnePanel, refreshAriadnePanel } from './webview/panel.js';
 import { registerAriadneLauncherView, refreshAriadneLauncherView } from './webview/launcherView.js';
+import { formatContextPreview } from './webview/handleWebviewMessage.js';
 
 let output: vscode.OutputChannel;
 let statusBarItem: vscode.StatusBarItem | undefined;
@@ -69,6 +73,51 @@ async function openMarkdownDocument(_title: string, markdown: string): Promise<v
   await vscode.window.showTextDocument(doc, { preview: true });
 }
 
+/**
+ * Hands the given task-context markdown off to VS Code's Copilot Chat view,
+ * auto-sending it as a chat query (no `isPartialQuery`, so the user doesn't
+ * have to press Enter again).
+ */
+export async function openInCopilotChat(markdown: string): Promise<void> {
+  await vscode.commands.executeCommand('workbench.action.chat.open', { query: markdown });
+}
+
+let copilotCliTerminal: vscode.Terminal | undefined;
+
+/**
+ * Hands the given task-context markdown off to a Copilot CLI session in an
+ * integrated terminal. The markdown is written to a temp file and read back
+ * via `$(cat …)` inside a double-quoted shell string — the standard idiom
+ * for passing arbitrary multi-line text (including embedded quotes) as a
+ * single shell argument without re-tokenizing it.
+ */
+export async function openInCopilotCli(markdown: string): Promise<void> {
+  const tmpFile = path.join(os.tmpdir(), `ariadne-context-${Date.now()}-${Math.random().toString(36).slice(2)}.md`);
+  await fs.writeFile(tmpFile, markdown, 'utf8');
+
+  if (!copilotCliTerminal || copilotCliTerminal.exitStatus !== undefined) {
+    copilotCliTerminal = vscode.window.createTerminal('Ariadne Copilot CLI');
+  }
+  copilotCliTerminal.show();
+  copilotCliTerminal.sendText(`copilot -i "$(cat ${JSON.stringify(tmpFile)})"`, true);
+}
+
+/**
+ * Builds task-handoff markdown for the current task using the default token
+ * budget, for callers (like the sidebar launcher view) that don't go through
+ * the full panel's context-preview flow.
+ */
+function buildCurrentTaskContextMarkdown(): string {
+  const taskId = getCurrentTaskId();
+  const store = openStoreForCurrentWorkspace();
+  if (!taskId || !store) {
+    throw new Error('No current task is selected. Create or select a task first.');
+  }
+  const context = buildContext(store, taskId, { tokenBudget: DEFAULT_TOKEN_BUDGET, workspaceRoot: resolveWorkspaceRoot() });
+  const { markdown } = formatContextPreview(context);
+  return markdown;
+}
+
 export function activate(context: vscode.ExtensionContext): void {
   output = vscode.window.createOutputChannel('Ariadne');
   context.subscriptions.push(output);
@@ -100,6 +149,8 @@ export function activate(context: vscode.ExtensionContext): void {
         openExportedMarkdown,
         copyText: (text: string) => Promise.resolve(vscode.env.clipboard.writeText(text)),
         openMarkdown: openMarkdownDocument,
+        openInCopilotChat,
+        openInCopilotCli,
       }),
     ),
   );
@@ -112,6 +163,12 @@ export function activate(context: vscode.ExtensionContext): void {
     },
     getWorkspaceRoot: resolveWorkspaceRoot,
     logError,
+    openContextInChat: async () => {
+      await openInCopilotChat(buildCurrentTaskContextMarkdown());
+    },
+    openContextInCli: async () => {
+      await openInCopilotCli(buildCurrentTaskContextMarkdown());
+    },
   });
 
   context.subscriptions.push(vscode.window.onDidChangeActiveTextEditor(() => refreshStatusBar()));

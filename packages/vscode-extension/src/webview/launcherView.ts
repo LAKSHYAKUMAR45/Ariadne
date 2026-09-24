@@ -7,6 +7,8 @@ export interface AriadneLauncherViewDeps {
   getCurrentTask: () => Task | undefined;
   getWorkspaceRoot: () => string | undefined;
   logError: (context: string, err: unknown) => string;
+  openContextInChat: () => Promise<void>;
+  openContextInCli: () => Promise<void>;
 }
 
 let currentProvider: AriadneLauncherViewProvider | undefined;
@@ -55,6 +57,10 @@ export class AriadneLauncherViewProvider implements vscode.WebviewViewProvider {
         await vscode.commands.executeCommand('ariadne.newTask');
       } else if (command === 'syncPush') {
         await vscode.commands.executeCommand('ariadne.syncPush');
+      } else if (command === 'openInChat') {
+        await this.deps.openContextInChat();
+      } else if (command === 'openInCli') {
+        await this.deps.openContextInCli();
       }
     } catch (err) {
       const detail = this.deps.logError('ariadne launcher view', err);
@@ -72,6 +78,7 @@ export class AriadneLauncherViewProvider implements vscode.WebviewViewProvider {
       : workspaceRoot
         ? 'Create or select a task to start capturing work.'
         : 'Open a workspace folder to start using Ariadne.';
+    const contextActionsDisabled = task ? '' : 'disabled';
 
     return `<!doctype html>
 <html lang="en">
@@ -85,7 +92,10 @@ export class AriadneLauncherViewProvider implements vscode.WebviewViewProvider {
     h2 { font-size: 14px; margin: 0 0 8px; }
     p { color: var(--vscode-descriptionForeground); margin: 0 0 12px; }
     button { width: 100%; margin: 0 0 8px; }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
     .card { border: 1px solid var(--vscode-panel-border); border-radius: 6px; padding: 10px; margin-bottom: 12px; }
+    .divider { border: none; border-top: 1px solid var(--vscode-panel-border); margin: 4px 0 12px; }
+    .secondary { background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); }
   </style>
 </head>
 <body>
@@ -96,6 +106,9 @@ export class AriadneLauncherViewProvider implements vscode.WebviewViewProvider {
   <button type="button" data-command="openPanel">Open Ariadne Panel</button>
   <button type="button" data-command="newTask">New Task</button>
   <button type="button" data-command="syncPush">Sync to Cloud</button>
+  <hr class="divider">
+  <button type="button" class="secondary" data-command="openInChat" ${contextActionsDisabled}>Open in Copilot Chat</button>
+  <button type="button" class="secondary" data-command="openInCli" ${contextActionsDisabled}>Open in Copilot CLI</button>
   <script nonce="${scriptNonce}">
     const vscode = acquireVsCodeApi();
     document.querySelectorAll('button[data-command]').forEach((button) => {

@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { EventEmitter } from 'node:events';
+import { PassThrough } from 'node:stream';
 import { execFileSync } from 'node:child_process';
 import type { ChildProcess } from 'node:child_process';
 import { openWorkspaceStore, setCurrentTaskId } from '@ariadne-dev/core';
@@ -19,6 +20,12 @@ function makeWorkspace(name: string): string {
 }
 
 class FakeChildProcess extends EventEmitter {}
+
+/** A FakeChildProcess with real (Readable) stdout/stderr streams, for tests that need `exec.ts`'s piping/tail-capture to actually run. */
+class FakeChildProcessWithStreams extends EventEmitter {
+  stdout = new PassThrough();
+  stderr = new PassThrough();
+}
 
 describe('ariadne exec', () => {
   beforeEach(() => {
@@ -46,7 +53,7 @@ describe('ariadne exec', () => {
       const exitCode = await runTaskExec(store, task.id, 'node', ['-e', 'process.exit(0)'], { spawnImpl });
 
       expect(exitCode).toBe(0);
-      expect(spawnImpl).toHaveBeenCalledWith('node', ['-e', 'process.exit(0)'], { stdio: 'inherit' });
+      expect(spawnImpl).toHaveBeenCalledWith('node', ['-e', 'process.exit(0)'], { stdio: ['inherit', 'pipe', 'pipe'] });
 
       const commands = store.listCommands(task.id);
       expect(commands).toHaveLength(1);
@@ -107,6 +114,61 @@ describe('ariadne exec', () => {
       expect(commands).toHaveLength(1);
       expect(commands[0].cmdRedacted).toContain('***');
       expect(commands[0].cmdRedacted).not.toContain('abc123');
+    } finally {
+      store.close();
+    }
+  });
+
+  it('captures a redacted tail of stdout/stderr into the auto-recorded failure error message', async () => {
+    const root = makeWorkspace('output-tail');
+    const store = openWorkspaceStore(root);
+    const task = store.createTask({ title: 'Exec output tail' });
+    setCurrentTaskId(task.id, root);
+
+    try {
+      const spawnImpl = vi.fn(() => {
+        const child = new FakeChildProcessWithStreams() as unknown as ChildProcess;
+        process.nextTick(() => {
+          (child.stdout as unknown as PassThrough).emit('data', Buffer.from('running tests...\n'));
+          (child.stderr as unknown as PassThrough).emit('data', Buffer.from('AssertionError: expected 1 to be 2\n'));
+          child.emit('close', 1, null);
+        });
+        return child;
+      });
+
+      const exitCode = await runTaskExec(store, task.id, 'pytest', ['test_y.py'], { spawnImpl });
+      expect(exitCode).toBe(1);
+
+      const errors = store.listErrors(task.id, { resolved: false });
+      expect(errors).toHaveLength(1);
+      expect(errors[0].message).toContain('Command failed (exit 1): pytest test_y.py');
+      expect(errors[0].message).toContain('AssertionError: expected 1 to be 2');
+    } finally {
+      store.close();
+    }
+  });
+
+  it('stores a caller-supplied summary alongside the command', async () => {
+    const root = makeWorkspace('summary');
+    const store = openWorkspaceStore(root);
+    const task = store.createTask({ title: 'Exec summary' });
+    setCurrentTaskId(task.id, root);
+
+    try {
+      const spawnImpl = vi.fn(() => {
+        const child = new FakeChildProcess() as ChildProcess;
+        process.nextTick(() => child.emit('close', 0, null));
+        return child;
+      });
+
+      await runTaskExec(store, task.id, 'node', ['-e', 'process.exit(0)'], {
+        spawnImpl,
+        summary: 'ran smoke test',
+      });
+
+      const commands = store.listCommands(task.id);
+      expect(commands).toHaveLength(1);
+      expect(commands[0].summary).toBe('ran smoke test');
     } finally {
       store.close();
     }

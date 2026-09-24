@@ -42,6 +42,8 @@ export const WebviewRequestTypes = {
   ContextPreview: 'context.preview',
   ContextCopy: 'context.copy',
   ContextOpen: 'context.open',
+  ContextOpenInChat: 'context.openInChat',
+  ContextOpenInCli: 'context.openInCli',
   ReviewGet: 'review.get',
   FileOpen: 'file.open',
   TasksList: 'tasks.list',
@@ -265,7 +267,9 @@ export type WebviewRequest =
     })
   | (WebviewRequestBase<'context.get'> & { payload?: { tokenBudget?: number } })
   | (WebviewRequestBase<'context.preview'> & { payload?: { tokenBudget?: number } })
-  | (WebviewRequestBase<'context.copy' | 'context.open'> & { payload: { markdown: string } })
+  | (WebviewRequestBase<'context.copy' | 'context.open' | 'context.openInChat' | 'context.openInCli'> & {
+      payload: { markdown: string };
+    })
   | (WebviewRequestBase<'file.open'> & { payload: { path: string } })
   | (WebviewRequestBase<'todo.create'> & { payload: Record<string, unknown> })
   | (WebviewRequestBase<'todo.updateText' | 'todo.setStatus' | 'todo.delete'> & { payload: Record<string, unknown> })
@@ -323,6 +327,8 @@ export interface WebviewDispatcherDeps {
   writeExport?: (taskId: string, markdown: string) => string;
   copyText?: (text: string) => Promise<void> | void;
   openMarkdown?: (title: string, markdown: string) => Promise<void> | void;
+  openInCopilotChat?: (markdown: string) => Promise<void> | void;
+  openInCopilotCli?: (markdown: string) => Promise<void> | void;
   openWorkspaceFile?: (relativePath: string) => Promise<void> | void;
   graphify?: {
     run: (payload: GraphifyRequestPayload, workspaceRoot?: string) => GraphifyRunResult;

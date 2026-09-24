@@ -502,6 +502,44 @@ describe('handleWebviewMessage', () => {
     store.close();
   });
 
+  it('hands context markdown off to Copilot Chat and Copilot CLI through injected host helpers', async () => {
+    const { store, task } = makeStore();
+    const openInCopilotChat = vi.fn();
+    const openInCopilotCli = vi.fn();
+
+    const chatResponse = await handleWebviewMessage(
+      { store, currentTaskId: task.id, workspaceRoot: '/repo', openInCopilotChat, openInCopilotCli } as never,
+      { id: 'context-open-chat', type: 'context.openInChat', payload: { markdown: '# Context\nFor chat' } },
+    );
+    expect(chatResponse).toEqual({
+      id: 'context-open-chat',
+      ok: true,
+      data: { opened: true },
+      state: expect.any(Object),
+    });
+    expect(openInCopilotChat).toHaveBeenCalledWith('# Context\nFor chat');
+
+    const cliResponse = await handleWebviewMessage(
+      { store, currentTaskId: task.id, workspaceRoot: '/repo', openInCopilotChat, openInCopilotCli } as never,
+      { id: 'context-open-cli', type: 'context.openInCli', payload: { markdown: '# Context\nFor cli' } },
+    );
+    expect(cliResponse).toEqual({
+      id: 'context-open-cli',
+      ok: true,
+      data: { opened: true },
+      state: expect.any(Object),
+    });
+    expect(openInCopilotCli).toHaveBeenCalledWith('# Context\nFor cli');
+
+    const missingHelperResponse = await handleWebviewMessage(
+      { store, currentTaskId: task.id, workspaceRoot: '/repo' } as never,
+      { id: 'context-open-chat-unconfigured', type: 'context.openInChat', payload: { markdown: '# Context' } },
+    );
+    expect(missingHelperResponse).toMatchObject({ id: 'context-open-chat-unconfigured', ok: false });
+
+    store.close();
+  });
+
   it('rejects invalid or missing file.open paths before invoking the host adapter', async () => {
     const { store, task } = makeStore();
     const openWorkspaceFile = vi.fn();

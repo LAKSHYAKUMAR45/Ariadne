@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
+import type { CSSProperties } from 'react';
 import type { AriadneBridge } from '../bridge';
 import type { SyncProfile } from '@host/messages';
 
@@ -38,11 +39,11 @@ const ACTION_LABELS: Record<SyncActionKey, string> = {
 
 function SyncProfileList({ profiles }: SyncProfileListProps) {
   return (
-    <ul>
+    <ul style={styles.profileList}>
       {profiles.map((profile) => (
-        <li key={`${profile.name}:${profile.serverUrl ?? ''}`}>
+        <li key={`${profile.name}:${profile.serverUrl ?? ''}`} style={styles.profileItem}>
           <span>{profile.name}</span>
-          {profile.serverUrl ? <span>{` — ${profile.serverUrl}`}</span> : null}
+          {profile.serverUrl ? <span style={styles.subtleText}>{` — ${profile.serverUrl}`}</span> : null}
         </li>
       ))}
     </ul>
@@ -135,59 +136,79 @@ export default function SyncPanel({ bridge }: SyncPanelProps) {
       : 'Idle. No sync actions run yet.';
 
   return (
-    <div>
-      <p aria-label="Sync status">{statusText}</p>
+    <div style={styles.root}>
+      <p aria-label="Sync status" style={styles.statusText}>
+        {statusText}
+      </p>
 
       {currentProfiles[0] ? (
-        <section aria-label="Current sync profile">
-          <h3>Current profile</h3>
+        <section aria-label="Current sync profile" style={styles.card}>
+          <h3 style={styles.sectionTitle}>Current profile</h3>
           <SyncProfileList profiles={currentProfiles} />
         </section>
       ) : (
-        <p>No sync profiles detected.</p>
+        <p style={styles.subtleText}>No sync profiles detected.</p>
       )}
 
-      {profileWarning ? <p role="alert">{profileWarning}</p> : null}
+      {profileWarning ? (
+        <p role="alert" style={styles.warningBanner}>
+          {profileWarning}
+        </p>
+      ) : null}
 
       {otherProfiles.length > 0 ? (
-        <section aria-label="Other sync profiles">
-          <h3>Other profiles</h3>
+        <section aria-label="Other sync profiles" style={styles.card}>
+          <h3 style={styles.sectionTitle}>Other profiles</h3>
           <SyncProfileList profiles={otherProfiles} />
         </section>
       ) : null}
 
-      <div>
-        <button type="button" onClick={() => void runSync('push', 'sync.push')} disabled={busy !== null}>
+      <div style={styles.actionsRow}>
+        <button type="button" onClick={() => void runSync('push', 'sync.push')} disabled={busy !== null} style={styles.secondaryButton}>
           Push local changes
         </button>
-        <button type="button" onClick={() => void runSync('pull', 'sync.pull', { importNew: false })} disabled={busy !== null}>
+        <button
+          type="button"
+          onClick={() => void runSync('pull', 'sync.pull', { importNew: false })}
+          disabled={busy !== null}
+          style={styles.secondaryButton}
+        >
           Pull remote changes
         </button>
         {confirmingImportNew ? (
-          <span role="group" aria-label="Confirm pull import-new">
-            <span>Import new remote tasks into this workspace?</span>
-            <button type="button" onClick={() => void confirmImportNewPull()} disabled={busy !== null}>
+          <span role="group" aria-label="Confirm pull import-new" style={styles.confirmGroup}>
+            <span style={styles.subtleText}>Import new remote tasks into this workspace?</span>
+            <button type="button" onClick={() => void confirmImportNewPull()} disabled={busy !== null} className="ariadne-btn-primary" style={styles.primaryButton}>
               Confirm pull import-new
             </button>
-            <button type="button" onClick={cancelImportNewPull} disabled={busy !== null}>
+            <button type="button" onClick={cancelImportNewPull} disabled={busy !== null} style={styles.secondaryButton}>
               Cancel
             </button>
           </span>
         ) : (
-          <button type="button" onClick={requestImportNewPull} disabled={busy !== null}>
+          <button type="button" onClick={requestImportNewPull} disabled={busy !== null} style={styles.secondaryButton}>
             Pull import-new
           </button>
         )}
-        <button type="button" onClick={() => void runSync('listRemote', 'sync.listRemote')} disabled={busy !== null}>
+        <button
+          type="button"
+          onClick={() => void runSync('listRemote', 'sync.listRemote')}
+          disabled={busy !== null}
+          style={styles.secondaryButton}
+        >
           List remote tasks
         </button>
       </div>
 
-      {guidance ? <p role="alert">{guidance}</p> : null}
+      {guidance ? (
+        <p role="alert" style={styles.warningBanner}>
+          {guidance}
+        </p>
+      ) : null}
 
-      <section aria-label="Sync action history">
-        <h3>Session status</h3>
-        <ul>
+      <section aria-label="Sync action history" style={styles.card}>
+        <h3 style={styles.sectionTitle}>Session status</h3>
+        <ul style={styles.historyList}>
           {(['profileList', 'push', 'pull', 'listRemote'] as SyncActionKey[])
             .filter((action) => actionStates[action])
             .map((action) => (
@@ -199,11 +220,92 @@ export default function SyncPanel({ bridge }: SyncPanelProps) {
       </section>
 
       {latestActionState && lastAction ? (
-        <details>
+        <details style={styles.card}>
           <summary>{`Raw output: ${ACTION_LABELS[lastAction]} (${latestActionState.status})`}</summary>
-          <pre aria-label="Raw sync command output">{latestActionState.output}</pre>
+          <pre aria-label="Raw sync command output" style={styles.outputBlock}>
+            {latestActionState.output}
+          </pre>
         </details>
       ) : null}
     </div>
   );
 }
+
+const styles: Record<string, CSSProperties> = {
+  root: {
+    display: 'grid',
+    gap: '1rem',
+  },
+  statusText: {
+    margin: 0,
+    color: 'var(--vscode-descriptionForeground)',
+  },
+  subtleText: {
+    color: 'var(--vscode-descriptionForeground)',
+  },
+  card: {
+    display: 'grid',
+    gap: '0.5rem',
+    border: '1px solid var(--vscode-panel-border, var(--vscode-widget-border))',
+    borderRadius: '6px',
+    background: 'var(--vscode-sideBar-background, var(--vscode-editor-background))',
+    padding: '0.75rem',
+  },
+  sectionTitle: {
+    margin: 0,
+  },
+  profileList: {
+    margin: 0,
+    paddingLeft: '1.25rem',
+  },
+  profileItem: {
+    marginBottom: '0.25rem',
+  },
+  actionsRow: {
+    display: 'flex',
+    gap: '0.5rem',
+    flexWrap: 'wrap',
+    alignItems: 'center',
+  },
+  secondaryButton: {
+    border: '1px solid var(--vscode-panel-border, var(--vscode-widget-border))',
+    borderRadius: '4px',
+    background: 'var(--vscode-button-secondaryBackground, var(--vscode-editorWidget-background))',
+    color: 'var(--vscode-foreground)',
+    padding: '0.5rem 0.875rem',
+  },
+  primaryButton: {
+    border: '1px solid var(--vscode-button-background)',
+    background: 'var(--vscode-button-background)',
+    color: 'var(--vscode-button-foreground)',
+    borderRadius: '4px',
+    padding: '0.5rem 0.875rem',
+  },
+  confirmGroup: {
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: '0.5rem',
+  },
+  warningBanner: {
+    margin: 0,
+    borderRadius: '6px',
+    padding: '0.625rem 0.875rem',
+    background: 'var(--vscode-inputValidation-warningBackground, var(--vscode-editorWidget-background))',
+    color: 'var(--vscode-inputValidation-warningForeground, var(--vscode-foreground))',
+    border: '1px solid var(--vscode-inputValidation-warningBorder, transparent)',
+  },
+  historyList: {
+    margin: 0,
+    paddingLeft: '1.25rem',
+  },
+  outputBlock: {
+    margin: '0.5rem 0 0',
+    border: '1px solid var(--vscode-panel-border, var(--vscode-widget-border))',
+    borderRadius: '6px',
+    background: 'var(--vscode-textCodeBlock-background, var(--vscode-editor-background))',
+    padding: '0.75rem',
+    overflowX: 'auto',
+    fontFamily: 'var(--vscode-editor-font-family, monospace)',
+    fontSize: '0.85rem',
+  },
+};

@@ -27,7 +27,7 @@ export function useHighlightScroll(highlightId: string | undefined, containerRef
 }
 
 function highlightStyle(isHighlighted: boolean): CSSProperties {
-  return isHighlighted ? { boxShadow: '0 0 0 2px #facc15 inset', background: '#1e293b' } : {};
+  return isHighlighted ? { boxShadow: '0 0 0 2px var(--vscode-focusBorder) inset', background: 'var(--vscode-button-secondaryBackground, var(--vscode-editorWidget-background))' } : {};
 }
 
 type TodoDraft = {
@@ -749,16 +749,16 @@ const styles: Record<string, CSSProperties> = {
   },
   description: {
     margin: 0,
-    color: '#94a3b8',
+    color: 'var(--vscode-descriptionForeground)',
   },
   form: {
     display: 'flex',
     flexDirection: 'column',
     gap: '0.75rem',
     padding: '0.75rem',
-    border: '1px solid #334155',
-    borderRadius: '0.75rem',
-    background: '#0f172a',
+    border: '1px solid var(--vscode-panel-border, var(--vscode-widget-border))',
+    borderRadius: '6px',
+    background: 'var(--vscode-editor-background)',
   },
   list: {
     display: 'flex',
@@ -770,9 +770,9 @@ const styles: Record<string, CSSProperties> = {
     flexDirection: 'column',
     gap: '0.75rem',
     padding: '0.75rem',
-    border: '1px solid #334155',
-    borderRadius: '0.75rem',
-    background: '#0f172a',
+    border: '1px solid var(--vscode-panel-border, var(--vscode-widget-border))',
+    borderRadius: '6px',
+    background: 'var(--vscode-editor-background)',
   },
   row: {
     display: 'grid',
@@ -792,39 +792,39 @@ const styles: Record<string, CSSProperties> = {
   },
   label: {
     fontSize: '0.875rem',
-    color: '#cbd5e1',
+    color: 'var(--vscode-descriptionForeground)',
   },
   input: {
     width: '100%',
     boxSizing: 'border-box',
-    border: '1px solid #334155',
-    borderRadius: '0.5rem',
-    background: '#111827',
-    color: '#e2e8f0',
+    border: '1px solid var(--vscode-input-border, var(--vscode-panel-border))',
+    borderRadius: '4px',
+    background: 'var(--vscode-input-background)',
+    color: 'var(--vscode-input-foreground)',
     padding: '0.5rem 0.75rem',
   },
   textarea: {
     width: '100%',
     minHeight: '4.25rem',
     boxSizing: 'border-box',
-    border: '1px solid #334155',
-    borderRadius: '0.5rem',
-    background: '#111827',
-    color: '#e2e8f0',
+    border: '1px solid var(--vscode-panel-border, var(--vscode-widget-border))',
+    borderRadius: '4px',
+    background: 'var(--vscode-sideBar-background, var(--vscode-editor-background))',
+    color: 'var(--vscode-foreground)',
     padding: '0.5rem 0.75rem',
     resize: 'vertical',
   },
   button: {
-    border: '1px solid #334155',
-    background: '#1e293b',
-    color: '#e2e8f0',
-    borderRadius: '0.5rem',
+    border: '1px solid var(--vscode-panel-border, var(--vscode-widget-border))',
+    background: 'var(--vscode-button-secondaryBackground, var(--vscode-editorWidget-background))',
+    color: 'var(--vscode-foreground)',
+    borderRadius: '4px',
     padding: '0.5rem 0.875rem',
     cursor: 'pointer',
   },
   status: {
     alignSelf: 'center',
-    color: '#94a3b8',
+    color: 'var(--vscode-descriptionForeground)',
     fontSize: '0.875rem',
   },
 };

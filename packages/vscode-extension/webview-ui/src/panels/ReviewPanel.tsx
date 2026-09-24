@@ -138,7 +138,7 @@ export default function ReviewPanel({ bridge, taskId, onNavigate, onBusy, onErro
 
       <section aria-label="Review actions" style={styles.section}>
         {review.canMarkDone ? (
-          <button type="button" onClick={() => void markTaskDone()} style={styles.primaryButton}>
+          <button type="button" onClick={() => void markTaskDone()} className="ariadne-btn-primary" style={styles.primaryButton}>
             Mark task done
           </button>
         ) : (
@@ -169,9 +169,9 @@ const styles: Record<string, CSSProperties> = {
     gap: '0.75rem',
   },
   card: {
-    border: '1px solid #334155',
-    borderRadius: '0.75rem',
-    background: '#111827',
+    border: '1px solid var(--vscode-panel-border, var(--vscode-widget-border))',
+    borderRadius: '6px',
+    background: 'var(--vscode-sideBar-background, var(--vscode-editor-background))',
     padding: '0.875rem',
     display: 'grid',
     gap: '0.75rem',
@@ -184,56 +184,56 @@ const styles: Record<string, CSSProperties> = {
     alignItems: 'center',
   },
   badge: {
-    borderRadius: '999px',
+    borderRadius: '4px',
     padding: '0.25rem 0.625rem',
     fontSize: '0.875rem',
     fontWeight: 600,
   },
   passBadge: {
-    background: '#14532d',
-    color: '#dcfce7',
+    background: 'var(--vscode-diffEditor-insertedTextBackground, var(--vscode-editorWidget-background))',
+    color: 'var(--vscode-foreground)',
   },
   warningBadge: {
-    background: '#78350f',
-    color: '#fef3c7',
+    background: 'var(--vscode-inputValidation-warningBackground, var(--vscode-editorWidget-background))',
+    color: 'var(--vscode-inputValidation-warningForeground, var(--vscode-foreground))',
   },
   failBadge: {
-    background: '#7f1d1d',
-    color: '#fee2e2',
+    background: 'var(--vscode-inputValidation-errorBackground, var(--vscode-editorWidget-background))',
+    color: 'var(--vscode-inputValidation-errorForeground, var(--vscode-errorForeground))',
   },
   unknownBadge: {
-    background: '#334155',
-    color: '#e2e8f0',
+    background: 'var(--vscode-panel-border, var(--vscode-widget-border))',
+    color: 'var(--vscode-foreground)',
   },
   detail: {
     margin: 0,
-    color: '#cbd5e1',
+    color: 'var(--vscode-descriptionForeground)',
   },
   button: {
-    border: '1px solid #334155',
-    background: '#1e293b',
-    color: '#e2e8f0',
-    borderRadius: '0.5rem',
+    border: '1px solid var(--vscode-panel-border, var(--vscode-widget-border))',
+    background: 'var(--vscode-button-secondaryBackground, var(--vscode-editorWidget-background))',
+    color: 'var(--vscode-foreground)',
+    borderRadius: '4px',
     padding: '0.5rem 0.875rem',
     cursor: 'pointer',
     justifySelf: 'start',
   },
   primaryButton: {
-    border: '1px solid #1d4ed8',
-    background: '#1d4ed8',
-    color: '#eff6ff',
-    borderRadius: '0.5rem',
+    border: '1px solid var(--vscode-button-background)',
+    background: 'var(--vscode-button-background)',
+    color: 'var(--vscode-button-foreground)',
+    borderRadius: '4px',
     padding: '0.625rem 1rem',
     cursor: 'pointer',
     justifySelf: 'start',
   },
   blockedText: {
     margin: 0,
-    color: '#fbbf24',
+    color: 'var(--vscode-editorWarning-foreground, #cca700)',
     fontWeight: 600,
   },
   muted: {
     margin: 0,
-    color: '#94a3b8',
+    color: 'var(--vscode-descriptionForeground)',
   },
 };

@@ -33,6 +33,11 @@ function nowIso(): string {
   return new Date().toISOString();
 }
 
+/** Escapes regex metacharacters so arbitrary text can be embedded literally in a `RegExp`. */
+function escapeRegExp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 // Raw row shapes as returned by better-sqlite3 (snake_case, SQLite integer booleans).
 interface TaskRow {
   id: string;
@@ -1176,16 +1181,16 @@ export class TaskStore {
    * TDD RED→GREEN rerun (e.g. `pytest some_test.py` failing, then passing
    * once fixed) stops permanently cluttering `status`/`resume` with a
    * "failure" that's actually already fixed. Deliberately exact-match only
-   * (no fuzzy matching) to avoid ever resolving an unrelated error by
-   * mistake. Returns the ids of errors it resolved, for callers that want
-   * to report this back to the user/agent.
+   * on the command text (no fuzzy matching) to avoid ever resolving an
+   * unrelated error by mistake; an optional output-tail excerpt appended
+   * after the command (see `packages/cli/src/exec.ts`) is allowed and
+   * ignored for matching purposes. Returns the ids of errors it resolved,
+   * for callers that want to report this back to the user/agent.
    */
   autoResolveMatchingCommandErrors(taskId: string, cmdRedacted: string): string[] {
-    const suffix = `): ${cmdRedacted}`;
+    const pattern = new RegExp(`^Command failed \\(exit \\d+\\): ${escapeRegExp(cmdRedacted)}(?:\\n|$)`);
     const unresolved = this.listErrors(taskId, { resolved: false });
-    const matches = unresolved.filter(
-      (e) => e.message.startsWith('Command failed (exit ') && e.message.endsWith(suffix),
-    );
+    const matches = unresolved.filter((e) => pattern.test(e.message));
     for (const m of matches) {
       this.resolveError(m.id, 'auto-resolved: this exact command succeeded on a later run');
     }

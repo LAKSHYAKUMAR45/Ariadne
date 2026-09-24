@@ -644,10 +644,14 @@ function printStatus(store: TaskStore, taskId: string, workspaceRoot: string, to
 program
   .command('exec <command> [args...]')
   .description('Run a command in the current task context, recording the command and any failure automatically')
+  .option('--summary <text>', 'Short label to store instead of the raw command line (e.g. "ran L4 usecase RED tests")')
   .allowUnknownOption(true)
-  .action(async (command: string, args: string[] = []) => {
+  .action(async (command: string, args: string[] = [], options: { summary?: string }) => {
     await withResolvedTask(undefined, async (store, taskId) => {
-      const exitCode = await runTaskExec(store, taskId, command, args, { workspaceRoot: findWorkspaceRoot() });
+      const exitCode = await runTaskExec(store, taskId, command, args, {
+        workspaceRoot: findWorkspaceRoot(),
+        summary: options.summary,
+      });
       if (exitCode !== 0) process.exitCode = exitCode;
     });
   });

@@ -72,8 +72,12 @@ export type {
 export {
   DEFAULT_REDACTION_RULES,
   MAX_REDACTED_LENGTH,
+  OUTPUT_TAIL_MAX_LINES,
+  OUTPUT_TAIL_MAX_CHARS,
   redact,
   redactCommand,
+  redactLines,
+  summarizeOutputTail,
 } from './Redactor.js';
 export type { RedactionRule } from './Redactor.js';
 export { exportTaskMarkdown } from './Exporter.js';

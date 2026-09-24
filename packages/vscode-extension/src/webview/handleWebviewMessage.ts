@@ -799,6 +799,34 @@ async function handleContextOpen(deps: WebviewDispatcherDeps, message: WebviewRe
   };
 }
 
+async function handleContextOpenInChat(deps: WebviewDispatcherDeps, message: WebviewRequest): Promise<WebviewResponse> {
+  if (!deps.openInCopilotChat) return errorResponse(message.id, 'Copilot Chat handoff is not configured.');
+  const payload = getPayload(message);
+  const markdown = readNonEmptyText(payload.markdown);
+  if (!markdown) return errorResponse(message.id, 'context.openInChat requires payload.markdown.');
+  await deps.openInCopilotChat(markdown);
+  return {
+    id: message.id,
+    ok: true,
+    data: { opened: true },
+    state: buildWebviewState(deps),
+  };
+}
+
+async function handleContextOpenInCli(deps: WebviewDispatcherDeps, message: WebviewRequest): Promise<WebviewResponse> {
+  if (!deps.openInCopilotCli) return errorResponse(message.id, 'Copilot CLI handoff is not configured.');
+  const payload = getPayload(message);
+  const markdown = readNonEmptyText(payload.markdown);
+  if (!markdown) return errorResponse(message.id, 'context.openInCli requires payload.markdown.');
+  await deps.openInCopilotCli(markdown);
+  return {
+    id: message.id,
+    ok: true,
+    data: { opened: true },
+    state: buildWebviewState(deps),
+  };
+}
+
 async function handleFileOpen(deps: WebviewDispatcherDeps, message: WebviewRequest): Promise<WebviewResponse> {
   if (!deps.openWorkspaceFile) return errorResponse(message.id, 'Workspace file opening is not configured.');
   const payload = getPayload(message);
@@ -1251,6 +1279,10 @@ export async function handleWebviewMessage(deps: WebviewDispatcherDeps, message:
         return await handleContextCopy(deps, message);
       case WebviewRequestTypes.ContextOpen:
         return await handleContextOpen(deps, message);
+      case WebviewRequestTypes.ContextOpenInChat:
+        return await handleContextOpenInChat(deps, message);
+      case WebviewRequestTypes.ContextOpenInCli:
+        return await handleContextOpenInCli(deps, message);
       case WebviewRequestTypes.FileOpen:
         return await handleFileOpen(deps, message);
       case WebviewRequestTypes.TasksList:

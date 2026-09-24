@@ -342,13 +342,13 @@ describe('UtilityPanels', () => {
     expect(onNavigate).toHaveBeenCalledWith({ tabId: 'errors', entityId: 'error-1' });
   });
 
-  it('previews context with a budget and offers copy/open actions', async () => {
+  it('previews context with the default token budget and offers copy/open actions', async () => {
     const harness = createBridge({
-      request: vi.fn(async (type: string, payload?: unknown) => {
+      request: vi.fn(async (type: string) => {
         if (type === 'context.preview') {
           return {
             preview: {
-              tokenBudget: (payload as { tokenBudget: number }).tokenBudget,
+              tokenBudget: 2000,
               markdown: '# Context\nUtility panels',
               sections: [{ id: 'summary', label: 'Summary', count: 1 }],
               context: {
@@ -376,18 +376,23 @@ describe('UtilityPanels', () => {
 
     render(<ContextPanel bridge={harness} taskId={task.id} onBusy={() => undefined} onError={() => undefined} />);
 
-    await userEvent.clear(screen.getByLabelText('Token budget'));
-    await userEvent.type(screen.getByLabelText('Token budget'), '1200');
     await userEvent.click(screen.getByRole('button', { name: 'Preview context' }));
 
     expect(await screen.findByText('# Context')).toBeInTheDocument();
     expect(screen.getByText('Summary: 1 included')).toBeInTheDocument();
+    await waitFor(() => expect(harness.request).toHaveBeenCalledWith('context.preview', {}));
 
     await userEvent.click(screen.getByRole('button', { name: 'Copy context' }));
     await waitFor(() => expect(harness.request).toHaveBeenCalledWith('context.copy', { markdown: '# Context\nUtility panels' }));
 
     await userEvent.click(screen.getByRole('button', { name: 'Open as Markdown' }));
     await waitFor(() => expect(harness.request).toHaveBeenCalledWith('context.open', { markdown: '# Context\nUtility panels' }));
+
+    await userEvent.click(screen.getByRole('button', { name: 'Open in Copilot Chat' }));
+    await waitFor(() => expect(harness.request).toHaveBeenCalledWith('context.openInChat', { markdown: '# Context\nUtility panels' }));
+
+    await userEvent.click(screen.getByRole('button', { name: 'Open in Copilot CLI' }));
+    await waitFor(() => expect(harness.request).toHaveBeenCalledWith('context.openInCli', { markdown: '# Context\nUtility panels' }));
   });
 
   it('shows review checks and can mark the task done from review mode', async () => {
@@ -465,7 +470,7 @@ describe('UtilityPanels', () => {
     await waitFor(() => expect(screen.queryByText('1 unresolved error needs resolution.')).not.toBeInTheDocument());
   });
 
-  it('does not render a stale context preview after the token budget changes', async () => {
+  it('does not render a stale context preview after the selected task changes', async () => {
     const firstPreview = createDeferred<{
       preview: {
         tokenBudget: number;
@@ -489,51 +494,55 @@ describe('UtilityPanels', () => {
         };
       };
     }>();
+    const nextTaskId = 'task-2';
+    let previewRequests = 0;
 
     const harness = createBridge({
-      request: vi.fn(async (type: string, payload?: unknown) => {
+      request: vi.fn(async (type: string) => {
         if (type === 'context.preview') {
-          const tokenBudget = (payload as { tokenBudget: number }).tokenBudget;
-          if (tokenBudget === 4000) {
-            return firstPreview.promise;
-          }
-          return {
-            preview: {
-              tokenBudget,
-              markdown: `# Context\nBudget ${tokenBudget}`,
-              sections: [{ id: 'summary', label: 'Summary', count: 1 }],
-              context: {
-                taskId: task.id,
-                goal: task.goal,
-                branch: task.branch,
-                workspaceRoot: '/repo',
-                latestSummary: 'Session summary',
-                openQuestions: [],
-                openTodos: [],
-                blockedTodos: [],
-                unresolvedErrors: [],
-                recentFiles: [],
-                recentCommits: [],
-                recentCommands: [],
-                decisions: [],
-                truncated: {},
+          previewRequests += 1;
+          if (previewRequests > 1) {
+            return {
+              preview: {
+                tokenBudget: 2000,
+                markdown: `# Context\nTask ${nextTaskId}`,
+                sections: [{ id: 'summary', label: 'Summary', count: 1 }],
+                context: {
+                  taskId: nextTaskId,
+                  goal: task.goal,
+                  branch: task.branch,
+                  workspaceRoot: '/repo',
+                  latestSummary: 'Session summary',
+                  openQuestions: [],
+                  openTodos: [],
+                  blockedTodos: [],
+                  unresolvedErrors: [],
+                  recentFiles: [],
+                  recentCommits: [],
+                  recentCommands: [],
+                  decisions: [],
+                  truncated: {},
+                },
               },
-            },
-          };
+            };
+          }
+          return firstPreview.promise;
         }
         return {};
       }) as BridgeHarness['request'],
     });
 
-    render(<ContextPanel bridge={harness} taskId={task.id} onBusy={() => undefined} onError={() => undefined} />);
+    const { rerender } = render(
+      <ContextPanel bridge={harness} taskId={task.id} onBusy={() => undefined} onError={() => undefined} />,
+    );
 
     await userEvent.click(screen.getByRole('button', { name: 'Preview context' }));
-    await userEvent.clear(screen.getByLabelText('Token budget'));
-    await userEvent.type(screen.getByLabelText('Token budget'), '1200');
+    rerender(<ContextPanel bridge={harness} taskId={nextTaskId} onBusy={() => undefined} onError={() => undefined} />);
+    await userEvent.click(screen.getByRole('button', { name: 'Preview context' }));
 
     firstPreview.resolve({
       preview: {
-        tokenBudget: 4000,
+        tokenBudget: 2000,
         markdown: '# Context\nBudget 4000',
         sections: [{ id: 'summary', label: 'Summary', count: 1 }],
         context: {
@@ -555,11 +564,11 @@ describe('UtilityPanels', () => {
       },
     });
 
-    await waitFor(() => expect(screen.queryByText('Budget 4000')).not.toBeInTheDocument());
-    expect(screen.getByText('Preview the current task handoff package to inspect or share it.')).toBeInTheDocument();
+    expect(await screen.findByText(`# Context\nTask ${nextTaskId}`.split('\n')[0])).toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByText('# Context\nBudget 4000')).not.toBeInTheDocument());
   });
 
-  it('clears busy when an in-flight context preview is invalidated by a budget change', async () => {
+  it('clears busy when an in-flight context preview is invalidated by a task change', async () => {
     const firstPreview = createDeferred<{
       preview: {
         tokenBudget: number;
@@ -594,19 +603,20 @@ describe('UtilityPanels', () => {
       }) as BridgeHarness['request'],
     });
 
-    render(<ContextPanel bridge={harness} taskId={task.id} onBusy={onBusy} onError={() => undefined} />);
+    const { rerender } = render(
+      <ContextPanel bridge={harness} taskId={task.id} onBusy={onBusy} onError={() => undefined} />,
+    );
 
     await userEvent.click(screen.getByRole('button', { name: 'Preview context' }));
     await waitFor(() => expect(onBusy).toHaveBeenCalledWith('Previewing context…'));
 
-    await userEvent.clear(screen.getByLabelText('Token budget'));
-    await userEvent.type(screen.getByLabelText('Token budget'), '1200');
+    rerender(<ContextPanel bridge={harness} taskId="task-2" onBusy={onBusy} onError={() => undefined} />);
 
     await waitFor(() => expect(onBusy).toHaveBeenLastCalledWith(undefined));
 
     firstPreview.resolve({
       preview: {
-        tokenBudget: 4000,
+        tokenBudget: 2000,
         markdown: '# Context\nBudget 4000',
         sections: [{ id: 'summary', label: 'Summary', count: 1 }],
         context: {
@@ -628,7 +638,7 @@ describe('UtilityPanels', () => {
       },
     });
 
-    await waitFor(() => expect(screen.queryByText('Budget 4000')).not.toBeInTheDocument());
+    await waitFor(() => expect(screen.queryByText('# Context\nBudget 4000')).not.toBeInTheDocument());
   });
 
   it('renders capture health warnings when no current task is selected', async () => {
@@ -684,7 +694,7 @@ describe('UtilityPanels', () => {
 
     const highlighted = document.querySelector('[data-entity-id="checkpoint-1"]');
     expect(highlighted).not.toBeNull();
-    expect(highlighted).toHaveStyle({ background: '#1e293b' });
+    expect(highlighted).toHaveStyle({ background: 'var(--vscode-button-secondaryBackground, var(--vscode-editorWidget-background))' });
   });
 
   it('loads a file capture diff lazily when a capture is selected', async () => {

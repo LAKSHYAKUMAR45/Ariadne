@@ -40,7 +40,7 @@ function triggerForCapture(capture: TaskFileCaptureWithEntries): Exclude<Trigger
 }
 
 function highlightStyle(isHighlighted: boolean): CSSProperties {
-  return isHighlighted ? { boxShadow: '0 0 0 2px #facc15 inset', background: '#1e293b' } : {};
+  return isHighlighted ? { boxShadow: '0 0 0 2px var(--vscode-focusBorder) inset', background: 'var(--vscode-button-secondaryBackground, var(--vscode-editorWidget-background))' } : {};
 }
 
 export default function FilesPanel({
@@ -143,12 +143,12 @@ export default function FilesPanel({
   }
 
   return (
-    <div>
-      <section aria-label="File captures">
-        <h3>File captures</h3>
+    <div style={styles.root}>
+      <section aria-label="File captures" style={styles.card}>
+        <h3 style={styles.sectionTitle}>File captures</h3>
         <div style={styles.filters}>
           <label style={styles.filterField}>
-            <span>Filter captured files</span>
+            <span style={styles.fieldLabel}>Filter captured files</span>
             <input
               aria-label="Filter captured files"
               value={pathFilter}
@@ -157,7 +157,7 @@ export default function FilesPanel({
             />
           </label>
           <label style={styles.filterField}>
-            <span>Trigger</span>
+            <span style={styles.fieldLabel}>Trigger</span>
             <select
               aria-label="Capture trigger"
               value={triggerFilter}
@@ -171,7 +171,7 @@ export default function FilesPanel({
             </select>
           </label>
           <label style={styles.filterField}>
-            <span>Status</span>
+            <span style={styles.fieldLabel}>Status</span>
             <select
               aria-label="Capture status"
               value={statusFilter}
@@ -186,18 +186,22 @@ export default function FilesPanel({
           </label>
         </div>
         {captures.length === 0 ? (
-          <p>No file captures for this task yet.</p>
+          <p style={styles.subtleText}>No file captures for this task yet.</p>
         ) : filteredCaptures.length === 0 ? (
-          <p>No captures match this filter.</p>
+          <p style={styles.subtleText}>No captures match this filter.</p>
         ) : (
-          <ul>
+          <ul style={styles.captureList}>
             {filteredCaptures.map((capture) => {
               const isHighlighted =
                 capture.id === highlightedCaptureId ||
                 capture.id === highlightCaptureId ||
                 capture.entries.some((entry) => entry.path === highlightPath);
               return (
-                <li key={capture.id} data-entity-id={capture.id} style={highlightStyle(isHighlighted)}>
+                <li
+                  key={capture.id}
+                  data-entity-id={capture.id}
+                  style={{ ...styles.captureItem, ...highlightStyle(isHighlighted) }}
+                >
                   <button
                     type="button"
                     onClick={() => void selectCapture(capture.id)}
@@ -210,14 +214,14 @@ export default function FilesPanel({
                   <ul style={styles.entryList}>
                     {capture.entries.map((entry) => (
                       <li key={entry.path} style={styles.entryRow}>
-                        <span>{entry.path}</span>
-                        <button type="button" onClick={() => void openPath(entry.path)}>
+                        <span style={styles.subtleText}>{entry.path}</span>
+                        <button type="button" onClick={() => void openPath(entry.path)} style={styles.secondaryButton}>
                           Open {entry.path}
                         </button>
                       </li>
                     ))}
                   </ul>
-                  {busyCaptureId === capture.id ? <p>Loading capture…</p> : null}
+                  {busyCaptureId === capture.id ? <p style={styles.subtleText}>Loading capture…</p> : null}
                 </li>
               );
             })}
@@ -225,27 +229,37 @@ export default function FilesPanel({
         )}
       </section>
 
-      {missingCommitMessage ? <p role="alert">{missingCommitMessage}</p> : null}
-      {message ? <p role="alert">{message}</p> : null}
+      {missingCommitMessage ? (
+        <p role="alert" style={styles.errorBanner}>
+          {missingCommitMessage}
+        </p>
+      ) : null}
+      {message ? (
+        <p role="alert" style={styles.errorBanner}>
+          {message}
+        </p>
+      ) : null}
 
-      <section aria-label="Selected capture details">
-        <h3>Selected capture</h3>
+      <section aria-label="Selected capture details" style={styles.card}>
+        <h3 style={styles.sectionTitle}>Selected capture</h3>
         {selectedCapture ? (
           <div>
-            <p>
+            <p style={styles.captureId}>
               <strong>{selectedCapture.id}</strong>
             </p>
-            <ul>
+            <ul style={styles.diffList}>
               {selectedCapture.entries.map((entry) => (
-                <li key={entry.path}>
-                  <p>Path: {entry.path}</p>
-                  <pre aria-label="Unified diff">{renderDiffText(entry.unifiedDiff)}</pre>
+                <li key={entry.path} style={styles.diffItem}>
+                  <p style={styles.subtleText}>Path: {entry.path}</p>
+                  <pre aria-label="Unified diff" style={styles.diffBlock}>
+                    {renderDiffText(entry.unifiedDiff)}
+                  </pre>
                 </li>
               ))}
             </ul>
           </div>
         ) : (
-          <p>Select a capture to view its diff.</p>
+          <p style={styles.subtleText}>Select a capture to view its diff.</p>
         )}
       </section>
     </div>
@@ -253,29 +267,91 @@ export default function FilesPanel({
 }
 
 const styles: Record<string, CSSProperties> = {
+  root: {
+    display: 'grid',
+    gap: '1rem',
+  },
+  card: {
+    display: 'grid',
+    gap: '0.5rem',
+    border: '1px solid var(--vscode-panel-border, var(--vscode-widget-border))',
+    borderRadius: '6px',
+    background: 'var(--vscode-sideBar-background, var(--vscode-editor-background))',
+    padding: '0.75rem',
+  },
+  sectionTitle: {
+    margin: 0,
+  },
+  subtleText: {
+    margin: 0,
+    color: 'var(--vscode-descriptionForeground)',
+  },
   filters: {
     display: 'flex',
     flexWrap: 'wrap',
     gap: 12,
-    marginBottom: 16,
+    marginBottom: 4,
   },
   filterField: {
     display: 'flex',
     flexDirection: 'column',
     gap: 4,
   },
+  fieldLabel: {
+    fontSize: '0.85rem',
+    color: 'var(--vscode-descriptionForeground)',
+  },
   input: {
     minWidth: 240,
+    border: '1px solid var(--vscode-input-border, var(--vscode-panel-border))',
+    borderRadius: '4px',
+    background: 'var(--vscode-input-background)',
+    color: 'var(--vscode-input-foreground)',
+    padding: '0.4rem 0.6rem',
+    boxSizing: 'border-box',
   },
   select: {
     minWidth: 140,
+    border: '1px solid var(--vscode-input-border, var(--vscode-panel-border))',
+    borderRadius: '4px',
+    background: 'var(--vscode-input-background)',
+    color: 'var(--vscode-input-foreground)',
+    padding: '0.4rem 0.6rem',
+    boxSizing: 'border-box',
+  },
+  captureList: {
+    display: 'grid',
+    gap: '0.5rem',
+    margin: 0,
+    padding: 0,
+    listStyle: 'none',
+  },
+  captureItem: {
+    border: '1px solid var(--vscode-panel-border, var(--vscode-widget-border))',
+    borderRadius: '6px',
+    padding: '0.625rem 0.75rem',
   },
   captureButton: {
     display: 'block',
+    width: '100%',
+    textAlign: 'left',
     marginBottom: 8,
+    border: '1px solid var(--vscode-panel-border, var(--vscode-widget-border))',
+    borderRadius: '4px',
+    background: 'var(--vscode-button-secondaryBackground, var(--vscode-editorWidget-background))',
+    color: 'var(--vscode-foreground)',
+    padding: '0.5rem 0.75rem',
+  },
+  secondaryButton: {
+    border: '1px solid var(--vscode-panel-border, var(--vscode-widget-border))',
+    borderRadius: '4px',
+    background: 'var(--vscode-button-secondaryBackground, var(--vscode-editorWidget-background))',
+    color: 'var(--vscode-foreground)',
+    padding: '0.3rem 0.6rem',
   },
   meta: {
     margin: '4px 0 8px',
+    color: 'var(--vscode-descriptionForeground)',
   },
   entryList: {
     margin: '0 0 8px',
@@ -287,5 +363,37 @@ const styles: Record<string, CSSProperties> = {
     gap: 12,
     alignItems: 'center',
     marginBottom: 6,
+  },
+  errorBanner: {
+    margin: 0,
+    borderRadius: '6px',
+    padding: '0.625rem 0.875rem',
+    background: 'var(--vscode-inputValidation-errorBackground, var(--vscode-editorWidget-background))',
+    color: 'var(--vscode-inputValidation-errorForeground, var(--vscode-errorForeground))',
+    border: '1px solid var(--vscode-inputValidation-errorBorder, transparent)',
+  },
+  captureId: {
+    margin: 0,
+  },
+  diffList: {
+    display: 'grid',
+    gap: '0.75rem',
+    margin: 0,
+    padding: 0,
+    listStyle: 'none',
+  },
+  diffItem: {
+    display: 'grid',
+    gap: '0.375rem',
+  },
+  diffBlock: {
+    margin: 0,
+    border: '1px solid var(--vscode-panel-border, var(--vscode-widget-border))',
+    borderRadius: '6px',
+    background: 'var(--vscode-textCodeBlock-background, var(--vscode-editor-background))',
+    padding: '0.75rem',
+    overflowX: 'auto',
+    fontFamily: 'var(--vscode-editor-font-family, monospace)',
+    fontSize: '0.85rem',
   },
 };
