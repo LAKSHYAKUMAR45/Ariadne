@@ -230,6 +230,33 @@ describe('sync-server: auth + sync routes', () => {
       const res = await request(app).post('/api/v1/auth/register').send({ username: 'dave', password: 'pw123456' });
       expect(JSON.stringify(res.body)).not.toContain('password');
     });
+
+    it('rejects login attempt for SSO-provisioned user with NULL password_hash', async () => {
+      // Directly insert a user with NULL password_hash (simulating SSO provisioning)
+      const pool = (app as any).locals.pool;
+      const { rows } = await pool.query<{ id: string }>(
+        'INSERT INTO users (username, password_hash) VALUES ($1, NULL) RETURNING id',
+        ['sso-user']
+      );
+      const userId = rows[0].id;
+
+      // Ensure the user exists in the singleton team
+      const teamRes = await pool.query<{ id: string }>(
+        "SELECT id FROM teams WHERE singleton_key = 'default' LIMIT 1"
+      );
+      if (teamRes.rows.length > 0) {
+        const teamId = teamRes.rows[0].id;
+        await pool.query(
+          'INSERT INTO team_memberships (team_id, user_id, role, active) VALUES ($1, $2, $3, true)',
+          [teamId, userId, 'member']
+        );
+      }
+
+      // Attempt to login with any password should return 401, not crash
+      const res = await request(app).post('/api/v1/auth/login').send({ username: 'sso-user', password: 'anypassword' });
+      expect(res.status).toBe(401);
+      expect(res.body.error.code).toBe('invalid_credentials');
+    });
   });
 
   describe('admin member routes', () => {

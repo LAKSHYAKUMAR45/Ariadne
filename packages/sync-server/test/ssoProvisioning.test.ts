@@ -73,4 +73,26 @@ describe('provisionSsoUser', () => {
       { username: 'admin-user-2', role: 'admin' },
     ]);
   });
+
+  it('clears password_hash when SSO-provisioning an existing self-registered user', async () => {
+    // Create a self-registered user with a password hash
+    const fakeHash = '$2a$12$abcdefghijklmnopqrstuvwxyz.fake.hash.value1234567890ab';
+    const { rows: insertRows } = await pool.query<{ id: string }>(
+      'INSERT INTO users (username, password_hash) VALUES ($1, $2) RETURNING id',
+      ['self-registered-user', fakeHash],
+    );
+    const userId = insertRows[0].id;
+
+    // Verify the password_hash is set
+    let checkRows = await pool.query('SELECT password_hash FROM users WHERE id = $1', [userId]);
+    expect(checkRows.rows[0].password_hash).toBe(fakeHash);
+
+    // SSO-provision the same username
+    const result = await provisionSsoUser(pool, 'self-registered-user', 'admin');
+    expect(result.userId).toBe(userId);
+
+    // Verify password_hash is now NULL
+    checkRows = await pool.query('SELECT password_hash FROM users WHERE id = $1', [userId]);
+    expect(checkRows.rows[0].password_hash).toBeNull();
+  });
 });

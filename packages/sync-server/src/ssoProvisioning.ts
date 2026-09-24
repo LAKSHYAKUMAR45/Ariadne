@@ -51,7 +51,7 @@ export async function provisionSsoUser(
     const userResult = await client.query<UserRow>(
       `INSERT INTO users (username, password_hash)
        VALUES ($1, NULL)
-       ON CONFLICT (username) DO UPDATE SET username = EXCLUDED.username
+       ON CONFLICT (username) DO UPDATE SET username = EXCLUDED.username, password_hash = NULL
        RETURNING id`,
       [username],
     );
