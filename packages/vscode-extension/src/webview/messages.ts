@@ -42,6 +42,7 @@ export const WebviewRequestTypes = {
   ContextPreview: 'context.preview',
   ContextCopy: 'context.copy',
   ContextOpen: 'context.open',
+  ReviewGet: 'review.get',
   FileOpen: 'file.open',
   TasksList: 'tasks.list',
   TodoCreate: 'todo.create',
@@ -197,8 +198,30 @@ export interface ContextPreview {
   sections: ContextSectionSummary[];
 }
 
+export type ReviewCheckStatus = 'pass' | 'warning' | 'fail' | 'unknown';
+
+export interface ReviewCheckAction {
+  label: string;
+  tabId?: WebviewTabId;
+  entityId?: string;
+}
+
+export interface ReviewCheck {
+  id: string;
+  label: string;
+  status: ReviewCheckStatus;
+  detail: string;
+  action?: ReviewCheckAction;
+}
+
+export interface ReviewSummary {
+  taskId: string;
+  checks: ReviewCheck[];
+  canMarkDone: boolean;
+}
+
 export type WebviewRequest =
-  | (WebviewRequestBase<'state.get' | 'activity.list' | 'capture.health' | 'tasks.list' | 'sync.push' | 'sync.listRemote' | 'export.markdown'> & {
+  | (WebviewRequestBase<'state.get' | 'activity.list' | 'capture.health' | 'review.get' | 'tasks.list' | 'sync.push' | 'sync.listRemote' | 'export.markdown'> & {
       payload?: undefined;
     })
   | (WebviewRequestBase<'task.create'> & {
@@ -261,6 +284,11 @@ export interface WebviewDispatcherDeps {
   store: TaskStore;
   currentTaskId?: string;
   workspaceRoot?: string;
+  sessionStatus?: {
+    lastSyncPush?: string;
+    lastSyncPull?: string;
+    lastExport?: string;
+  };
   passiveCapture?: {
     enabled: boolean;
     shellIntegrationAvailable: boolean;

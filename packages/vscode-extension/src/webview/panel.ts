@@ -24,6 +24,11 @@ export interface AriadnePanelDeps {
 let panel: vscode.WebviewPanel | undefined;
 let panelDeps: AriadnePanelDeps | undefined;
 let selectedWorkspaceRoot: string | undefined;
+let panelSessionStatus: {
+  lastSyncPush?: string;
+  lastSyncPull?: string;
+  lastExport?: string;
+} = {};
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -211,6 +216,7 @@ async function handleWebviewRequest(message: unknown): Promise<void> {
         store,
         currentTaskId: selectedWorkspaceRoot ? store.getCurrentTaskId() : panelDeps.getCurrentTaskId(),
         workspaceRoot,
+        sessionStatus: panelSessionStatus,
         passiveCapture: readPassiveCaptureState(workspaceRoot),
         setCurrentTaskId: panelDeps.setCurrentTask,
         setCurrentTaskIdForWorkspace: panelDeps.setCurrentTaskInWorkspace,
@@ -239,6 +245,17 @@ async function handleWebviewRequest(message: unknown): Promise<void> {
       },
       message,
     );
+
+    if (response.ok) {
+      const timestamp = new Date().toISOString();
+      if (message.type === WebviewRequestTypes.SyncPush) {
+        panelSessionStatus = { ...panelSessionStatus, lastSyncPush: timestamp };
+      } else if (message.type === WebviewRequestTypes.SyncPull) {
+        panelSessionStatus = { ...panelSessionStatus, lastSyncPull: timestamp };
+      } else if (message.type === WebviewRequestTypes.ExportMarkdown) {
+        panelSessionStatus = { ...panelSessionStatus, lastExport: timestamp };
+      }
+    }
 
     void panel.webview.postMessage(response);
     if (response.state) {
@@ -283,6 +300,7 @@ export function openAriadnePanel(context: vscode.ExtensionContext, deps: Ariadne
     panel = undefined;
     panelDeps = undefined;
     selectedWorkspaceRoot = undefined;
+    panelSessionStatus = {};
   });
 
   postStateUpdate(currentState());

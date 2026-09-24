@@ -8,6 +8,7 @@ import ActivityPanel from './panels/ActivityPanel';
 import ContextPanel from './panels/ContextPanel';
 import OverviewPanel from './panels/OverviewPanel';
 import FilesPanel from './panels/FilesPanel';
+import ReviewPanel from './panels/ReviewPanel';
 import SearchPanel from './panels/SearchPanel';
 import type { SearchCategory, SearchHit } from './panels/SearchPanel';
 import SyncPanel from './panels/SyncPanel';
@@ -24,7 +25,7 @@ const categoryTabMap: Record<SearchCategory, TabId> = {
   commit: 'files',
 };
 
-type TabId = 'overview' | 'activity' | 'context' | 'todos' | 'decisions' | 'errors' | 'questions' | 'files' | 'search' | 'sync';
+type TabId = 'overview' | 'activity' | 'context' | 'review' | 'todos' | 'decisions' | 'errors' | 'questions' | 'files' | 'search' | 'sync';
 
 interface NavigationTarget {
   tabId: WebviewTabId;
@@ -47,6 +48,7 @@ const tabs: Array<{ id: TabId; label: string }> = [
   { id: 'overview', label: 'Overview' },
   { id: 'activity', label: 'Activity' },
   { id: 'context', label: 'Context' },
+  { id: 'review', label: 'Review' },
   { id: 'todos', label: 'Todos' },
   { id: 'decisions', label: 'Decisions' },
   { id: 'errors', label: 'Errors' },
@@ -355,6 +357,18 @@ export default function App({ bridge, initialState }: AppProps) {
       case 'context':
         return state ? (
           <ContextPanel bridge={bridge} taskId={state.currentTaskId} onBusy={handleBusy} onError={handlePanelError} />
+        ) : (
+          <p>No task selected.</p>
+        );
+      case 'review':
+        return state ? (
+          <ReviewPanel
+            bridge={bridge}
+            taskId={state.currentTaskId}
+            onNavigate={navigateToPanel}
+            onBusy={handleBusy}
+            onError={handlePanelError}
+          />
         ) : (
           <p>No task selected.</p>
         );

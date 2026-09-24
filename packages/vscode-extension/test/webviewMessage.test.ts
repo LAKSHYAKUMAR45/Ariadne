@@ -148,6 +148,35 @@ describe('handleWebviewMessage', () => {
     store.close();
   });
 
+  it('reports review checks before task completion', async () => {
+    const { store, task } = makeStore();
+    store.createTodo({ taskId: task.id, text: 'Blocked item', status: 'blocked' });
+
+    const response = await handleWebviewMessage(
+      { store, currentTaskId: task.id, workspaceRoot: '/repo' },
+      { id: 'review', type: 'review.get' } as never,
+    );
+
+    expect(response.ok).toBe(true);
+    if (response.ok) {
+      expect(response.data).toMatchObject({
+        review: {
+          taskId: task.id,
+          checks: expect.arrayContaining([
+            expect.objectContaining({ id: 'pending-todos', status: 'fail' }),
+            expect.objectContaining({ id: 'unresolved-errors', status: 'fail' }),
+            expect.objectContaining({ id: 'open-questions', status: 'warning' }),
+            expect.objectContaining({ id: 'recent-checkpoint', status: 'pass' }),
+            expect.objectContaining({ id: 'sync-status', status: 'unknown' }),
+            expect.objectContaining({ id: 'export-status', status: 'unknown' }),
+          ]),
+          canMarkDone: false,
+        },
+      });
+    }
+    store.close();
+  });
+
   it('returns empty activity and unknown health when no task is selected', async () => {
     const store = new TaskStore(':memory:');
 

@@ -65,6 +65,8 @@ function bridge(overrides: Partial<BridgeHarness> = {}): BridgeHarness {
         return { output: 'Pushed to cloud' };
       case 'export.markdown':
         return { path: '/repo/.ariadne/export/task-1.md', markdown: '# task' };
+      case 'review.get':
+        return { review: { taskId: task1.id, canMarkDone: true, checks: [] } };
       case 'task.switch':
         return { currentTaskId: task2.id };
       default:
@@ -98,10 +100,11 @@ describe('App', () => {
     expect(screen.getByRole('button', { name: 'Overview' })).toHaveAttribute('aria-pressed', 'true');
     expect(screen.getByRole('button', { name: 'Activity' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Context' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Review' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /Panel task/ })).toBeInTheDocument();
   });
 
-  it('switches to the activity and context tabs', async () => {
+  it('switches to the activity, context, and review tabs', async () => {
     render(<App bridge={bridge()} initialState={baseState} />);
 
     await userEvent.click(screen.getByRole('button', { name: 'Activity' }));
@@ -109,6 +112,9 @@ describe('App', () => {
 
     await userEvent.click(screen.getByRole('button', { name: 'Context' }));
     expect(screen.getByRole('button', { name: 'Context' })).toHaveAttribute('aria-pressed', 'true');
+
+    await userEvent.click(screen.getByRole('button', { name: 'Review' }));
+    expect(screen.getByRole('button', { name: 'Review' })).toHaveAttribute('aria-pressed', 'true');
   });
 
   it('switches tabs without routing', async () => {

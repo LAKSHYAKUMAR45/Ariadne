@@ -21,6 +21,8 @@ import {
   type ActivityItem,
   type CaptureHealth,
   type ContextSectionSummary,
+  type ReviewCheck,
+  type ReviewSummary,
   type SyncActions,
   type TaskTemplateId,
   TaskTemplates,
@@ -359,6 +361,145 @@ function buildCaptureHealth(deps: WebviewDispatcherDeps): CaptureHealth {
   };
 }
 
+function buildReviewSummary(deps: WebviewDispatcherDeps, taskId: string): ReviewSummary {
+  const task = deps.store.getTask(taskId);
+  const blockedTodos = deps.store.listTodos(taskId).filter((todo) => todo.status === 'blocked');
+  const pendingTodos = deps.store.listTodos(taskId).filter((todo) => todo.status === 'pending');
+  const unresolvedErrors = deps.store.listErrors(taskId, { resolved: false });
+  const openQuestions = deps.store.listOpenQuestions(taskId, { resolved: false });
+  const checkpoints = deps.store.listCheckpoints(taskId);
+  const currentBranch = deps.passiveCapture?.currentBranch;
+  const taskBranch = task?.branch ?? undefined;
+
+  const checks: ReviewCheck[] = [
+    blockedTodos.length > 0
+      ? {
+          id: 'pending-todos',
+          label: 'Pending todos',
+          status: 'fail',
+          detail: `${blockedTodos.length} blocked todo${blockedTodos.length === 1 ? ' is' : 's are'} still open.`,
+          action: { label: 'Open todos', tabId: 'todos', entityId: blockedTodos[0]?.id },
+        }
+      : pendingTodos.length > 0
+        ? {
+            id: 'pending-todos',
+            label: 'Pending todos',
+            status: 'warning',
+            detail: `${pendingTodos.length} pending todo${pendingTodos.length === 1 ? ' remains' : 's remain'}.`,
+            action: { label: 'Open todos', tabId: 'todos', entityId: pendingTodos[0]?.id },
+          }
+        : {
+            id: 'pending-todos',
+            label: 'Pending todos',
+            status: 'pass',
+            detail: 'No pending todos.',
+          },
+    unresolvedErrors.length > 0
+      ? {
+          id: 'unresolved-errors',
+          label: 'Unresolved errors',
+          status: 'fail',
+          detail: `${unresolvedErrors.length} unresolved error${unresolvedErrors.length === 1 ? ' needs' : 's need'} resolution.`,
+          action: { label: 'Open errors', tabId: 'errors', entityId: unresolvedErrors[0]?.id },
+        }
+      : {
+          id: 'unresolved-errors',
+          label: 'Unresolved errors',
+          status: 'pass',
+          detail: 'No unresolved errors.',
+        },
+    openQuestions.length > 0
+      ? {
+          id: 'open-questions',
+          label: 'Open questions',
+          status: 'warning',
+          detail: `${openQuestions.length} open question${openQuestions.length === 1 ? ' still needs' : 's still need'} an answer.`,
+          action: { label: 'Open questions', tabId: 'questions', entityId: openQuestions[0]?.id },
+        }
+      : {
+          id: 'open-questions',
+          label: 'Open questions',
+          status: 'pass',
+          detail: 'No open questions.',
+        },
+    checkpoints.length > 0
+      ? {
+          id: 'recent-checkpoint',
+          label: 'Recent checkpoint',
+          status: 'pass',
+          detail: `Latest checkpoint: ${checkpoints[0]!.summary}`,
+          action: { label: 'Open overview', tabId: 'overview', entityId: checkpoints[0]?.id },
+        }
+      : {
+          id: 'recent-checkpoint',
+          label: 'Recent checkpoint',
+          status: 'warning',
+          detail: 'Add a checkpoint before marking the task done.',
+          action: { label: 'Open overview', tabId: 'overview' },
+        },
+    !taskBranch || !currentBranch
+      ? {
+          id: 'branch-match',
+          label: 'Branch match',
+          status: 'unknown',
+          detail: 'Task branch or current branch is unavailable.',
+          action: { label: 'Open overview', tabId: 'overview' },
+        }
+      : taskBranch === currentBranch
+        ? {
+            id: 'branch-match',
+            label: 'Branch match',
+            status: 'pass',
+            detail: `Current branch matches task branch (${taskBranch}).`,
+          }
+        : {
+            id: 'branch-match',
+            label: 'Branch match',
+            status: 'fail',
+            detail: `Current branch "${currentBranch}" does not match task branch "${taskBranch}".`,
+            action: { label: 'Open activity', tabId: 'activity' },
+          },
+    deps.sessionStatus?.lastSyncPush || deps.sessionStatus?.lastSyncPull
+      ? {
+          id: 'sync-status',
+          label: 'Sync status',
+          status: 'pass',
+          detail: deps.sessionStatus.lastSyncPush
+            ? `Last sync push: ${deps.sessionStatus.lastSyncPush}`
+            : `Last sync pull: ${deps.sessionStatus!.lastSyncPull}`,
+          action: { label: 'Open sync', tabId: 'sync' },
+        }
+      : {
+          id: 'sync-status',
+          label: 'Sync status',
+          status: 'unknown',
+          detail: 'No sync action has run in this panel session.',
+          action: { label: 'Open sync', tabId: 'sync' },
+        },
+    deps.sessionStatus?.lastExport
+      ? {
+          id: 'export-status',
+          label: 'Export status',
+          status: 'pass',
+          detail: `Last export: ${deps.sessionStatus.lastExport}`,
+          action: { label: 'Open context', tabId: 'context' },
+        }
+      : {
+          id: 'export-status',
+          label: 'Export status',
+          status: 'unknown',
+          detail: 'No Markdown export has run in this panel session.',
+          action: { label: 'Open context', tabId: 'context' },
+        },
+  ];
+
+  return {
+    taskId,
+    checks,
+    canMarkDone: checks.every((check) => check.status !== 'fail'),
+  };
+}
+
 function requireCurrentTaskId(deps: WebviewDispatcherDeps, id: string): string | WebviewResponse {
   const currentTaskId = deps.currentTaskId;
   if (!currentTaskId) {
@@ -489,6 +630,17 @@ function handleCaptureHealth(deps: WebviewDispatcherDeps, message: WebviewReques
     ok: true,
     data: { health: buildCaptureHealth(deps) },
     state: buildWebviewState(deps),
+  };
+}
+
+function handleReviewGet(deps: WebviewDispatcherDeps, message: WebviewRequest): WebviewResponse {
+  const taskId = requireCurrentTaskId(deps, message.id);
+  if (typeof taskId !== 'string') return taskId;
+  return {
+    id: message.id,
+    ok: true,
+    data: { review: buildReviewSummary(deps, taskId) },
+    state: buildWebviewState({ ...deps, currentTaskId: taskId }),
   };
 }
 
@@ -1027,6 +1179,8 @@ export async function handleWebviewMessage(deps: WebviewDispatcherDeps, message:
         return handleActivityList(deps, message);
       case WebviewRequestTypes.CaptureHealth:
         return handleCaptureHealth(deps, message);
+      case WebviewRequestTypes.ReviewGet:
+        return handleReviewGet(deps, message);
       case WebviewRequestTypes.TaskCreate:
         return handleTaskCreate(deps, message);
       case WebviewRequestTypes.TaskCreateFromTemplate:

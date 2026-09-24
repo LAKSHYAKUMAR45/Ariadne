@@ -8,6 +8,7 @@ import ActivityPanel from './ActivityPanel';
 import ContextPanel from './ContextPanel';
 import OverviewPanel from './OverviewPanel';
 import FilesPanel from './FilesPanel';
+import ReviewPanel from './ReviewPanel';
 import SearchPanel from './SearchPanel';
 import SyncPanel from './SyncPanel';
 
@@ -336,6 +337,81 @@ describe('UtilityPanels', () => {
 
     await userEvent.click(screen.getByRole('button', { name: 'Open as Markdown' }));
     await waitFor(() => expect(harness.request).toHaveBeenCalledWith('context.open', { markdown: '# Context\nUtility panels' }));
+  });
+
+  it('shows review checks and can mark the task done from review mode', async () => {
+    const harness = createBridge({
+      request: vi.fn(async (type: string, payload?: unknown) => {
+        if (type === 'review.get') {
+          return {
+            review: {
+              taskId: task.id,
+              canMarkDone: true,
+              checks: [
+                { id: 'pending-todos', label: 'Pending todos', status: 'pass', detail: 'No pending todos.' },
+                { id: 'sync-status', label: 'Sync status', status: 'unknown', detail: 'No sync action has run in this panel session.' },
+              ],
+            },
+          };
+        }
+        return payload ?? {};
+      }) as BridgeHarness['request'],
+    });
+
+    render(<ReviewPanel bridge={harness} taskId={task.id} onBusy={() => undefined} onError={() => undefined} />);
+
+    expect(await screen.findByText('Pending todos')).toBeInTheDocument();
+    expect(screen.getByText('No sync action has run in this panel session.')).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: 'Mark task done' }));
+    await waitFor(() => expect(harness.request).toHaveBeenCalledWith('task.setStatus', { id: task.id, status: 'done' }));
+  });
+
+  it('does not render stale review data after the selected task changes', async () => {
+    const firstReview = createDeferred<{
+      review: {
+        taskId: string;
+        canMarkDone: boolean;
+        checks: Array<{ id: string; label: string; status: 'pass' | 'warning' | 'fail' | 'unknown'; detail: string }>;
+      };
+    }>();
+    const nextTaskId = 'task-2';
+    let reviewRequests = 0;
+
+    const harness = createBridge({
+      request: vi.fn(async (type: string) => {
+        if (type === 'review.get') {
+          reviewRequests += 1;
+          if (reviewRequests > 1) {
+            return {
+              review: {
+                taskId: nextTaskId,
+                canMarkDone: true,
+                checks: [{ id: 'pending-todos', label: 'Pending todos', status: 'pass', detail: 'No pending todos.' }],
+              },
+            };
+          }
+          return firstReview.promise;
+        }
+        return {};
+      }) as BridgeHarness['request'],
+    });
+
+    const { rerender } = render(
+      <ReviewPanel bridge={harness} taskId={task.id} onBusy={() => undefined} onError={() => undefined} />,
+    );
+
+    rerender(<ReviewPanel bridge={harness} taskId={nextTaskId} onBusy={() => undefined} onError={() => undefined} />);
+
+    firstReview.resolve({
+      review: {
+        taskId: task.id,
+        canMarkDone: false,
+        checks: [{ id: 'unresolved-errors', label: 'Unresolved errors', status: 'fail', detail: '1 unresolved error needs resolution.' }],
+      },
+    });
+
+    expect(await screen.findByText('No pending todos.')).toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByText('1 unresolved error needs resolution.')).not.toBeInTheDocument());
   });
 
   it('does not render a stale context preview after the token budget changes', async () => {
