@@ -32,6 +32,7 @@ import { createAuthRouter } from './routes/auth.js';
 import { createSyncRouter } from './routes/sync.js';
 import { createTaskHistoryRouter } from './routes/taskHistory.js';
 import { createTaskHistoryStore } from './taskHistoryStore.js';
+import { createInternalSsoRouter } from './routes/internalSso.js';
 
 export interface CreateAppOptions {
   /** Required: the server must never run without a loaded keyring. */
@@ -56,6 +57,8 @@ export interface CreateAppOptions {
   adminAuthRateLimiter?: AdminAuthRateLimiter;
   /** Built dashboard directory. Omit in API-only tests and development. */
   dashboardDistDir?: string | null;
+  /** Shared secret for SSO code minting (server-to-server); tests can override. */
+  ssoSharedSecret?: string;
 }
 
 const CALLBACK_TOKEN_PATTERN = /^[0-9a-f]{64}$/;
@@ -136,6 +139,11 @@ export function createApp(pool: Pool, jwtSecret: string, options: CreateAppOptio
   app.use('/api/v1/admin', adminNoStoreHeaders());
 
   app.use(express.json());
+
+  // Internal SSO code minting endpoint (server-to-server, shared-secret authenticated).
+  // Mounted after the global JSON parser so the body is available for validation.
+  const ssoSharedSecret = options?.ssoSharedSecret ?? '';
+  app.use('/internal/sso', createInternalSsoRouter(pool, ssoSharedSecret));
 
   app.use('/api/v1/auth', createAuthRouter(pool, jwtSecret));
 

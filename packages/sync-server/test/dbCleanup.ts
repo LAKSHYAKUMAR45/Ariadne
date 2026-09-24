@@ -32,6 +32,7 @@ export const CORE_FIXTURE_TABLES = [
   'team_memberships',
   'teams',
   'users',
+  'sso_exchange_codes',
 ] as const;
 
 /** Fixture tables for suites that also exercise encrypted task history. */
