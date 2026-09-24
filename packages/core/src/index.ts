@@ -245,6 +245,21 @@ export type {
   KnowledgeRedactionHook,
 } from './knowledge/KnowledgeProviders.js';
 export {
+  rankByEmbedding,
+} from './knowledge/KnowledgeEmbeddings.js';
+export type {
+  EmbeddingProvider as KnowledgeEmbeddingProvider,
+  EmbeddingCandidate,
+  RankedEmbeddingCandidate,
+  RankByEmbeddingOptions,
+} from './knowledge/KnowledgeEmbeddings.js';
+export { importGraphifyJson } from './knowledge/GraphifyImport.js';
+export type {
+  GraphImportNode,
+  GraphImportEdge,
+  GraphImportResult,
+} from './knowledge/GraphifyImport.js';
+export {
   createProviderRequiredGeneration,
   redactKnowledgeAnalysisPayload,
   validateKnowledgeAnalysis,
