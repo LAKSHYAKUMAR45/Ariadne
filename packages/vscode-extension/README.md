@@ -16,8 +16,35 @@ task state is identical no matter which one you use.
   for a compact launcher/status view, then click **Open Ariadne Panel** for
   the full task UI.
 - Adds a full **Ariadne panel** with task switching, overview, editable
-  todos/decisions/errors/questions, captured file diffs, search, sync, and
-  Markdown export.
+  todos/decisions/errors/questions, captured file diffs, search, sync,
+  Graphify, review helpers, and Markdown export.
+- Adds a polished **first-run onboarding flow** inside the panel: create a
+  task immediately, jump to sync/import, or open context help without leaving
+  the webview.
+- Lets you **create tasks from built-in templates** (`feature`, `bugfix`,
+  `review`, `research`, `incident`) so the task starts with seeded todos,
+  questions, and decisions instead of a blank slate.
+- Adds an **Activity** tab with **Capture health** (passive capture, shell
+  integration, git availability, branch alignment, latest file/command/commit
+  captures, unresolved error count, warnings) and an **Activity timeline**
+  that filters checkpoints, todos, decisions, errors, questions, file
+  captures, commits, and commands.
+- Adds a **Context** tab that previews the task handoff package against a
+  configurable token budget, then lets you copy it to the clipboard or open it
+  as Markdown for a clean handoff into chat.
+- Adds a **Review** tab with advisory completion checks for task readiness,
+  branch alignment, open blockers, and evidence coverage. Review mode is
+  intentionally advisory product guidance; it does not add extra host-side
+  hard gating beyond the panel's own completion affordances.
+- Adds **Files** and **Search** polish so you can filter captures by file
+  path/trigger/status, open captured files directly, and jump search hits for
+  files or commits back into the Files tab with the right capture highlighted.
+- Adds a **Graphify** tab that runs `graphify update`, `query`, `path`, and
+  `explain` through extension-host helpers, keeping shell execution in the host
+  instead of the webview.
+- Adds a **Sync** tab that shows current/other sync profiles, surfaces auth
+  guidance, tracks per-panel action history, and exposes push/pull/list-remote
+  actions without leaving VS Code.
 - Adds an **`@ariadne` chat participant** to Copilot Chat, so you can recall
   or update the current task's state directly from the chat you're already
   using.
@@ -89,6 +116,33 @@ extension host picks up the latest view contributions. Then use any of:
 - Run **Ariadne: Open Panel** from the Command Palette.
 - Click the Ariadne status bar item when a workspace is open.
 - Use `@ariadne` in Copilot Chat for command-style updates.
+
+## Panel walkthrough
+
+The full panel is organized into focused tabs so the webview stays
+renderer-only while the extension host continues to own filesystem, SQLite,
+git, clipboard/editor, and CLI work:
+
+- **Overview**: switch tasks, filter tasks, create new tasks, edit the current
+  task, and export the current task to Markdown.
+- **Activity**: inspect capture health at a glance, then browse the activity
+  timeline by category to see what Ariadne has actually recorded.
+- **Context**: preview the current handoff package before copying or opening
+  it, including section counts and truncation metadata for the selected token
+  budget.
+- **Review**: inspect completion-readiness checks and jump straight to the tab
+  that needs cleanup.
+- **Todos / Decisions / Errors / Questions**: edit the task's structured
+  working memory in place.
+- **Files**: review captured file diffs, filter captures, and open captured
+  files from the panel.
+- **Search**: search task memory across the current workspace or all
+  workspaces, then jump directly to the matching entity, file capture, or
+  commit evidence.
+- **Graphify**: update or inspect the local code knowledge graph from the
+  extension host.
+- **Sync**: inspect sync profiles and recent sync status, then push, pull,
+  pull with import-new confirmation, or list remote tasks.
 
 ## Known limitations (early/pre-release)
 

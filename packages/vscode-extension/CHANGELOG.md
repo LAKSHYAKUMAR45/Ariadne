@@ -10,6 +10,25 @@ All notable changes to the Ariadne VS Code extension will be documented here.
 - React webview panel for task switching, overview, editable todos,
   decisions, errors, open questions, captured file diffs, search, sync, and
   Markdown export.
+- First-run onboarding inside the panel, including task creation, sync/import
+  shortcuts, and context help.
+- Built-in task templates (`feature`, `bugfix`, `review`, `research`,
+  `incident`) that seed new tasks with starter todos, questions, and
+  decisions.
+- Activity tab coverage for Capture Health and the filterable Activity
+  Timeline, showing capture guardrails and recent checkpoints, todos,
+  decisions, errors, questions, file captures, commits, and commands.
+- Context handoff preview/copy/open workflow with token-budget metadata and
+  truncation summaries.
+- Advisory Review tab that summarizes completion checks and links back to the
+  relevant cleanup surface.
+- Files/Search polish: file-capture filtering, direct file open actions, and
+  search navigation that can route file/commit results back into the Files
+  tab.
+- Graphify webview tab for `update`, `query`, `path`, and `explain` runs
+  through the extension host.
+- Sync profile/status UI, including current-vs-other profile display, auth
+  guidance, action history, and `pull import-new` confirmation.
 - Initial `@ariadne` chat participant with `/status`, `/resume`,
   `/checkpoint`, `/todo`, `/task`, `/decision`, and `/error` commands.
 - `Ariadne: New Task` and `Ariadne: Show Task Status` commands.
