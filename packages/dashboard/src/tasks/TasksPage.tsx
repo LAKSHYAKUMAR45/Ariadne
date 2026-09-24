@@ -17,6 +17,7 @@ import type {
   TimelineEvent,
 } from '../api/types';
 import { CaptureDeleteDialog } from './CaptureDeleteDialog';
+import { buildCopilotCliCommand, buildTaskContextMarkdown } from './taskContextMarkdown';
 
 type MobilePane = 'tasks' | 'timeline' | 'file';
 
@@ -277,6 +278,68 @@ export function TasksPage() {
   }, [query, tasks]);
 
   const selectedTask = tasks.find((task) => task.taskId === selectedTaskId) ?? null;
+  const [contextActionError, setContextActionError] = useState<string | null>(null);
+  const [contextActionFeedback, setContextActionFeedback] = useState<string | null>(null);
+
+  const downloadTaskContext = useCallback(() => {
+    if (!selectedTask) return;
+    setContextActionError(null);
+    let objectUrl: string | null = null;
+    try {
+      const markdown = buildTaskContextMarkdown(selectedTask, events);
+      const blob = new Blob([markdown], { type: 'text/markdown' });
+      objectUrl = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = objectUrl;
+      link.download = `ariadne-task-${selectedTask.localId}-context.md`;
+      link.style.display = 'none';
+      document.body.append(link);
+      link.click();
+      link.remove();
+      setContextActionFeedback('Context downloaded.');
+    } catch (downloadError: unknown) {
+      setContextActionError(
+        downloadError instanceof Error ? downloadError.message : 'Unable to download the task context.',
+      );
+    } finally {
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    }
+  }, [events, selectedTask]);
+
+  const copyTaskContextForChat = useCallback(async () => {
+    if (!selectedTask) return;
+    setContextActionError(null);
+    try {
+      const markdown = buildTaskContextMarkdown(selectedTask, events);
+      await navigator.clipboard.writeText(markdown);
+      setContextActionFeedback('Copied context for Copilot Chat.');
+    } catch (copyError: unknown) {
+      setContextActionError(
+        copyError instanceof Error ? copyError.message : 'Unable to copy the task context.',
+      );
+    }
+  }, [events, selectedTask]);
+
+  const copyTaskContextCliCommand = useCallback(async () => {
+    if (!selectedTask) return;
+    setContextActionError(null);
+    try {
+      const markdown = buildTaskContextMarkdown(selectedTask, events);
+      await navigator.clipboard.writeText(buildCopilotCliCommand(markdown));
+      setContextActionFeedback('Copied Copilot CLI command.');
+    } catch (copyError: unknown) {
+      setContextActionError(
+        copyError instanceof Error ? copyError.message : 'Unable to copy the Copilot CLI command.',
+      );
+    }
+  }, [events, selectedTask]);
+
+  useEffect(() => {
+    if (!contextActionFeedback) return;
+    const timer = window.setTimeout(() => setContextActionFeedback(null), 3000);
+    return () => window.clearTimeout(timer);
+  }, [contextActionFeedback]);
+
   const selectedCapture = useMemo(
     () =>
       events.find(
@@ -294,6 +357,8 @@ export function TasksPage() {
     deleteTaskIdRef.current = null;
     deletedCaptureIdRef.current = null;
     setTimelineRetry(null);
+    setContextActionError(null);
+    setContextActionFeedback(null);
     setSelectedTaskId(taskId);
     await loadTimeline(taskId, {
       clearSelection: true,
@@ -512,6 +577,19 @@ export function TasksPage() {
               <span>{selectedTask?.status ?? 'Select a task'}</span>
             </div>
             <div className="pane-actions">
+              {selectedTask ? (
+                <>
+                  <button className="quiet-action" type="button" onClick={downloadTaskContext}>
+                    Download context
+                  </button>
+                  <button className="quiet-action" type="button" onClick={() => void copyTaskContextForChat()}>
+                    Copy for Copilot Chat
+                  </button>
+                  <button className="quiet-action" type="button" onClick={() => void copyTaskContextCliCommand()}>
+                    Copy Copilot CLI command
+                  </button>
+                </>
+              ) : null}
               {selectedTaskId ? (
                 <button className="quiet-action pane-toggle" type="button" onClick={() => setActivePane('tasks')}>
                   Tasks
@@ -520,6 +598,12 @@ export function TasksPage() {
               {events.length ? <span>{events.length} events</span> : null}
             </div>
           </div>
+          {contextActionFeedback ? (
+            <div className="notice notice--success" role="status">{contextActionFeedback}</div>
+          ) : null}
+          {contextActionError ? (
+            <div className="notice notice--error" role="alert">{contextActionError}</div>
+          ) : null}
           <div className="scroll-region timeline">
             {!selectedTaskId ? (
               <div className="pane-empty">

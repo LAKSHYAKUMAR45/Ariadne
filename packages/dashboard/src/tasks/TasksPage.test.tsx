@@ -181,6 +181,58 @@ describe('TasksPage', () => {
     expect(screen.getByText('+updated src/App.tsx')).toBeVisible();
   });
 
+  it('downloads, copies for Copilot Chat, and copies a Copilot CLI command for the selected task', async () => {
+    const responses = new Map<string, unknown>([
+      ['/api/v1/admin/session', sessionBody()],
+      [
+        '/api/v1/admin/tasks?limit=100',
+        { tasks: [taskSummary('task-1', 'Build cloud dashboard', 1)], hasMore: false, nextOffset: null },
+      ],
+      [
+        '/api/v1/admin/tasks/task-1/timeline',
+        { taskId: 'task-1', events: [captureEvent('capture-1', 'src/App.tsx')] },
+      ],
+    ]);
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL) => {
+        const url = String(input);
+        const body = responses.get(url);
+        return Promise.resolve(body ? json(body) : new Response(null, { status: 404 }));
+      }),
+    );
+
+    const createObjectURL = vi.fn().mockReturnValue('blob:mock-url');
+    const revokeObjectURL = vi.fn();
+    vi.stubGlobal('URL', { ...URL, createObjectURL, revokeObjectURL });
+    const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => undefined);
+
+    const user = userEvent.setup();
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, 'clipboard', {
+      value: { writeText },
+      configurable: true,
+    });
+    renderWithProvider(<TasksPage />);
+
+    await user.click(await screen.findByRole('button', { name: /build cloud dashboard/i }));
+
+    await user.click(await screen.findByRole('button', { name: 'Download context' }));
+    expect(clickSpy).toHaveBeenCalledTimes(1);
+    expect(createObjectURL).toHaveBeenCalledTimes(1);
+    expect(revokeObjectURL).toHaveBeenCalledWith('blob:mock-url');
+    expect(await screen.findByText('Context downloaded.')).toBeVisible();
+
+    await user.click(screen.getByRole('button', { name: 'Copy for Copilot Chat' }));
+    expect(writeText).toHaveBeenLastCalledWith(expect.stringContaining('# Build cloud dashboard'));
+    expect(await screen.findByText('Copied context for Copilot Chat.')).toBeVisible();
+
+    await user.click(screen.getByRole('button', { name: 'Copy Copilot CLI command' }));
+    expect(writeText).toHaveBeenLastCalledWith(expect.stringContaining('copilot -i "$(cat <<\'ARIADNE_CONTEXT_EOF\''));
+    expect(await screen.findByText('Copied Copilot CLI command.')).toBeVisible();
+  });
+
   it('shows delete controls only for the selected capture and removes it only after a refreshed timeline confirms success', async () => {
     const refreshTimeline = deferredResponse();
     const eventStream = createEventStream();
