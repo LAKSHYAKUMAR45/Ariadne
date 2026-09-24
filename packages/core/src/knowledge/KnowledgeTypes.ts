@@ -7,7 +7,7 @@ export type KnowledgeSourceId = KnowledgeId<'source'>;
 export type KnowledgePageId = KnowledgeId<'page'>;
 export type KnowledgeJobId = KnowledgeId<'job'>;
 export type KnowledgeReviewId = KnowledgeId<'review'>;
-export type KnowledgeGraphNodeId = KnowledgeId<'graph-node'>;
+export type KnowledgeGraphNodeId = string;
 
 export type KnowledgePageType =
   | 'overview'
@@ -77,7 +77,7 @@ export interface KnowledgePageRecord {
   title: string;
   slug: string;
   summary: string | null;
-  status: 'active' | 'archived';
+  status: 'active' | 'archived' | 'stale';
   currentVersion: number;
   confidence: number | null;
   createdAt: string;
