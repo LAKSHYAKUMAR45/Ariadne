@@ -28,7 +28,7 @@
 ## Fix Round 1
 
 - **Status:** DONE
-- **Commits:** `PENDING`
+- **Commits:** `64f251b` (`fix: tighten vscode task 1 contract coverage`)
 
 ### Files Changed
 
