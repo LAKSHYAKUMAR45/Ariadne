@@ -25,7 +25,7 @@ const EXISTING_KEY_MATERIAL = 'a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f607182
 const EXISTING_TOKEN = 'ffeeddccbbaa99887766554433221100ffeeddccbbaa99887766554433221100';
 const EXISTING_COMPOSE_ENV = 'POSTGRES_PASSWORD=do-not-touch-this-secret\n';
 const EXISTING_SERVER_ENV =
-  'DATABASE_URL=postgres://ariadne@127.0.0.1:5432/ariadne_sync\nSYNC_SERVER_JWT_SECRET=do-not-touch-this-secret\nADMIN_PUBLIC_ORIGIN=http://127.0.0.1:14300\n';
+  'DATABASE_URL=postgres://ariadne@127.0.0.1:5432/ariadne_sync\nSYNC_SERVER_JWT_SECRET=do-not-touch-this-secret\nADMIN_PUBLIC_ORIGIN=http://127.0.0.1:14300\nARIADNE_SSO_SHARED_SECRET=do-not-touch-this-secret\n';
 
 const INSTALLED_EXECUTABLES = [
   'backup',
