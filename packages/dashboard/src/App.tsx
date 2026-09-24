@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState, type MouseEvent } from 'react';
+import { useCallback, useEffect, useRef, useState, type MouseEvent } from 'react';
 import { AuthProvider, useAuth } from './auth/AuthProvider';
 import { LoginPage } from './auth/LoginPage';
 import type { ConfirmationRequest } from './api/types';
@@ -11,6 +11,7 @@ import { LogsPage } from './operations/LogsPage';
 import { OverviewPage } from './overview/OverviewPage';
 import { ServicesPage } from './operations/ServicesPage';
 import { TasksPage } from './tasks/TasksPage';
+import { getStoredTheme, initTheme, toggleTheme, type Theme } from './theme';
 
 type Section =
   | 'overview'
@@ -53,7 +54,12 @@ function ConsoleShell() {
   const [section, setSection] = useState<Section>('overview');
   const [reauthenticating, setReauthenticating] = useState(false);
   const [reauthenticationError, setReauthenticationError] = useState<string | null>(null);
+  const [theme, setTheme] = useState<Theme>('light');
   const mainRef = useRef<HTMLElement | null>(null);
+
+  useEffect(() => {
+    setTheme(getStoredTheme());
+  }, []);
 
   if (!session) {
     return null;
@@ -107,6 +113,14 @@ function ConsoleShell() {
             Sign out
           </button>
         </div>
+        <button
+          className="theme-toggle"
+          type="button"
+          aria-label={theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}
+          onClick={() => setTheme((current) => toggleTheme(current))}
+        >
+          {theme === 'dark' ? 'Light mode' : 'Dark mode'}
+        </button>
       </aside>
       <main
         ref={mainRef}
@@ -174,6 +188,10 @@ function AuthenticatedApp() {
 }
 
 export function App() {
+  useEffect(() => {
+    initTheme();
+  }, []);
+
   return (
     <AuthProvider>
       <AuthenticatedApp />
