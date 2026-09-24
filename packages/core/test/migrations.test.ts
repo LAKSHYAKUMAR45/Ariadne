@@ -263,7 +263,7 @@ describe('MIGRATIONS (real app migrations)', () => {
       `INSERT INTO commits (sha, task_id, message, created_at) VALUES ('commit-1', 't1', 'excluded files', '2020-01-02')`,
     ).run();
 
-    runMigrations(db, MIGRATIONS);
+    runMigrations(db, MIGRATIONS.filter((m) => m.version <= 6));
 
     const version = db.prepare(`SELECT value FROM schema_meta WHERE key = 'schema_version'`).get() as { value: string };
     expect(version.value).toBe('6');
