@@ -177,6 +177,162 @@ describe('handleWebviewMessage', () => {
     store.close();
   });
 
+  it('reports branch-match review status as pass, fail, or unknown from passive capture state', async () => {
+    const { store, task } = makeStore();
+    store.updateTaskBranch(task.id, 'feat/review-mode');
+
+    const passResponse = await handleWebviewMessage(
+      {
+        store,
+        currentTaskId: task.id,
+        workspaceRoot: '/repo',
+        passiveCapture: {
+          enabled: true,
+          shellIntegrationAvailable: true,
+          gitExtensionAvailable: true,
+          currentBranch: 'feat/review-mode',
+        },
+      },
+      { id: 'review-branch-pass', type: 'review.get' } as never,
+    );
+    expect(passResponse).toMatchObject({
+      ok: true,
+      data: {
+        review: {
+          checks: expect.arrayContaining([
+            expect.objectContaining({
+              id: 'branch-match',
+              status: 'pass',
+              detail: 'Current branch matches task branch (feat/review-mode).',
+            }),
+          ]),
+        },
+      },
+    });
+
+    const failResponse = await handleWebviewMessage(
+      {
+        store,
+        currentTaskId: task.id,
+        workspaceRoot: '/repo',
+        passiveCapture: {
+          enabled: true,
+          shellIntegrationAvailable: true,
+          gitExtensionAvailable: true,
+          currentBranch: 'main',
+        },
+      },
+      { id: 'review-branch-fail', type: 'review.get' } as never,
+    );
+    expect(failResponse).toMatchObject({
+      ok: true,
+      data: {
+        review: {
+          checks: expect.arrayContaining([
+            expect.objectContaining({
+              id: 'branch-match',
+              status: 'fail',
+              detail: 'Current branch "main" does not match task branch "feat/review-mode".',
+            }),
+          ]),
+          canMarkDone: false,
+        },
+      },
+    });
+
+    const unknownResponse = await handleWebviewMessage(
+      {
+        store,
+        currentTaskId: task.id,
+        workspaceRoot: '/repo',
+        passiveCapture: {
+          enabled: true,
+          shellIntegrationAvailable: true,
+          gitExtensionAvailable: true,
+        },
+      },
+      { id: 'review-branch-unknown', type: 'review.get' } as never,
+    );
+    expect(unknownResponse).toMatchObject({
+      ok: true,
+      data: {
+        review: {
+          checks: expect.arrayContaining([
+            expect.objectContaining({
+              id: 'branch-match',
+              status: 'unknown',
+              detail: 'Task branch or current branch is unavailable.',
+            }),
+          ]),
+        },
+      },
+    });
+
+    store.close();
+  });
+
+  it('reports sync and export review status transitions from unknown to pass using sessionStatus', async () => {
+    const { store, task } = makeStore();
+
+    const unknownResponse = await handleWebviewMessage(
+      { store, currentTaskId: task.id, workspaceRoot: '/repo' },
+      { id: 'review-status-unknown', type: 'review.get' } as never,
+    );
+    expect(unknownResponse).toMatchObject({
+      ok: true,
+      data: {
+        review: {
+          checks: expect.arrayContaining([
+            expect.objectContaining({
+              id: 'sync-status',
+              status: 'unknown',
+              detail: 'No sync action has run in this panel session.',
+            }),
+            expect.objectContaining({
+              id: 'export-status',
+              status: 'unknown',
+              detail: 'No Markdown export has run in this panel session.',
+            }),
+          ]),
+        },
+      },
+    });
+
+    const passResponse = await handleWebviewMessage(
+      {
+        store,
+        currentTaskId: task.id,
+        workspaceRoot: '/repo',
+        sessionStatus: {
+          lastSyncPull: '2026-09-23T20:00:00.000Z',
+          lastExport: '2026-09-23T20:01:00.000Z',
+        },
+      },
+      { id: 'review-status-pass', type: 'review.get' } as never,
+    );
+    expect(passResponse).toMatchObject({
+      ok: true,
+      data: {
+        review: {
+          checks: expect.arrayContaining([
+            expect.objectContaining({
+              id: 'sync-status',
+              status: 'pass',
+              detail: 'Last sync pull: 2026-09-23T20:00:00.000Z',
+            }),
+            expect.objectContaining({
+              id: 'export-status',
+              status: 'pass',
+              detail: 'Last export: 2026-09-23T20:01:00.000Z',
+            }),
+          ]),
+        },
+      },
+    });
+
+    store.close();
+  });
+
   it('returns empty activity and unknown health when no task is selected', async () => {
     const store = new TaskStore(':memory:');
 
