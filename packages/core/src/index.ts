@@ -230,3 +230,40 @@ export type {
   IngestSpan,
   KnowledgeIngestor,
 } from './knowledge/formats/index.js';
+export {
+  KNOWLEDGE_PROVIDER_CAPABILITIES,
+  KnowledgeProviderRegistry,
+  KnowledgeProviderRequiredError,
+  KnowledgeProviderTimeoutError,
+  redactKnowledgeProviderPayload,
+} from './knowledge/KnowledgeProviders.js';
+export type {
+  KnowledgeProvider,
+  KnowledgeProviderCapability,
+  KnowledgeProviderExecutionContext,
+  KnowledgeProviderExecutionOptions,
+  KnowledgeRedactionHook,
+} from './knowledge/KnowledgeProviders.js';
+export {
+  createProviderRequiredGeneration,
+  redactKnowledgeAnalysisPayload,
+  validateKnowledgeAnalysis,
+  validateKnowledgeGeneration,
+} from './knowledge/KnowledgeAnalysis.js';
+export type {
+  GeneratedKnowledge,
+  KnowledgeAnalysis,
+  KnowledgeAnalysisInput,
+  KnowledgeAnalysisPayloadKind,
+  KnowledgeAnalysisRedactionHooks,
+  KnowledgeAnalyzer,
+  KnowledgeClaim,
+  KnowledgeContradiction,
+  KnowledgeEntity,
+  KnowledgeGeneration,
+  KnowledgeGenerationInput,
+  KnowledgeGenerator,
+  KnowledgeRelationship,
+  KnowledgeResearchGap,
+  ProviderRequiredKnowledgeGeneration,
+} from './knowledge/KnowledgeAnalysis.js';
