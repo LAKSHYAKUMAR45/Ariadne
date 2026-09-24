@@ -297,6 +297,59 @@ describe('Ariadne webview panel', () => {
     expect(postedMessages).toContainEqual({ type: 'stateUpdate', state: responseState });
   });
 
+  it('posts state updates for error responses that still include refreshed state', async () => {
+    const refreshHost = vi.fn();
+    const responseState = {
+      workspaceRoot: '/workspace',
+      currentTaskId: 'task-partial',
+      currentTask: { id: 'task-partial', title: 'Broken seed' },
+      tasks: [],
+      checkpoints: [],
+      todos: [],
+      decisions: [],
+      errors: [],
+      questions: [],
+      fileCaptures: [],
+      searchResults: [],
+      counts: { pendingTodos: 0, unresolvedErrors: 0, openQuestions: 0 },
+    };
+
+    const { openAriadnePanel } = await loadPanelModule();
+    const deps = {
+      openStoreForCurrentWorkspace: () => ({}) as never,
+      getCurrentTaskId: () => 'task-1',
+      setCurrentTask: () => {},
+      setCurrentTaskInWorkspace: () => {},
+      resolveWorkspaceRoot: () => '/workspace',
+      output: { appendLine: (line: string) => outputLines.push(line) } as never,
+      logError: (_context: string, err: unknown) => (err instanceof Error ? err.message : String(err)),
+      refreshHost,
+      openExportedMarkdown: mocks.openExportedMarkdown,
+      copyText: vi.fn(),
+      openMarkdown: vi.fn(),
+    };
+
+    mocks.handleWebviewMessage.mockReturnValue({
+      id: 'template-fail',
+      ok: false,
+      error: 'Task was created but template seeding failed: seed write failed',
+      state: responseState,
+    });
+
+    openAriadnePanel({ extensionUri: { fsPath: '/extension' } } as never, deps);
+    receiveMessage?.({ id: 'template-fail', type: 'task.createFromTemplate', payload: { title: 'Broken seed', templateId: 'feature' } });
+    await flush();
+
+    expect(postedMessages).toContainEqual({
+      id: 'template-fail',
+      ok: false,
+      error: 'Task was created but template seeding failed: seed write failed',
+      state: responseState,
+    });
+    expect(postedMessages).toContainEqual({ type: 'stateUpdate', state: responseState });
+    expect(refreshHost).toHaveBeenCalledTimes(1);
+  });
+
   it('refreshAriadnePanel posts the current workspace state', async () => {
     const { openAriadnePanel, refreshAriadnePanel } = await loadPanelModule();
 

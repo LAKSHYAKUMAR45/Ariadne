@@ -76,12 +76,13 @@ export function createVsCodeBridge(vscodeApi: VsCodeApi): AriadneBridge {
       if (!pendingRequest) return;
       pending.delete(message.id);
 
+      if (message.state) {
+        currentState = message.state;
+        vscodeApi.setState(message.state);
+        for (const listener of listeners) listener(message.state);
+      }
+
       if (message.ok) {
-        if (message.state) {
-          currentState = message.state;
-          vscodeApi.setState(message.state);
-          for (const listener of listeners) listener(message.state);
-        }
         pendingRequest.resolve(message.data);
       } else {
         pendingRequest.reject(new Error(message.error));

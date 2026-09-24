@@ -344,6 +344,23 @@ describe('handleWebviewMessage', () => {
     store.close();
   });
 
+  it('rejects inherited template ids without creating a task', async () => {
+    const store = new TaskStore(':memory:');
+
+    const response = await handleWebviewMessage(
+      { store, workspaceRoot: '/repo', setCurrentTaskId: vi.fn() },
+      { id: 'template-inherited', type: 'task.createFromTemplate', payload: { title: 'Bad template', templateId: 'toString' } } as never,
+    );
+
+    expect(response).toEqual({
+      id: 'template-inherited',
+      ok: false,
+      error: 'task.createFromTemplate requires payload.templateId to be feature, bugfix, review, research, or incident.',
+    });
+    expect(store.listTasks()).toHaveLength(0);
+    store.close();
+  });
+
   it('edits a task and applies lifecycle status transitions', async () => {
     const cleanupRegistry = setupRegistry();
     const workspace = makeWorkspace('task-lifecycle');

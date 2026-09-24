@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import type { CSSProperties, FormEvent } from 'react';
+import type { CSSProperties, FormEvent, ReactElement } from 'react';
 import { TaskTemplates, type Task, type TaskTemplateId, type WebviewTabId } from '@host/messages';
 import type { AriadneBridge } from './bridge';
 import type { WebviewState } from '@host/messages';
@@ -188,7 +188,7 @@ export default function App({ bridge, initialState }: AppProps) {
     setNewTaskTemplate('none');
   }
 
-  function renderCreateTaskForm(): JSX.Element {
+  function renderCreateTaskForm(): ReactElement {
     const submitLabel = newTaskTemplate === 'none' ? 'Create task' : 'Create task from template';
 
     return (

@@ -241,11 +241,9 @@ async function handleWebviewRequest(message: unknown): Promise<void> {
     );
 
     void panel.webview.postMessage(response);
-    if (response.ok && response.state) {
+    if (response.state) {
       selectedWorkspaceRoot = response.state.workspaceRoot;
       postStateUpdate(response.state);
-    }
-    if (response.ok && response.state) {
       panelDeps.refreshHost();
     }
     if (response.ok && message.type === WebviewRequestTypes.ExportMarkdown) {

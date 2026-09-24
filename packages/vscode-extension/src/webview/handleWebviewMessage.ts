@@ -74,7 +74,7 @@ function isCheckpointLevel(value: unknown): value is CheckpointLevel {
 }
 
 function isTaskTemplateId(value: unknown): value is TaskTemplateId {
-  return typeof value === 'string' && value in TaskTemplates;
+  return typeof value === 'string' && Object.prototype.hasOwnProperty.call(TaskTemplates, value);
 }
 
 function errorResponse(id: string, error: string): WebviewResponse {

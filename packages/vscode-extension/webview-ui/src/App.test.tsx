@@ -186,7 +186,7 @@ describe('App', () => {
   });
 
   it('shows onboarding when no task exists and creates a templated task', async () => {
-    const request = vi.fn(async (_type: string, payload?: unknown) => payload ?? {});
+    const request = vi.fn(async (_type: string, payload?: unknown) => payload ?? {}) as unknown as AriadneBridge['request'];
     render(
       <App
         bridge={{ request, subscribe: vi.fn(() => () => undefined) }}
