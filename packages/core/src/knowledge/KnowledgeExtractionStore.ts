@@ -1,4 +1,5 @@
 import type Database from 'better-sqlite3';
+import { redactLines } from '../Redactor.js';
 import { createKnowledgeId } from './KnowledgeIds.js';
 import {
   canonicalizeDeterministicExtraction,
@@ -78,6 +79,13 @@ interface KnowledgeExtractionRow {
   completed_at: string | null;
 }
 
+export class KnowledgeExtractionStoreError extends Error {
+  public constructor(message: string, options?: { cause?: unknown }) {
+    super(message, options);
+    this.name = 'KnowledgeExtractionStoreError';
+  }
+}
+
 function now(): string {
   return new Date().toISOString();
 }
@@ -127,9 +135,79 @@ function resultPath(
   return `knowledge/extractions/${sourceVersionId}/${extractorKind}/${analyzerId}-${analyzerVersion}.json`;
 }
 
+function hasNonEmptyString(value: string | null | undefined): value is string {
+  return typeof value === 'string' && value.trim().length > 0;
+}
+
+function isCompleteRow(row: KnowledgeExtractionRow): boolean {
+  return (
+    hasNonEmptyString(row.analyzer_id) &&
+    hasNonEmptyString(row.analyzer_version) &&
+    hasNonEmptyString(row.extraction_hash) &&
+    hasNonEmptyString(row.result_json) &&
+    hasNonEmptyString(row.completed_at)
+  );
+}
+
+function redactOptionalString(value: string | null | undefined): string | null | undefined {
+  if (value === undefined || value === null) return value;
+  return redactLines(value);
+}
+
+function redactPersistedSpan(span: KnowledgeSourceSpan): KnowledgeSourceSpan {
+  return {
+    ...span,
+    label: redactOptionalString(span.label) ?? undefined,
+  };
+}
+
+function redactPersistedExtraction(extraction: DeterministicExtraction): DeterministicExtraction {
+  return canonicalizeDeterministicExtraction({
+    ...extraction,
+    title: redactLines(extraction.title),
+    summary: redactLines(extraction.summary),
+    sections: extraction.sections.map((section) => ({
+      ...section,
+      title: redactOptionalString(section.title) ?? undefined,
+      text: redactLines(section.text),
+      span: redactPersistedSpan(section.span),
+    })),
+    symbols: extraction.symbols.map((symbol) => ({
+      ...symbol,
+      name: redactLines(symbol.name),
+      qualifiedName: redactOptionalString(symbol.qualifiedName) ?? undefined,
+      signature: redactOptionalString(symbol.signature) ?? undefined,
+      detail: redactOptionalString(symbol.detail) ?? undefined,
+      span: redactPersistedSpan(symbol.span),
+    })),
+    relationships: extraction.relationships.map((relationship) => ({
+      ...relationship,
+      detail: redactOptionalString(relationship.detail) ?? undefined,
+      span: relationship.span ? redactPersistedSpan(relationship.span) : relationship.span,
+    })),
+    links: extraction.links.map((link) => ({
+      ...link,
+      target: redactLines(link.target),
+      title: redactOptionalString(link.title) ?? undefined,
+      span: link.span ? redactPersistedSpan(link.span) : link.span,
+    })),
+    diagnostics: extraction.diagnostics.map((diagnostic) => ({
+      ...diagnostic,
+      message: redactLines(diagnostic.message),
+      span: diagnostic.span ? redactPersistedSpan(diagnostic.span) : diagnostic.span,
+    })),
+  });
+}
+
 function parsePersistedExtraction(row: KnowledgeExtractionRow): DeterministicExtraction {
   if (!row.result_json) throw new Error(`Extraction ${row.id} is missing result_json`);
-  return validateDeterministicExtraction(JSON.parse(row.result_json) as unknown);
+  try {
+    return validateDeterministicExtraction(JSON.parse(row.result_json) as unknown);
+  } catch (error: unknown) {
+    throw new KnowledgeExtractionStoreError(`KnowledgeExtractionStore could not parse result_json for extraction ${row.id}`, {
+      cause: error,
+    });
+  }
 }
 
 function parsePersistedDiagnostics(
@@ -163,6 +241,9 @@ function loadSections(
 }
 
 function rowToRecord(row: KnowledgeExtractionRow): KnowledgeExtractionRecord {
+  if (!isCompleteRow(row)) {
+    throw new KnowledgeExtractionStoreError(`KnowledgeExtractionStore encountered incomplete extraction row ${row.id}`);
+  }
   const extraction = parsePersistedExtraction(row);
   return {
     id: row.id,
@@ -187,7 +268,9 @@ export class KnowledgeExtractionStore {
   public save(input: SaveKnowledgeExtractionInput): KnowledgeExtractionRecord {
     const projectId = requireNonEmpty(input.projectId, 'projectId');
     const extractorKind = requireNonEmpty(input.extractorKind ?? 'deterministic', 'extractorKind');
-    const extraction = canonicalizeDeterministicExtraction(validateDeterministicExtraction(input.extraction));
+    const extraction = redactPersistedExtraction(
+      canonicalizeDeterministicExtraction(validateDeterministicExtraction(input.extraction)),
+    );
     const timestamp = input.completedAt ?? now();
     const extractionHash = hashDeterministicExtraction(extraction);
     const extractionIdValue = extractionId(
@@ -203,6 +286,29 @@ export class KnowledgeExtractionStore {
     const save = this.db.transaction(() => {
       this.ensureSourceVersion(projectId, extraction.sourceVersionId);
       this.persistSpans(projectId, extraction.sourceVersionId, extraction);
+      const crossKindCollision = this.db
+        .prepare(
+          `SELECT extractor_kind
+           FROM knowledge_extractions
+           WHERE project_id = ?
+             AND source_version_id = ?
+             AND analyzer_id = ?
+             AND analyzer_version = ?
+             AND extractor_kind != ?
+           LIMIT 1`,
+        )
+        .get(
+          projectId,
+          extraction.sourceVersionId,
+          extraction.analyzerId,
+          extraction.analyzerVersion,
+          extractorKind,
+        ) as { extractor_kind: string } | undefined;
+      if (crossKindCollision) {
+        throw new KnowledgeExtractionStoreError(
+          `KnowledgeExtractionStore analyzer identity collision: ${extraction.analyzerId}@${extraction.analyzerVersion} is already persisted as extractor kind "${crossKindCollision.extractor_kind}" for source version ${extraction.sourceVersionId}; cannot reuse it for "${extractorKind}"`,
+        );
+      }
       const existing = this.db
         .prepare(
           `SELECT id, extraction_hash
@@ -351,6 +457,9 @@ export class KnowledgeExtractionStore {
            AND source_version_id = ?
            AND analyzer_id = ?
            AND analyzer_version = ?
+           AND extraction_hash IS NOT NULL
+           AND result_json IS NOT NULL
+           AND completed_at IS NOT NULL
          ORDER BY updated_at DESC, created_at DESC, id ASC
          LIMIT 1`,
       )
@@ -374,7 +483,13 @@ export class KnowledgeExtractionStore {
                 updated_at,
                 completed_at
          FROM knowledge_extractions
-         WHERE project_id = ? AND source_version_id = ?
+         WHERE project_id = ?
+           AND source_version_id = ?
+           AND analyzer_id IS NOT NULL
+           AND analyzer_version IS NOT NULL
+           AND extraction_hash IS NOT NULL
+           AND result_json IS NOT NULL
+           AND completed_at IS NOT NULL
          ORDER BY analyzer_id ASC, analyzer_version ASC, created_at ASC`,
       )
       .all(projectId, sourceVersionId) as KnowledgeExtractionRow[];
@@ -408,6 +523,9 @@ export class KnowledgeExtractionStore {
            AND extractor_kind = ?
            AND analyzer_id = ?
            AND analyzer_version = ?
+           AND extraction_hash IS NOT NULL
+           AND result_json IS NOT NULL
+           AND completed_at IS NOT NULL
          LIMIT 1`,
       )
       .get(projectId, sourceVersionId, extractorKind, analyzerId, analyzerVersion) as KnowledgeExtractionRow | undefined;
