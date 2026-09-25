@@ -96,6 +96,8 @@ describe('KnowledgeGraph', () => {
 
     expect(nodeA).toMatchObject({
       qualifiedName: 'docs/A',
+      provenanceSourceId: 'source-1',
+      provenanceSourcePath: 'docs/A.md',
       sourceVersionId: 'source-version-1',
       span: {
         startOffset: 0,
@@ -117,6 +119,7 @@ describe('KnowledgeGraph', () => {
       {
         kind: 'source',
         id: 'source-1',
+        path: 'docs/A.md',
         sourceVersionId: 'source-version-1',
         startOffset: 0,
         endOffset: 8,
@@ -129,6 +132,38 @@ describe('KnowledgeGraph', () => {
       },
     ]);
     expect(graph.scoreGraphEdge(edge)).toBeCloseTo(0.57);
+  });
+
+  it('overrides caller-supplied source provenance paths with authoritative source records', () => {
+    const { db, graph } = createGraph();
+    databases.push(db);
+    graph.upsertGraphNode({ id: 'node-a' as never, projectId: 'project-1', nodeType: 'page', label: 'A' });
+    graph.upsertGraphNode({ id: 'node-b' as never, projectId: 'project-1', nodeType: 'page', label: 'B' });
+
+    const edge = graph.upsertGraphEdge({
+      projectId: 'project-1',
+      sourceNodeId: 'node-a' as never,
+      targetNodeId: 'node-b' as never,
+      edgeType: 'relates_to',
+      evidence: 'explicit_link',
+      provenance: [
+        {
+          kind: 'source',
+          id: 'source-1',
+          path: 'docs/B.md',
+          sourceVersionId: 'source-version-1',
+        },
+      ],
+    });
+
+    expect(edge.provenance).toEqual([
+      {
+        kind: 'source',
+        id: 'source-1',
+        path: 'docs/A.md',
+        sourceVersionId: 'source-version-1',
+      },
+    ]);
   });
 
   it('rejects self loops and endpoints from another or missing project', () => {
@@ -242,5 +277,69 @@ describe('KnowledgeGraph', () => {
     expect(graph.listGraphEdges('project-1')).toHaveLength(1);
     expect(graph.removeGraphEdge('project-1', 'node-a' as never, 'node-b' as never, 'relates_to')).toBe(true);
     expect(graph.listGraphEdges('project-1')).toEqual([]);
+  });
+
+  it('rejects oversized or deeply nested provenance metadata without persisting partial edges', () => {
+    const { db, graph } = createGraph();
+    databases.push(db);
+    graph.upsertGraphNode({ id: 'node-a' as never, projectId: 'project-1', nodeType: 'page', label: 'A' });
+    graph.upsertGraphNode({ id: 'node-b' as never, projectId: 'project-1', nodeType: 'page', label: 'B' });
+
+    const deepMetadata = { relation: { level1: { level2: { level3: { level4: 'boom' } } } } } as never;
+    expect(() =>
+      graph.upsertGraphEdge({
+        projectId: 'project-1',
+        sourceNodeId: 'node-a' as never,
+        targetNodeId: 'node-b' as never,
+        edgeType: 'relates_to',
+        evidence: 'explicit_link',
+        provenance: [{ kind: 'source', id: 'source-1', sourceVersionId: 'source-version-1', metadata: deepMetadata }],
+      }),
+    ).toThrow(/provenance.*metadata/i);
+    expect(graph.listGraphEdges('project-1')).toEqual([]);
+
+    const wideContext = Array.from({ length: 70 }, (_, index) => `item-${index}`);
+    expect(() =>
+      graph.upsertGraphEdge({
+        projectId: 'project-1',
+        sourceNodeId: 'node-a' as never,
+        targetNodeId: 'node-b' as never,
+        edgeType: 'relates_to',
+        evidence: 'explicit_link',
+        provenance: [
+          {
+            kind: 'source',
+            id: 'source-1',
+            sourceVersionId: 'source-version-1',
+            metadata: { context: wideContext } as never,
+          },
+        ],
+      }),
+    ).toThrow(/entry count/i);
+    expect(graph.listGraphEdges('project-1')).toEqual([]);
+  });
+
+  it('fails contextual read paths for legacy metadata that exceeds recursion bounds', () => {
+    const { db, graph } = createGraph();
+    databases.push(db);
+    graph.upsertGraphNode({ id: 'node-a' as never, projectId: 'project-1', nodeType: 'page', label: 'A' });
+    graph.upsertGraphNode({ id: 'node-b' as never, projectId: 'project-1', nodeType: 'page', label: 'B' });
+
+    let nested = '"leaf"';
+    for (let depth = 0; depth < 80; depth += 1) {
+      nested = `{"level${depth}":${nested}}`;
+    }
+    db.prepare(
+      `INSERT INTO knowledge_graph_edges
+       (id, project_id, source_node_id, target_node_id, edge_type, evidence_json, confidence, created_at, updated_at)
+       VALUES (?, 'project-1', 'node-a', 'node-b', 'relates_to', ?, 1, ?, ?)`,
+    ).run(
+      'legacy-edge',
+      `{"evidence":["explicit_link"],"weight":1,"provenance":[{"kind":"source","id":"source-1","sourceVersionId":"source-version-1","metadata":{"context":${nested}}}]}`,
+      '2026-09-24T00:00:00.000Z',
+      '2026-09-24T00:00:00.000Z',
+    );
+
+    expect(() => graph.listGraphEdges('project-1')).toThrow(/legacy-edge|invalid stored evidence/i);
   });
 });

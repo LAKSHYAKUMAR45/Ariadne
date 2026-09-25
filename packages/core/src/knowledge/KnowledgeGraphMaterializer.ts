@@ -7,6 +7,10 @@ import type {
   ExtractedSymbol,
   KnowledgeSourceSpan,
 } from './KnowledgeExtraction.js';
+import {
+  sanitizeProvenanceMetadata,
+  stableGraphJsonStringify,
+} from './GraphMetadata.js';
 import type { KnowledgeEdgeEvidence, KnowledgeGraphEdgeType, KnowledgeGraphNodeId, KnowledgeProvenanceRef } from './KnowledgeTypes.js';
 import { KnowledgeGraph } from './graph/KnowledgeGraph.js';
 
@@ -29,14 +33,6 @@ interface AggregatedEdge {
   evidence: KnowledgeEdgeEvidence[];
   confidence: number;
   provenance: KnowledgeProvenanceRef[];
-}
-
-
-function stableJsonStringify(value: unknown): string {
-  if (value === null || typeof value !== 'object') return JSON.stringify(value);
-  if (Array.isArray(value)) return `[${value.map((entry) => stableJsonStringify(entry)).join(',')}]`;
-  const entries = Object.entries(value as Record<string, unknown>).sort(([left], [right]) => left.localeCompare(right));
-  return `{${entries.map(([key, entry]) => `${JSON.stringify(key)}:${stableJsonStringify(entry)}`).join(',')}}`;
 }
 
 function requireText(value: string, label: string): string {
@@ -83,6 +79,12 @@ function spanToProvenance(
   span?: KnowledgeSourceSpan | null,
   metadata?: ExtractedMetadata | null,
 ): KnowledgeProvenanceRef {
+  const sanitizedMetadata = metadata
+    ? sanitizeProvenanceMetadata(
+        metadata,
+        `Knowledge graph materialization source ${sourceId}/${sourceVersionId} relationship provenance metadata`,
+      )
+    : undefined;
   return {
     kind: 'source',
     id: sourceId,
@@ -99,7 +101,7 @@ function spanToProvenance(
         }
       : {}),
     confidence,
-    ...(metadata ? { metadata: { ...metadata } } : {}),
+    ...(sanitizedMetadata ? { metadata: sanitizedMetadata } : {}),
   };
 }
 
@@ -110,7 +112,9 @@ function provenanceOrder(left: KnowledgeProvenanceRef, right: KnowledgeProvenanc
     (left.startColumn ?? Number.MAX_SAFE_INTEGER) - (right.startColumn ?? Number.MAX_SAFE_INTEGER) ||
     (left.endOffset ?? Number.MAX_SAFE_INTEGER) - (right.endOffset ?? Number.MAX_SAFE_INTEGER) ||
     left.id.localeCompare(right.id) ||
-    stableJsonStringify(left.metadata ?? {}).localeCompare(stableJsonStringify(right.metadata ?? {}))
+    stableGraphJsonStringify(left.metadata ?? {}, 'Knowledge graph materialization left provenance metadata').localeCompare(
+      stableGraphJsonStringify(right.metadata ?? {}, 'Knowledge graph materialization right provenance metadata'),
+    )
   );
 }
 
@@ -121,7 +125,9 @@ function uniqueSortedEvidence(evidence: Iterable<KnowledgeEdgeEvidence>): Knowle
 function uniqueSortedProvenance(provenance: Iterable<KnowledgeProvenanceRef>): KnowledgeProvenanceRef[] {
   const byFingerprint = new Map<string, KnowledgeProvenanceRef>();
   for (const reference of provenance) {
-    const fingerprint = createHash('sha256').update(stableJsonStringify(reference)).digest('hex');
+    const fingerprint = createHash('sha256')
+      .update(stableGraphJsonStringify(reference, 'Knowledge graph materialization provenance fingerprint'))
+      .digest('hex');
     if (!byFingerprint.has(fingerprint)) byFingerprint.set(fingerprint, reference);
   }
   return [...byFingerprint.values()].sort(provenanceOrder);
@@ -192,10 +198,17 @@ export class KnowledgeGraphMaterializer {
         stableNodeId(projectId, sourceVersionId, left).localeCompare(stableNodeId(projectId, sourceVersionId, right)),
       );
       const materializedSymbols = new Map<string, MaterializedSymbol>();
+      const nodeIdsToSymbols = new Map<KnowledgeGraphNodeId, ExtractedSymbol>();
       const aliases = new Map<string, KnowledgeGraphNodeId | null>();
 
       for (const symbol of symbols) {
         const nodeId = stableNodeId(projectId, sourceVersionId, symbol);
+        const existingSymbol = nodeIdsToSymbols.get(nodeId);
+        if (existingSymbol && existingSymbol.id !== symbol.id) {
+          throw new Error(
+            `Knowledge graph materialization node ID collision for ${nodeId} (${existingSymbol.id} vs ${symbol.id})`,
+          );
+        }
         this.graph.upsertGraphNode({
           id: nodeId,
           projectId,
@@ -209,6 +222,7 @@ export class KnowledgeGraphMaterializer {
           confidence: symbol.confidence,
         });
         materializedSymbols.set(symbol.id, { symbol, nodeId });
+        nodeIdsToSymbols.set(nodeId, symbol);
         registerAlias(aliases, symbol.qualifiedName ?? null, nodeId);
         registerAlias(aliases, symbol.name, nodeId);
       }

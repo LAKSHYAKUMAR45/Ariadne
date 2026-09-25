@@ -1,6 +1,10 @@
 import type Database from 'better-sqlite3';
 import type { KnowledgeSourceSpan } from '../KnowledgeExtraction.js';
 import { createKnowledgeId, normalizeKnowledgePath } from '../KnowledgeIds.js';
+import {
+  sanitizeProvenanceMetadata,
+  stableGraphJsonStringify,
+} from '../GraphMetadata.js';
 import type {
   KnowledgeEdgeEvidence,
   KnowledgeGraphEdgeType,
@@ -39,6 +43,8 @@ export interface KnowledgeGraphNodeRecord {
   sourceId: string | null;
   qualifiedName: string | null;
   sourceVersionId: string | null;
+  provenanceSourceId: string | null;
+  provenanceSourcePath: string | null;
   span: KnowledgeSourceSpan | null;
   confidence: number;
   createdAt: string;
@@ -87,6 +93,8 @@ interface NodeRow {
   end_line: number | null;
   end_column: number | null;
   span_label: string | null;
+  provenance_source_id: string | null;
+  provenance_source_path: string | null;
   confidence: number;
   created_at: string;
   updated_at: string;
@@ -135,13 +143,16 @@ const EDGE_TYPES = new Set<KnowledgeGraphEdgeType>([
   'supports',
 ]);
 
-
-function stableJsonStringify(value: unknown): string {
-  if (value === null || typeof value !== 'object') return JSON.stringify(value);
-  if (Array.isArray(value)) return `[${value.map((entry) => stableJsonStringify(entry)).join(',')}]`;
-  const entries = Object.entries(value as Record<string, unknown>).sort(([left], [right]) => left.localeCompare(right));
-  return `{${entries.map(([key, entry]) => `${JSON.stringify(key)}:${stableJsonStringify(entry)}`).join(',')}}`;
-}
+const NODE_SELECT_SQL = `SELECT nodes.*,
+  versions.source_id AS provenance_source_id,
+  sources.source_path AS provenance_source_path
+ FROM knowledge_graph_nodes nodes
+ LEFT JOIN knowledge_source_versions versions
+   ON versions.project_id = nodes.project_id
+  AND versions.id = nodes.source_version_id
+ LEFT JOIN knowledge_sources sources
+   ON sources.project_id = versions.project_id
+  AND sources.id = versions.source_id`;
 
 function requireText(value: string, label: string): void {
   if (value.trim().length === 0) throw new Error(`Knowledge graph ${label} must not be empty`);
@@ -166,18 +177,40 @@ function normalizeSpan(span: KnowledgeSourceSpan | null | undefined): KnowledgeS
   return { ...span };
 }
 
-function normalizeProvenance(provenance: readonly KnowledgeProvenanceRef[]): KnowledgeProvenanceRef[] {
+function normalizeProvenance(
+  provenance: readonly KnowledgeProvenanceRef[],
+  context: string,
+  hydrateSourcePath?: (reference: KnowledgeProvenanceRef) => string | null,
+): KnowledgeProvenanceRef[] {
   return [...provenance]
-    .map((reference) => ({
-      ...reference,
-      ...(reference.kind === 'file'
-        ? {
-            id: normalizeKnowledgePath(reference.id),
-            ...(reference.path ? { path: normalizeKnowledgePath(reference.path) } : {}),
-          }
-        : {}),
-      ...(reference.metadata ? { metadata: { ...reference.metadata } } : {}),
-    }))
+    .map((reference, index) => {
+      const normalized =
+        reference.kind === 'file'
+          ? {
+              ...reference,
+              id: normalizeKnowledgePath(reference.id),
+              ...(reference.path ? { path: normalizeKnowledgePath(reference.path) } : {}),
+            }
+          : {
+              ...reference,
+            };
+      const metadata = reference.metadata
+        ? sanitizeProvenanceMetadata(reference.metadata, `${context} reference ${index + 1} metadata`)
+        : undefined;
+      return {
+        ...normalized,
+        ...(reference.kind === 'source'
+          ? (() => {
+              const authoritativePath = hydrateSourcePath?.(normalized as KnowledgeProvenanceRef) ?? null;
+              if (authoritativePath) {
+                return { path: authoritativePath };
+              }
+              return reference.path ? { path: reference.path } : {};
+            })()
+          : {}),
+        ...(metadata ? { metadata } : {}),
+      };
+    })
     .sort(
       (left, right) =>
         left.id.localeCompare(right.id) ||
@@ -185,7 +218,9 @@ function normalizeProvenance(provenance: readonly KnowledgeProvenanceRef[]): Kno
         (left.endOffset ?? Number.MAX_SAFE_INTEGER) - (right.endOffset ?? Number.MAX_SAFE_INTEGER) ||
         (left.startLine ?? Number.MAX_SAFE_INTEGER) - (right.startLine ?? Number.MAX_SAFE_INTEGER) ||
         (left.startColumn ?? Number.MAX_SAFE_INTEGER) - (right.startColumn ?? Number.MAX_SAFE_INTEGER) ||
-        stableJsonStringify(left.metadata ?? {}).localeCompare(stableJsonStringify(right.metadata ?? {})),
+        stableGraphJsonStringify(left.metadata ?? {}, `${context} left metadata`).localeCompare(
+          stableGraphJsonStringify(right.metadata ?? {}, `${context} right metadata`),
+        ),
     );
 }
 
@@ -216,6 +251,8 @@ function toNode(row: NodeRow): KnowledgeGraphNodeRecord {
     sourceId: row.source_id,
     qualifiedName: row.qualified_name,
     sourceVersionId: row.source_version_id,
+    provenanceSourceId: row.provenance_source_id,
+    provenanceSourcePath: row.provenance_source_path,
     span,
     confidence: row.confidence,
     createdAt: row.created_at,
@@ -223,7 +260,11 @@ function toNode(row: NodeRow): KnowledgeGraphNodeRecord {
   };
 }
 
-function parseStoredEvidence(value: string): Required<StoredEvidence> {
+function parseStoredEvidence(
+  value: string,
+  edgeId: string,
+  hydrateSourcePath?: (reference: KnowledgeProvenanceRef) => string | null,
+): Required<StoredEvidence> {
   try {
     const parsed: unknown = JSON.parse(value);
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
@@ -233,15 +274,26 @@ function parseStoredEvidence(value: string): Required<StoredEvidence> {
     return {
       evidence: Array.isArray(stored.evidence) ? stored.evidence.filter((entry): entry is KnowledgeEdgeEvidence => EVIDENCE_TYPES.has(entry as KnowledgeEdgeEvidence)) : [],
       weight: typeof stored.weight === 'number' && Number.isFinite(stored.weight) ? stored.weight : 1,
-      provenance: Array.isArray(stored.provenance) ? normalizeProvenance(stored.provenance) : [],
+      provenance: Array.isArray(stored.provenance)
+        ? normalizeProvenance(stored.provenance, `Knowledge graph edge ${edgeId} stored provenance`, hydrateSourcePath)
+        : [],
     };
-  } catch {
+  } catch (error) {
+    if (error instanceof Error && error.message.includes('Knowledge graph edge')) {
+      throw error;
+    }
+    if (error instanceof Error && !error.message.includes('Unexpected token')) {
+      throw new Error(`Knowledge graph edge ${edgeId} has invalid stored evidence: ${error.message}`);
+    }
     return { evidence: [], weight: 1, provenance: [] };
   }
 }
 
-function toEdge(row: EdgeRow): KnowledgeGraphEdgeRecord {
-  const stored = parseStoredEvidence(row.evidence_json);
+function toEdge(
+  row: EdgeRow,
+  hydrateSourcePath?: (reference: KnowledgeProvenanceRef) => string | null,
+): KnowledgeGraphEdgeRecord {
+  const stored = parseStoredEvidence(row.evidence_json, row.id, hydrateSourcePath);
   return {
     id: row.id,
     projectId: row.project_id,
@@ -328,6 +380,47 @@ export class KnowledgeGraph {
       )
       .get(projectId, sourceId) as { 1: number } | undefined;
     return row !== undefined;
+  }
+
+  private lookupAuthoritativeSourcePath(
+    projectId: string,
+    sourceId: string,
+    sourceVersionId?: string | null,
+    strict = true,
+  ): string | null {
+    const byVersion = sourceVersionId
+      ? ((this.db
+          .prepare(
+            `SELECT sources.source_path
+             FROM knowledge_source_versions versions
+             JOIN knowledge_sources sources
+               ON sources.project_id = versions.project_id
+              AND sources.id = versions.source_id
+             WHERE versions.project_id = ? AND versions.source_id = ? AND versions.id = ?
+             LIMIT 1`,
+          )
+          .get(projectId, sourceId, sourceVersionId) as { source_path: string | null } | undefined) ?? null)
+      : null;
+    if (sourceVersionId && byVersion === null) {
+      if (!strict) return null;
+      throw new Error(`Knowledge graph provenance source ${sourceId}/${sourceVersionId} must belong to project ${projectId}`);
+    }
+    if (byVersion) {
+      return byVersion.source_path ? normalizeKnowledgePath(byVersion.source_path) : null;
+    }
+    const bySource = this.db
+      .prepare(
+        `SELECT source_path
+         FROM knowledge_sources
+         WHERE project_id = ? AND id = ?
+         LIMIT 1`,
+      )
+      .get(projectId, sourceId) as { source_path: string | null } | undefined;
+    if (!bySource) {
+      if (!strict) return null;
+      throw new Error(`Knowledge graph provenance source ${sourceId} must belong to project ${projectId}`);
+    }
+    return bySource.source_path ? normalizeKnowledgePath(bySource.source_path) : null;
   }
 
   findUniqueGraphNodeId(
@@ -500,7 +593,7 @@ export class KnowledgeGraph {
         updatedAt: now,
       });
     const row = this.db
-      .prepare(`SELECT * FROM knowledge_graph_nodes WHERE project_id = ? AND id = ? LIMIT 1`)
+      .prepare(`${NODE_SELECT_SQL} WHERE nodes.project_id = ? AND nodes.id = ? LIMIT 1`)
       .get(input.projectId, id) as NodeRow | undefined;
     if (!row) throw new Error(`Knowledge graph node ${id} could not be persisted`);
     return toNode(row);
@@ -523,22 +616,18 @@ export class KnowledgeGraph {
     validateUnit(weight, 'weight');
     const confidence = input.confidence ?? 1;
     validateUnit(confidence, 'confidence');
-    const provenance = normalizeProvenance(input.provenance ?? []);
+    const provenance = normalizeProvenance(
+      input.provenance ?? [],
+      `Knowledge graph edge ${input.edgeType} provenance`,
+      (reference) => this.lookupAuthoritativeSourcePath(input.projectId, reference.id, reference.sourceVersionId),
+    );
     provenance.forEach((reference) => {
       if (reference.confidence !== undefined) validateUnit(reference.confidence, 'provenance confidence');
       if (reference.kind !== 'source' && reference.kind !== 'file') {
         throw new Error(`Knowledge graph provenance kind is unsupported on graph edges: ${reference.kind}`);
       }
       if (reference.kind === 'source') {
-        if (reference.sourceVersionId) {
-          if (!this.sourceVersionExists(input.projectId, reference.id, reference.sourceVersionId)) {
-            throw new Error(
-              `Knowledge graph provenance source ${reference.id}/${reference.sourceVersionId} must belong to project ${input.projectId}`,
-            );
-          }
-        } else if (!this.sourceExistsInProject(input.projectId, reference.id)) {
-          throw new Error(`Knowledge graph provenance source ${reference.id} must belong to project ${input.projectId}`);
-        }
+        this.lookupAuthoritativeSourcePath(input.projectId, reference.id, reference.sourceVersionId);
       }
       if (reference.kind === 'file') {
         const normalizedId = normalizeKnowledgePath(reference.id);
@@ -590,7 +679,11 @@ export class KnowledgeGraph {
       )
       .get(input.projectId, input.sourceNodeId, input.targetNodeId, input.edgeType) as EdgeRow | undefined;
     if (!row) throw new Error(`Knowledge graph edge ${id} could not be persisted`);
-    return toEdge(row);
+    return toEdge(row, (reference) =>
+      reference.kind === 'source'
+        ? this.lookupAuthoritativeSourcePath(input.projectId, reference.id, reference.sourceVersionId, false)
+        : null,
+    );
   }
 
   removeGraphEdge(projectId: string, sourceNodeId: KnowledgeGraphNodeId, targetNodeId: KnowledgeGraphNodeId, edgeType?: string): boolean {
@@ -607,7 +700,7 @@ export class KnowledgeGraph {
 
   getGraphNode(projectId: string, nodeId: KnowledgeGraphNodeId): KnowledgeGraphNodeRecord | null {
     const row = this.db
-      .prepare(`SELECT * FROM knowledge_graph_nodes WHERE project_id = ? AND id = ?`)
+      .prepare(`${NODE_SELECT_SQL} WHERE nodes.project_id = ? AND nodes.id = ?`)
       .get(projectId, nodeId) as NodeRow | undefined;
     return row ? toNode(row) : null;
   }
@@ -615,14 +708,20 @@ export class KnowledgeGraph {
   /** Lists every node in a project, ordered by label then ID for stable CLI/API output. */
   listGraphNodes(projectId: string): KnowledgeGraphNodeRecord[] {
     requireText(projectId, 'project ID');
-    return (this.db.prepare(`SELECT * FROM knowledge_graph_nodes WHERE project_id = ?`).all(projectId) as NodeRow[])
+    return (this.db.prepare(`${NODE_SELECT_SQL} WHERE nodes.project_id = ?`).all(projectId) as NodeRow[])
       .map(toNode)
       .sort((left, right) => left.label.localeCompare(right.label) || left.id.localeCompare(right.id));
   }
 
   listGraphEdges(projectId: string): KnowledgeGraphEdgeRecord[] {
     return (this.db.prepare(`SELECT * FROM knowledge_graph_edges WHERE project_id = ?`).all(projectId) as EdgeRow[])
-      .map(toEdge)
+      .map((row) =>
+        toEdge(row, (reference) =>
+          reference.kind === 'source'
+            ? this.lookupAuthoritativeSourcePath(projectId, reference.id, reference.sourceVersionId, false)
+            : null,
+        ),
+      )
       .sort(edgeOrder);
   }
 

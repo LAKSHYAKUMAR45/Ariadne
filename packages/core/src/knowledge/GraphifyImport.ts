@@ -1,7 +1,11 @@
 import { normalizeKnowledgePath } from './KnowledgeIds.js';
 import type { KnowledgeEdgeEvidence, KnowledgeGraphEdgeType, KnowledgeProvenanceRef } from './KnowledgeTypes.js';
+import {
+  sanitizeGraphifyMetadata,
+  sanitizeGraphJsonValue,
+  type GraphJsonLike,
+} from './GraphMetadata.js';
 
-type JsonLike = null | boolean | number | string | JsonLike[] | { [key: string]: JsonLike };
 type UnknownRecord = Record<string, unknown>;
 
 const NATIVE_EDGE_TYPES = new Set<KnowledgeGraphEdgeType>([
@@ -45,7 +49,7 @@ export interface GraphImportNode {
   nodeType: string;
   label: string;
   path: string | null;
-  metadata: Record<string, JsonLike>;
+  metadata: Record<string, GraphJsonLike>;
 }
 
 export interface GraphImportEdge {
@@ -56,7 +60,7 @@ export interface GraphImportEdge {
   inferred: boolean;
   confidence: number;
   provenance: KnowledgeProvenanceRef[];
-  metadata: Record<string, JsonLike>;
+  metadata: Record<string, GraphJsonLike>;
 }
 
 export interface GraphImportResult {
@@ -94,33 +98,22 @@ function normalizedPath(value: unknown): string | null {
   }
 }
 
-function sanitizeJsonLike(value: unknown): JsonLike | undefined {
-  if (value === null) return null;
-  if (typeof value === 'string' || typeof value === 'boolean') return value;
-  if (typeof value === 'number') return Number.isFinite(value) ? value : String(value);
-  if (Array.isArray(value)) {
-    const items = value.map((item) => sanitizeJsonLike(item)).filter((item) => item !== undefined);
-    return items;
-  }
-  if (!value || typeof value !== 'object') return undefined;
-  const entries = Object.entries(value)
-    .map(([key, entry]) => {
-      const sanitized = sanitizeJsonLike(entry);
-      return sanitized === undefined ? null : ([key, sanitized] as const);
-    })
-    .filter((entry): entry is readonly [string, JsonLike] => entry !== null);
-  return Object.fromEntries(entries);
-}
-
-function filteredMetadata(value: UnknownRecord, reservedKeys: ReadonlySet<string>): Record<string, JsonLike> {
+function filteredMetadata(value: UnknownRecord, reservedKeys: ReadonlySet<string>, context: string): Record<string, GraphJsonLike> {
   const metadataEntries = Object.entries(value)
     .filter(([key]) => !reservedKeys.has(key))
     .map(([key, entry]) => {
-      const sanitized = sanitizeJsonLike(entry);
+      let sanitized: GraphJsonLike | undefined;
+      try {
+        sanitized = sanitizeGraphJsonValue(entry, `${context}.${key}`);
+      } catch {
+        sanitized = undefined;
+      }
       return sanitized === undefined ? null : ([key, sanitized] as const);
     })
-    .filter((entry): entry is readonly [string, JsonLike] => entry !== null);
-  return Object.fromEntries(metadataEntries);
+    .filter((entry): entry is readonly [string, GraphJsonLike] => entry !== null);
+  const metadata = Object.fromEntries(metadataEntries);
+  const bounded = sanitizeGraphJsonValue(metadata, context);
+  return bounded && typeof bounded === 'object' && !Array.isArray(bounded) ? bounded : {};
 }
 
 function relationType(value: UnknownRecord): { edgeType: KnowledgeGraphEdgeType; originalEdgeType?: string } {
@@ -145,6 +138,11 @@ function normalizeConfidence(value: unknown, inferred: boolean): number {
 function parseLineLocation(value: unknown):
   | { parsed: true; startLine: number; endLine: number; startColumn?: number; endColumn?: number }
   | { parsed: false } {
+  const parseZeroBasedColumn = (candidate: unknown): number | undefined | null => {
+    if (candidate === undefined) return undefined;
+    if (typeof candidate !== 'number' || !Number.isInteger(candidate) || candidate < 0) return null;
+    return candidate;
+  };
   if (typeof value === 'string') {
     const trimmed = value.trim();
     const single = /^L(\d+)$/i.exec(trimmed);
@@ -171,21 +169,17 @@ function parseLineLocation(value: unknown):
   const candidate = value as UnknownRecord;
   const line = typeof candidate.line === 'number' && Number.isInteger(candidate.line) ? candidate.line : null;
   if (line && line > 0) {
-    const column = typeof candidate.column === 'number' && Number.isInteger(candidate.column) && candidate.column > 0 ? candidate.column : undefined;
+    const column = parseZeroBasedColumn(candidate.column);
+    if (column === null) return { parsed: false };
     return { parsed: true, startLine: line, endLine: line, ...(column !== undefined ? { startColumn: column, endColumn: column } : {}) };
   }
 
   const startLine = typeof candidate.startLine === 'number' && Number.isInteger(candidate.startLine) ? candidate.startLine : null;
   const endLine = typeof candidate.endLine === 'number' && Number.isInteger(candidate.endLine) ? candidate.endLine : null;
   if (startLine && endLine && startLine > 0 && endLine > 0 && endLine >= startLine) {
-    const startColumn =
-      typeof candidate.startColumn === 'number' && Number.isInteger(candidate.startColumn) && candidate.startColumn > 0
-        ? candidate.startColumn
-        : undefined;
-    const endColumn =
-      typeof candidate.endColumn === 'number' && Number.isInteger(candidate.endColumn) && candidate.endColumn > 0
-        ? candidate.endColumn
-        : undefined;
+    const startColumn = parseZeroBasedColumn(candidate.startColumn);
+    const endColumn = parseZeroBasedColumn(candidate.endColumn);
+    if (startColumn === null || endColumn === null) return { parsed: false };
     return {
       parsed: true,
       startLine,
@@ -201,10 +195,9 @@ function parseLineLocation(value: unknown):
     const nestedStartLine = typeof start.line === 'number' && Number.isInteger(start.line) ? start.line : null;
     const nestedEndLine = typeof end.line === 'number' && Number.isInteger(end.line) ? end.line : null;
     if (nestedStartLine && nestedEndLine && nestedStartLine > 0 && nestedEndLine > 0 && nestedEndLine >= nestedStartLine) {
-      const nestedStartColumn =
-        typeof start.column === 'number' && Number.isInteger(start.column) && start.column > 0 ? start.column : undefined;
-      const nestedEndColumn =
-        typeof end.column === 'number' && Number.isInteger(end.column) && end.column > 0 ? end.column : undefined;
+      const nestedStartColumn = parseZeroBasedColumn(start.column);
+      const nestedEndColumn = parseZeroBasedColumn(end.column);
+      if (nestedStartColumn === null || nestedEndColumn === null) return { parsed: false };
       return {
         parsed: true,
         startLine: nestedStartLine,
@@ -220,12 +213,14 @@ function parseLineLocation(value: unknown):
 
 function buildEdgeProvenance(value: UnknownRecord): {
   provenance: KnowledgeProvenanceRef[];
-  unparsedSourceLocation?: JsonLike;
+  unparsedSourceLocation?: GraphJsonLike;
 } {
   const sourcePath = normalizedPath(value.source_file ?? value.sourceFile);
   const rawLocation = value.source_location ?? value.sourceLocation;
   if (!sourcePath) {
-    return rawLocation === undefined ? { provenance: [] } : { provenance: [], unparsedSourceLocation: sanitizeJsonLike(rawLocation) };
+    return rawLocation === undefined
+      ? { provenance: [] }
+      : { provenance: [], unparsedSourceLocation: sanitizeGraphJsonValue(rawLocation, 'Graphify edge source_location') };
   }
   if (rawLocation === undefined) {
     return {
@@ -236,7 +231,7 @@ function buildEdgeProvenance(value: UnknownRecord): {
   if (!parsedLocation.parsed) {
     return {
       provenance: [{ kind: 'file', id: sourcePath, path: sourcePath }],
-      unparsedSourceLocation: sanitizeJsonLike(rawLocation),
+      unparsedSourceLocation: sanitizeGraphJsonValue(rawLocation, 'Graphify edge source_location'),
     };
   }
   return {
@@ -278,7 +273,7 @@ export function importGraphifyJson(input: string | unknown): GraphImportResult {
       nodeType: stringValue(value.nodeType ?? value.type, 'node'),
       label,
       path: normalizedPath(value.path ?? value.file ?? value.source),
-      metadata: filteredMetadata(value, NODE_METADATA_KEYS),
+      metadata: filteredMetadata(value, NODE_METADATA_KEYS, `Graphify node ${id} metadata`),
     });
     nodeIds.add(id);
   }
@@ -299,11 +294,12 @@ export function importGraphifyJson(input: string | unknown): GraphImportResult {
     const inferred = value.inferred === true || value.kind === 'inferred' || value.explicit === false;
     const { edgeType, originalEdgeType } = relationType(value);
     const { provenance, unparsedSourceLocation } = buildEdgeProvenance(value);
-    const original = {
-      ...filteredMetadata(value, new Set(['from', 'id', 'source', 'target', 'to'])),
-    };
-    const metadata: Record<string, JsonLike> = {
-      ...(Object.keys(original).length > 0 ? { original } : {}),
+    const original = sanitizeGraphifyMetadata(
+      filteredMetadata(value, new Set(['from', 'id', 'source', 'target', 'to']), `Graphify edge ${sourceNodeId}->${targetNodeId} metadata`),
+      `Graphify edge ${sourceNodeId}->${targetNodeId} metadata.original`,
+    );
+    const metadata: Record<string, GraphJsonLike> = {
+      ...(original ? { original } : {}),
       ...(originalEdgeType ? { originalEdgeType } : {}),
       ...(unparsedSourceLocation !== undefined ? { unparsedSourceLocation } : {}),
     };

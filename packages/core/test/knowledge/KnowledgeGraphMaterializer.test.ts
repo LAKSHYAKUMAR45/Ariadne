@@ -316,6 +316,8 @@ describe('KnowledgeGraphMaterializer', () => {
         nodeType: 'method',
         label: 'run',
         qualifiedName: 'src/service.DeviceService.run',
+        provenanceSourceId: 'source-1',
+        provenanceSourcePath: 'src/service.ts',
         sourceVersionId: 'source-version-1',
         span: {
           startOffset: 90,
@@ -339,6 +341,7 @@ describe('KnowledgeGraphMaterializer', () => {
         {
           kind: 'source',
           id: 'source-1',
+          path: 'src/service.ts',
           sourceVersionId: 'source-version-1',
           startOffset: 110,
           endOffset: 118,
@@ -352,6 +355,7 @@ describe('KnowledgeGraphMaterializer', () => {
         {
           kind: 'source',
           id: 'source-1',
+          path: 'src/service.ts',
           sourceVersionId: 'source-version-1',
           startOffset: 120,
           endOffset: 128,
@@ -438,6 +442,105 @@ describe('KnowledgeGraphMaterializer', () => {
     expect(result.unresolvedRelationships).toBe(0);
     expect(graph.listGraphEdges('project-1')).toContainEqual(
       expect.objectContaining({ edgeType: 'calls' }),
+    );
+  });
+
+  it('rejects deterministic node-id collisions without losing the prior graph snapshot', () => {
+    const { db, graph } = createGraph();
+    databases.push(db);
+    const materializer = new KnowledgeGraphMaterializer(graph);
+
+    const baseline = materializer.materialize({
+      projectId: 'project-1',
+      sourceId: 'source-1',
+      sourceVersionId: 'source-version-1',
+      extraction: extraction(),
+    });
+
+    const collidingExtraction: DeterministicExtraction = {
+      ...extraction(),
+      symbols: [
+        {
+          id: 'symbol:function:first',
+          kind: 'function',
+          name: 'dup',
+          qualifiedName: 'src/service.dup',
+          span: {
+            startOffset: 300,
+            endOffset: 340,
+            startLine: 30,
+            startColumn: 1,
+            endLine: 34,
+            endColumn: 1,
+          },
+          confidence: 0.9,
+        },
+        {
+          id: 'symbol:function:second',
+          kind: 'function',
+          name: 'dup',
+          qualifiedName: 'src/service.dup',
+          span: {
+            startOffset: 300,
+            endOffset: 340,
+            startLine: 30,
+            startColumn: 1,
+            endLine: 34,
+            endColumn: 1,
+          },
+          confidence: 0.8,
+        },
+      ],
+      relationships: [],
+    };
+
+    expect(() =>
+      materializer.materialize({
+        projectId: 'project-1',
+        sourceId: 'source-1',
+        sourceVersionId: 'source-version-1',
+        extraction: collidingExtraction,
+      }),
+    ).toThrow(/node ID collision/i);
+    expect(graph.listGraphNodes('project-1').map((node) => node.id).sort()).toEqual(baseline.nodeIds);
+  });
+
+  it('drops unallowlisted relationship metadata instead of persisting secrets verbatim', () => {
+    const { db, graph } = createGraph();
+    databases.push(db);
+    const materializer = new KnowledgeGraphMaterializer(graph);
+
+    materializer.materialize({
+      projectId: 'project-1',
+      sourceId: 'source-1',
+      sourceVersionId: 'source-version-1',
+      extraction: {
+        ...extraction(),
+        relationships: [
+          {
+            id: 'relationship:calls:redacted',
+            type: 'calls',
+            sourceSymbolId: 'symbol:method:run',
+            targetSymbolId: 'symbol:function:helper',
+            confidence: 0.7,
+            metadata: {
+              callee: 'helper',
+              token: 'sk-abcdefghijklmnopqrstuvwxyz123456',
+            } as never,
+          },
+        ],
+      },
+    });
+
+    expect(graph.listGraphEdges('project-1')).toContainEqual(
+      expect.objectContaining({
+        edgeType: 'calls',
+        provenance: [
+          expect.objectContaining({
+            metadata: { callee: 'helper' },
+          }),
+        ],
+      }),
     );
   });
 
