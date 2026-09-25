@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { AnalyzerRegistry } from '../../../src/knowledge/analyzers/index.js';
+import { AnalyzerRegistry, createDefaultAnalyzerRegistry } from '../../../src/knowledge/analyzers/index.js';
 import type { AnalyzerInput, AnalyzerSelectionInput, DeterministicAnalyzer } from '../../../src/knowledge/analyzers/index.js';
 
 class StubAnalyzer implements DeterministicAnalyzer {
@@ -45,5 +45,13 @@ describe('AnalyzerRegistry', () => {
     registry.register(second);
 
     expect(registry.require({ sourcePath: 'docs/example.txt', mimeType: 'text/plain' })).toBe(first);
+  });
+
+  it('rejects unsupported extensions when no deterministic analyzer matches', () => {
+    const registry = createDefaultAnalyzerRegistry();
+
+    expect(() => registry.require({ sourcePath: 'scripts/example.rb', mimeType: 'application/x-ruby' })).toThrow(
+      /no deterministic analyzer/i,
+    );
   });
 });

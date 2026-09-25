@@ -14,6 +14,7 @@ import {
   collectParseDiagnostics,
   definitionSignature,
   findChildren,
+  findDescendants,
   findFirstChild,
   moduleNameFromPath,
   nodeSpan,
@@ -33,6 +34,7 @@ interface CollectedSymbol {
   node: SyntaxNode;
   containerSymbolId: string | null;
   exported: boolean;
+  defaultExport: boolean;
 }
 
 function identifierText(content: string, node: SyntaxNode): string {
@@ -75,12 +77,14 @@ function headerSpan(content: string, node: SyntaxNode, endNode: SyntaxNode | nul
   return spanFromOffsets(content, node.from, Math.min(endNode.from + 1, content.length));
 }
 
-function unwrapExport(node: SyntaxNode): { target: SyntaxNode; exported: boolean } {
+function unwrapExport(node: SyntaxNode): { target: SyntaxNode; exported: boolean; defaultExport: boolean } {
   if (node.type.name !== 'ExportDeclaration') {
-    return { target: node, exported: false };
+    return { target: node, exported: false, defaultExport: false };
   }
+  const children = childNodes(node);
+  const defaultExport = children.some((child) => child.type.name === 'default');
   const target = childNodes(node).find((child) => child.type.name.endsWith('Declaration'));
-  return { target: target ?? node, exported: true };
+  return { target: target ?? node, exported: true, defaultExport };
 }
 
 function symbolFromNode(
@@ -89,6 +93,7 @@ function symbolFromNode(
   sourceVersionId: string,
   moduleName: string,
   containerSymbolId: string | null,
+  defaultExport: boolean,
   className?: string,
 ): CollectedSymbol | null {
   if (node.type.name === 'InterfaceDeclaration') {
@@ -111,6 +116,7 @@ function symbolFromNode(
       node,
       containerSymbolId,
       exported: false,
+      defaultExport: false,
     };
   }
 
@@ -133,14 +139,15 @@ function symbolFromNode(
       node,
       containerSymbolId,
       exported: false,
+      defaultExport: false,
     };
   }
 
   if (node.type.name === 'ClassDeclaration') {
     const nameNode = findFirstChild(node, 'VariableDefinition');
     const classBody = findFirstChild(node, 'ClassBody');
-    if (!nameNode) return null;
-    const name = identifierText(content, nameNode);
+    const name = nameNode ? identifierText(content, nameNode) : defaultExport ? 'default' : null;
+    if (!name) return null;
     const span = headerSpan(content, node, classBody);
     return {
       symbol: {
@@ -156,14 +163,17 @@ function symbolFromNode(
       node,
       containerSymbolId,
       exported: false,
+      defaultExport,
     };
   }
 
   if (node.type.name === 'FunctionDeclaration') {
     const nameNode = findFirstChild(node, 'VariableDefinition');
     const block = findFirstChild(node, 'Block');
-    if (!nameNode) return null;
-    const name = identifierText(content, nameNode);
+    const name = nameNode ? identifierText(content, nameNode) : defaultExport ? 'default' : null;
+    if (!name) return null;
+    const rawSignature = definitionSignature(nodeText(content, node)).replace(/^function\s*/, '');
+    const signature = rawSignature.startsWith('(') ? `${name}${rawSignature}` : rawSignature;
     const span = headerSpan(content, node, block);
     return {
       symbol: {
@@ -171,7 +181,7 @@ function symbolFromNode(
         kind: className ? 'method' : 'function',
         name,
         qualifiedName: `${moduleName}.${className ? `${className}.` : ''}${name}`,
-        signature: definitionSignature(nodeText(content, node)).replace(/^function\s+/, ''),
+        signature,
         detail: null,
         span,
         confidence: 1,
@@ -179,6 +189,7 @@ function symbolFromNode(
       node,
       containerSymbolId,
       exported: false,
+      defaultExport,
     };
   }
 
@@ -202,6 +213,7 @@ function symbolFromNode(
       node,
       containerSymbolId,
       exported: false,
+      defaultExport: false,
     };
   }
 
@@ -218,8 +230,16 @@ function collectSymbolsFromStatements(
 ): CollectedSymbol[] {
   const symbols: CollectedSymbol[] = [];
   for (const statement of statements) {
-    const { target, exported } = unwrapExport(statement);
-    const collected = symbolFromNode(target, content, sourceVersionId, moduleName, containerSymbolId, className);
+    const { target, exported, defaultExport } = unwrapExport(statement);
+    const collected = symbolFromNode(
+      target,
+      content,
+      sourceVersionId,
+      moduleName,
+      containerSymbolId,
+      defaultExport,
+      className,
+    );
     if (!collected) {
       continue;
     }
@@ -236,7 +256,7 @@ function collectSymbolsFromStatements(
         span,
       };
     }
-    symbols.push({ ...collected, exported });
+    symbols.push({ ...collected, exported, defaultExport });
     if (target.type.name === 'ClassDeclaration') {
       const body = findFirstChild(target, 'ClassBody');
       if (!body) {
@@ -286,9 +306,10 @@ function symbolIndex(symbols: ExtractedSymbol[]): Map<string, ExtractedSymbol[]>
 function resolveLocalSymbol(
   symbolsByName: Map<string, ExtractedSymbol[]>,
   importedNames: Set<string>,
+  shadowedNames: Set<string>,
   name: string,
 ): ExtractedSymbol | null {
-  if (importedNames.has(name)) {
+  if (importedNames.has(name) || shadowedNames.has(name)) {
     return null;
   }
   const matches = symbolsByName.get(name) ?? [];
@@ -306,6 +327,84 @@ function collectImportRelationships(
     const children = childNodes(statement);
     const sourceNode = findFirstChild(statement, 'String');
     const source = sourceNode ? identifierText(content, sourceNode).replace(/^['"]|['"]$/g, '') : 'unknown';
+    const statementText = nodeText(content, statement);
+    const fromIndex = children.findIndex((child) => child.type.name === 'from');
+    const defaultImportIndex = children.findIndex(
+      (child, index) =>
+        child.type.name === 'VariableDefinition' &&
+        (fromIndex < 0 || index < fromIndex) &&
+        children[index - 1]?.type.name !== 'as',
+    );
+    const defaultImport = defaultImportIndex >= 0 ? children[defaultImportIndex] : undefined;
+    if (defaultImport) {
+      const localName = identifierText(content, defaultImport);
+      importedNames.add(localName);
+      relationships.push(
+        createRelationship(sourceVersionId, {
+          type: 'imports',
+          sourceSymbolId: null,
+          targetSymbolId: null,
+          targetReference: `${source}#default`,
+          span: nodeSpan(content, defaultImport),
+          metadata: {
+            importKind: 'default',
+            importedName: 'default',
+            localName,
+          },
+        }),
+      );
+    }
+
+    const mixedNamespaceMatch = /^import\s+[A-Za-z_$][\w$]*\s*,\s*\*\s+as\s+([A-Za-z_$][\w$]*)\s+from\b/u.exec(statementText);
+    if (mixedNamespaceMatch) {
+      const localName = mixedNamespaceMatch[1]!;
+      const clauseText = `* as ${localName}`;
+      const clauseStart = statementText.indexOf(clauseText);
+      if (clauseStart >= 0) {
+        importedNames.add(localName);
+        relationships.push(
+          createRelationship(sourceVersionId, {
+            type: 'imports',
+            sourceSymbolId: null,
+            targetSymbolId: null,
+            targetReference: `${source}#*`,
+            span: spanFromOffsets(content, statement.from + clauseStart, statement.from + clauseStart + clauseText.length),
+            metadata: {
+              importKind: 'namespace',
+              importedName: '*',
+              localName,
+            },
+          }),
+        );
+        continue;
+      }
+    }
+
+    const starIndex = children.findIndex((child) => child.type.name === 'Star');
+    if (starIndex >= 0) {
+      const starNode = children[starIndex]!;
+      const localNode = children[starIndex + 2];
+      if (localNode?.type.name === 'VariableDefinition') {
+        const localName = identifierText(content, localNode);
+        importedNames.add(localName);
+        relationships.push(
+          createRelationship(sourceVersionId, {
+            type: 'imports',
+            sourceSymbolId: null,
+            targetSymbolId: null,
+            targetReference: `${source}#*`,
+            span: spanFromOffsets(content, starNode.from, localNode.to),
+            metadata: {
+              importKind: 'namespace',
+              importedName: '*',
+              localName,
+            },
+          }),
+        );
+      }
+      continue;
+    }
+
     const importGroup = findFirstChild(statement, 'ImportGroup');
     if (importGroup) {
       const groupChildren = childNodes(importGroup);
@@ -313,29 +412,44 @@ function collectImportRelationships(
         const current = groupChildren[index]!;
         const next = groupChildren[index + 1];
         const following = groupChildren[index + 2];
+        const hasAlias = next?.type.name === 'as';
         const importedNode =
-          current.type.name === 'VariableName' && next?.type.name === 'as' && following?.type.name === 'VariableDefinition'
+          (current.type.name === 'VariableName' || current.type.name === 'default') &&
+          hasAlias &&
+          following?.type.name === 'VariableDefinition'
             ? current
             : current.type.name === 'VariableDefinition'
               ? current
               : null;
         const localNode =
-          current.type.name === 'VariableName' && next?.type.name === 'as' && following?.type.name === 'VariableDefinition'
+          (current.type.name === 'VariableName' || current.type.name === 'default') &&
+          hasAlias &&
+          following?.type.name === 'VariableDefinition'
             ? following
             : current.type.name === 'VariableDefinition'
               ? current
               : null;
+        if (hasAlias && following?.type.name !== 'VariableDefinition') {
+          continue;
+        }
         if (!importedNode || !localNode) {
           continue;
         }
+        const importedName = importedNode.type.name === 'default' ? 'default' : identifierText(content, importedNode);
+        const localName = identifierText(content, localNode);
         importedNames.add(identifierText(content, localNode));
         relationships.push(
           createRelationship(sourceVersionId, {
             type: 'imports',
             sourceSymbolId: null,
             targetSymbolId: null,
-            targetReference: `${source}#${identifierText(content, importedNode)}`,
-            span: sourceNode ? spanFromOffsets(content, localNode.from, sourceNode.to) : nodeSpan(content, localNode),
+            targetReference: `${source}#${importedName}`,
+            span: spanFromOffsets(content, current.from, localNode.to),
+            metadata: {
+              importKind: 'named',
+              importedName,
+              localName,
+            },
           }),
         );
         if (localNode !== current) {
@@ -345,52 +459,192 @@ function collectImportRelationships(
       continue;
     }
 
-    const starIndex = children.findIndex((child) => child.type.name === 'Star');
-    if (starIndex >= 0) {
-      const localNode = children[starIndex + 2];
-      if (localNode?.type.name === 'VariableDefinition') {
-        importedNames.add(identifierText(content, localNode));
-        relationships.push(
-          createRelationship(sourceVersionId, {
-            type: 'imports',
-            sourceSymbolId: null,
-            targetSymbolId: null,
-            targetReference: `${source}#*`,
-            span: sourceNode ? spanFromOffsets(content, localNode.from, sourceNode.to) : nodeSpan(content, localNode),
-          }),
-        );
+  }
+  return { relationships, importedNames };
+}
+
+function collectFunctionScopedBindings(content: string, owner: SyntaxNode, body: SyntaxNode): Set<string> {
+  const bindings = new Set<string>();
+  const params = findFirstChild(owner, 'ParamList');
+  if (params) {
+    for (const child of findDescendants(params, 'VariableDefinition')) {
+      bindings.add(identifierText(content, child));
+    }
+  }
+
+  const visit = (node: SyntaxNode): void => {
+    if (
+      node !== body &&
+      ['FunctionDeclaration', 'FunctionExpression', 'ArrowFunction', 'MethodDeclaration', 'ClassDeclaration'].includes(
+        node.type.name,
+      )
+    ) {
+      return;
+    }
+    if (node.type.name === 'VariableDeclaration') {
+      const declarationKind = childNodes(node)[0]?.type.name;
+      if (declarationKind === 'var') {
+        for (const child of findDescendants(node, 'VariableDefinition')) {
+          bindings.add(identifierText(content, child));
+        }
+      }
+    }
+    for (const child of childNodes(node)) {
+      visit(child);
+    }
+  };
+
+  visit(body);
+  return bindings;
+}
+
+function collectTypeParameterBindings(content: string, owner: SyntaxNode): Set<string> {
+  const bindings = new Set<string>();
+  const typeParams = findFirstChild(owner, 'TypeParamList');
+  if (!typeParams) {
+    return bindings;
+  }
+  for (const child of findDescendants(typeParams, 'TypeDefinition')) {
+    bindings.add(identifierText(content, child));
+  }
+  return bindings;
+}
+
+function collectTypeShadowBindings(content: string, owner: SyntaxNode, body: SyntaxNode): Set<string> {
+  return collectTypeParameterBindings(content, owner);
+}
+
+function collectBlockTypeBindings(content: string, block: SyntaxNode): Set<string> {
+  const bindings = new Set<string>();
+  for (const child of childNodes(block)) {
+    if (child.type.name === 'TypeAliasDeclaration' || child.type.name === 'InterfaceDeclaration') {
+      const nameNode = findFirstChild(child, 'TypeDefinition');
+      if (nameNode) {
+        bindings.add(identifierText(content, nameNode));
       }
       continue;
     }
-
-    const defaultImport = children.find((child) => child.type.name === 'VariableDefinition');
-    if (defaultImport) {
-      importedNames.add(identifierText(content, defaultImport));
-      relationships.push(
-        createRelationship(sourceVersionId, {
-          type: 'imports',
-          sourceSymbolId: null,
-          targetSymbolId: null,
-          targetReference: `${source}#default`,
-          span: sourceNode ? spanFromOffsets(content, defaultImport.from, sourceNode.to) : nodeSpan(content, defaultImport),
-        }),
-      );
+    if (child.type.name === 'ClassDeclaration') {
+      const nameNode = findFirstChild(child, 'VariableDefinition');
+      if (nameNode) {
+        bindings.add(identifierText(content, nameNode));
+      }
     }
   }
-  return { relationships, importedNames };
+  return bindings;
+}
+
+function collectBlockScopedBindings(content: string, block: SyntaxNode): Set<string> {
+  const bindings = new Set<string>();
+  for (const child of childNodes(block)) {
+    if (child.type.name === 'VariableDeclaration') {
+      const declarationKind = childNodes(child)[0]?.type.name;
+      if (declarationKind === 'var') {
+        continue;
+      }
+      for (const grandchild of findDescendants(child, 'VariableDefinition')) {
+        bindings.add(identifierText(content, grandchild));
+      }
+      continue;
+    }
+    if (['FunctionDeclaration', 'ClassDeclaration'].includes(child.type.name)) {
+      const nameNode = findFirstChild(child, 'VariableDefinition') ?? findFirstChild(child, 'PropertyDefinition');
+      if (nameNode) {
+        bindings.add(identifierText(content, nameNode));
+      }
+      continue;
+    }
+    if (child.type.name === 'CatchClause') {
+      const nameNode = findFirstChild(child, 'VariableDefinition');
+      if (nameNode) {
+        bindings.add(identifierText(content, nameNode));
+      }
+    }
+  }
+  return bindings;
+}
+
+function mergeShadowedNames(functionScopedBindings: Set<string>, activeBlockBindings: Set<string>[]): Set<string> {
+  const shadowed = new Set(functionScopedBindings);
+  for (const bindings of activeBlockBindings) {
+    for (const name of bindings) {
+      shadowed.add(name);
+    }
+  }
+  return shadowed;
+}
+
+function collectLoopScopedBindings(content: string, node: SyntaxNode): Set<string> {
+  if (node.type.name !== 'ForStatement') {
+    return new Set<string>();
+  }
+
+  const bindings = new Set<string>();
+  const loopSpec = childNodes(node).find((child) =>
+    ['ForOfSpec', 'ForInSpec', 'ForSpec'].includes(child.type.name),
+  );
+  if (!loopSpec) {
+    return bindings;
+  }
+
+  for (const child of findDescendants(loopSpec, 'VariableDefinition')) {
+    bindings.add(identifierText(content, child));
+  }
+  return bindings;
 }
 
 function collectCallRelationships(
   sourceVersionId: string,
   content: string,
   owner: ExtractedSymbol,
+  ownerNode: SyntaxNode,
   block: SyntaxNode,
   symbolsByName: Map<string, ExtractedSymbol[]>,
   importedNames: Set<string>,
 ): ExtractedRelationship[] {
   const relationships: ExtractedRelationship[] = [];
-  const visit = (node: SyntaxNode): void => {
-    if (node.type.name === 'FunctionDeclaration' || node.type.name === 'ClassDeclaration' || node.type.name === 'MethodDeclaration') {
+  const functionScopedBindings = collectFunctionScopedBindings(content, ownerNode, block);
+  const visit = (node: SyntaxNode, activeBlockBindings: Set<string>[]): void => {
+    if (
+      node.type.name === 'FunctionDeclaration' ||
+      node.type.name === 'FunctionExpression' ||
+      node.type.name === 'ArrowFunction' ||
+      node.type.name === 'ClassDeclaration' ||
+      node.type.name === 'MethodDeclaration'
+    ) {
+      return;
+    }
+    if (node.type.name === 'Block') {
+      const nextActiveBindings = [...activeBlockBindings, collectBlockScopedBindings(content, node)];
+      for (const child of childNodes(node)) {
+        visit(child, nextActiveBindings);
+      }
+      return;
+    }
+    if (node.type.name === 'ForStatement') {
+      const loopBindings = collectLoopScopedBindings(content, node);
+      for (const child of childNodes(node)) {
+        const nextBindings =
+          child.type.name === 'ForOfSpec' ||
+          child.type.name === 'ForInSpec' ||
+          child.type.name === 'ForSpec' ||
+          child.type.name === 'for'
+            ? activeBlockBindings
+            : [...activeBlockBindings, loopBindings];
+        visit(child, nextBindings);
+      }
+      return;
+    }
+    if (node.type.name === 'CatchClause') {
+      const catchBindings = new Set<string>();
+      const catchParam = findFirstChild(node, 'VariableDefinition');
+      if (catchParam) {
+        catchBindings.add(identifierText(content, catchParam));
+      }
+      const nextBindings = [...activeBlockBindings, catchBindings];
+      for (const child of childNodes(node)) {
+        visit(child, nextBindings);
+      }
       return;
     }
     if (node.type.name === 'CallExpression' || node.type.name === 'NewExpression') {
@@ -399,8 +653,9 @@ function collectCallRelationships(
       );
       const targetName = targetNode ? identifierText(content, targetNode) : null;
       if (targetName) {
+        const shadowedNames = mergeShadowedNames(functionScopedBindings, activeBlockBindings);
         const localTarget = targetNode?.type.name === 'VariableName'
-          ? resolveLocalSymbol(symbolsByName, importedNames, targetName)
+          ? resolveLocalSymbol(symbolsByName, importedNames, shadowedNames, targetName)
           : null;
         relationships.push(
           createRelationship(sourceVersionId, {
@@ -414,11 +669,12 @@ function collectCallRelationships(
       }
     }
     for (const child of childNodes(node)) {
-      visit(child);
+      visit(child, activeBlockBindings);
     }
   };
+  const rootBlockBindings = collectBlockScopedBindings(content, block);
   for (const child of childNodes(block)) {
-    visit(child);
+    visit(child, [rootBlockBindings]);
   }
   return relationships;
 }
@@ -430,15 +686,21 @@ function collectTypeReferenceRelationships(
   node: SyntaxNode,
   symbolsByName: Map<string, ExtractedSymbol[]>,
   importedNames: Set<string>,
+  functionScopedTypeBindings: Set<string>,
 ): ExtractedRelationship[] {
   const relationships: ExtractedRelationship[] = [];
-  const visit = (current: SyntaxNode): void => {
+  const visit = (current: SyntaxNode, activeBlockBindings: Set<string>[]): void => {
     if (current !== node && ['FunctionDeclaration', 'MethodDeclaration', 'ClassDeclaration'].includes(current.type.name)) {
       return;
     }
     if (current.type.name === 'TypeName') {
       const targetName = identifierText(content, current);
-      const localTarget = resolveLocalSymbol(symbolsByName, importedNames, targetName);
+      const localTarget = resolveLocalSymbol(
+        symbolsByName,
+        importedNames,
+        mergeShadowedNames(functionScopedTypeBindings, activeBlockBindings),
+        targetName,
+      );
       relationships.push(
         createRelationship(sourceVersionId, {
           type: 'references',
@@ -449,11 +711,19 @@ function collectTypeReferenceRelationships(
         }),
       );
     }
+    if (current !== node && current.type.name === 'Block') {
+      const blockBindings = collectBlockTypeBindings(content, current);
+      for (const child of childNodes(current)) {
+        visit(child, [...activeBlockBindings, blockBindings]);
+      }
+      return;
+    }
     for (const child of childNodes(current)) {
-      visit(child);
+      visit(child, activeBlockBindings);
     }
   };
-  visit(node);
+  const rootBlockBindings = node.type.name === 'Block' ? [collectBlockTypeBindings(content, node)] : [];
+  visit(node, rootBlockBindings);
   return relationships;
 }
 
@@ -485,10 +755,61 @@ function collectSymbolRelationships(
           type: 'exports',
           sourceSymbolId: entry.symbol.id,
           targetSymbolId: null,
-          targetReference: entry.symbol.name,
+          targetReference: entry.defaultExport ? 'default' : entry.symbol.name,
           span: entry.symbol.span,
+          metadata: {
+            exportKind: entry.defaultExport ? 'default' : 'declaration',
+            localName: entry.symbol.name,
+            exportedName: entry.defaultExport ? 'default' : entry.symbol.name,
+          },
         }),
       );
+    }
+  }
+
+  for (const statement of topLevelStatements.filter((node) => node.type.name === 'ExportDeclaration')) {
+    const sourceNode = findFirstChild(statement, 'String');
+    const exportGroup = findFirstChild(statement, 'ExportGroup');
+    if (!exportGroup) {
+      continue;
+    }
+
+    const source = sourceNode ? identifierText(content, sourceNode).replace(/^['"]|['"]$/g, '') : null;
+    const groupChildren = childNodes(exportGroup);
+    for (let index = 0; index < groupChildren.length; index += 1) {
+      const current = groupChildren[index]!;
+      const maybeAs = groupChildren[index + 1];
+      const maybeAlias = groupChildren[index + 2];
+      if (current.type.name !== 'VariableName' && current.type.name !== 'default') {
+        continue;
+      }
+      if (maybeAs?.type.name === 'as' && maybeAlias?.type.name !== 'VariableName') {
+        continue;
+      }
+      const aliasNode = maybeAs?.type.name === 'as' && maybeAlias?.type.name === 'VariableName' ? maybeAlias : null;
+      const localName = identifierText(content, current);
+      const exportedName = identifierText(content, aliasNode ?? current);
+      const localTarget = source
+        ? null
+        : resolveLocalSymbol(symbolsByName, importedNames, new Set<string>(), localName);
+      const span = spanFromOffsets(content, current.from, (aliasNode ?? current).to);
+      relationships.push(
+        createRelationship(sourceVersionId, {
+          type: 'exports',
+          sourceSymbolId: localTarget?.id ?? null,
+          targetSymbolId: null,
+          targetReference: source ? `${source}#${localName}` : exportedName,
+          span,
+          metadata: {
+            exportKind: source ? 'reexport' : 'named',
+            localName,
+            exportedName,
+          },
+        }),
+      );
+      if (aliasNode) {
+        index += 2;
+      }
     }
   }
 
@@ -499,7 +820,9 @@ function collectSymbolRelationships(
     }
     const classNameNode = findFirstChild(target, 'VariableDefinition');
     const className = classNameNode ? identifierText(content, classNameNode) : null;
-    const classSymbol = className ? resolveLocalSymbol(symbolsByName, new Set<string>(), className) : null;
+    const classSymbol = className
+      ? resolveLocalSymbol(symbolsByName, importedNames, new Set<string>(), className)
+      : null;
     if (!classSymbol) {
       continue;
     }
@@ -509,7 +832,7 @@ function collectSymbolRelationships(
       const baseNode = childNodes(target)[extendsIndex + 1] ?? null;
       if (baseNode) {
         const baseName = identifierText(content, baseNode);
-        const targetSymbol = resolveLocalSymbol(symbolsByName, importedNames, baseName);
+        const targetSymbol = resolveLocalSymbol(symbolsByName, importedNames, new Set<string>(), baseName);
         relationships.push(
           createRelationship(sourceVersionId, {
             type: 'inherits',
@@ -526,7 +849,7 @@ function collectSymbolRelationships(
     if (implementsIndex >= 0) {
       for (const implementNode of childNodes(target).slice(implementsIndex + 1).filter((child) => child.type.name === 'TypeName')) {
         const targetName = identifierText(content, implementNode);
-        const targetSymbol = resolveLocalSymbol(symbolsByName, importedNames, targetName);
+        const targetSymbol = resolveLocalSymbol(symbolsByName, importedNames, new Set<string>(), targetName);
         relationships.push(
           createRelationship(sourceVersionId, {
             type: 'implements',
@@ -542,9 +865,30 @@ function collectSymbolRelationships(
 
   for (const entry of symbols.filter((item) => item.symbol.kind === 'function' || item.symbol.kind === 'method')) {
     const block = findFirstChild(entry.node, 'Block');
-    relationships.push(...collectTypeReferenceRelationships(sourceVersionId, content, entry.symbol, entry.node, symbolsByName, importedNames));
+    const typeShadowedNames = block ? collectTypeShadowBindings(content, entry.node, block) : new Set<string>();
+    relationships.push(
+      ...collectTypeReferenceRelationships(
+        sourceVersionId,
+        content,
+        entry.symbol,
+        entry.node,
+        symbolsByName,
+        importedNames,
+        typeShadowedNames,
+      ),
+    );
     if (block) {
-      relationships.push(...collectCallRelationships(sourceVersionId, content, entry.symbol, block, symbolsByName, importedNames));
+      relationships.push(
+        ...collectCallRelationships(
+          sourceVersionId,
+          content,
+          entry.symbol,
+          entry.node,
+          block,
+          symbolsByName,
+          importedNames,
+        ),
+      );
     }
   }
 

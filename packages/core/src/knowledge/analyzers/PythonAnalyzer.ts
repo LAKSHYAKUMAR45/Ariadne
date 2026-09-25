@@ -26,6 +26,70 @@ import {
 import { buildSummaryFromSections } from './SourceText.js';
 import { spanFromOffsets } from './SourceText.js';
 
+function collectImportBindings(content: string, node: SyntaxNode): Set<string> {
+  const bindings = new Set<string>();
+  const importText = nodeText(content, node);
+  const children = childNodes(node);
+  if (importText.startsWith('import ')) {
+    for (const clause of collectBareImportClauses(content, node)) {
+      bindings.add(clause.localName);
+    }
+    return bindings;
+  }
+
+  const importIndex = children.findIndex((child) => child.type.name === 'import');
+  const importedChildren = children.slice(importIndex + 1);
+  for (let index = 0; index < importedChildren.length; index += 1) {
+    const current = importedChildren[index]!;
+    const maybeAs = importedChildren[index + 1];
+    const maybeAlias = importedChildren[index + 2];
+    if (current.type.name !== 'VariableName') {
+      continue;
+    }
+    if (maybeAs?.type.name === 'as' && maybeAlias?.type.name === 'VariableName') {
+      bindings.add(identifierText(content, maybeAlias));
+      index += 2;
+      continue;
+    }
+    bindings.add(identifierText(content, current));
+  }
+  return bindings;
+}
+
+function collectBareImportClauses(
+  content: string,
+  node: SyntaxNode,
+): { moduleReference: string; localName: string; span: ReturnType<typeof nodeSpan> }[] {
+  const statementText = nodeText(content, node);
+  const clauseText = statementText.replace(/^import\s+/, '');
+  const clauses: { moduleReference: string; localName: string; span: ReturnType<typeof nodeSpan> }[] = [];
+  let searchOffset = 0;
+  for (const rawClause of clauseText.split(',')) {
+    const clause = rawClause.trim();
+    if (!clause) {
+      searchOffset += rawClause.length + 1;
+      continue;
+    }
+    const match = /^([A-Za-z_][\w.]*)(?:\s+as\s+([A-Za-z_][\w]*))?$/u.exec(clause);
+    if (!match) {
+      searchOffset += rawClause.length + 1;
+      continue;
+    }
+    const moduleReference = match[1]!;
+    const localName = match[2] ?? moduleReference.split('.')[0]!;
+    const clauseStart = clauseText.indexOf(clause, searchOffset);
+    const localStartInClause = match[2] ? clause.lastIndexOf(localName) : clause.indexOf(localName);
+    const startOffset = node.from + statementText.indexOf('import ') + 'import '.length + clauseStart + localStartInClause;
+    clauses.push({
+      moduleReference,
+      localName,
+      span: spanFromOffsets(content, startOffset, startOffset + localName.length),
+    });
+    searchOffset = clauseStart + rawClause.length + 1;
+  }
+  return clauses;
+}
+
 const PYTHON_EXTENSIONS = new Set(['.py', '.pyi']);
 
 interface CollectedSymbol {
@@ -268,9 +332,10 @@ function localSymbolIndex(symbols: ExtractedSymbol[]): Map<string, ExtractedSymb
 function resolveLocalSymbol(
   symbolsByName: Map<string, ExtractedSymbol[]>,
   importedNames: Set<string>,
+  shadowedNames: Set<string>,
   name: string,
 ): ExtractedSymbol | null {
-  if (importedNames.has(name)) {
+  if (importedNames.has(name) || shadowedNames.has(name)) {
     return null;
   }
   const matches = symbolsByName.get(name) ?? [];
@@ -322,27 +387,23 @@ function collectImportRelationships(
   const importedNames = new Set<string>();
 
   for (const statement of statements.filter((node) => node.type.name === 'ImportStatement')) {
-    const children = childNodes(statement);
     if (nodeText(content, statement).startsWith('import ')) {
-      const nameNodes = children.filter((child) => child.type.name === 'VariableName');
-      const asIndex = children.findIndex((child) => child.type.name === 'as');
-      const moduleNodes = asIndex >= 0 ? nameNodes.slice(0, -1) : nameNodes;
-      const moduleReference = moduleNodes.map((node) => identifierText(content, node)).join('.');
-      const localNode = asIndex >= 0 ? nameNodes[nameNodes.length - 1] ?? null : nameNodes[nameNodes.length - 1] ?? null;
-      if (localNode && moduleReference) {
-        importedNames.add(identifierText(content, localNode));
+      for (const clause of collectBareImportClauses(content, statement)) {
+        importedNames.add(clause.localName);
         relationships.push(
           createRelationship(sourceVersionId, {
             type: 'imports',
             sourceSymbolId: null,
             targetSymbolId: null,
-            targetReference: moduleReference,
-            span: nodeSpan(content, localNode),
+            targetReference: clause.moduleReference,
+            span: clause.span,
           }),
         );
       }
       continue;
     }
+
+    const children = childNodes(statement);
 
     const importIndex = children.findIndex((child) => child.type.name === 'import');
     const moduleReference = children
@@ -389,6 +450,7 @@ function collectCallRelationships(
   body: SyntaxNode,
   symbolsByName: Map<string, ExtractedSymbol[]>,
   importedNames: Set<string>,
+  shadowedNames: Set<string>,
 ): ExtractedRelationship[] {
   const relationships: ExtractedRelationship[] = [];
   const visit = (node: SyntaxNode): void => {
@@ -399,7 +461,7 @@ function collectCallRelationships(
       const callee = childNodes(node)[0] ?? null;
       const calleeName = callee ? nodeText(content, callee).trim() : null;
       if (calleeName) {
-        const localTarget = resolveLocalSymbol(symbolsByName, importedNames, calleeName);
+        const localTarget = resolveLocalSymbol(symbolsByName, importedNames, shadowedNames, calleeName);
         relationships.push(
           createRelationship(sourceVersionId, {
             type: 'calls',
@@ -419,6 +481,66 @@ function collectCallRelationships(
     visit(child);
   }
   return relationships;
+}
+
+function collectScopeBindings(content: string, owner: SyntaxNode, body: SyntaxNode): Set<string> {
+  const bindings = new Set<string>();
+  const params = findFirstChild(owner, 'ParamList');
+  if (params) {
+    for (const child of childNodes(params)) {
+      if (child.type.name === 'VariableName' && identifierText(content, child) !== 'self') {
+        bindings.add(identifierText(content, child));
+      }
+    }
+  }
+
+  const visit = (node: SyntaxNode): void => {
+    if (node !== body && (node.type.name === 'FunctionDefinition' || node.type.name === 'ClassDefinition')) {
+      const nameNode = findFirstChild(node, 'VariableName');
+      if (nameNode) {
+        bindings.add(identifierText(content, nameNode));
+      }
+      return;
+    }
+    if (node.type.name === 'AssignStatement') {
+      const children = childNodes(node);
+      const lastAssignOpIndex = children.map((child) => child.type.name).lastIndexOf('AssignOp');
+      for (const child of lastAssignOpIndex >= 0 ? children.slice(0, lastAssignOpIndex) : []) {
+        if (child.type.name === 'VariableName') {
+          bindings.add(identifierText(content, child));
+        }
+      }
+    }
+    if (node.type.name === 'ForStatement') {
+      for (const child of childNodes(node)) {
+        if (child.type.name === 'in') {
+          break;
+        }
+        if (child.type.name === 'VariableName') {
+          bindings.add(identifierText(content, child));
+        }
+      }
+    }
+    if (node.type.name === 'ImportStatement') {
+      for (const binding of collectImportBindings(content, node)) {
+        bindings.add(binding);
+      }
+    }
+    if (node.type.name === 'TryStatement') {
+      const children = childNodes(node);
+      const asIndex = children.findIndex((child) => child.type.name === 'as');
+      const aliasNode = asIndex >= 0 ? children[asIndex + 1] : null;
+      if (aliasNode?.type.name === 'VariableName') {
+        bindings.add(identifierText(content, aliasNode));
+      }
+    }
+    for (const child of childNodes(node)) {
+      visit(child);
+    }
+  };
+
+  visit(body);
+  return bindings;
 }
 
 function collectPythonRelationships(
@@ -455,14 +577,14 @@ function collectPythonRelationships(
     if (!className) {
       continue;
     }
-    const classSymbol = resolveLocalSymbol(symbolsByName, new Set<string>(), className);
+    const classSymbol = resolveLocalSymbol(symbolsByName, importedNames, new Set<string>(), className);
     if (!classSymbol) {
       continue;
     }
     const bases = findFirstChild(target, 'ArgList');
     for (const base of bases ? childNodes(bases).filter((child) => child.type.name === 'VariableName') : []) {
       const baseName = identifierText(content, base);
-      const targetSymbol = resolveLocalSymbol(symbolsByName, importedNames, baseName);
+      const targetSymbol = resolveLocalSymbol(symbolsByName, importedNames, new Set<string>(), baseName);
       relationships.push(
         createRelationship(sourceVersionId, {
           type: 'inherits',
@@ -477,26 +599,42 @@ function collectPythonRelationships(
     if (!body) {
       continue;
     }
-    for (const child of childNodes(body).filter((candidate) => candidate.type.name === 'AssignStatement')) {
-      const variableNames = findChildren(child, 'VariableName');
-      const rhs = variableNames[1] ?? null;
-      if (!rhs) {
+    const priorClassBindings = new Set<string>();
+    for (const child of childNodes(body)) {
+      if (child.type.name === 'AssignStatement') {
+        const variableNames = findChildren(child, 'VariableName');
+        const lhs = variableNames[0] ?? null;
+        const rhs = variableNames[1] ?? null;
+        if (rhs) {
+          const rhsName = identifierText(content, rhs);
+          const localTarget = resolveLocalSymbol(symbolsByName, importedNames, priorClassBindings, rhsName);
+          relationships.push(
+            createRelationship(sourceVersionId, {
+              type: 'references',
+              sourceSymbolId: classSymbol.id,
+              targetSymbolId: localTarget?.id ?? null,
+              targetReference: localTarget ? null : rhsName,
+              span: nodeSpan(content, rhs),
+            }),
+          );
+        }
+        if (lhs) {
+          priorClassBindings.add(identifierText(content, lhs));
+        }
         continue;
       }
-      const rhsName = identifierText(content, rhs);
-      const localTarget = resolveLocalSymbol(symbolsByName, importedNames, rhsName);
-      if (!localTarget) {
+      if (child.type.name === 'ImportStatement') {
+        for (const binding of collectImportBindings(content, child)) {
+          priorClassBindings.add(binding);
+        }
         continue;
       }
-      relationships.push(
-        createRelationship(sourceVersionId, {
-          type: 'references',
-          sourceSymbolId: classSymbol.id,
-          targetSymbolId: localTarget.id,
-          targetReference: null,
-          span: nodeSpan(content, rhs),
-        }),
-      );
+      if (child.type.name === 'FunctionDefinition' || child.type.name === 'ClassDefinition') {
+        const nameNode = findFirstChild(child, 'VariableName');
+        if (nameNode) {
+          priorClassBindings.add(identifierText(content, nameNode));
+        }
+      }
     }
   }
 
@@ -505,8 +643,17 @@ function collectPythonRelationships(
     if (!body) {
       continue;
     }
+    const shadowedNames = collectScopeBindings(content, entry.node, body);
     relationships.push(
-      ...collectCallRelationships(sourceVersionId, content, entry.symbol, body, symbolsByName, importedNames),
+      ...collectCallRelationships(
+        sourceVersionId,
+        content,
+        entry.symbol,
+        body,
+        symbolsByName,
+        importedNames,
+        shadowedNames,
+      ),
     );
   }
   return relationships;
