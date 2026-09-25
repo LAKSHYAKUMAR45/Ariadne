@@ -1,80 +1,72 @@
 # Task 4 RED/GREEN Report
 
 ## Scope
-Implemented a providerless deterministic analyzer registry plus offline text and Markdown analyzers for `@ariadne-dev/core`. The analyzers normalize newlines, emit exact one-based spans, generate stable deterministic IDs, preserve bounded excerpts for summaries, and avoid any provider calls or parser dependencies.
+Fixed Task 4 review findings in `@ariadne-dev/core` with strict TDD: exact CRLF/CR spans, bounded Markdown paragraph/list splitting, validator-safe empty/whitespace/heading-only outputs, deterministic registry coverage, and fenced-code link handling without adding dependencies or provider calls.
 
 ## RED
-### Added failing tests
+### Added/expanded failing tests
 - `packages/core/test/knowledge/analyzers/TextAnalyzer.test.ts`
 - `packages/core/test/knowledge/analyzers/MarkdownAnalyzer.test.ts`
-- `packages/core/test/knowledge/fixtures/markdown/architecture.md`
+- `packages/core/test/knowledge/analyzers/AnalyzerRegistry.test.ts`
 
-### Failure command
+### Primary failure command
 ```bash
-pnpm --filter @ariadne-dev/core test -- TextAnalyzer.test.ts MarkdownAnalyzer.test.ts
+cd /home/lkumar/Ariadne/.worktrees/ariadne-knowledge-wiki/packages/core && pnpm test -- test/knowledge/analyzers/TextAnalyzer.test.ts test/knowledge/analyzers/MarkdownAnalyzer.test.ts test/knowledge/analyzers/AnalyzerRegistry.test.ts
 ```
 
-### Failure result
-The run failed because `packages/core/src/knowledge/analyzers/index.js` did not exist yet:
-- `Cannot find module '../../../src/knowledge/analyzers/index.js'`
-- Both new analyzer suites failed to load.
+### Primary RED result
+FAIL (`2` failed files, `7` failed tests):
+- `TextAnalyzer` kept normalized offsets/text for CRLF and CR input.
+- `MarkdownAnalyzer` did not split oversized paragraph/list blocks.
+- `validateDeterministicExtraction` rejected empty summaries required for empty/whitespace-only inputs.
+- Heading-only Markdown summary did not follow the source-excerpt brief.
+
+### Reviewer follow-up RED
+```bash
+cd /home/lkumar/Ariadne/.worktrees/ariadne-knowledge-wiki/packages/core && pnpm test -- test/knowledge/analyzers/MarkdownAnalyzer.test.ts
+```
+FAIL (`1` failed test): long single-line Markdown paragraph splitting dropped a link that crossed the 2,000-character boundary.
 
 ## GREEN
 ### Implemented
-- `packages/core/src/knowledge/analyzers/AnalyzerRegistry.ts`
+- `packages/core/src/knowledge/KnowledgeExtraction.ts`
+- `packages/core/src/knowledge/analyzers/SourceText.ts`
 - `packages/core/src/knowledge/analyzers/TextAnalyzer.ts`
 - `packages/core/src/knowledge/analyzers/MarkdownAnalyzer.ts`
-- `packages/core/src/knowledge/analyzers/index.ts`
-- `packages/core/src/index.ts`
 
 ### Behavior delivered
-- Default registry selects analyzers by extension and MIME type.
-- Text analyzer:
-  - normalizes `CRLF`/`CR` to `LF`;
-  - splits plain text into bounded paragraph sections;
-  - caps sections at 2,000 characters or 80 lines;
-  - emits exact offsets and one-based line/column spans;
-  - produces stable paragraph IDs and excerpt-only summaries.
-- Markdown analyzer:
-  - extracts headings, paragraphs, code blocks, list blocks, Markdown links, and wikilinks;
-  - emits stable duplicate-heading IDs via slug counters;
-  - records `contains` hierarchy relationships and `links_to` relationships;
-  - emits exact spans for sections and links;
-  - uses the first non-heading bounded section as the summary excerpt.
+- Source positions now treat `LF`, `CRLF`, and `CR` as real source newlines.
+- Text analyzer emits original-source text/spans for CRLF/CR input and keeps deterministic bounded paragraph chunks.
+- Markdown analyzer splits paragraph/list-derived sections to `<= 2000` chars and `<= 80` lines with deterministic chunk IDs.
+- Long single-line Markdown chunks now avoid splitting through Markdown links/wikilinks, so deterministic link extraction survives chunking.
+- Summary validation now allows `''` only when no non-empty excerpt exists; whitespace-only fabricated summaries still fail validation.
+- Markdown summaries now follow the brief: first non-empty bounded source excerpt, with no invented prose.
 
 ### Passing focused validation
 ```bash
-pnpm --filter @ariadne-dev/core test -- TextAnalyzer.test.ts MarkdownAnalyzer.test.ts
+cd /home/lkumar/Ariadne/.worktrees/ariadne-knowledge-wiki/packages/core && pnpm test -- test/knowledge/analyzers/TextAnalyzer.test.ts test/knowledge/analyzers/MarkdownAnalyzer.test.ts test/knowledge/analyzers/AnalyzerRegistry.test.ts
 ```
-Result: PASS (`57` files, `415` tests), including both new analyzer suites.
+PASS (`58` files, `424` tests).
+
+### Passing targeted build
+```bash
+cd /home/lkumar/Ariadne/.worktrees/ariadne-knowledge-wiki && pnpm --filter @ariadne-dev/core run build
+```
+PASS.
 
 ## IMPROVE
-After the first implementation pass, the Markdown suite exposed exact-span expectation mistakes in the new test. I corrected those expectations to match the fixture’s real offsets/lines while keeping the implementation unchanged.
-
-## Full validation
-### Full core tests
-```bash
-pnpm --filter @ariadne-dev/core test
-```
-Result: PASS (`57` files, `415` tests).
-
-### Core build
-```bash
-pnpm --filter @ariadne-dev/core build
-```
-Result: PASS.
+After GREEN, a TypeScript review found a chunk-boundary regression for long inline links. I added a failing regression test first, then made chunk splitting link-aware and tightened summary validation so only the empty string bypasses the non-empty summary rule.
 
 ## Files changed
-- `packages/core/src/index.ts`
-- `packages/core/src/knowledge/analyzers/AnalyzerRegistry.ts`
-- `packages/core/src/knowledge/analyzers/TextAnalyzer.ts`
+- `.superpowers/sdd/2026-09-24-offline-knowledge-worker-implementation-plan/task-4-report.md`
+- `packages/core/src/knowledge/KnowledgeExtraction.ts`
 - `packages/core/src/knowledge/analyzers/MarkdownAnalyzer.ts`
-- `packages/core/src/knowledge/analyzers/index.ts`
-- `packages/core/test/knowledge/analyzers/TextAnalyzer.test.ts`
+- `packages/core/src/knowledge/analyzers/SourceText.ts`
+- `packages/core/src/knowledge/analyzers/TextAnalyzer.ts`
+- `packages/core/test/knowledge/analyzers/AnalyzerRegistry.test.ts`
 - `packages/core/test/knowledge/analyzers/MarkdownAnalyzer.test.ts`
-- `packages/core/test/knowledge/fixtures/markdown/architecture.md`
+- `packages/core/test/knowledge/analyzers/TextAnalyzer.test.ts`
 
 ## Notes
-- No provider calls were added.
-- No parser dependencies were added.
-- Output stays deterministic and source-grounded.
+- Providerless deterministic operation is preserved.
+- No new dependency or parser was added.

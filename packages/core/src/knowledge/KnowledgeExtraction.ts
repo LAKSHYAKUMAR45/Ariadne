@@ -134,6 +134,19 @@ function expectString(value: unknown, label: string): string {
   return value.trim();
 }
 
+function expectSourceText(value: unknown, label: string, options?: { allowEmpty?: boolean }): string {
+  if (typeof value !== 'string') {
+    throw new Error(`${label} must be a string`);
+  }
+  if (options?.allowEmpty && value.length === 0) {
+    return value;
+  }
+  if (value.trim().length === 0) {
+    throw new Error(`${label} must be a non-empty string`);
+  }
+  return value;
+}
+
 function optionalString(value: unknown, label: string): string | null | undefined {
   if (value === undefined) return undefined;
   if (value === null) return null;
@@ -194,7 +207,7 @@ function validateSection(value: unknown, index: number): ExtractedSection {
     id: expectString(candidate.id, `sections[${index}].id`),
     kind: expectString(candidate.kind, `sections[${index}].kind`),
     title: optionalString(candidate.title, `sections[${index}].title`) ?? undefined,
-    text: expectString(candidate.text, `sections[${index}].text`),
+    text: expectSourceText(candidate.text, `sections[${index}].text`),
     span: validateSpan(candidate.span, `sections[${index}].span`),
   };
 }
@@ -288,13 +301,25 @@ export function offsetToPosition(content: string, offset: number): KnowledgeSour
   }
   let line = 1;
   let column = 1;
-  for (let index = 0; index < offset; index += 1) {
-    if (content[index] === '\n') {
+  for (let index = 0; index < offset; ) {
+    if (content[index] === '\r') {
+      if (content[index + 1] === '\n' && index + 1 < offset) {
+        index += 2;
+      } else {
+        index += 1;
+      }
       line += 1;
       column = 1;
-    } else {
-      column += 1;
+      continue;
     }
+    if (content[index] === '\n') {
+      index += 1;
+      line += 1;
+      column = 1;
+      continue;
+    }
+    index += 1;
+    column += 1;
   }
   return { offset, line, column };
 }
@@ -306,7 +331,7 @@ export function validateDeterministicExtraction(value: unknown): DeterministicEx
     analyzerVersion: expectString(candidate.analyzerVersion, 'analyzerVersion'),
     sourceVersionId: expectString(candidate.sourceVersionId, 'source version ID'),
     title: expectString(candidate.title, 'title'),
-    summary: expectString(candidate.summary, 'summary'),
+    summary: expectSourceText(candidate.summary, 'summary', { allowEmpty: true }),
     sections: expectArray(candidate.sections, 'sections').map((item, index) => validateSection(item, index)),
     symbols: expectArray(candidate.symbols, 'symbols').map((item, index) => validateSymbol(item, index)),
     relationships: expectArray(candidate.relationships, 'relationships').map((item, index) => validateRelationship(item, index)),

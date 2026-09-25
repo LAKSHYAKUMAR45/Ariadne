@@ -1,22 +1,21 @@
 import path from 'node:path';
-import { offsetToPosition } from '../KnowledgeExtraction.js';
 import type {
   DeterministicExtraction,
   ExtractedLink,
   ExtractedRelationship,
   ExtractedSection,
-  KnowledgeSourceSpan,
 } from '../KnowledgeExtraction.js';
 import type { AnalyzerInput, AnalyzerSelectionInput, DeterministicAnalyzer } from './AnalyzerRegistry.js';
+import {
+  buildChunkId,
+  buildSummaryFromSections,
+  parseSourceLines,
+  type SectionChunk,
+  spanFromOffsets,
+  splitLineRange,
+} from './SourceText.js';
 
-const SUMMARY_LIMIT = 280;
 const MARKDOWN_EXTENSIONS = new Set(['.md', '.markdown', '.mdown', '.mkd']);
-
-interface ParsedLine {
-  text: string;
-  startOffset: number;
-  lineNumber: number;
-}
 
 interface HeadingContext {
   level: number;
@@ -27,40 +26,6 @@ interface LinkMatch {
   section: ExtractedSection;
   link: ExtractedLink;
   relationship: ExtractedRelationship;
-}
-
-function normalizeContent(content: string): string {
-  return content.replace(/\r\n?/g, '\n');
-}
-
-function parseLines(content: string): ParsedLine[] {
-  const lines: ParsedLine[] = [];
-  let lineNumber = 1;
-  let lineStart = 0;
-  for (let index = 0; index <= content.length; index += 1) {
-    if (index === content.length || content[index] === '\n') {
-      lines.push({ text: content.slice(lineStart, index), startOffset: lineStart, lineNumber });
-      lineNumber += 1;
-      lineStart = index + 1;
-    }
-  }
-  if (content.length === 0) {
-    return [{ text: '', startOffset: 0, lineNumber: 1 }];
-  }
-  return lines;
-}
-
-function spanFromOffsets(content: string, startOffset: number, endOffset: number): KnowledgeSourceSpan {
-  const start = offsetToPosition(content, startOffset);
-  const end = offsetToPosition(content, endOffset);
-  return {
-    startOffset,
-    endOffset,
-    startLine: start.line,
-    startColumn: start.column,
-    endLine: end.line,
-    endColumn: end.column,
-  };
 }
 
 function slugifyHeading(title: string): string {
@@ -93,24 +58,13 @@ function isFenceLine(text: string): boolean {
   return /^```/.test(text);
 }
 
-function buildSummary(sections: ExtractedSection[]): string {
-  const candidate = sections.find(
-    (section) =>
-      section.kind !== 'heading' &&
-      section.kind !== 'link' &&
-      section.kind !== 'wikilink' &&
-      section.text.trim().length > 0,
-  );
-  return (candidate?.text.trim() ?? '').slice(0, SUMMARY_LIMIT);
-}
-
-function findLinks(content: string, paragraph: ExtractedSection): LinkMatch[] {
+function findLinks(content: string, section: ExtractedSection): LinkMatch[] {
   const results: LinkMatch[] = [];
   const markdownPattern = /\[([^\]]+)\]\(([^)]+)\)/g;
   const wikilinkPattern = /\[\[([^\]|]+)(?:\|([^\]]+))?\]\]/g;
 
-  for (const match of paragraph.text.matchAll(markdownPattern)) {
-    const absoluteStart = paragraph.span.startOffset + (match.index ?? 0);
+  for (const match of section.text.matchAll(markdownPattern)) {
+    const absoluteStart = section.span.startOffset + (match.index ?? 0);
     const absoluteEnd = absoluteStart + match[0].length;
     const span = spanFromOffsets(content, absoluteStart, absoluteEnd);
     const sectionId = `section:link:${span.startLine}:${span.startColumn}`;
@@ -129,17 +83,17 @@ function findLinks(content: string, paragraph: ExtractedSection): LinkMatch[] {
         span,
       },
       relationship: {
-        id: `relationship:links_to:${paragraph.id}->${sectionId}`,
+        id: `relationship:links_to:${section.id}->${sectionId}`,
         type: 'links_to',
-        fromId: paragraph.id,
+        fromId: section.id,
         toId: sectionId,
         span,
       },
     });
   }
 
-  for (const match of paragraph.text.matchAll(wikilinkPattern)) {
-    const absoluteStart = paragraph.span.startOffset + (match.index ?? 0);
+  for (const match of section.text.matchAll(wikilinkPattern)) {
+    const absoluteStart = section.span.startOffset + (match.index ?? 0);
     const absoluteEnd = absoluteStart + match[0].length;
     const span = spanFromOffsets(content, absoluteStart, absoluteEnd);
     const target = match[1].trim();
@@ -160,9 +114,9 @@ function findLinks(content: string, paragraph: ExtractedSection): LinkMatch[] {
         span,
       },
       relationship: {
-        id: `relationship:links_to:${paragraph.id}->${sectionId}`,
+        id: `relationship:links_to:${section.id}->${sectionId}`,
         type: 'links_to',
-        fromId: paragraph.id,
+        fromId: section.id,
         toId: sectionId,
         span,
       },
@@ -171,6 +125,30 @@ function findLinks(content: string, paragraph: ExtractedSection): LinkMatch[] {
 
   results.sort((left, right) => left.section.span.startOffset - right.section.span.startOffset);
   return results;
+}
+
+function findProtectedLinkRanges(startOffset: number, text: string): SectionChunk[] {
+  const ranges: SectionChunk[] = [];
+  const markdownPattern = /\[([^\]]+)\]\(([^)]+)\)/g;
+  const wikilinkPattern = /\[\[([^\]|]+)(?:\|([^\]]+))?\]\]/g;
+
+  for (const match of text.matchAll(markdownPattern)) {
+    const matchStart = startOffset + (match.index ?? 0);
+    ranges.push({
+      startOffset: matchStart,
+      endOffset: matchStart + match[0].length,
+    });
+  }
+
+  for (const match of text.matchAll(wikilinkPattern)) {
+    const matchStart = startOffset + (match.index ?? 0);
+    ranges.push({
+      startOffset: matchStart,
+      endOffset: matchStart + match[0].length,
+    });
+  }
+
+  return ranges.sort((left, right) => left.startOffset - right.startOffset || left.endOffset - right.endOffset);
 }
 
 export class MarkdownAnalyzer implements DeterministicAnalyzer {
@@ -186,8 +164,8 @@ export class MarkdownAnalyzer implements DeterministicAnalyzer {
   }
 
   public async analyze(input: AnalyzerInput): Promise<DeterministicExtraction> {
-    const content = normalizeContent(input.content);
-    const lines = parseLines(content);
+    const content = input.content;
+    const lines = parseSourceLines(content);
     const sections: ExtractedSection[] = [];
     const relationships: ExtractedRelationship[] = [];
     const links: ExtractedLink[] = [];
@@ -215,7 +193,7 @@ export class MarkdownAnalyzer implements DeterministicAnalyzer {
           kind: 'heading',
           title,
           text: line.text,
-          span: spanFromOffsets(content, line.startOffset, line.startOffset + line.text.length),
+          span: spanFromOffsets(content, line.startOffset, line.endOffset),
         };
         while (headingStack.length > 0 && headingStack[headingStack.length - 1]!.level >= headingMatch[1].length) {
           headingStack.pop();
@@ -243,11 +221,11 @@ export class MarkdownAnalyzer implements DeterministicAnalyzer {
           id: `section:code:${line.lineNumber}`,
           kind: 'code',
           title: line.text.slice(3).trim() || undefined,
-          text: codeLines.map((entry) => entry.text).join('\n'),
+          text: content.slice(codeLines[0]!.startOffset, codeLines[codeLines.length - 1]!.endOffset),
           span: spanFromOffsets(
             content,
             codeLines[0]!.startOffset,
-            codeLines[codeLines.length - 1]!.startOffset + codeLines[codeLines.length - 1]!.text.length,
+            codeLines[codeLines.length - 1]!.endOffset,
           ),
         };
         sections.push(section);
@@ -264,21 +242,27 @@ export class MarkdownAnalyzer implements DeterministicAnalyzer {
         while (endIndex + 1 < lines.length && isListLine(lines[endIndex + 1]!.text)) {
           endIndex += 1;
         }
-        const listLines = lines.slice(startIndex, endIndex + 1);
-        const section: ExtractedSection = {
-          id: `section:list:${line.lineNumber}`,
-          kind: 'list',
-          text: listLines.map((entry) => entry.text).join('\n'),
-          span: spanFromOffsets(
-            content,
-            listLines[0]!.startOffset,
-            listLines[listLines.length - 1]!.startOffset + listLines[listLines.length - 1]!.text.length,
-          ),
-        };
-        sections.push(section);
-        if (headingStack.length > 0) {
-          addContainsRelationship(relationships, headingStack[headingStack.length - 1]!.id, section.id);
-        }
+        const blockStartOffset = lines[startIndex]!.startOffset;
+        const blockEndOffset = lines[endIndex]!.endOffset;
+        const protectedRanges = findProtectedLinkRanges(blockStartOffset, content.slice(blockStartOffset, blockEndOffset));
+        const chunks = splitLineRange(content, lines, startIndex, endIndex, protectedRanges);
+        chunks.forEach((chunk, chunkIndex) => {
+          const section: ExtractedSection = {
+            id: buildChunkId('list', line.lineNumber, chunkIndex),
+            kind: 'list',
+            text: content.slice(chunk.startOffset, chunk.endOffset),
+            span: spanFromOffsets(content, chunk.startOffset, chunk.endOffset),
+          };
+          sections.push(section);
+          if (headingStack.length > 0) {
+            addContainsRelationship(relationships, headingStack[headingStack.length - 1]!.id, section.id);
+          }
+          for (const linkMatch of findLinks(content, section)) {
+            sections.push(linkMatch.section);
+            links.push(linkMatch.link);
+            relationships.push(linkMatch.relationship);
+          }
+        });
         lineIndex = endIndex + 1;
         continue;
       }
@@ -294,26 +278,27 @@ export class MarkdownAnalyzer implements DeterministicAnalyzer {
       ) {
         endIndex += 1;
       }
-      const paragraphLines = lines.slice(startIndex, endIndex + 1);
-      const paragraph: ExtractedSection = {
-        id: `section:paragraph:${line.lineNumber}`,
-        kind: 'paragraph',
-        text: paragraphLines.map((entry) => entry.text).join('\n'),
-        span: spanFromOffsets(
-          content,
-          paragraphLines[0]!.startOffset,
-          paragraphLines[paragraphLines.length - 1]!.startOffset + paragraphLines[paragraphLines.length - 1]!.text.length,
-        ),
-      };
-      sections.push(paragraph);
-      if (headingStack.length > 0) {
-        addContainsRelationship(relationships, headingStack[headingStack.length - 1]!.id, paragraph.id);
-      }
-      for (const linkMatch of findLinks(content, paragraph)) {
-        sections.push(linkMatch.section);
-        links.push(linkMatch.link);
-        relationships.push(linkMatch.relationship);
-      }
+      const blockStartOffset = lines[startIndex]!.startOffset;
+      const blockEndOffset = lines[endIndex]!.endOffset;
+      const protectedRanges = findProtectedLinkRanges(blockStartOffset, content.slice(blockStartOffset, blockEndOffset));
+      const chunks = splitLineRange(content, lines, startIndex, endIndex, protectedRanges);
+      chunks.forEach((chunk, chunkIndex) => {
+        const paragraph: ExtractedSection = {
+          id: buildChunkId('paragraph', line.lineNumber, chunkIndex),
+          kind: 'paragraph',
+          text: content.slice(chunk.startOffset, chunk.endOffset),
+          span: spanFromOffsets(content, chunk.startOffset, chunk.endOffset),
+        };
+        sections.push(paragraph);
+        if (headingStack.length > 0) {
+          addContainsRelationship(relationships, headingStack[headingStack.length - 1]!.id, paragraph.id);
+        }
+        for (const linkMatch of findLinks(content, paragraph)) {
+          sections.push(linkMatch.section);
+          links.push(linkMatch.link);
+          relationships.push(linkMatch.relationship);
+        }
+      });
       lineIndex = endIndex + 1;
     }
 
@@ -322,7 +307,7 @@ export class MarkdownAnalyzer implements DeterministicAnalyzer {
       analyzerVersion: this.version,
       sourceVersionId: input.sourceVersionId,
       title: path.basename(input.sourcePath ?? input.sourceVersionId),
-      summary: buildSummary(sections),
+      summary: buildSummaryFromSections(sections),
       sections,
       symbols: [],
       relationships,
