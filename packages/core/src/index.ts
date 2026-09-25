@@ -224,6 +224,11 @@ export type {
   RegisterKnowledgeSourceInput,
   KnowledgeSourceVersionRecord,
 } from './knowledge/KnowledgeSourceStore.js';
+export {
+  KnowledgeSourceVersionLoadError,
+  loadKnowledgeSourceVersion,
+} from './knowledge/KnowledgeSourceVersionLoader.js';
+export type { LoadedKnowledgeSourceVersion } from './knowledge/KnowledgeSourceVersionLoader.js';
 export { scanKnowledgeSources } from './knowledge/KnowledgeSourceScanner.js';
 export type { SourceCandidate } from './knowledge/KnowledgeSourceScanner.js';
 export { shouldIngestSource } from './knowledge/SourcePolicy.js';
