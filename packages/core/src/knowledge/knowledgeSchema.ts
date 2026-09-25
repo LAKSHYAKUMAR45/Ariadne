@@ -1,4 +1,4 @@
-export const KNOWLEDGE_SCHEMA_VERSION = 1;
+export const KNOWLEDGE_SCHEMA_VERSION = 2;
 
 export const KNOWLEDGE_SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS knowledge_projects (
@@ -104,6 +104,10 @@ CREATE TABLE IF NOT EXISTS knowledge_source_spans (
   source_version_id TEXT NOT NULL,
   start_offset INTEGER NOT NULL,
   end_offset INTEGER NOT NULL,
+  start_line INTEGER,
+  start_column INTEGER,
+  end_line INTEGER,
+  end_column INTEGER,
   label TEXT,
   created_at TEXT NOT NULL,
   CHECK (start_offset >= 0),
@@ -120,14 +124,28 @@ CREATE TABLE IF NOT EXISTS knowledge_extractions (
   project_id TEXT NOT NULL REFERENCES knowledge_projects(id) ON DELETE CASCADE,
   source_version_id TEXT NOT NULL,
   extractor_kind TEXT NOT NULL,
+  analyzer_id TEXT,
+  analyzer_version TEXT,
   result_path TEXT NOT NULL,
   content_hash TEXT NOT NULL,
+  extraction_hash TEXT,
+  result_json TEXT,
+  diagnostics_json TEXT,
   status TEXT NOT NULL,
+  completed_at TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   FOREIGN KEY (project_id, source_version_id)
     REFERENCES knowledge_source_versions(project_id, id) ON DELETE CASCADE
 );
+CREATE UNIQUE INDEX IF NOT EXISTS idx_knowledge_extractions_analyzer
+  ON knowledge_extractions(
+    project_id,
+    source_version_id,
+    extractor_kind,
+    analyzer_id,
+    analyzer_version
+  );
 
 CREATE TABLE IF NOT EXISTS knowledge_pages (
   id TEXT PRIMARY KEY,
@@ -289,6 +307,7 @@ CREATE TABLE IF NOT EXISTS knowledge_jobs (
   source_version_id TEXT,
   status TEXT NOT NULL,
   payload_json TEXT NOT NULL,
+  result_json TEXT,
   requested_at TEXT NOT NULL,
   started_at TEXT,
   completed_at TEXT,

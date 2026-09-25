@@ -90,6 +90,32 @@ export {
   lexicalScore,
   searchKnowledge,
 } from './knowledge/KnowledgeSearch.js';
+export {
+  hashDeterministicExtraction,
+  offsetToPosition,
+  stableExtractionStringify,
+  validateDeterministicExtraction,
+} from './knowledge/KnowledgeExtraction.js';
+export type {
+  DeterministicExtraction,
+  ExtractedLink,
+  ExtractedRelationship,
+  ExtractedRelationshipType,
+  ExtractedSection,
+  ExtractedSymbol,
+  ExtractedSymbolKind,
+  ExtractionDiagnostic,
+  ExtractionDiagnosticSeverity,
+  KnowledgeSourcePosition,
+  KnowledgeSourceSpan,
+} from './knowledge/KnowledgeExtraction.js';
+export { KnowledgeExtractionStore } from './knowledge/KnowledgeExtractionStore.js';
+export type {
+  KnowledgeExtractionRecord,
+  KnowledgeExtractionSectionRecord,
+  PersistedKnowledgeSourceSpan,
+  SaveKnowledgeExtractionInput,
+} from './knowledge/KnowledgeExtractionStore.js';
 export type {
   KnowledgeSearchCitation,
   KnowledgeSearchContext,

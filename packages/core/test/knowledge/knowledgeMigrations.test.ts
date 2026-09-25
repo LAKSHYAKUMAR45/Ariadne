@@ -63,6 +63,10 @@ function indexNames(db: Database.Database): string[] {
   );
 }
 
+function columns(db: Database.Database, table: string): string[] {
+  return (db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map(({ name }) => name);
+}
+
 afterEach(() => {
   for (const directory of temporaryDirectories.splice(0)) {
     rmSync(directory, { force: true, recursive: true });
@@ -79,7 +83,26 @@ describe('knowledge schema migrations', () => {
 
     expect(tableNames(db)).toEqual(expect.arrayContaining(KNOWLEDGE_TABLES));
     expect(indexNames(db)).toEqual(expect.arrayContaining(REQUIRED_INDEXES));
-    expect(KNOWLEDGE_SCHEMA_VERSION).toBe(1);
+    expect(KNOWLEDGE_SCHEMA_VERSION).toBe(2);
+    expect(columns(db, 'knowledge_extractions')).toEqual(
+      expect.arrayContaining([
+        'analyzer_id',
+        'analyzer_version',
+        'extraction_hash',
+        'result_json',
+        'diagnostics_json',
+        'completed_at',
+      ]),
+    );
+    expect(columns(db, 'knowledge_source_spans')).toEqual(
+      expect.arrayContaining([
+        'start_line',
+        'start_column',
+        'end_line',
+        'end_column',
+      ]),
+    );
+    expect(columns(db, 'knowledge_jobs')).toContain('result_json');
 
     db.close();
   });
@@ -148,6 +171,71 @@ describe('knowledge schema migrations', () => {
         ) VALUES ('source-version-1', 'project-2', 'source-1', 1, 'hash', 'content/hash', 4, ?)`,
       ).run(createdAt),
     ).toThrow(/FOREIGN KEY/);
+
+    db.close();
+  });
+
+  it('enforces analyzer uniqueness for extraction persistence identity', () => {
+    const db = new Database(':memory:');
+    db.pragma('foreign_keys = ON');
+    db.exec(SCHEMA_SQL);
+    applyKnowledgeMigrations(db);
+
+    const createdAt = '2026-09-24T00:00:00.000Z';
+    db.prepare(
+      `INSERT INTO knowledge_projects (id, workspace_root, name, created_at, updated_at)
+       VALUES ('project-1', '/workspace/one', 'One', ?, ?)`,
+    ).run(createdAt, createdAt);
+    db.prepare(
+      `INSERT INTO knowledge_sources (id, project_id, source_kind, source_path, created_at, updated_at)
+       VALUES ('source-1', 'project-1', 'file', 'notes.md', ?, ?)`,
+    ).run(createdAt, createdAt);
+    db.prepare(
+      `INSERT INTO knowledge_source_versions (
+           id, project_id, source_id, version_number, content_hash, content_path, byte_length, created_at
+         ) VALUES ('source-version-1', 'project-1', 'source-1', 1, 'hash', 'content/hash', 4, ?)`,
+    ).run(createdAt);
+    db.prepare(
+      `INSERT INTO knowledge_extractions (
+         id,
+         project_id,
+         source_version_id,
+         extractor_kind,
+         analyzer_id,
+         analyzer_version,
+         result_path,
+         content_hash,
+         extraction_hash,
+         result_json,
+         diagnostics_json,
+         status,
+         completed_at,
+         created_at,
+         updated_at
+       ) VALUES (?, 'project-1', 'source-version-1', 'deterministic', 'python-lezer', '1', 'result.json', 'hash', 'hash', '{}', '[]', 'completed', ?, ?, ?)`,
+    ).run('extraction-1', createdAt, createdAt, createdAt);
+
+    expect(() =>
+      db.prepare(
+        `INSERT INTO knowledge_extractions (
+           id,
+           project_id,
+           source_version_id,
+           extractor_kind,
+           analyzer_id,
+           analyzer_version,
+           result_path,
+           content_hash,
+           extraction_hash,
+           result_json,
+           diagnostics_json,
+           status,
+           completed_at,
+           created_at,
+           updated_at
+         ) VALUES (?, 'project-1', 'source-version-1', 'deterministic', 'python-lezer', '1', 'result-2.json', 'hash-2', 'hash-2', '{}', '[]', 'completed', ?, ?, ?)`,
+      ).run('extraction-2', createdAt, createdAt, createdAt),
+    ).toThrow(/UNIQUE/);
 
     db.close();
   });

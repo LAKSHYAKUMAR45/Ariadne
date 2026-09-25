@@ -9,6 +9,47 @@ function hasColumn(db: Database.Database, table: string, column: string): boolea
   );
 }
 
+export function applyKnowledgeSchemaV2Migration(db: Database.Database): void {
+  for (const [column, definition] of [
+    ['start_line', 'INTEGER'],
+    ['start_column', 'INTEGER'],
+    ['end_line', 'INTEGER'],
+    ['end_column', 'INTEGER'],
+  ] as const) {
+    if (!hasColumn(db, 'knowledge_source_spans', column)) {
+      db.exec(`ALTER TABLE knowledge_source_spans ADD COLUMN ${column} ${definition}`);
+    }
+  }
+
+  for (const [column, definition] of [
+    ['analyzer_id', 'TEXT'],
+    ['analyzer_version', 'TEXT'],
+    ['extraction_hash', 'TEXT'],
+    ['result_json', 'TEXT'],
+    ['diagnostics_json', 'TEXT'],
+    ['completed_at', 'TEXT'],
+  ] as const) {
+    if (!hasColumn(db, 'knowledge_extractions', column)) {
+      db.exec(`ALTER TABLE knowledge_extractions ADD COLUMN ${column} ${definition}`);
+    }
+  }
+
+  if (!hasColumn(db, 'knowledge_jobs', 'result_json')) {
+    db.exec('ALTER TABLE knowledge_jobs ADD COLUMN result_json TEXT');
+  }
+
+  db.exec(
+    `CREATE UNIQUE INDEX IF NOT EXISTS idx_knowledge_extractions_analyzer
+     ON knowledge_extractions(
+       project_id,
+       source_version_id,
+       extractor_kind,
+       analyzer_id,
+       analyzer_version
+     )`,
+  );
+}
+
 export function applyKnowledgeQueueMigration(db: Database.Database): void {
   for (const [column, definition] of [
     ['source_version_id', 'TEXT'],
@@ -35,6 +76,7 @@ export function applyKnowledgeQueueMigration(db: Database.Database): void {
 export function applyKnowledgeMigrations(db: Database.Database): void {
   db.transaction(() => {
     db.exec(KNOWLEDGE_SCHEMA_SQL);
+    applyKnowledgeSchemaV2Migration(db);
     applyKnowledgeQueueMigration(db);
   })();
 }
