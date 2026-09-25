@@ -34,9 +34,15 @@
   --amber-rgb: 251 207 51;
   --red: #f5365c;
   --red-rgb: 245 54 92;
-  /* jcnr-triage's --argon-info, used for its login page's second radial-gradient
-     accent (see dashboard.css .login-shell) - not otherwise part of the status
-     palette, so it only needs a light-mode value. */
+  /* Secondary accent used alongside --blue for jcnr-triage's brand/active-nav
+     gradients (dashboard.css .sidebar-logo/.sidebar-link.active) - promoted
+     to a token here so it can also tint the timeline's checkpoint glyph. */
+  --purple: #825ee4;
+  --purple-rgb: 130 94 228;
+  /* jcnr-triage's --argon-info (#11cdef). Originally only needed as an -rgb
+     token for the login gradient; now also used as a plain color for the
+     timeline's command-event glyph, so both forms are defined. */
+  --info: #11cdef;
   --info-rgb: 17 205 239;
   --danger-text: #c81e3f;
   --success-text: #1f8f5f;

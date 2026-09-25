@@ -1359,6 +1359,17 @@ a:focus-visible {
   gap: 6px;
   list-style: none;
   user-select: none;
+  /* Export was reading as just another plain outlined button next to the
+     also-plain Delete capture button - tinted blue (jcnr-triage's primary
+     hue) so the two read as distinct action types at a glance. */
+  border-color: rgb(var(--blue-rgb) / 40%);
+  background: rgb(var(--blue-rgb) / 8%);
+  color: var(--blue-strong);
+}
+
+.export-menu__trigger:hover {
+  border-color: rgb(var(--blue-rgb) / 65%);
+  background: rgb(var(--blue-rgb) / 14%);
 }
 
 .export-menu__trigger::-webkit-details-marker {
@@ -1372,7 +1383,7 @@ a:focus-visible {
 }
 
 .export-menu[open] .export-menu__trigger {
-  background: var(--surface-raised);
+  background: rgb(var(--blue-rgb) / 16%);
 }
 
 .export-menu__list {
@@ -1507,8 +1518,10 @@ a:focus-visible {
 .capture-count {
   min-width: 20px;
   padding: 3px 5px;
-  border: 1px solid var(--line-strong);
+  border: 1px solid rgb(var(--blue-rgb) / 35%);
   border-radius: 999px;
+  background: rgb(var(--blue-rgb) / 10%);
+  color: var(--blue);
   text-align: center;
 }
 
@@ -1555,12 +1568,38 @@ a:focus-visible {
 
 .event-glyph--error {
   border-color: rgb(var(--red-rgb) / 55%);
+  background: rgb(var(--red-rgb) / 10%);
   color: var(--red);
 }
 
 .event-glyph--capture {
   border-color: rgb(var(--blue-rgb) / 55%);
+  background: rgb(var(--blue-rgb) / 10%);
   color: var(--blue);
+}
+
+.event-glyph--checkpoint {
+  border-color: rgb(var(--purple-rgb) / 55%);
+  background: rgb(var(--purple-rgb) / 10%);
+  color: var(--purple);
+}
+
+.event-glyph--command {
+  border-color: rgb(var(--info-rgb) / 55%);
+  background: rgb(var(--info-rgb) / 10%);
+  color: var(--info);
+}
+
+.event-glyph--decision {
+  border-color: rgb(var(--amber-rgb) / 55%);
+  background: rgb(var(--amber-rgb) / 12%);
+  color: #a6790a;
+}
+
+.event-glyph--commit {
+  border-color: rgb(var(--green-rgb) / 55%);
+  background: rgb(var(--green-rgb) / 10%);
+  color: var(--green);
 }
 
 .event-copy {
@@ -1618,9 +1657,13 @@ a:focus-visible {
 
 .file-row:hover,
 .file-row--selected {
-  border-color: var(--line-strong);
-  background: var(--surface-selected);
+  border-color: rgb(var(--blue-rgb) / 45%);
+  background: rgb(var(--blue-rgb) / 8%);
   color: var(--text);
+}
+
+.file-row--selected {
+  box-shadow: inset 2px 0 0 var(--blue);
 }
 
 .file-row span {
@@ -1657,8 +1700,9 @@ a:focus-visible {
 }
 
 .segmented-control button.is-active {
-  background: var(--surface-selected);
-  color: var(--text);
+  background: var(--blue);
+  color: #ffffff;
+  box-shadow: 0 2px 6px rgb(var(--blue-rgb) / 35%);
 }
 
 .destructive-action {
