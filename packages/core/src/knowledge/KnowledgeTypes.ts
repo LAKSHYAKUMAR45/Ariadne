@@ -44,6 +44,21 @@ export type KnowledgeReviewStatus =
   | 'rejected'
   | 'dismissed';
 
+export type KnowledgeGraphEdgeType =
+  | 'imports'
+  | 'exports'
+  | 'defines'
+  | 'contains'
+  | 'inherits'
+  | 'implements'
+  | 'calls'
+  | 'references'
+  | 'links_to'
+  | 'related_to'
+  | 'relates_to'
+  | 'link'
+  | 'supports';
+
 export type KnowledgeEdgeEvidence =
   | 'explicit_link'
   | 'shared_source'
@@ -65,9 +80,16 @@ export interface KnowledgeProvenanceRef {
   kind: KnowledgeProvenanceKind;
   id: string;
   path?: string;
+  sourceVersionId?: string;
+  startOffset?: number;
+  endOffset?: number;
   startLine?: number;
+  startColumn?: number;
   endLine?: number;
+  endColumn?: number;
+  label?: string;
   confidence?: number;
+  metadata?: Record<string, unknown>;
 }
 
 export interface KnowledgePageRecord {

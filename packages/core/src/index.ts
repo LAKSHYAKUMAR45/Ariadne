@@ -343,6 +343,7 @@ export type {
   KnowledgeSourceKind,
   KnowledgeJobStatus,
   KnowledgeReviewStatus,
+  KnowledgeGraphEdgeType,
   KnowledgeEdgeEvidence,
   KnowledgeProvenanceKind,
   KnowledgeProvenanceRef,
@@ -461,6 +462,8 @@ export type {
   RankedEmbeddingCandidate,
   RankByEmbeddingOptions,
 } from './knowledge/KnowledgeEmbeddings.js';
+export { KnowledgeGraphMaterializer } from './knowledge/KnowledgeGraphMaterializer.js';
+export type { KnowledgeGraphMaterializationResult } from './knowledge/KnowledgeGraphMaterializer.js';
 export { importGraphifyJson } from './knowledge/GraphifyImport.js';
 export type {
   GraphImportNode,

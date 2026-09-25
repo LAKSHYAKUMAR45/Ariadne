@@ -1,4 +1,4 @@
-export const KNOWLEDGE_SCHEMA_VERSION = 2;
+export const KNOWLEDGE_SCHEMA_VERSION = 3;
 
 export const KNOWLEDGE_SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS knowledge_projects (
@@ -236,6 +236,15 @@ CREATE TABLE IF NOT EXISTS knowledge_graph_nodes (
   label TEXT NOT NULL,
   source_kind TEXT,
   source_id TEXT,
+  qualified_name TEXT,
+  source_version_id TEXT,
+  start_offset INTEGER,
+  end_offset INTEGER,
+  start_line INTEGER,
+  start_column INTEGER,
+  end_line INTEGER,
+  end_column INTEGER,
+  span_label TEXT,
   confidence REAL NOT NULL DEFAULT 1,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
@@ -264,6 +273,14 @@ CREATE TABLE IF NOT EXISTS knowledge_graph_edges (
 );
 CREATE INDEX IF NOT EXISTS idx_knowledge_graph_edges_project_source_target
   ON knowledge_graph_edges(project_id, source_node_id, target_node_id);
+
+CREATE TRIGGER IF NOT EXISTS trg_knowledge_graph_nodes_source_version_delete
+AFTER DELETE ON knowledge_source_versions
+BEGIN
+  DELETE FROM knowledge_graph_nodes
+  WHERE project_id = OLD.project_id AND source_version_id = OLD.id;
+END;
+
 
 CREATE TABLE IF NOT EXISTS knowledge_graph_snapshots (
   id TEXT PRIMARY KEY,

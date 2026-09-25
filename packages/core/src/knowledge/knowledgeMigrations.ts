@@ -69,6 +69,24 @@ export function applyKnowledgeQueueMigration(db: Database.Database): void {
   );
 }
 
+export function applyKnowledgeGraphMetadataMigration(db: Database.Database): void {
+  for (const [column, definition] of [
+    ['qualified_name', 'TEXT'],
+    ['source_version_id', 'TEXT'],
+    ['start_offset', 'INTEGER'],
+    ['end_offset', 'INTEGER'],
+    ['start_line', 'INTEGER'],
+    ['start_column', 'INTEGER'],
+    ['end_line', 'INTEGER'],
+    ['end_column', 'INTEGER'],
+    ['span_label', 'TEXT'],
+  ] as const) {
+    if (!hasColumn(db, 'knowledge_graph_nodes', column)) {
+      db.exec(`ALTER TABLE knowledge_graph_nodes ADD COLUMN ${column} ${definition}`);
+    }
+  }
+}
+
 /**
  * Creates the additive knowledge schema atomically. It is idempotent so it
  * can be called safely by the shared migration runner on every database open.
@@ -78,5 +96,6 @@ export function applyKnowledgeMigrations(db: Database.Database): void {
     db.exec(KNOWLEDGE_SCHEMA_SQL);
     applyKnowledgeSchemaV2Migration(db);
     applyKnowledgeQueueMigration(db);
+    applyKnowledgeGraphMetadataMigration(db);
   })();
 }

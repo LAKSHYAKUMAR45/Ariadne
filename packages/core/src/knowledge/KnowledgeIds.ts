@@ -34,6 +34,9 @@ export function normalizeKnowledgePath(value: string): string {
     normalized.length === 0 ||
     normalized === '.' ||
     /^[A-Za-z]:/.test(candidate) ||
+    /^[A-Za-z]:/.test(normalized) ||
+    /^[A-Za-z][A-Za-z0-9+.-]*:/.test(candidate) ||
+    /^[A-Za-z][A-Za-z0-9+.-]*:/.test(normalized) ||
     path.posix.isAbsolute(normalized) ||
     normalized === '..' ||
     normalized.startsWith('../')

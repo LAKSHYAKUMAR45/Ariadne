@@ -83,7 +83,7 @@ describe('knowledge schema migrations', () => {
 
     expect(tableNames(db)).toEqual(expect.arrayContaining(KNOWLEDGE_TABLES));
     expect(indexNames(db)).toEqual(expect.arrayContaining(REQUIRED_INDEXES));
-    expect(KNOWLEDGE_SCHEMA_VERSION).toBe(2);
+    expect(KNOWLEDGE_SCHEMA_VERSION).toBe(3);
     expect(columns(db, 'knowledge_extractions')).toEqual(
       expect.arrayContaining([
         'analyzer_id',
@@ -100,6 +100,19 @@ describe('knowledge schema migrations', () => {
         'start_column',
         'end_line',
         'end_column',
+      ]),
+    );
+    expect(columns(db, 'knowledge_graph_nodes')).toEqual(
+      expect.arrayContaining([
+        'qualified_name',
+        'source_version_id',
+        'start_offset',
+        'end_offset',
+        'start_line',
+        'start_column',
+        'end_line',
+        'end_column',
+        'span_label',
       ]),
     );
     expect(columns(db, 'knowledge_jobs')).toContain('result_json');

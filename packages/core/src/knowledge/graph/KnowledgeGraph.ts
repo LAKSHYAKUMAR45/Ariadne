@@ -1,7 +1,9 @@
 import type Database from 'better-sqlite3';
-import { createKnowledgeId } from '../KnowledgeIds.js';
+import type { KnowledgeSourceSpan } from '../KnowledgeExtraction.js';
+import { createKnowledgeId, normalizeKnowledgePath } from '../KnowledgeIds.js';
 import type {
   KnowledgeEdgeEvidence,
+  KnowledgeGraphEdgeType,
   KnowledgeGraphNodeId,
   KnowledgeProvenanceRef,
 } from '../KnowledgeTypes.js';
@@ -22,6 +24,9 @@ export interface UpsertGraphNodeInput {
   label: string;
   sourceKind?: string | null;
   sourceId?: string | null;
+  qualifiedName?: string | null;
+  sourceVersionId?: string | null;
+  span?: KnowledgeSourceSpan | null;
   confidence?: number;
 }
 
@@ -32,6 +37,9 @@ export interface KnowledgeGraphNodeRecord {
   label: string;
   sourceKind: string | null;
   sourceId: string | null;
+  qualifiedName: string | null;
+  sourceVersionId: string | null;
+  span: KnowledgeSourceSpan | null;
   confidence: number;
   createdAt: string;
   updatedAt: string;
@@ -42,7 +50,7 @@ export interface UpsertGraphEdgeInput {
   projectId: string;
   sourceNodeId: KnowledgeGraphNodeId;
   targetNodeId: KnowledgeGraphNodeId;
-  edgeType: string;
+  edgeType: KnowledgeGraphEdgeType;
   evidence: KnowledgeEdgeEvidence | KnowledgeEdgeEvidence[];
   weight?: number;
   confidence?: number;
@@ -54,7 +62,7 @@ export interface KnowledgeGraphEdgeRecord {
   projectId: string;
   sourceNodeId: KnowledgeGraphNodeId;
   targetNodeId: KnowledgeGraphNodeId;
-  edgeType: string;
+  edgeType: KnowledgeGraphEdgeType;
   evidence: KnowledgeEdgeEvidence[];
   weight: number;
   confidence: number;
@@ -70,6 +78,15 @@ interface NodeRow {
   label: string;
   source_kind: string | null;
   source_id: string | null;
+  qualified_name: string | null;
+  source_version_id: string | null;
+  start_offset: number | null;
+  end_offset: number | null;
+  start_line: number | null;
+  start_column: number | null;
+  end_line: number | null;
+  end_column: number | null;
+  span_label: string | null;
   confidence: number;
   created_at: string;
   updated_at: string;
@@ -80,7 +97,7 @@ interface EdgeRow {
   project_id: string;
   source_node_id: string;
   target_node_id: string;
-  edge_type: string;
+  edge_type: KnowledgeGraphEdgeType;
   evidence_json: string;
   confidence: number;
   created_at: string;
@@ -88,9 +105,9 @@ interface EdgeRow {
 }
 
 interface StoredEvidence {
-  evidence: KnowledgeEdgeEvidence[];
-  weight: number;
-  provenance: KnowledgeProvenanceRef[];
+  evidence?: KnowledgeEdgeEvidence[];
+  weight?: number;
+  provenance?: KnowledgeProvenanceRef[];
 }
 
 const EVIDENCE_TYPES = new Set<KnowledgeEdgeEvidence>([
@@ -101,6 +118,30 @@ const EVIDENCE_TYPES = new Set<KnowledgeEdgeEvidence>([
   'contradiction',
   'supersession',
 ]);
+
+const EDGE_TYPES = new Set<KnowledgeGraphEdgeType>([
+  'imports',
+  'exports',
+  'defines',
+  'contains',
+  'inherits',
+  'implements',
+  'calls',
+  'references',
+  'links_to',
+  'related_to',
+  'relates_to',
+  'link',
+  'supports',
+]);
+
+
+function stableJsonStringify(value: unknown): string {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map((entry) => stableJsonStringify(entry)).join(',')}]`;
+  const entries = Object.entries(value as Record<string, unknown>).sort(([left], [right]) => left.localeCompare(right));
+  return `{${entries.map(([key, entry]) => `${JSON.stringify(key)}:${stableJsonStringify(entry)}`).join(',')}}`;
+}
 
 function requireText(value: string, label: string): void {
   if (value.trim().length === 0) throw new Error(`Knowledge graph ${label} must not be empty`);
@@ -120,7 +161,52 @@ function normalizeEvidence(evidence: KnowledgeEdgeEvidence | KnowledgeEdgeEviden
   return [...new Set(values)].sort();
 }
 
+function normalizeSpan(span: KnowledgeSourceSpan | null | undefined): KnowledgeSourceSpan | null {
+  if (!span) return null;
+  return { ...span };
+}
+
+function normalizeProvenance(provenance: readonly KnowledgeProvenanceRef[]): KnowledgeProvenanceRef[] {
+  return [...provenance]
+    .map((reference) => ({
+      ...reference,
+      ...(reference.kind === 'file'
+        ? {
+            id: normalizeKnowledgePath(reference.id),
+            ...(reference.path ? { path: normalizeKnowledgePath(reference.path) } : {}),
+          }
+        : {}),
+      ...(reference.metadata ? { metadata: { ...reference.metadata } } : {}),
+    }))
+    .sort(
+      (left, right) =>
+        left.id.localeCompare(right.id) ||
+        (left.startOffset ?? Number.MAX_SAFE_INTEGER) - (right.startOffset ?? Number.MAX_SAFE_INTEGER) ||
+        (left.endOffset ?? Number.MAX_SAFE_INTEGER) - (right.endOffset ?? Number.MAX_SAFE_INTEGER) ||
+        (left.startLine ?? Number.MAX_SAFE_INTEGER) - (right.startLine ?? Number.MAX_SAFE_INTEGER) ||
+        (left.startColumn ?? Number.MAX_SAFE_INTEGER) - (right.startColumn ?? Number.MAX_SAFE_INTEGER) ||
+        stableJsonStringify(left.metadata ?? {}).localeCompare(stableJsonStringify(right.metadata ?? {})),
+    );
+}
+
 function toNode(row: NodeRow): KnowledgeGraphNodeRecord {
+  const span =
+    row.start_offset !== null &&
+    row.end_offset !== null &&
+    row.start_line !== null &&
+    row.start_column !== null &&
+    row.end_line !== null &&
+    row.end_column !== null
+      ? {
+          startOffset: row.start_offset,
+          endOffset: row.end_offset,
+          startLine: row.start_line,
+          startColumn: row.start_column,
+          endLine: row.end_line,
+          endColumn: row.end_column,
+          ...(row.span_label ? { label: row.span_label } : {}),
+        }
+      : null;
   return {
     id: row.id as KnowledgeGraphNodeId,
     projectId: row.project_id,
@@ -128,14 +214,34 @@ function toNode(row: NodeRow): KnowledgeGraphNodeRecord {
     label: row.label,
     sourceKind: row.source_kind,
     sourceId: row.source_id,
+    qualifiedName: row.qualified_name,
+    sourceVersionId: row.source_version_id,
+    span,
     confidence: row.confidence,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
 }
 
+function parseStoredEvidence(value: string): Required<StoredEvidence> {
+  try {
+    const parsed: unknown = JSON.parse(value);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return { evidence: [], weight: 1, provenance: [] };
+    }
+    const stored = parsed as StoredEvidence;
+    return {
+      evidence: Array.isArray(stored.evidence) ? stored.evidence.filter((entry): entry is KnowledgeEdgeEvidence => EVIDENCE_TYPES.has(entry as KnowledgeEdgeEvidence)) : [],
+      weight: typeof stored.weight === 'number' && Number.isFinite(stored.weight) ? stored.weight : 1,
+      provenance: Array.isArray(stored.provenance) ? normalizeProvenance(stored.provenance) : [],
+    };
+  } catch {
+    return { evidence: [], weight: 1, provenance: [] };
+  }
+}
+
 function toEdge(row: EdgeRow): KnowledgeGraphEdgeRecord {
-  const stored = JSON.parse(row.evidence_json) as StoredEvidence;
+  const stored = parseStoredEvidence(row.evidence_json);
   return {
     id: row.id,
     projectId: row.project_id,
@@ -163,21 +269,215 @@ function edgeOrder(left: KnowledgeGraphEdgeRecord, right: KnowledgeGraphEdgeReco
 export class KnowledgeGraph {
   constructor(private readonly db: Database.Database) {}
 
+  sourceVersionExists(projectId: string, sourceId: string, sourceVersionId: string): boolean {
+    requireText(projectId, 'project ID');
+    requireText(sourceId, 'source ID');
+    requireText(sourceVersionId, 'source version ID');
+    const row = this.db
+      .prepare(
+        `SELECT 1
+         FROM knowledge_source_versions versions
+         JOIN knowledge_sources sources
+           ON sources.project_id = versions.project_id
+          AND sources.id = versions.source_id
+         WHERE versions.project_id = ? AND sources.id = ? AND versions.id = ?
+         LIMIT 1`,
+      )
+      .get(projectId, sourceId, sourceVersionId) as { 1: number } | undefined;
+    return row !== undefined;
+  }
+
+  sourceVersionBelongsToProject(projectId: string, sourceVersionId: string): boolean {
+    requireText(projectId, 'project ID');
+    requireText(sourceVersionId, 'source version ID');
+    const row = this.db
+      .prepare(
+        `SELECT 1
+         FROM knowledge_source_versions
+         WHERE project_id = ? AND id = ?
+         LIMIT 1`,
+      )
+      .get(projectId, sourceVersionId) as { 1: number } | undefined;
+    return row !== undefined;
+  }
+
+
+  filePathBelongsToProject(projectId: string, filePath: string): boolean {
+    requireText(projectId, 'project ID');
+    const normalizedPath = normalizeKnowledgePath(filePath);
+    const sourceMatch = this.db
+      .prepare(
+        `SELECT 1
+         FROM knowledge_sources
+         WHERE project_id = ? AND source_path = ?
+         LIMIT 1`,
+      )
+      .get(projectId, normalizedPath) as { 1: number } | undefined;
+    return sourceMatch !== undefined;
+  }
+
+  sourceExistsInProject(projectId: string, sourceId: string): boolean {
+    requireText(projectId, 'project ID');
+    requireText(sourceId, 'source ID');
+    const row = this.db
+      .prepare(
+        `SELECT 1
+         FROM knowledge_sources
+         WHERE project_id = ? AND id = ?
+         LIMIT 1`,
+      )
+      .get(projectId, sourceId) as { 1: number } | undefined;
+    return row !== undefined;
+  }
+
+  findUniqueGraphNodeId(
+    projectId: string,
+    reference: string,
+    options: { sourceKind?: string } = {},
+  ): KnowledgeGraphNodeId | null {
+    requireText(projectId, 'project ID');
+    requireText(reference, 'reference');
+    const sourceKindClause = options.sourceKind ? 'AND nodes.source_kind = @sourceKind' : '';
+    const versionPresenceClause = options.sourceKind === 'deterministic_symbol' ? 'AND nodes.source_version_id IS NOT NULL' : '';
+    const latestVersionClause = `
+      AND (
+        nodes.source_version_id IS NULL OR versions.version_number = (
+          SELECT MAX(latest.version_number)
+          FROM knowledge_source_versions latest
+          WHERE latest.project_id = versions.project_id AND latest.source_id = versions.source_id
+        )
+      )`;
+    const byQualifiedName = this.db
+      .prepare(
+        `SELECT nodes.id
+         FROM knowledge_graph_nodes nodes
+         LEFT JOIN knowledge_source_versions versions
+           ON versions.project_id = nodes.project_id
+          AND versions.id = nodes.source_version_id
+         WHERE nodes.project_id = @projectId AND nodes.qualified_name = @reference ${sourceKindClause} ${versionPresenceClause} ${latestVersionClause}
+         ORDER BY nodes.id ASC
+         LIMIT 2`,
+      )
+      .all({ projectId, reference, sourceKind: options.sourceKind ?? null }) as Array<{ id: string }>;
+    if (byQualifiedName.length === 1) return byQualifiedName[0].id as KnowledgeGraphNodeId;
+    if (byQualifiedName.length > 1) return null;
+    const byLabel = this.db
+      .prepare(
+        `SELECT nodes.id
+         FROM knowledge_graph_nodes nodes
+         LEFT JOIN knowledge_source_versions versions
+           ON versions.project_id = nodes.project_id
+          AND versions.id = nodes.source_version_id
+         WHERE nodes.project_id = @projectId AND nodes.label = @reference ${sourceKindClause} ${versionPresenceClause} ${latestVersionClause}
+         ORDER BY nodes.id ASC
+         LIMIT 2`,
+      )
+      .all({ projectId, reference, sourceKind: options.sourceKind ?? null }) as Array<{ id: string }>;
+    return byLabel.length === 1 ? (byLabel[0].id as KnowledgeGraphNodeId) : null;
+  }
+
+  runInTransaction<T>(operation: () => T): T {
+    return this.db.transaction(operation)();
+  }
+
+  removeMaterializedSourceVersion(projectId: string, sourceVersionId: string): void {
+    requireText(projectId, 'project ID');
+    requireText(sourceVersionId, 'source version ID');
+    this.db
+      .prepare(
+        `DELETE FROM knowledge_graph_nodes
+         WHERE project_id = ? AND source_kind = 'deterministic_symbol' AND source_version_id = ?`,
+      )
+      .run(projectId, sourceVersionId);
+  }
+
   upsertGraphNode(input: UpsertGraphNodeInput): KnowledgeGraphNodeRecord {
     requireText(input.projectId, 'project ID');
     requireText(input.nodeType, 'node type');
     requireText(input.label, 'node label');
     const confidence = input.confidence ?? 1;
     validateUnit(confidence, 'confidence');
-    const id = input.id ?? (createKnowledgeId('graph-node') as KnowledgeGraphNodeId);
+    if (input.sourceVersionId && !this.sourceVersionBelongsToProject(input.projectId, input.sourceVersionId)) {
+      throw new Error(`Knowledge graph source version ${input.sourceVersionId} must belong to project ${input.projectId}`);
+    }
+    const existingById = input.id
+      ? ((this.db.prepare(`SELECT * FROM knowledge_graph_nodes WHERE id = ? LIMIT 1`).get(input.id) as NodeRow | undefined) ?? null)
+      : null;
+    if (existingById && existingById.project_id !== input.projectId) {
+      throw new Error(`Knowledge graph node ${input.id} already belongs to another project`);
+    }
+    const existingBySource =
+      input.sourceKind !== undefined && input.sourceKind !== null && input.sourceId !== undefined && input.sourceId !== null
+        ? ((this.db
+            .prepare(
+              `SELECT * FROM knowledge_graph_nodes
+               WHERE project_id = ? AND node_type = ? AND source_kind = ? AND source_id = ?
+               LIMIT 1`,
+            )
+            .get(input.projectId, input.nodeType, input.sourceKind, input.sourceId) as NodeRow | undefined) ?? null)
+        : null;
+    const id = (input.id ?? existingBySource?.id ?? createKnowledgeId('graph-node')) as KnowledgeGraphNodeId;
     const now = new Date().toISOString();
+    const span = normalizeSpan(input.span);
     this.db
       .prepare(
         `INSERT INTO knowledge_graph_nodes
-          (id, project_id, node_type, label, source_kind, source_id, confidence, created_at, updated_at)
-         VALUES (@id, @projectId, @nodeType, @label, @sourceKind, @sourceId, @confidence, @now, @now)
-         ON CONFLICT(project_id, node_type, source_kind, source_id) DO UPDATE SET
-           label = excluded.label, confidence = excluded.confidence, updated_at = excluded.updated_at`,
+          (
+            id,
+            project_id,
+            node_type,
+            label,
+            source_kind,
+            source_id,
+            qualified_name,
+            source_version_id,
+            start_offset,
+            end_offset,
+            start_line,
+            start_column,
+            end_line,
+            end_column,
+            span_label,
+            confidence,
+            created_at,
+            updated_at
+          )
+         VALUES (
+            @id,
+            @projectId,
+            @nodeType,
+            @label,
+            @sourceKind,
+            @sourceId,
+            @qualifiedName,
+            @sourceVersionId,
+            @startOffset,
+            @endOffset,
+            @startLine,
+            @startColumn,
+            @endLine,
+            @endColumn,
+            @spanLabel,
+            @confidence,
+            @createdAt,
+            @updatedAt
+         )
+         ON CONFLICT(id) DO UPDATE SET
+           node_type = excluded.node_type,
+           label = excluded.label,
+           source_kind = excluded.source_kind,
+           source_id = excluded.source_id,
+           qualified_name = excluded.qualified_name,
+           source_version_id = excluded.source_version_id,
+           start_offset = excluded.start_offset,
+           end_offset = excluded.end_offset,
+           start_line = excluded.start_line,
+           start_column = excluded.start_column,
+           end_line = excluded.end_line,
+           end_column = excluded.end_column,
+           span_label = excluded.span_label,
+           confidence = excluded.confidence,
+           updated_at = excluded.updated_at`,
       )
       .run({
         id,
@@ -186,24 +486,22 @@ export class KnowledgeGraph {
         label: input.label,
         sourceKind: input.sourceKind ?? null,
         sourceId: input.sourceId ?? null,
+        qualifiedName: input.qualifiedName ?? null,
+        sourceVersionId: input.sourceVersionId ?? null,
+        startOffset: span?.startOffset ?? null,
+        endOffset: span?.endOffset ?? null,
+        startLine: span?.startLine ?? null,
+        startColumn: span?.startColumn ?? null,
+        endLine: span?.endLine ?? null,
+        endColumn: span?.endColumn ?? null,
+        spanLabel: span?.label ?? null,
         confidence,
-        now,
+        createdAt: existingBySource?.created_at ?? now,
+        updatedAt: now,
       });
     const row = this.db
-      .prepare(
-        `SELECT * FROM knowledge_graph_nodes
-         WHERE project_id = ? AND (id = ? OR (node_type = ? AND source_kind IS ? AND source_id IS ?))
-         ORDER BY CASE WHEN id = ? THEN 0 ELSE 1 END
-         LIMIT 1`,
-      )
-      .get(
-        input.projectId,
-        id,
-        input.nodeType,
-        input.sourceKind ?? null,
-        input.sourceId ?? null,
-        id,
-      ) as NodeRow | undefined;
+      .prepare(`SELECT * FROM knowledge_graph_nodes WHERE project_id = ? AND id = ? LIMIT 1`)
+      .get(input.projectId, id) as NodeRow | undefined;
     if (!row) throw new Error(`Knowledge graph node ${id} could not be persisted`);
     return toNode(row);
   }
@@ -213,6 +511,7 @@ export class KnowledgeGraph {
     requireText(input.sourceNodeId, 'source node ID');
     requireText(input.targetNodeId, 'target node ID');
     requireText(input.edgeType, 'edge type');
+    if (!EDGE_TYPES.has(input.edgeType)) throw new Error(`Knowledge graph edge type is unsupported: ${input.edgeType}`);
     if (input.sourceNodeId === input.targetNodeId) {
       throw new Error('Knowledge graph edges cannot connect a node to itself');
     }
@@ -224,19 +523,55 @@ export class KnowledgeGraph {
     validateUnit(weight, 'weight');
     const confidence = input.confidence ?? 1;
     validateUnit(confidence, 'confidence');
-    const provenance = input.provenance ?? [];
+    const provenance = normalizeProvenance(input.provenance ?? []);
     provenance.forEach((reference) => {
       if (reference.confidence !== undefined) validateUnit(reference.confidence, 'provenance confidence');
+      if (reference.kind !== 'source' && reference.kind !== 'file') {
+        throw new Error(`Knowledge graph provenance kind is unsupported on graph edges: ${reference.kind}`);
+      }
+      if (reference.kind === 'source') {
+        if (reference.sourceVersionId) {
+          if (!this.sourceVersionExists(input.projectId, reference.id, reference.sourceVersionId)) {
+            throw new Error(
+              `Knowledge graph provenance source ${reference.id}/${reference.sourceVersionId} must belong to project ${input.projectId}`,
+            );
+          }
+        } else if (!this.sourceExistsInProject(input.projectId, reference.id)) {
+          throw new Error(`Knowledge graph provenance source ${reference.id} must belong to project ${input.projectId}`);
+        }
+      }
+      if (reference.kind === 'file') {
+        const normalizedId = normalizeKnowledgePath(reference.id);
+        if (reference.path && normalizeKnowledgePath(reference.path) !== normalizedId) {
+          throw new Error('Knowledge graph file provenance path must match its normalized identifier');
+        }
+        if (!this.filePathBelongsToProject(input.projectId, normalizedId)) {
+          throw new Error(`Knowledge graph file provenance ${normalizedId} must belong to project ${input.projectId}`);
+        }
+      }
     });
+    const existingEdge =
+      input.id === undefined
+        ? ((this.db
+            .prepare(
+              `SELECT id FROM knowledge_graph_edges
+               WHERE project_id = ? AND source_node_id = ? AND target_node_id = ? AND edge_type = ?
+               LIMIT 1`,
+            )
+            .get(input.projectId, input.sourceNodeId, input.targetNodeId, input.edgeType) as { id: string } | undefined) ?? null)
+        : null;
     const now = new Date().toISOString();
-    const id = input.id ?? createKnowledgeId('graph-edge');
+    const id = input.id ?? existingEdge?.id ?? createKnowledgeId('graph-edge');
     this.db
       .prepare(
         `INSERT INTO knowledge_graph_edges
           (id, project_id, source_node_id, target_node_id, edge_type, evidence_json, confidence, created_at, updated_at)
          VALUES (@id, @projectId, @sourceNodeId, @targetNodeId, @edgeType, @evidenceJson, @confidence, @now, @now)
          ON CONFLICT(project_id, source_node_id, target_node_id, edge_type) DO UPDATE SET
-           evidence_json = excluded.evidence_json, confidence = excluded.confidence, updated_at = excluded.updated_at`,
+           id = excluded.id,
+           evidence_json = excluded.evidence_json,
+           confidence = excluded.confidence,
+           updated_at = excluded.updated_at`,
       )
       .run({
         id,
