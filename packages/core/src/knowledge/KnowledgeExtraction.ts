@@ -338,6 +338,7 @@ export function validateDeterministicExtraction(value: unknown): DeterministicEx
     links: expectArray(candidate.links, 'links').map((item, index) => validateLink(item, index)),
     diagnostics: expectArray(candidate.diagnostics, 'diagnostics').map((item, index) => validateDiagnostic(item, index)),
   };
+  assertSummaryMatchesExtractedContent(extraction);
   assertUniqueIds([
     { label: 'sections', items: extraction.sections },
     { label: 'symbols', items: extraction.symbols },
@@ -346,6 +347,12 @@ export function validateDeterministicExtraction(value: unknown): DeterministicEx
   ]);
   assertRelationshipEndpoints(extraction.relationships, extraction.sections, extraction.symbols);
   return extraction;
+}
+
+function assertSummaryMatchesExtractedContent(extraction: DeterministicExtraction): void {
+  if (extraction.summary.length === 0 && extraction.sections.length > 0) {
+    throw new Error('summary must be a non-empty string');
+  }
 }
 
 function compareNullableStrings(left: string | null | undefined, right: string | null | undefined): number {

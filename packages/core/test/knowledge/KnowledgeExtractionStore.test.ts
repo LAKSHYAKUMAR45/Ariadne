@@ -111,6 +111,15 @@ describe('validateDeterministicExtraction', () => {
       }),
     ).toThrow(/relationship/i);
   });
+
+  it('rejects an empty summary when extracted source content is present', () => {
+    expect(() =>
+      validateDeterministicExtraction({
+        ...baseExtraction('source-version-1'),
+        summary: '',
+      }),
+    ).toThrow(/summary must be a non-empty string/i);
+  });
 });
 
 describe('KnowledgeExtractionStore', () => {

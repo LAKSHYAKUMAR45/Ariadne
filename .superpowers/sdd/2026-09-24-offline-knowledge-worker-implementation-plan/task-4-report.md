@@ -1,5 +1,50 @@
 # Task 4 RED/GREEN Report
 
+## Scoped re-review blocker (2026-09-25)
+### Finding
+`validateDeterministicExtraction` accepted `summary: ''` even when extracted sections already contained non-empty source text.
+
+### RED
+Added failing regression coverage in:
+- `packages/core/test/knowledge/KnowledgeExtractionStore.test.ts`
+
+Command:
+```bash
+cd /home/lkumar/Ariadne/.worktrees/ariadne-knowledge-wiki/packages/core && pnpm test -- test/knowledge/KnowledgeExtractionStore.test.ts
+```
+
+Result:
+- FAIL — `validateDeterministicExtraction > rejects an empty summary when extracted source content is present`
+- Message: `expected [Function] to throw an error`
+
+### GREEN
+Narrow validation fix in:
+- `packages/core/src/knowledge/KnowledgeExtraction.ts`
+
+Focused re-run:
+```bash
+cd /home/lkumar/Ariadne/.worktrees/ariadne-knowledge-wiki/packages/core && pnpm test -- test/knowledge/KnowledgeExtractionStore.test.ts
+```
+
+Result:
+- PASS — focused validator regression now rejects populated `summary: ''` payloads.
+
+Coverage re-check:
+```bash
+cd /home/lkumar/Ariadne/.worktrees/ariadne-knowledge-wiki/packages/core && pnpm exec vitest run test/knowledge/KnowledgeExtractionStore.test.ts test/knowledge/analyzers/TextAnalyzer.test.ts test/knowledge/analyzers/MarkdownAnalyzer.test.ts test/knowledge/analyzers/AnalyzerRegistry.test.ts
+```
+
+Result:
+- PASS (`4` files, `20` tests)
+
+Build:
+```bash
+cd /home/lkumar/Ariadne/.worktrees/ariadne-knowledge-wiki && pnpm --filter @ariadne-dev/core run build
+```
+
+Result:
+- PASS
+
 ## Scope
 Fixed Task 4 review findings in `@ariadne-dev/core` with strict TDD: exact CRLF/CR spans, bounded Markdown paragraph/list splitting, validator-safe empty/whitespace/heading-only outputs, deterministic registry coverage, and fenced-code link handling without adding dependencies or provider calls.
 
