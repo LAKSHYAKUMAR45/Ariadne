@@ -157,6 +157,33 @@ describe('KnowledgeQueue', () => {
     expect(queue.claim('project_1', 'worker-b')?.workerId).toBe('worker-b');
   });
 
+  it('does not modify or report a recovered job when its lease is renewed after selection', () => {
+    const job = queue.enqueue({ projectId: 'project_1', jobKind: 'build', payload: {} });
+    expect(queue.claim('project_1', 'worker-a')?.workerId).toBe('worker-a');
+
+    queue = new KnowledgeQueue(db, {
+      leaseDurationMs: 1_000,
+      now: () => '2026-01-01T00:00:02.000Z',
+      onRecoverExpiredCandidate: (candidate) => {
+        if (candidate.id === job.id) {
+          queue.renewLease(job.id, 'worker-a');
+        }
+      },
+    });
+
+    expect(queue.recoverExpiredKnowledgeJobs('project_1')).toEqual([]);
+    expect(queue.get(job.id)).toMatchObject({
+      id: job.id,
+      projectId: 'project_1',
+      status: 'running',
+      workerId: 'worker-a',
+      retryCount: 0,
+      failureCode: null,
+      failureMessage: null,
+      leaseExpiresAt: '2026-01-01T00:00:03.000Z',
+    });
+  });
+
   it('suppresses duplicate jobs for the same source version', () => {
     const input = {
       projectId: 'project_1',

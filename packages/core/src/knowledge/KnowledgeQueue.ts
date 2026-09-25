@@ -70,6 +70,7 @@ export interface KnowledgeProgressEvent {
 export interface KnowledgeQueueOptions {
   leaseDurationMs?: number;
   now?: () => string;
+  onRecoverExpiredCandidate?: (job: KnowledgeJobRecord) => void;
 }
 
 interface JobRow {
@@ -202,6 +203,7 @@ function getErrorMessage(code: string, id: string): Error {
 export class KnowledgeQueue {
   private readonly leaseDurationMs: number;
   private now: () => string;
+  private readonly onRecoverExpiredCandidate?: (job: KnowledgeJobRecord) => void;
 
   public constructor(
     private readonly db: Database.Database,
@@ -209,6 +211,7 @@ export class KnowledgeQueue {
   ) {
     this.leaseDurationMs = options.leaseDurationMs ?? DEFAULT_LEASE_DURATION_MS;
     this.now = options.now ?? (() => new Date().toISOString());
+    this.onRecoverExpiredCandidate = options.onRecoverExpiredCandidate;
   }
 
   public setNow(now: () => string): void {
@@ -379,36 +382,41 @@ export class KnowledgeQueue {
   }
 
   public recoverExpiredKnowledgeJobs(projectId?: string): string[] {
-    const now = this.now();
-    const expired = this.db
-      .prepare(
-        `SELECT * FROM knowledge_jobs
-         WHERE status = 'running'
-           AND lease_expires_at IS NOT NULL
-           AND lease_expires_at <= @now
-           AND (@projectId IS NULL OR project_id = @projectId)
-         ORDER BY requested_at, id`,
-      )
-      .all({ now, projectId: projectId ?? null }) as JobRow[];
-    const recovered: string[] = [];
-    this.db.transaction(() => {
+    return this.db.transaction(() => {
+      const now = this.now();
+      const expired = this.db
+        .prepare(
+          `SELECT * FROM knowledge_jobs
+           WHERE status = 'running'
+             AND lease_expires_at IS NOT NULL
+             AND lease_expires_at <= @now
+             AND (@projectId IS NULL OR project_id = @projectId)
+           ORDER BY requested_at, id`,
+        )
+        .all({ now, projectId: projectId ?? null }) as JobRow[];
+      const recovered: string[] = [];
       for (const job of expired) {
+        this.onRecoverExpiredCandidate?.(rowToJob(job));
         const retryCount = job.retry_count + 1;
         const status = retryCount > job.max_retries ? 'failed' : 'queued';
-        this.db
+        const result = this.db
           .prepare(
             `UPDATE knowledge_jobs
              SET status = @status, completed_at = CASE WHEN @status = 'failed' THEN @now ELSE NULL END,
                  failure_code = CASE WHEN @status = 'failed' THEN 'lease_expired' ELSE NULL END,
                  failure_message = CASE WHEN @status = 'failed' THEN 'Worker lease expired' ELSE NULL END,
                  retry_count = @retryCount, worker_id = NULL, lease_expires_at = NULL
-             WHERE id = @id AND project_id = @projectId AND status = 'running'`,
+             WHERE id = @id
+               AND project_id = @projectId
+               AND status = 'running'
+               AND lease_expires_at IS NOT NULL
+               AND lease_expires_at <= @now`,
           )
           .run({ id: job.id, projectId: job.project_id, status, now, retryCount });
-        if (status === 'queued') recovered.push(job.id);
+        if (result.changes === 1 && status === 'queued') recovered.push(job.id);
       }
+      return recovered;
     })();
-    return recovered;
   }
 
   public getQueueStatus(projectId: string): KnowledgeQueueStatus {
