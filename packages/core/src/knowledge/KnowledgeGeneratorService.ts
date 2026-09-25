@@ -48,7 +48,6 @@ export interface KnowledgeGeneratorServiceOptions {
   workerId?: string;
   renderer?: KnowledgeRenderer;
   now?: () => string;
-  beforePersist?: () => Promise<void> | void;
 }
 
 interface JobRow {
@@ -144,19 +143,21 @@ function pageRelativePath(input: KnowledgeGenerationPageInput): string {
   return resolveOutputPath('/', `pages/${input.type}/${input.slug}.md`).relativePath;
 }
 
-function commitFiles(root: string, files: StagedFile[]): FileCommit {
+function commitFiles(workspaceRoot: string, root: string, files: StagedFile[]): FileCommit {
   mkdirSync(root, { recursive: true });
   const token = `${process.pid}.${Date.now()}.${createKnowledgeId('generation').slice(-8)}`;
   const absoluteRoot = path.resolve(root);
   const stagingRoot = path.join(absoluteRoot, `.generation-${token}`);
   const backupRoot = path.join(absoluteRoot, `.generation-backup-${token}`);
+  assertNoSymlinkComponents(workspaceRoot, absoluteRoot, 'Knowledge generation output root');
+  assertNoSymlinkComponents(workspaceRoot, stagingRoot, 'Knowledge generation staging path');
   const staged = files.map((file) => ({ ...file, ...resolveOutputPath(absoluteRoot, file.relativePath) }));
   const targets = staged.map(({ absolutePath }) => absolutePath);
   const backups: Array<{ target: string; backup: string }> = [];
   try {
     for (const file of staged) writeDurable(path.join(stagingRoot, file.relativePath), file.content);
     for (const target of targets) {
-      assertNoSymlinkComponents(absoluteRoot, path.dirname(target), 'Knowledge generation output path');
+      assertNoSymlinkComponents(workspaceRoot, path.dirname(target), 'Knowledge generation output path');
       if (!existsSync(target)) continue;
       const backup = path.join(backupRoot, path.relative(absoluteRoot, target));
       mkdirSync(path.dirname(backup), { recursive: true });
@@ -165,7 +166,7 @@ function commitFiles(root: string, files: StagedFile[]): FileCommit {
     }
     for (const file of staged) {
       const target = file.absolutePath;
-      assertNoSymlinkComponents(absoluteRoot, path.dirname(target), 'Knowledge generation output path');
+      assertNoSymlinkComponents(workspaceRoot, path.dirname(target), 'Knowledge generation output path');
       mkdirSync(path.dirname(target), { recursive: true });
       renameSync(path.join(stagingRoot, file.relativePath), target);
     }
@@ -206,7 +207,6 @@ export class KnowledgeGeneratorService {
   private readonly renderer: KnowledgeRenderer;
   private readonly workerId: string;
   private readonly now: () => string;
-  private readonly beforePersist?: () => Promise<void> | void;
 
   public constructor(
     private readonly db: Database.Database,
@@ -216,7 +216,6 @@ export class KnowledgeGeneratorService {
     this.workerId =
       options.workerId ?? `knowledge-generator-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2, 10)}`;
     this.now = options.now ?? (() => new Date().toISOString());
-    this.beforePersist = options.beforePersist;
   }
 
   public async runKnowledgeGeneration(jobId: string): Promise<KnowledgeGenerationResult> {
@@ -288,7 +287,6 @@ export class KnowledgeGeneratorService {
           relativePath,
         });
       }
-      await this.beforePersist?.();
       this.renewLease(jobId, this.now());
     } catch (error) {
       this.failJob(jobId, error);
@@ -385,9 +383,9 @@ export class KnowledgeGeneratorService {
           updatedAt: generatedAt,
         }))
         .sort((left, right) => left.slug.localeCompare(right.slug) || left.id.localeCompare(right.id));
-      const existingLog = existsSync(path.join(outputRoot, 'log.md'))
-        ? readFileSync(path.join(outputRoot, 'log.md'), 'utf8')
-        : '';
+      const logPath = path.join(outputRoot, 'log.md');
+      assertNoSymlinkComponents(workspaceRoot, logPath, 'Knowledge generation log path');
+      const existingLog = existsSync(logPath) ? readFileSync(logPath, 'utf8') : '';
       const stagedFiles: StagedFile[] = [
         ...pageResults.map((result) => ({
           relativePath: result.relativePath,
@@ -402,7 +400,7 @@ export class KnowledgeGeneratorService {
         },
         { relativePath: 'manifest.json', content: `${JSON.stringify(manifest, null, 2)}\n` },
       ];
-      fileCommit = commitFiles(outputRoot, stagedFiles);
+      fileCommit = commitFiles(workspaceRoot, outputRoot, stagedFiles);
       const completionNow = this.now();
       const completion = this.db
         .prepare(

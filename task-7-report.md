@@ -1,39 +1,44 @@
-# Task 7 Report — FIX ALL
+# Task 7 Report — Fix Round 2
 
 ## Scope
-Applied the Task 7 FIX ALL remediation only in `packages/core`:
+Applied Task 7 round-2 fixes in `packages/core` only:
 
-- `DeterministicPageBuilder`
 - `KnowledgeGeneratorService`
 - `KnowledgeSearch`
-- focused Task 7 tests
+- focused Task 7 regressions
 
 No worker/provider/adapter/CLI/MCP/VS Code/dashboard codepaths were changed.
 
 ## RED
-Command:
+Initial focused RED command:
 
 ```bash
-pnpm --filter @ariadne-dev/core test -- DeterministicPageBuilder.test.ts KnowledgeGeneratorService.test.ts KnowledgeSearch.test.ts
+pnpm --filter @ariadne-dev/core exec vitest run test/knowledge/DeterministicPageBuilder.test.ts test/knowledge/KnowledgeGeneratorService.test.ts test/knowledge/KnowledgeSearch.test.ts
 ```
 
-Initial RED failures reproduced all blocker classes added in this pass:
+Initial failure recorded before implementation:
 
-- fabricated top-level provenance bounds (`startOffset: 0`, `line 1:1`) instead of real extraction span bounds
-- unchanged generation race creating a second semantic page version after an interleaved identical generation
-- path-only metadata outranking extraction-backed source matches under repeated-path adversarial input
-- extraction-backed snippets returning unredacted / wrong-match excerpts instead of redacted source-backed text
+- `searchKnowledge > skips extraction rows when persisted spans overflow the bounded lookup window`
+  - search still treated an overflowed extraction as content-backed, returned a span-backed citation, and exposed extraction metadata instead of falling back safely
+
+Additional round-2 regressions added during the fix cover:
+
+- spanless/path-like extraction-title matches staying metadata-ranked
+- UTF-8 byte query caps for Unicode-heavy input
+- two-connection SQLite unchanged-version dedupe without the public `beforePersist` hook
+- task/graph expansion redaction on returned search context
+- symlinked `log.md` rejection during generation
 
 ## GREEN
 Focused Task 7 command:
 
 ```bash
-pnpm --filter @ariadne-dev/core test -- DeterministicPageBuilder.test.ts KnowledgeGeneratorService.test.ts KnowledgeSearch.test.ts
+pnpm --filter @ariadne-dev/core exec vitest run test/knowledge/DeterministicPageBuilder.test.ts test/knowledge/KnowledgeGeneratorService.test.ts test/knowledge/KnowledgeSearch.test.ts
 ```
 
 Result:
 
-- pass (`62` files / `495` tests in this workspace Vitest configuration)
+- pass (`3` files / `33` tests)
 
 Full core tests:
 
@@ -43,7 +48,7 @@ pnpm --filter @ariadne-dev/core test
 
 Result:
 
-- pass (`62` files / `495` tests)
+- pass (`62` files / `501` tests)
 
 Core build:
 
@@ -57,76 +62,61 @@ Result:
 
 ## Fix summary
 
-### 1. Race-safe unchanged generation
+### 1. Spanless extraction metadata no longer masquerades as content
 
-- moved page-version decision and creation into a single `BEGIN IMMEDIATE` persistence window
-- re-checks the current page version immediately before persist, so an interleaved identical generation reuses the already-current version instead of creating a duplicate semantic version
-- preserves rollback semantics: filesystem commit still rolls back on failure before DB commit completes
-- added a deterministic regression via `beforePersist` that interleaves a second identical generation between preparation and persistence
-- hardened job ownership by:
-  - issuing per-service-instance worker IDs
-  - claiming/renewing a lease before persistence
-  - guarding completion/failure updates on worker + lease ownership
+- extraction fields only receive content rank when they are backed by a persisted span
+- spanless extraction title/summary matches remain searchable, but are classified as metadata
+- repeated path-like source-title matches can no longer outrank true symbol/section hits solely by lexical repetition
+- exact citation requirements still hold for content-ranked matches
 
-### 2. Rank classes for extraction-backed search
+### 2. Persisted span loading is SQL-bounded and overflow-safe
 
-- introduced explicit source search rank classes:
-  - extraction-backed matches
-  - metadata/path-only fallback matches
-- source-vs-source ordering now compares rank class before score/tie-breaks, preventing repeated-path metadata from beating real extraction content
-- preserved existing modes and deterministic tie-breaks
+- persisted span loading now uses SQL `LIMIT MAX+1` instead of loading every row then slicing
+- overflow is detected explicitly
+- overflowed extraction rows are skipped as extraction-backed content so search does not emit partial or misleading citations
+- metadata fallback behavior is preserved when the source path/title still matches
 
-### 3. Exact top-level provenance only
+### 3. Query caps now enforce UTF-8 bytes
 
-- top-level deterministic-page provenance now derives min/max bounds from real extracted spans only
-- when no real span exists, coordinate fields are omitted instead of fabricated
-- no more claims over unextracted source regions
+- query rejection now checks `Buffer.byteLength(normalizedQuery, 'utf8')`
+- the prior length guard remains in place as a cheap code-unit bound
+- added Unicode-heavy regression coverage
 
-### 4. Secret-safe search snippets
+### 4. Public test-only hook removed; dedupe invariant documented via two connections
 
-- reused the shared repository redactor at the extraction indexing/search boundary
-- bounded snippets now come from redacted extraction text
-- page/source titles, summaries, citation paths/URLs/labels, and context-fed metadata are also redacted before results are returned or budgeted
-- citations still reference exact persisted source spans; only human-readable text is redacted
-- regression coverage includes API-key/token/password/AWS-key-style content
+- removed the public `beforePersist` hook from `KnowledgeGeneratorServiceOptions`
+- replaced that coverage with an on-disk two-connection SQLite regression that exercises the transactional compare-and-insert invariant directly
+- documented in the test that SQLite serializes writers, so the invariant is validated across independent connections rather than forced simultaneous writes
 
-### 5. Search CPU / memory bounds
+### 5. Search redaction and generation path hardening
 
-- added conservative caps for:
-  - query length and query terms
-  - extraction JSON bytes
-  - symbols, sections, searchable fields, persisted spans, and result candidates
-- oversized/malformed legacy extraction rows now safely fall back to metadata-only source results instead of crashing the whole search
-- replaced repeated span scans with O(1) keyed lookups
-- avoided repeated extraction parsing within a query via per-query caching
+- task-mode search results now redact returned task titles and match text before surfacing or budgeting them
+- graph expansion titles/text are redacted before returning or budgeting them
+- generation revalidates the output-root/log path against symlinks before reading `log.md`
+- file commit staging now revalidates the output root and staged target parents against the workspace root before writes/renames
 
 ## Migration ruling
 
-No schema migration was required for this FIX ALL pass.
+No schema migration was required for this round.
 
-Ruling: concurrency safety is enforced with a transactional compare-and-insert flow in `KnowledgeGeneratorService` rather than new SQLite columns/indexes. That kept Task 7 surgical while still eliminating duplicate unchanged semantic versions and preserving atomic rollback behavior.
+Ruling: unchanged-generation safety remains enforced through transactional compare-and-insert behavior rather than new SQLite columns or indexes.
 
 ## Security / audit notes
 
-- SQL remained parameterized; no new string-interpolated query inputs were introduced
+- SQL remained parameterized; no string-interpolated query inputs were introduced
 - project scoping remains enforced on page/source/span lookups
-- Markdown/provenance output no longer invents source coverage
-- search excerpts/context no longer re-expose secrets stored inside extraction JSON or result metadata
-- output writes now symlink-check target parent paths before backup/rename
-- rollback cleanup still removes staged outputs when persistence fails
-- final **Security Reviewer** signoff: no remaining scoped issues
+- search results now redact titles/snippets/graph expansions/task matches before return and context budgeting
+- persisted-span overflow no longer yields misleading content-backed citations
+- generation now rejects symlinked `log.md` inputs and revalidates output-root paths before staging writes
 
 ## Files changed
 
-- `packages/core/src/knowledge/DeterministicPageBuilder.ts`
 - `packages/core/src/knowledge/KnowledgeGeneratorService.ts`
 - `packages/core/src/knowledge/KnowledgeSearch.ts`
-- `packages/core/test/knowledge/DeterministicPageBuilder.test.ts`
 - `packages/core/test/knowledge/KnowledgeGeneratorService.test.ts`
 - `packages/core/test/knowledge/KnowledgeSearch.test.ts`
 - `task-7-report.md`
 
 ## Remaining concerns
 
-- `beforePersist` is an additive deterministic test hook on `KnowledgeGeneratorServiceOptions`; it is intentionally small, but still public API surface.
-- Search caps are conservative and deterministic, but very large extraction corpora may still warrant a persisted search index in a future task if recall/performance trade-offs become visible.
+- `searchKnowledge()` still scores all active pages/sources in JavaScript after loading them with `.all()`. The new per-item caps bound extraction payload handling, but very large projects may still want SQL-side prefiltering or a persisted index in a future task.

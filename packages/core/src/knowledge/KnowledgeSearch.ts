@@ -147,6 +147,7 @@ interface ExtractionSearchData {
 const DEFAULT_LIMIT = 20;
 const SOURCE_SNIPPET_LIMIT = 180;
 const MAX_QUERY_LENGTH = 256;
+const MAX_QUERY_BYTES = 256;
 const MAX_QUERY_TERMS = 16;
 const MAX_EXTRACTION_JSON_BYTES = 262_144;
 const MAX_EXTRACTION_SECTIONS = 200;
@@ -377,16 +378,24 @@ function buildBoundedSnippet(text: string, query: string, limit = SOURCE_SNIPPET
   return `${prefix}${snippet}${suffix}`;
 }
 
-function loadPersistedSpans(db: Database.Database, projectId: string, sourceVersionId: string): PersistedSpanRow[] {
-  return db
+function loadPersistedSpans(
+  db: Database.Database,
+  projectId: string,
+  sourceVersionId: string,
+): { spans: PersistedSpanRow[]; overflow: boolean } {
+  const rows = db
     .prepare(
       `SELECT id, start_offset, end_offset, start_line, start_column, end_line, end_column, label
        FROM knowledge_source_spans
        WHERE project_id = ? AND source_version_id = ?
-       ORDER BY start_offset ASC, end_offset ASC, id ASC`,
+       ORDER BY start_offset ASC, end_offset ASC, id ASC
+       LIMIT ?`,
     )
-    .all(projectId, sourceVersionId)
-    .slice(0, MAX_PERSISTED_SPANS) as PersistedSpanRow[];
+    .all(projectId, sourceVersionId, MAX_PERSISTED_SPANS + 1) as PersistedSpanRow[];
+  return {
+    spans: rows.slice(0, MAX_PERSISTED_SPANS),
+    overflow: rows.length > MAX_PERSISTED_SPANS,
+  };
 }
 
 function spanKey(span: {
@@ -417,13 +426,39 @@ function matchPersistedSpan(
   return spans.get(spanKey(span)) ?? null;
 }
 
+function searchFieldRankClass(span: PersistedSpanRow | null): number {
+  return span ? EXTRACTION_MATCH_RANK_CLASS : METADATA_MATCH_RANK_CLASS;
+}
+
+function searchableField(text: string, weight: number, span: PersistedSpanRow | null): SearchableField {
+  return {
+    text,
+    weight,
+    rankClass: searchFieldRankClass(span),
+    span,
+  };
+}
+
+function redactTaskResult(taskResult: WorkspaceSearchResult): WorkspaceSearchResult {
+  return {
+    ...taskResult,
+    taskTitle: redactLines(taskResult.taskTitle),
+    matches: taskResult.matches.map((match) => ({
+      ...match,
+      text: redactLines(match.text),
+    })),
+  };
+}
+
 function parseExtractionSearchData(db: Database.Database, row: SourceSearchRow): ExtractionSearchData | null {
   if (!row.source_version_id || !row.extraction_id || !row.extraction_result_json) return null;
   if (Buffer.byteLength(row.extraction_result_json, 'utf8') > MAX_EXTRACTION_JSON_BYTES) return null;
   try {
     const extraction = validateDeterministicExtraction(JSON.parse(row.extraction_result_json) as unknown);
+    const persistedSpans = loadPersistedSpans(db, row.project_id, row.source_version_id);
+    if (persistedSpans.overflow) return null;
     const spans = new Map(
-      loadPersistedSpans(db, row.project_id, row.source_version_id).map((span) => [
+      persistedSpans.spans.map((span) => [
         spanKey({
           startOffset: span.start_offset,
           endOffset: span.end_offset,
@@ -440,41 +475,25 @@ function parseExtractionSearchData(db: Database.Database, row: SourceSearchRow):
       ...extraction.symbols.slice(0, MAX_EXTRACTION_SYMBOLS).flatMap((symbol) => [
         ...(symbol.qualifiedName
           ? [
-              {
-                text: redactLines(symbol.qualifiedName),
-                weight: 10,
-                rankClass: EXTRACTION_MATCH_RANK_CLASS,
-                span: matchPersistedSpan(spans, symbol.span),
-              },
+              searchableField(
+                redactLines(symbol.qualifiedName),
+                10,
+                matchPersistedSpan(spans, symbol.span),
+              ),
             ]
           : []),
-        {
-          text: redactLines(symbol.name),
-          weight: 8,
-          rankClass: EXTRACTION_MATCH_RANK_CLASS,
-          span: matchPersistedSpan(spans, symbol.span),
-        },
+        searchableField(redactLines(symbol.name), 8, matchPersistedSpan(spans, symbol.span)),
       ]),
       ...extraction.sections.slice(0, MAX_EXTRACTION_SECTIONS).flatMap((section) => [
         ...(section.title
           ? [
-              {
-                text: redactLines(section.title),
-                weight: 7,
-                rankClass: EXTRACTION_MATCH_RANK_CLASS,
-                span: matchPersistedSpan(spans, section.span),
-              },
+              searchableField(redactLines(section.title), 7, matchPersistedSpan(spans, section.span)),
             ]
           : []),
-        {
-          text: redactLines(section.text),
-          weight: 5,
-          rankClass: EXTRACTION_MATCH_RANK_CLASS,
-          span: matchPersistedSpan(spans, section.span),
-        },
+        searchableField(redactLines(section.text), 5, matchPersistedSpan(spans, section.span)),
       ]),
-      { text: redactLines(extraction.title), weight: 6, rankClass: EXTRACTION_MATCH_RANK_CLASS, span: null },
-      { text: redactLines(extraction.summary), weight: 3, rankClass: EXTRACTION_MATCH_RANK_CLASS, span: null },
+      { text: redactLines(extraction.title), weight: 6, rankClass: METADATA_MATCH_RANK_CLASS, span: null },
+      { text: redactLines(extraction.summary), weight: 3, rankClass: METADATA_MATCH_RANK_CLASS, span: null },
     ].slice(0, MAX_SEARCH_FIELDS);
     return {
       extractionId: row.extraction_id,
@@ -513,7 +532,14 @@ function sourceCitationFromMatch(row: SourceSearchRow, span: PersistedSpanRow | 
 function withGraphExpansions(result: KnowledgeSearchResult, options: KnowledgeSearchOptions): KnowledgeSearchResult {
   if (!options.graphExpansion) return result;
   const maxGraphExpansions = options.maxGraphExpansions ?? 3;
-  const expansions = options.graphExpansion(result).slice(0, Math.max(0, maxGraphExpansions));
+  const expansions = options
+    .graphExpansion(result)
+    .slice(0, Math.max(0, maxGraphExpansions))
+    .map((expansion) => ({
+      ...expansion,
+      title: redactLines(expansion.title),
+      text: redactLines(expansion.text),
+    }));
   return { ...result, graphExpansions: expansions };
 }
 
@@ -621,26 +647,29 @@ function searchSources(query: string, options: KnowledgeSearchOptions): Knowledg
 
 function searchTasks(query: string, options: KnowledgeSearchOptions): KnowledgeSearchResult[] {
   if (!options.taskStore) return [];
-  return searchWorkspace(options.taskStore, query, { limit: options.limit ?? DEFAULT_LIMIT }).map((taskResult) =>
+  return searchWorkspace(options.taskStore, query, { limit: options.limit ?? DEFAULT_LIMIT }).map((taskResult) => {
+    const redactedTaskResult = redactTaskResult(taskResult);
+    return (
     withGraphExpansions(
       {
         mode: options.mode ?? 'tasks',
         kind: 'task',
-        id: taskResult.taskId,
+        id: redactedTaskResult.taskId,
         projectId: null,
-        title: taskResult.taskTitle,
-        snippet: taskResult.matches.map((match) => match.text).join('\n'),
-        score: taskResult.matches.length * 10,
+        title: redactedTaskResult.taskTitle,
+        snippet: redactedTaskResult.matches.map((match) => match.text).join('\n'),
+        score: redactedTaskResult.matches.length * 10,
         citations: [],
         graphExpansions: [],
-        taskResult,
+        taskResult: redactedTaskResult,
         metadata: {
-          taskStatus: taskResult.taskStatus,
+          taskStatus: redactedTaskResult.taskStatus,
         },
       },
       options,
-    ),
-  );
+    )
+    );
+  });
 }
 
 function dedupeResults(results: KnowledgeSearchResult[]): KnowledgeSearchResult[] {
@@ -671,6 +700,7 @@ export function searchKnowledge(query: string, options: KnowledgeSearchOptions):
   const normalizedQuery = normalize(query);
   if (!normalizedQuery) return [];
   if (normalizedQuery.length > MAX_QUERY_LENGTH) return [];
+  if (Buffer.byteLength(normalizedQuery, 'utf8') > MAX_QUERY_BYTES) return [];
 
   const mode = options.mode ?? 'hybrid';
   const scopedOptions: KnowledgeSearchOptions = { ...options, mode };

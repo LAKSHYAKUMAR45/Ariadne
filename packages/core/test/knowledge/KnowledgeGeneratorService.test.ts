@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { openDatabase } from '../../src/db.js';
 import { KnowledgeGeneratorService } from '../../src/knowledge/KnowledgeGeneratorService.js';
@@ -154,6 +154,21 @@ describe('KnowledgeGeneratorService', () => {
       /knowledge|workspace/i,
     );
     expect(existsSync(join(outputRoot, 'pages'))).toBe(false);
+  });
+
+  it('refuses to read an existing log file through a symlink', async () => {
+    const workspaceRoot = mkdtempSync(join(process.cwd(), '.knowledge-generator-test-'));
+    const outputRoot = join(workspaceRoot, '.ariadne', 'knowledge');
+    directories.push(workspaceRoot);
+    const database = createDatabase(workspaceRoot);
+    const secretPath = join(workspaceRoot, 'secret.txt');
+    writeFileSync(secretPath, 'should-not-be-read\n', 'utf8');
+    mkdirSync(outputRoot, { recursive: true });
+    symlinkSync(secretPath, join(outputRoot, 'log.md'));
+    const jobId = enqueue(database, outputRoot);
+
+    await expect(new KnowledgeGeneratorService(database).runKnowledgeGeneration(jobId)).rejects.toThrow(/symbolic links/i);
+    expect(database.prepare('SELECT status FROM knowledge_jobs WHERE id = ?').get(jobId)).toEqual({ status: 'failed' });
   });
 
   it('refuses to run a job already claimed by another worker', async () => {
@@ -344,94 +359,71 @@ describe('KnowledgeGeneratorService', () => {
     });
   });
 
-  it('reuses the current version when an identical generation commits between preparation and persistence', async () => {
+  it('reuses an unchanged semantic version across SQLite connections without creating duplicates', () => {
     const workspaceRoot = mkdtempSync(join(process.cwd(), '.knowledge-generator-test-'));
-    const outputRoot = join(workspaceRoot, '.ariadne', 'knowledge');
+    const databasePath = join(workspaceRoot, '.ariadne', 'knowledge-generator.db');
     directories.push(workspaceRoot);
-    const database = createDatabase(workspaceRoot);
 
-    database
+    const firstConnection = openDatabase(databasePath);
+    const secondConnection = openDatabase(databasePath);
+    databases.push(firstConnection, secondConnection);
+    firstConnection
       .prepare(
-        `INSERT INTO knowledge_jobs
-         (id, project_id, job_kind, status, payload_json, requested_at)
-         VALUES (?, ?, ?, 'queued', ?, ?)`,
+        `INSERT INTO knowledge_projects
+         (id, workspace_root, name, status, created_at, updated_at)
+         VALUES (?, ?, ?, 'active', ?, ?)`,
       )
-      .run(
-        'job_race_seed',
-        'project_1',
-        'generate',
-        JSON.stringify({
-          outputRoot,
-          generatorVersion: 'deterministic:typescript-lezer:2.1.0',
-          generatedAt: '2026-01-09T00:00:00.000Z',
-          pages: [
-            {
-              pageId: 'page_source_race',
-              type: 'source',
-              title: 'src/race.ts',
-              slug: 'source-src-race-ts',
-              content: 'Original body',
-            },
-          ],
-        }),
-        '2026-01-09T00:00:00.000Z',
-      );
-    await new KnowledgeGeneratorService(database).runKnowledgeGeneration('job_race_seed');
+      .run('project_1', workspaceRoot, 'Wiki', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z');
 
-    for (const [jobId, generatedAt] of [
-      ['job_race_first', '2026-01-10T00:00:00.000Z'],
-      ['job_race_second', '2026-01-11T00:00:00.000Z'],
-    ] as const) {
-      database
-        .prepare(
-          `INSERT INTO knowledge_jobs
-           (id, project_id, job_kind, status, payload_json, requested_at)
-           VALUES (?, ?, ?, 'queued', ?, ?)`,
-        )
-        .run(
-          jobId,
-          'project_1',
-          'generate',
-          JSON.stringify({
-            outputRoot,
-            generatorVersion: 'deterministic:typescript-lezer:2.1.0',
-            generatedAt,
-            pages: [
-              {
-                pageId: 'page_source_race',
-                type: 'source',
-                title: 'src/race.ts',
-                slug: 'source-src-race-ts',
-                content: 'Changed once',
-              },
-            ],
-          }),
-          generatedAt,
-        );
-    }
+    const firstStore = new KnowledgePageStore(firstConnection);
+    const secondStore = new KnowledgePageStore(secondConnection);
 
-    let interleaved = false;
-    const result = await new KnowledgeGeneratorService(database, {
-      beforePersist: async () => {
-        if (interleaved) return;
-        interleaved = true;
-        await new KnowledgeGeneratorService(database).runKnowledgeGeneration('job_race_second');
-      },
-    }).runKnowledgeGeneration('job_race_first');
+    firstStore.createPageVersion({
+      projectId: 'project_1',
+      pageId: 'page_source_race',
+      type: 'source',
+      title: 'src/race.ts',
+      slug: 'source-src-race-ts',
+      content: 'Original body',
+      createdAt: '2026-01-09T00:00:00.000Z',
+    });
 
-    expect(database.prepare('SELECT COUNT(*) AS count FROM knowledge_page_versions').get()).toEqual({ count: 2 });
-    expect(result.pageResults).toEqual([
-      expect.objectContaining({
-        reused: true,
-        page: expect.objectContaining({
-          pageId: 'page_source_race',
-          versionNumber: 2,
-          createdAt: '2026-01-11T00:00:00.000Z',
-        }),
-      }),
-    ]);
-    expect(readFileSync(join(outputRoot, 'pages/source/source-src-race-ts.md'), 'utf8')).toContain(
-      'generated_at: "2026-01-11T00:00:00.000Z"',
-    );
+    // SQLite serializes writers, so this exercises the transactional compare-and-insert invariant
+    // across independent connections rather than forcing true simultaneous writes.
+    firstConnection.exec('BEGIN IMMEDIATE');
+    const changedVersion = firstStore.createPageVersion({
+      projectId: 'project_1',
+      pageId: 'page_source_race',
+      type: 'source',
+      title: 'src/race.ts',
+      slug: 'source-src-race-ts',
+      content: 'Changed once',
+      createdAt: '2026-01-10T00:00:00.000Z',
+    });
+    firstConnection.exec('COMMIT');
+
+    secondConnection.exec('BEGIN IMMEDIATE');
+    const reusedVersion = secondStore.createPageVersion({
+      projectId: 'project_1',
+      pageId: 'page_source_race',
+      type: 'source',
+      title: 'src/race.ts',
+      slug: 'source-src-race-ts',
+      content: 'Changed once',
+      createdAt: '2026-01-11T00:00:00.000Z',
+    });
+    secondConnection.exec('COMMIT');
+
+    expect(changedVersion).toMatchObject({
+      pageId: 'page_source_race',
+      versionNumber: 2,
+      createdAt: '2026-01-10T00:00:00.000Z',
+    });
+    expect(reusedVersion).toMatchObject({
+      pageId: 'page_source_race',
+      versionNumber: 2,
+      createdAt: '2026-01-10T00:00:00.000Z',
+    });
+    expect(firstConnection.prepare('SELECT COUNT(*) AS count FROM knowledge_page_versions').get()).toEqual({ count: 2 });
   });
 });

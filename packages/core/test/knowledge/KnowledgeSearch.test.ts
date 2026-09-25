@@ -160,6 +160,40 @@ describe('searchKnowledge', () => {
     ]);
   });
 
+  it('redacts task-mode titles and snippets before returning task-backed search results', () => {
+    const task = taskStore.createTask({
+      title: 'Rotate ghp_abcdefghijklmnopqrstuvwxyz0123456789 token',
+      goal: 'Remove leaked token',
+    });
+    taskStore.createTodo({
+      taskId: task.id,
+      text: 'Replace ghp_abcdefghijklmnopqrstuvwxyz0123456789 in rollout notes',
+    });
+
+    const results = searchKnowledge('ghp_abcdefghijklmnopqrstuvwxyz0123456789', {
+      db,
+      projectId: PROJECT_ID,
+      taskStore,
+      mode: 'tasks',
+    });
+
+    expect(results).toEqual([
+      expect.objectContaining({
+        kind: 'task',
+        title: expect.not.stringContaining('ghp_abcdefghijklmnopqrstuvwxyz0123456789'),
+        snippet: expect.not.stringContaining('ghp_abcdefghijklmnopqrstuvwxyz0123456789'),
+        taskResult: expect.objectContaining({
+          taskTitle: expect.not.stringContaining('ghp_abcdefghijklmnopqrstuvwxyz0123456789'),
+          matches: expect.arrayContaining([
+            expect.objectContaining({
+              text: expect.not.stringContaining('ghp_abcdefghijklmnopqrstuvwxyz0123456789'),
+            }),
+          ]),
+        }),
+      }),
+    ]);
+  });
+
   it('ranks lexically relevant results ahead of weaker matches and deduplicates page/source pairs', () => {
     const strong = sourceStore.register({
       projectId: PROJECT_ID,
@@ -233,6 +267,7 @@ describe('searchKnowledge', () => {
       path: 'docs/graph.md',
       content: 'Graph expansion budget',
     });
+
     const page = pageStore.createPageVersion({
       projectId: PROJECT_ID,
       type: 'architecture',
@@ -262,6 +297,47 @@ describe('searchKnowledge', () => {
     expect(context.results[0].graphExpansions).toEqual([expansions[0]]);
     expect(context.truncated.results).toBeUndefined();
     expect(context.truncated.graphExpansions).toBeUndefined();
+  });
+
+
+  it('redacts graph expansion text before returning or budgeting it', () => {
+    const source = sourceStore.register({
+      projectId: PROJECT_ID,
+      kind: 'file',
+      path: 'docs/graph-secrets.md',
+      content: 'Graph expansion secrets',
+    });
+    pageStore.createPageVersion({
+      projectId: PROJECT_ID,
+      type: 'architecture',
+      title: 'Graph expansion secrets',
+      slug: 'graph-expansion-secrets',
+      content: 'Generated',
+      summary: 'Graph expansion should redact secrets.',
+      sourceVersionIds: [sourceStore.listVersions(PROJECT_ID, source.id)[0].id],
+    });
+
+    const results = searchKnowledge('graph expansion secrets', {
+      db,
+      projectId: PROJECT_ID,
+      mode: 'knowledge',
+      graphExpansion: () => [
+        {
+          id: 'neighbor-secret',
+          title: 'Deploy ghp_abcdefghijklmnopqrstuvwxyz0123456789',
+          text: 'password=ghp_abcdefghijklmnopqrstuvwxyz0123456789',
+        },
+      ],
+    });
+    const context = buildKnowledgeSearchContext(results, { tokenBudget: 200 });
+
+    expect(results[0]?.graphExpansions).toEqual([
+      expect.objectContaining({
+        title: expect.not.stringContaining('ghp_abcdefghijklmnopqrstuvwxyz0123456789'),
+        text: expect.not.stringContaining('ghp_abcdefghijklmnopqrstuvwxyz0123456789'),
+      }),
+    ]);
+    expect(JSON.stringify(context)).not.toContain('ghp_abcdefghijklmnopqrstuvwxyz0123456789');
   });
 
   it('reports budget truncation when results do not fit', () => {
@@ -564,6 +640,130 @@ describe('searchKnowledge', () => {
     expect(results.findIndex((result) => result.id === metadataOnlySource.id)).toBeGreaterThan(0);
   });
 
+  it('treats spanless extraction titles as metadata so they cannot outrank span-backed content matches', () => {
+    const repeatedPath = `src/${'security_group_index_'.repeat(18)}notes.py`;
+    const metadataOnlySource = sourceStore.register({
+      projectId: PROJECT_ID,
+      kind: 'file',
+      path: repeatedPath,
+      content: 'path metadata only',
+      format: 'python',
+      mimeType: 'text/x-python',
+    });
+    const metadataOnlyVersionId = sourceStore.listVersions(PROJECT_ID, metadataOnlySource.id)[0].id;
+    extractionStore.save({
+      projectId: PROJECT_ID,
+      extraction: {
+        analyzerId: 'python-lezer',
+        analyzerVersion: '1',
+        sourceVersionId: metadataOnlyVersionId,
+        title: repeatedPath,
+        summary: 'Path-like source metadata only.',
+        sections: [
+          {
+            id: 'section:metadata',
+            kind: 'code',
+            title: 'helper',
+            text: 'def helper():\n    return "metadata"\n',
+            span: {
+              startOffset: 0,
+              endOffset: 35,
+              startLine: 1,
+              startColumn: 1,
+              endLine: 2,
+              endColumn: 22,
+            },
+            confidence: 1,
+          },
+        ],
+        symbols: [],
+        relationships: [],
+        links: [],
+        diagnostics: [],
+      },
+    });
+
+    const contentSource = sourceStore.register({
+      projectId: PROJECT_ID,
+      kind: 'file',
+      path: 'src/group_allocator.py',
+      content: 'def allocate_security_group_index(group):\n    return group.index\n',
+      format: 'python',
+      mimeType: 'text/x-python',
+    });
+    const contentVersionId = sourceStore.listVersions(PROJECT_ID, contentSource.id)[0].id;
+    extractionStore.save({
+      projectId: PROJECT_ID,
+      extraction: {
+        analyzerId: 'python-lezer',
+        analyzerVersion: '1',
+        sourceVersionId: contentVersionId,
+        title: 'src/group_allocator.py',
+        summary: 'Allocates security group indexes.',
+        sections: [
+          {
+            id: 'section:allocate',
+            kind: 'code',
+            title: 'allocate security group index',
+            text: 'def allocate_security_group_index(group):\n    return group.index\n',
+            span: {
+              startOffset: 0,
+              endOffset: 65,
+              startLine: 1,
+              startColumn: 1,
+              endLine: 2,
+              endColumn: 23,
+            },
+            confidence: 1,
+          },
+        ],
+        symbols: [
+          {
+            id: 'symbol:allocate',
+            kind: 'function',
+            name: 'allocate_security_group_index',
+            qualifiedName: 'allocator.allocate_security_group_index',
+            span: {
+              startOffset: 4,
+              endOffset: 33,
+              startLine: 1,
+              startColumn: 5,
+              endLine: 1,
+              endColumn: 34,
+            },
+            confidence: 1,
+          },
+        ],
+        relationships: [],
+        links: [],
+        diagnostics: [],
+      },
+    });
+
+    const results = searchKnowledge('security group index', { db, projectId: PROJECT_ID, mode: 'sources' });
+
+    expect(results[0]).toMatchObject({
+      kind: 'source',
+      id: contentSource.id,
+      citations: [
+        expect.objectContaining({
+          sourceId: contentSource.id,
+          span: expect.objectContaining({
+            startLine: 1,
+            endLine: 2,
+          }),
+        }),
+      ],
+    });
+    expect(results.findIndex((result) => result.id === metadataOnlySource.id)).toBeGreaterThan(0);
+    expect(results.find((result) => result.id === metadataOnlySource.id)?.citations).toEqual([
+      expect.objectContaining({
+        sourceId: metadataOnlySource.id,
+        span: null,
+      }),
+    ]);
+  });
+
   it('redacts extraction-backed snippets before returning source-backed excerpts and exact citations', () => {
     const source = sourceStore.register({
       projectId: PROJECT_ID,
@@ -708,5 +908,97 @@ describe('searchKnowledge', () => {
         ],
       }),
     ]);
+  });
+
+  it('skips extraction rows when persisted spans overflow the bounded lookup window', () => {
+    const source = sourceStore.register({
+      projectId: PROJECT_ID,
+      kind: 'file',
+      path: 'docs/overflow-spans.md',
+      content: 'overflow spans metadata',
+      format: 'markdown',
+    });
+    const sourceVersionId = sourceStore.listVersions(PROJECT_ID, source.id)[0].id;
+    extractionStore.save({
+      projectId: PROJECT_ID,
+      extraction: {
+        analyzerId: 'markdown',
+        analyzerVersion: '1',
+        sourceVersionId,
+        title: 'docs/overflow-spans.md',
+        summary: 'Overflow spans summary.',
+        sections: [
+          {
+            id: 'section:overflow',
+            kind: 'paragraph',
+            title: 'overflow spans',
+            text: 'overflow spans content',
+            span: {
+              startOffset: 0,
+              endOffset: 22,
+              startLine: 1,
+              startColumn: 1,
+              endLine: 1,
+              endColumn: 23,
+            },
+            confidence: 1,
+          },
+        ],
+        symbols: [],
+        relationships: [],
+        links: [],
+        diagnostics: [],
+      },
+    });
+
+    const insertSpan = db.prepare(
+      `INSERT INTO knowledge_source_spans
+       (id, project_id, source_version_id, start_offset, end_offset, start_line, start_column, end_line, end_column, label, created_at)
+       VALUES (?, ?, ?, ?, ?, 1, 1, 1, 2, ?, ?)`,
+    );
+    for (let index = 0; index < 2_100; index += 1) {
+      insertSpan.run(
+        `span_overflow_${index}`,
+        PROJECT_ID,
+        sourceVersionId,
+        10_000 + index * 2,
+        10_001 + index * 2,
+        `overflow-${index}`,
+        CREATED_AT,
+      );
+    }
+
+    const results = searchKnowledge('overflow spans', { db, projectId: PROJECT_ID, mode: 'sources' });
+
+    expect(results).toEqual([
+      expect.objectContaining({
+        kind: 'source',
+        id: source.id,
+        snippet: expect.stringContaining('overflow-spans'),
+        citations: [
+          expect.objectContaining({
+            sourceId: source.id,
+            span: null,
+          }),
+        ],
+        metadata: expect.objectContaining({
+          extractionId: null,
+          analyzerId: null,
+          analyzerVersion: null,
+        }),
+      }),
+    ]);
+  });
+
+  it('rejects Unicode-heavy queries by UTF-8 byte length before source search runs', () => {
+    sourceStore.register({
+      projectId: PROJECT_ID,
+      kind: 'file',
+      path: 'docs/unicode-heavy.md',
+      content: 'unicode heavy',
+      format: 'markdown',
+    });
+
+    expect(searchKnowledge('🙂'.repeat(100), { db, projectId: PROJECT_ID, mode: 'sources' })).toEqual([]);
   });
 });
