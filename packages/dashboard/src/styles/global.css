@@ -130,12 +130,16 @@ a:focus-visible {
   justify-content: center;
   padding: clamp(48px, 8vw, 120px);
   border-right: 1px solid var(--line);
+  /* Matches jcnr-triage's .login-shell wash (dashboard.css): a primary
+     radial-gradient top-left plus its --argon-info cyan top-right, layered
+     over the same grid-dot pattern this panel already had. */
   background:
-    radial-gradient(circle at 18% 20%, rgb(var(--blue-rgb) / 14%), transparent 34%),
+    radial-gradient(circle at 18% 20%, rgb(var(--blue-rgb) / 22%), transparent 32%),
+    radial-gradient(circle at 82% 8%, rgb(var(--info-rgb) / 18%), transparent 28%),
     linear-gradient(90deg, rgb(var(--blue-rgb) / 3%) 1px, transparent 1px),
     linear-gradient(rgb(var(--blue-rgb) / 3%) 1px, transparent 1px),
     var(--canvas);
-  background-size: auto, 32px 32px, 32px 32px, auto;
+  background-size: auto, auto, 32px 32px, 32px 32px, auto;
 }
 
 .login-story .brand-lockup {
@@ -297,7 +301,37 @@ a:focus-visible {
   flex-direction: column;
   padding: 24px 16px 16px;
   border-right: 1px solid var(--line);
-  background: var(--surface-sunken);
+  /* jcnr-triage's .app-sidebar is always this dark navy gradient regardless of
+     the page's light/dark theme (dashboard.css has no [data-bs-theme="dark"]
+     override for it) - mirrored here rather than following --surface-sunken,
+     which would otherwise flip pale in light mode. */
+  background: linear-gradient(180deg, #172033, #111827);
+  color: #d6dcea;
+}
+
+.sidebar .brand-lockup {
+  color: #ffffff;
+}
+
+.sidebar .brand-mark {
+  border-color: transparent;
+  background: linear-gradient(135deg, var(--blue), #825ee4);
+  color: #ffffff;
+}
+
+.sidebar .environment,
+.sidebar .sidebar-footer {
+  border-color: rgb(255 255 255 / 13%);
+}
+
+.sidebar .environment strong,
+.sidebar .sidebar-footer strong {
+  color: #ffffff;
+}
+
+.sidebar .environment span:last-child,
+.sidebar .sidebar-footer span:last-child {
+  color: #8893a7;
 }
 
 .environment {
@@ -345,7 +379,7 @@ a:focus-visible {
   border: 0;
   border-radius: 5px;
   background: transparent;
-  color: var(--text-muted);
+  color: #d6dcea;
   font-size: 13px;
   font-weight: 650;
   text-align: left;
@@ -354,13 +388,14 @@ a:focus-visible {
 }
 
 .nav-item:hover {
-  background: var(--surface);
-  color: var(--text);
+  background: rgb(255 255 255 / 6%);
+  color: #ffffff;
 }
 
 .nav-item--active {
-  background: var(--surface-selected);
-  color: var(--text);
+  background: linear-gradient(90deg, var(--blue), #697dea);
+  color: #ffffff;
+  box-shadow: 0 5px 12px rgb(var(--blue-rgb) / 35%);
 }
 
 .nav-glyph {
@@ -389,13 +424,13 @@ a:focus-visible {
   padding: 6px;
   border: 0;
   background: transparent;
-  color: var(--text-muted);
+  color: #8893a7;
   font-size: 9px;
   cursor: pointer;
 }
 
 .logout-action:hover {
-  color: var(--text);
+  color: #ffffff;
 }
 
 .theme-toggle {

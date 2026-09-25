@@ -116,6 +116,7 @@ function buildSession(reauthenticated = false): AdminSession {
   return {
     userId: ADMIN_USER_ID,
     username: ADMIN_USERNAME,
+    role: 'admin',
     csrfToken: 'csrf-token',
     reauthenticatedUntil: reauthenticated ? futureReauthentication() : null,
     expiresAt: new Date(Date.now() + 30 * 60_000).toISOString(),

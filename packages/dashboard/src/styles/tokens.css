@@ -21,15 +21,19 @@
   --text-faint: #94a3b8;
   --text-watermark: #eef1f6;
   --blue: #5e72e4;
-  --blue-rgb: 94, 114, 228;
+  --blue-rgb: 94 114 228;
   --blue-strong: #4c5fd6;
   --blue-strong-hover: #3f52c9;
   --green: #2dce89;
-  --green-rgb: 45, 206, 137;
+  --green-rgb: 45 206 137;
   --amber: #fbcf33;
-  --amber-rgb: 251, 207, 51;
+  --amber-rgb: 251 207 51;
   --red: #f5365c;
-  --red-rgb: 245, 54, 92;
+  --red-rgb: 245 54 92;
+  /* jcnr-triage's --argon-info, used for its login page's second radial-gradient
+     accent (see dashboard.css .login-shell) - not otherwise part of the status
+     palette, so it only needs a light-mode value. */
+  --info-rgb: 17 205 239;
   --danger-text: #c81e3f;
   --success-text: #1f8f5f;
   --avatar-bg: #dfe6fb;
