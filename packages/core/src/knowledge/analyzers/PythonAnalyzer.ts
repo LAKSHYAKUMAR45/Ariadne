@@ -342,6 +342,19 @@ function resolveLocalSymbol(
   return matches.length === 1 ? matches[0]! : null;
 }
 
+function resolveLexicalCallTarget(
+  symbolsByName: Map<string, ExtractedSymbol[]>,
+  importedNames: Set<string>,
+  shadowedNames: Set<string>,
+  name: string,
+): ExtractedSymbol | null {
+  if (importedNames.has(name) || shadowedNames.has(name)) {
+    return null;
+  }
+  const matches = (symbolsByName.get(name) ?? []).filter((symbol) => symbol.kind !== 'method');
+  return matches.length === 1 ? matches[0]! : null;
+}
+
 function createRelationship(
   sourceVersionId: string,
   relationship: Omit<ExtractedRelationship, 'id' | 'confidence'>,
@@ -461,7 +474,7 @@ function collectCallRelationships(
       const callee = childNodes(node)[0] ?? null;
       const calleeName = callee ? nodeText(content, callee).trim() : null;
       if (calleeName) {
-        const localTarget = resolveLocalSymbol(symbolsByName, importedNames, shadowedNames, calleeName);
+        const localTarget = resolveLexicalCallTarget(symbolsByName, importedNames, shadowedNames, calleeName);
         relationships.push(
           createRelationship(sourceVersionId, {
             type: 'calls',

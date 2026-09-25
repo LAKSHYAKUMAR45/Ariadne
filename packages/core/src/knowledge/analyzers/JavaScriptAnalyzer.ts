@@ -37,6 +37,15 @@ interface CollectedSymbol {
   defaultExport: boolean;
 }
 
+function findCollectedSymbolForNode(symbols: CollectedSymbol[], node: SyntaxNode): CollectedSymbol | null {
+  return (
+    symbols.find(
+      (entry) =>
+        entry.node.type.name === node.type.name && entry.node.from === node.from && entry.node.to === node.to,
+    ) ?? null
+  );
+}
+
 function identifierText(content: string, node: SyntaxNode): string {
   return nodeText(content, node).trim();
 }
@@ -85,6 +94,23 @@ function unwrapExport(node: SyntaxNode): { target: SyntaxNode; exported: boolean
   const defaultExport = children.some((child) => child.type.name === 'default');
   const target = childNodes(node).find((child) => child.type.name.endsWith('Declaration'));
   return { target: target ?? node, exported: true, defaultExport };
+}
+
+function explicitClassNameNode(node: SyntaxNode): SyntaxNode | null {
+  const children = childNodes(node);
+  const classIndex = children.findIndex((child) => child.type.name === 'class');
+  const candidate = classIndex >= 0 ? children[classIndex + 1] : null;
+  return candidate?.type.name === 'VariableDefinition' ? candidate : null;
+}
+
+function isKeywordNode(content: string, node: SyntaxNode, keyword: string): boolean {
+  return node.type.name === keyword || (node.type.isError && nodeText(content, node).trim() === keyword);
+}
+
+function classHeritageNode(content: string, node: SyntaxNode, keyword: 'extends' | 'implements'): SyntaxNode | null {
+  const children = childNodes(node);
+  const keywordIndex = children.findIndex((child) => isKeywordNode(content, child, keyword));
+  return keywordIndex >= 0 ? children[keywordIndex + 1] ?? null : null;
 }
 
 function symbolFromNode(
@@ -144,7 +170,7 @@ function symbolFromNode(
   }
 
   if (node.type.name === 'ClassDeclaration') {
-    const nameNode = findFirstChild(node, 'VariableDefinition');
+    const nameNode = explicitClassNameNode(node);
     const classBody = findFirstChild(node, 'ClassBody');
     const name = nameNode ? identifierText(content, nameNode) : defaultExport ? 'default' : null;
     if (!name) return null;
@@ -313,6 +339,19 @@ function resolveLocalSymbol(
     return null;
   }
   const matches = symbolsByName.get(name) ?? [];
+  return matches.length === 1 ? matches[0]! : null;
+}
+
+function resolveLexicalCallTarget(
+  symbolsByName: Map<string, ExtractedSymbol[]>,
+  importedNames: Set<string>,
+  shadowedNames: Set<string>,
+  name: string,
+): ExtractedSymbol | null {
+  if (importedNames.has(name) || shadowedNames.has(name)) {
+    return null;
+  }
+  const matches = (symbolsByName.get(name) ?? []).filter((symbol) => symbol.kind !== 'method');
   return matches.length === 1 ? matches[0]! : null;
 }
 
@@ -655,7 +694,7 @@ function collectCallRelationships(
       if (targetName) {
         const shadowedNames = mergeShadowedNames(functionScopedBindings, activeBlockBindings);
         const localTarget = targetNode?.type.name === 'VariableName'
-          ? resolveLocalSymbol(symbolsByName, importedNames, shadowedNames, targetName)
+          ? resolveLexicalCallTarget(symbolsByName, importedNames, shadowedNames, targetName)
           : null;
         relationships.push(
           createRelationship(sourceVersionId, {
@@ -769,12 +808,36 @@ function collectSymbolRelationships(
 
   for (const statement of topLevelStatements.filter((node) => node.type.name === 'ExportDeclaration')) {
     const sourceNode = findFirstChild(statement, 'String');
+    const source = sourceNode ? identifierText(content, sourceNode).replace(/^['"]|['"]$/g, '') : null;
+    const starNode = findFirstChild(statement, 'Star');
     const exportGroup = findFirstChild(statement, 'ExportGroup');
+    if (source && starNode) {
+      const children = childNodes(statement);
+      const asIndex = children.findIndex((child) => child.type.name === 'as');
+      const aliasNode = asIndex >= 0 ? children[asIndex + 1] : null;
+      const exportedName = aliasNode?.type.name === 'VariableName' ? identifierText(content, aliasNode) : '*';
+      const span = spanFromOffsets(content, starNode.from, aliasNode?.type.name === 'VariableName' ? aliasNode.to : starNode.to);
+      relationships.push(
+        createRelationship(sourceVersionId, {
+          type: 'exports',
+          sourceSymbolId: null,
+          targetSymbolId: null,
+          targetReference: `${source}#*`,
+          span,
+          metadata: {
+            exportKind: 'reexport',
+            localName: '*',
+            exportedName,
+          },
+        }),
+      );
+      continue;
+    }
+
     if (!exportGroup) {
       continue;
     }
 
-    const source = sourceNode ? identifierText(content, sourceNode).replace(/^['"]|['"]$/g, '') : null;
     const groupChildren = childNodes(exportGroup);
     for (let index = 0; index < groupChildren.length; index += 1) {
       const current = groupChildren[index]!;
@@ -818,34 +881,27 @@ function collectSymbolRelationships(
     if (target.type.name !== 'ClassDeclaration') {
       continue;
     }
-    const classNameNode = findFirstChild(target, 'VariableDefinition');
-    const className = classNameNode ? identifierText(content, classNameNode) : null;
-    const classSymbol = className
-      ? resolveLocalSymbol(symbolsByName, importedNames, new Set<string>(), className)
-      : null;
+    const classSymbol = findCollectedSymbolForNode(symbols, target)?.symbol ?? null;
     if (!classSymbol) {
       continue;
     }
 
-    const extendsIndex = childNodes(target).findIndex((child) => child.type.name === 'extends');
-    if (extendsIndex >= 0) {
-      const baseNode = childNodes(target)[extendsIndex + 1] ?? null;
-      if (baseNode) {
-        const baseName = identifierText(content, baseNode);
-        const targetSymbol = resolveLocalSymbol(symbolsByName, importedNames, new Set<string>(), baseName);
-        relationships.push(
-          createRelationship(sourceVersionId, {
-            type: 'inherits',
-            sourceSymbolId: classSymbol.id,
-            targetSymbolId: targetSymbol?.id ?? null,
-            targetReference: targetSymbol ? null : baseName,
-            span: nodeSpan(content, baseNode),
-          }),
-        );
-      }
+    const baseNode = classHeritageNode(content, target, 'extends');
+    if (baseNode) {
+      const baseName = identifierText(content, baseNode);
+      const targetSymbol = resolveLocalSymbol(symbolsByName, importedNames, new Set<string>(), baseName);
+      relationships.push(
+        createRelationship(sourceVersionId, {
+          type: 'inherits',
+          sourceSymbolId: classSymbol.id,
+          targetSymbolId: targetSymbol?.id ?? null,
+          targetReference: targetSymbol ? null : baseName,
+          span: nodeSpan(content, baseNode),
+        }),
+      );
     }
 
-    const implementsIndex = childNodes(target).findIndex((child) => child.type.name === 'implements');
+    const implementsIndex = childNodes(target).findIndex((child) => isKeywordNode(content, child, 'implements'));
     if (implementsIndex >= 0) {
       for (const implementNode of childNodes(target).slice(implementsIndex + 1).filter((child) => child.type.name === 'TypeName')) {
         const targetName = identifierText(content, implementNode);

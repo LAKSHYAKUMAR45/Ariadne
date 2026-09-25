@@ -857,6 +857,207 @@ describe('JavaScriptAnalyzer', () => {
     );
   });
 
+  it('keeps anonymous default class identities source-backed when heritage clauses are present', async () => {
+    const analyzer = new JavaScriptAnalyzer();
+    const content = [
+      'class Base {}',
+      '',
+      'export default class extends Base {}',
+      '',
+    ].join('\n');
+
+    const result = await analyzer.analyze({
+      sourceVersionId: 'javascript-anonymous-default-class',
+      sourceKind: 'file',
+      sourcePath: 'src/anonymous-default.ts',
+      mimeType: 'text/plain',
+      content,
+    });
+
+    const baseSymbol = result.symbols.find((symbol) => symbol.kind === 'class' && symbol.name === 'Base');
+    const anonymousDefaultClass = result.symbols.find(
+      (symbol) => symbol.kind === 'class' && symbol.qualifiedName === 'anonymous-default.default',
+    );
+
+    expect(anonymousDefaultClass).toEqual(
+      expect.objectContaining({
+        name: 'default',
+        qualifiedName: 'anonymous-default.default',
+        span: expectedSpan(content, 'export default class extends Base {'),
+      }),
+    );
+    expect(result.relationships).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: 'inherits',
+          sourceSymbolId: anonymousDefaultClass?.id,
+          targetSymbolId: baseSymbol?.id,
+          targetReference: null,
+          span: expectedSpan(content, 'Base', 2),
+        }),
+        expect.objectContaining({
+          type: 'exports',
+          sourceSymbolId: anonymousDefaultClass?.id,
+          targetReference: 'default',
+          span: expectedSpan(content, 'export default class extends Base {'),
+        }),
+      ]),
+    );
+  });
+
+  it('resolves bare calls inside methods to module functions instead of sibling methods', async () => {
+    const analyzer = new JavaScriptAnalyzer();
+    const content = [
+      'class Example {',
+      '  helper(): void {}',
+      '  static make(): void {}',
+      '  run(): void {',
+      '    helper();',
+      '    make();',
+      '  }',
+      '}',
+      '',
+      'function helper(): void {}',
+      'function make(): void {}',
+    ].join('\n');
+
+    const result = await analyzer.analyze({
+      sourceVersionId: 'javascript-method-bare-calls',
+      sourceKind: 'file',
+      sourcePath: 'src/method-bare-calls.ts',
+      mimeType: 'text/plain',
+      content,
+    });
+
+    const helperFunction = result.symbols.find(
+      (symbol) => symbol.kind === 'function' && symbol.qualifiedName === 'method-bare-calls.helper',
+    );
+    const makeFunction = result.symbols.find(
+      (symbol) => symbol.kind === 'function' && symbol.qualifiedName === 'method-bare-calls.make',
+    );
+    const exampleRun = result.symbols.find(
+      (symbol) => symbol.kind === 'method' && symbol.qualifiedName === 'method-bare-calls.Example.run',
+    );
+
+    expect(result.relationships).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: 'calls',
+          sourceSymbolId: exampleRun?.id,
+          targetSymbolId: helperFunction?.id,
+          targetReference: null,
+          span: expectedSpan(content, 'helper()', 2),
+        }),
+        expect.objectContaining({
+          type: 'calls',
+          sourceSymbolId: exampleRun?.id,
+          targetSymbolId: makeFunction?.id,
+          targetReference: null,
+          span: expectedSpan(content, 'make()', 2),
+        }),
+      ]),
+    );
+  });
+
+  it('leaves bare sibling method calls unresolved when no module function is in scope', async () => {
+    const analyzer = new JavaScriptAnalyzer();
+    const content = [
+      'class OnlySibling {',
+      '  helper(): void {}',
+      '  static make(): void {}',
+      '  run(): void {',
+      '    helper();',
+      '    make();',
+      '  }',
+      '}',
+      '',
+    ].join('\n');
+
+    const result = await analyzer.analyze({
+      sourceVersionId: 'javascript-sibling-method-only',
+      sourceKind: 'file',
+      sourcePath: 'src/sibling-method-only.ts',
+      mimeType: 'text/plain',
+      content,
+    });
+
+    const runSymbol = result.symbols.find(
+      (symbol) => symbol.kind === 'method' && symbol.qualifiedName === 'sibling-method-only.OnlySibling.run',
+    );
+
+    expect(result.relationships).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: 'calls',
+          sourceSymbolId: runSymbol?.id,
+          targetSymbolId: null,
+          targetReference: 'helper',
+          span: expectedSpan(content, 'helper()', 2),
+        }),
+        expect.objectContaining({
+          type: 'calls',
+          sourceSymbolId: runSymbol?.id,
+          targetSymbolId: null,
+          targetReference: 'make',
+          span: expectedSpan(content, 'make()', 2),
+        }),
+      ]),
+    );
+  });
+
+  it('captures deterministic star re-export relationships without fabricating namespace symbols', async () => {
+    const analyzer = new JavaScriptAnalyzer();
+    const content = [
+      "export * from 'pkg';",
+      "export * as ns from 'pkg';",
+      '',
+    ].join('\n');
+
+    const result = await analyzer.analyze({
+      sourceVersionId: 'javascript-star-reexports',
+      sourceKind: 'file',
+      sourcePath: 'src/star-reexports.ts',
+      mimeType: 'text/plain',
+      content,
+    });
+
+    expect(result.relationships).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: 'exports',
+          sourceSymbolId: null,
+          targetSymbolId: null,
+          targetReference: 'pkg#*',
+          span: expectedSpan(content, '*'),
+          metadata: {
+            exportKind: 'reexport',
+            localName: '*',
+            exportedName: '*',
+          },
+        }),
+        expect.objectContaining({
+          type: 'exports',
+          sourceSymbolId: null,
+          targetSymbolId: null,
+          targetReference: 'pkg#*',
+          span: expectedSpan(content, '* as ns'),
+          metadata: {
+            exportKind: 'reexport',
+            localName: '*',
+            exportedName: 'ns',
+          },
+        }),
+      ]),
+    );
+    expect(result.symbols).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          name: 'ns',
+        }),
+      ]),
+    );
+  });
+
   it('surfaces diagnostics for malformed-but-parseable TypeScript without inventing unsupported export facts', async () => {
     const analyzer = new JavaScriptAnalyzer();
     const content = [

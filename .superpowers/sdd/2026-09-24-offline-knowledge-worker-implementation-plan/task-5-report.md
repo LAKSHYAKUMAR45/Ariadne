@@ -146,3 +146,57 @@ Final results:
   - import target references now preserve original imported symbols instead of local aliases/default names;
   - Python dotted/aliased imports are parsed from Lezer-confirmed structure;
   - ambiguous duplicate bare names no longer overwrite prior symbols during local resolution.
+
+## Task 5 fix round 2 — RED -> GREEN
+
+### Scope
+- Prevent anonymous default class identities from inheriting fabricated names from heritage descendants.
+- Keep bare calls inside class methods lexical: sibling instance/static methods are not bare bindings in JS/TS or Python.
+- Emit deterministic `export * from` and `export * as ns from` re-export relationships with exact spans and source-module evidence, without fabricating local namespace symbols.
+
+### RED
+Added failing coverage first for:
+- `export default class extends Base {}` preserving `default` identity plus `inherits` / `exports` relationships;
+- JS/TS method bare-call resolution with sibling-method-only and sibling-method-plus-module-function cases;
+- Python method bare-call resolution with the same two cases;
+- `export * from 'pkg'` and `export * as ns from 'pkg'` re-export relationships and no fabricated `ns` symbol.
+
+Failing reproduction before the implementation changes:
+
+```bash
+cd packages/core
+ariadne exec pnpm exec vitest run \
+  test/knowledge/analyzers/PythonAnalyzer.test.ts \
+  test/knowledge/analyzers/JavaScriptAnalyzer.test.ts
+```
+
+Observed failures:
+- anonymous default class with `extends` was misidentified/missed because Lezer recovery exposed the base name as a `VariableDefinition`;
+- bare method calls either resolved to sibling methods or stayed ambiguously unresolved instead of preferring a clearly scoped module/global function;
+- star re-export relationships were missing entirely.
+
+### GREEN
+Passing validation after the fixes:
+
+```bash
+cd packages/core
+pnpm exec vitest run \
+  test/knowledge/analyzers/AnalyzerRegistry.test.ts \
+  test/knowledge/analyzers/PythonAnalyzer.test.ts \
+  test/knowledge/analyzers/JavaScriptAnalyzer.test.ts \
+  test/knowledge/formats/Ingestors.test.ts
+
+pnpm test
+pnpm run build
+```
+
+Results:
+- focused Task 5/registry/Ingestors suites: 45/45 passed;
+- full `@ariadne-dev/core` test suite: 463/463 passed;
+- `@ariadne-dev/core` build passed.
+
+### IMPROVE
+- JavaScript class-name extraction now treats anonymous default class declarations conservatively, using the source-backed `default` identity when a parser-recovery heritage clause would otherwise look like a name.
+- JavaScript inheritance detection now tolerates Lezer recovery nodes for anonymous default `extends` clauses while keeping exact target spans.
+- Bare call target resolution now filters out `method` symbols for lexical call binding in both analyzers, so sibling methods are never treated as bare local names, while clearly scoped module/global functions still resolve.
+- JavaScript export analysis now emits deterministic `exports` relationships for `export *` and `export * as ns` using source-module evidence (`pkg#*`) and exact star/namespace spans without fabricating local symbols.

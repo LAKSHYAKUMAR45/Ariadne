@@ -631,6 +631,115 @@ describe('PythonAnalyzer', () => {
     );
   });
 
+  it('resolves bare calls inside methods to module functions instead of sibling methods', async () => {
+    const analyzer = new PythonAnalyzer();
+    const content = [
+      'class Example:',
+      '    def helper(self):',
+      '        return None',
+      '',
+      '    @staticmethod',
+      '    def make():',
+      '        return None',
+      '',
+      '    def run(self):',
+      '        helper()',
+      '        make()',
+      '',
+      'def helper():',
+      '    return None',
+      '',
+      'def make():',
+      '    return None',
+    ].join('\n');
+
+    const result = await analyzer.analyze({
+      sourceVersionId: 'python-method-bare-calls',
+      sourceKind: 'file',
+      sourcePath: 'method_bare_calls.py',
+      mimeType: 'text/x-python',
+      content,
+    });
+
+    const helperFunction = result.symbols.find(
+      (symbol) => symbol.kind === 'function' && symbol.qualifiedName === 'method_bare_calls.helper',
+    );
+    const makeFunction = result.symbols.find(
+      (symbol) => symbol.kind === 'function' && symbol.qualifiedName === 'method_bare_calls.make',
+    );
+    const exampleRun = result.symbols.find(
+      (symbol) => symbol.kind === 'method' && symbol.qualifiedName === 'method_bare_calls.Example.run',
+    );
+
+    expect(result.relationships).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: 'calls',
+          sourceSymbolId: exampleRun?.id,
+          targetSymbolId: helperFunction?.id,
+          targetReference: null,
+          span: expectedSpan(content, 'helper()', 1),
+        }),
+        expect.objectContaining({
+          type: 'calls',
+          sourceSymbolId: exampleRun?.id,
+          targetSymbolId: makeFunction?.id,
+          targetReference: null,
+          span: expectedSpan(content, 'make()', 2),
+        }),
+      ]),
+    );
+  });
+
+  it('leaves bare sibling method calls unresolved when no module function is in scope', async () => {
+    const analyzer = new PythonAnalyzer();
+    const content = [
+      'class OnlySibling:',
+      '    def helper(self):',
+      '        return None',
+      '',
+      '    @staticmethod',
+      '    def make():',
+      '        return None',
+      '',
+      '    def run(self):',
+      '        helper()',
+      '        make()',
+      '',
+    ].join('\n');
+
+    const result = await analyzer.analyze({
+      sourceVersionId: 'python-sibling-method-only',
+      sourceKind: 'file',
+      sourcePath: 'sibling_method_only.py',
+      mimeType: 'text/x-python',
+      content,
+    });
+
+    const runSymbol = result.symbols.find(
+      (symbol) => symbol.kind === 'method' && symbol.qualifiedName === 'sibling_method_only.OnlySibling.run',
+    );
+
+    expect(result.relationships).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: 'calls',
+          sourceSymbolId: runSymbol?.id,
+          targetSymbolId: null,
+          targetReference: 'helper',
+          span: expectedSpan(content, 'helper()'),
+        }),
+        expect.objectContaining({
+          type: 'calls',
+          sourceSymbolId: runSymbol?.id,
+          targetSymbolId: null,
+          targetReference: 'make',
+          span: expectedSpan(content, 'make()', 2),
+        }),
+      ]),
+    );
+  });
+
   it('registers python sources by extension and MIME type', () => {
     const registry = createDefaultAnalyzerRegistry();
 
