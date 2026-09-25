@@ -105,13 +105,50 @@ function pagePath(type: KnowledgePageType, slug: string): string {
 function parseProvenance(db: Database.Database, versionId: string): KnowledgeProvenanceRef[] {
   const rows = db
     .prepare(
-      `SELECT source_kind, source_id, confidence
+      `SELECT prov.source_kind,
+              prov.source_id,
+              prov.confidence,
+              span.source_version_id,
+              span.start_offset,
+              span.end_offset,
+              span.start_line,
+              span.start_column,
+              span.end_line,
+              span.end_column,
+              span.label
        FROM knowledge_page_provenance
-       WHERE page_version_id = ?
-       ORDER BY rowid ASC`,
+       AS prov
+       LEFT JOIN knowledge_source_spans span
+         ON span.project_id = prov.project_id AND span.id = prov.source_span_id
+       WHERE prov.page_version_id = ?
+       ORDER BY prov.rowid ASC`,
     )
-    .all(versionId) as Array<{ source_kind: KnowledgeProvenanceRef['kind']; source_id: string; confidence: number }>;
-  return rows.map((row) => ({ kind: row.source_kind, id: row.source_id, confidence: row.confidence }));
+    .all(versionId) as Array<{
+    source_kind: KnowledgeProvenanceRef['kind'];
+    source_id: string;
+    confidence: number;
+    source_version_id: string | null;
+    start_offset: number | null;
+    end_offset: number | null;
+    start_line: number | null;
+    start_column: number | null;
+    end_line: number | null;
+    end_column: number | null;
+    label: string | null;
+  }>;
+  return rows.map((row) => ({
+    kind: row.source_kind,
+    id: row.source_id,
+    ...(row.source_version_id !== null ? { sourceVersionId: row.source_version_id } : {}),
+    ...(row.start_offset !== null ? { startOffset: row.start_offset } : {}),
+    ...(row.end_offset !== null ? { endOffset: row.end_offset } : {}),
+    ...(row.start_line !== null ? { startLine: row.start_line } : {}),
+    ...(row.start_column !== null ? { startColumn: row.start_column } : {}),
+    ...(row.end_line !== null ? { endLine: row.end_line } : {}),
+    ...(row.end_column !== null ? { endColumn: row.end_column } : {}),
+    ...(row.label !== null ? { label: row.label } : {}),
+    confidence: row.confidence,
+  }));
 }
 
 function parseSourceVersionIds(db: Database.Database, versionId: string): string[] {
@@ -125,6 +162,53 @@ function parseSourceVersionIds(db: Database.Database, versionId: string): string
       )
       .all(versionId) as Array<{ source_version_id: string }>
   ).map((row) => row.source_version_id);
+}
+
+function resolveSourceSpanId(db: Database.Database, input: CreatePageVersionInput, reference: KnowledgeProvenanceRef): string | null {
+  if (
+    reference.kind !== 'source' ||
+    !reference.sourceVersionId ||
+    reference.startOffset === undefined ||
+    reference.endOffset === undefined ||
+    reference.startLine === undefined ||
+    reference.startColumn === undefined ||
+    reference.endLine === undefined ||
+    reference.endColumn === undefined
+  ) {
+    return null;
+  }
+  const row = db
+    .prepare(
+      `SELECT id
+       FROM knowledge_source_spans span
+       JOIN knowledge_source_versions version
+         ON version.project_id = span.project_id
+        AND version.id = span.source_version_id
+       WHERE span.project_id = @projectId
+         AND span.source_version_id = @sourceVersionId
+         AND version.source_id = @sourceId
+         AND span.start_offset = @startOffset
+         AND span.end_offset = @endOffset
+         AND span.start_line = @startLine
+         AND span.start_column = @startColumn
+         AND span.end_line = @endLine
+         AND span.end_column = @endColumn
+         AND ((span.label IS NULL AND @label IS NULL) OR span.label = @label)
+       LIMIT 1`,
+    )
+    .get({
+      projectId: input.projectId,
+      sourceVersionId: reference.sourceVersionId,
+      sourceId: reference.id,
+      startOffset: reference.startOffset,
+      endOffset: reference.endOffset,
+      startLine: reference.startLine,
+      startColumn: reference.startColumn,
+      endLine: reference.endLine,
+      endColumn: reference.endColumn,
+      label: reference.label ?? null,
+    }) as { id: string } | undefined;
+  return row?.id ?? null;
 }
 
 export class KnowledgePageStore {
@@ -214,17 +298,19 @@ export class KnowledgePageStore {
 
       const insertProvenance = this.db.prepare(
         `INSERT INTO knowledge_page_provenance
-         (id, project_id, page_version_id, source_kind, source_id, confidence, created_at)
-         VALUES (@id, @projectId, @versionId, @kind, @sourceId, @confidence, @createdAt)`,
+         (id, project_id, page_version_id, source_kind, source_id, source_span_id, confidence, created_at)
+         VALUES (@id, @projectId, @versionId, @kind, @sourceId, @sourceSpanId, @confidence, @createdAt)`,
       );
       for (const reference of input.provenance ?? []) {
         validateConfidence(reference.confidence);
+        const sourceSpanId = resolveSourceSpanId(this.db, input, reference);
         insertProvenance.run({
           id: createKnowledgeId('provenance', `${versionId}:${reference.kind}:${reference.id}`),
           projectId: input.projectId,
           versionId,
           kind: reference.kind,
           sourceId: reference.id,
+          sourceSpanId,
           confidence: reference.confidence ?? input.confidence ?? 1,
           createdAt: timestamp,
         });
@@ -258,6 +344,34 @@ export class KnowledgePageStore {
       .get(projectId, pageId) as PageRow | undefined;
     if (!row) return null;
     return this.toPage(row);
+  }
+
+  public getCurrentVersion(projectId: string, pageId: KnowledgePageId): KnowledgePageVersion | null {
+    const row = this.db
+      .prepare(
+        `SELECT *
+         FROM knowledge_page_versions
+         WHERE project_id = ? AND page_id = ?
+         ORDER BY version_number DESC LIMIT 1`,
+      )
+      .get(projectId, pageId) as VersionRow | undefined;
+    return row ? this.toVersion(row) : null;
+  }
+
+  public activatePage(
+    projectId: string,
+    pageId: KnowledgePageId,
+    type: KnowledgePageType,
+    title: string,
+    updatedAt: string,
+  ): void {
+    this.db
+      .prepare(
+        `UPDATE knowledge_pages
+         SET page_type = @type, title = @title, status = 'active', updated_at = @updatedAt
+         WHERE project_id = @projectId AND id = @id`,
+      )
+      .run({ projectId, id: pageId, type, title, updatedAt });
   }
 
   public listPages(projectId: string, type?: KnowledgePageType): KnowledgePage[] {

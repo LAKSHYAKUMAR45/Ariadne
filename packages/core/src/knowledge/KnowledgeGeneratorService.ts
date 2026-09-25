@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import type Database from 'better-sqlite3';
@@ -33,8 +34,14 @@ export interface KnowledgeGenerationResult {
   projectId: string;
   generatedAt: string;
   pages: KnowledgePageVersion[];
+  pageResults: KnowledgeGenerationPageResult[];
   files: string[];
   manifest: KnowledgeManifest;
+}
+
+export interface KnowledgeGenerationPageResult {
+  page: KnowledgePageVersion;
+  reused: boolean;
 }
 
 export interface KnowledgeGeneratorServiceOptions {
@@ -68,6 +75,16 @@ interface FileCommit {
   rollback: () => void;
 }
 
+interface PreparedPageGeneration {
+  input: KnowledgeGenerationPageInput;
+  pageId: string;
+  relativePath: string;
+  markdown: string;
+  versionNumber: number;
+  reused: boolean;
+  reusedVersion: KnowledgePageVersion | null;
+}
+
 function parsePayload(value: string): KnowledgeGenerationPayload {
   const payload: unknown = JSON.parse(value);
   if (payload === null || typeof payload !== 'object' || Array.isArray(payload)) {
@@ -87,6 +104,18 @@ function writeDurable(filePath: string, content: string): void {
   } finally {
     closeSync(descriptor);
   }
+}
+
+function contentHash(content: string): string {
+  return createHash('sha256').update(content).digest('hex');
+}
+
+function canonicalizeSourceVersionIds(value: string[] | undefined): string[] {
+  return [...new Set(value ?? [])].sort();
+}
+
+function sameStrings(left: string[] | undefined, right: string[]): boolean {
+  return JSON.stringify(canonicalizeSourceVersionIds(left)) === JSON.stringify(canonicalizeSourceVersionIds(right));
 }
 
 function resolveOutputPath(root: string, relativePath: string): { relativePath: string; absolutePath: string } {
@@ -211,28 +240,77 @@ export class KnowledgeGeneratorService {
     assertNoSymlinkComponents(workspaceRoot, outputRoot, 'Knowledge generation output root');
     const manifest = buildKnowledgeManifest(project.id, generatedAt);
     const pageStore = new KnowledgePageStore(this.db);
-    const renderedPages: Array<{ input: KnowledgeGenerationPageInput; pageId: string; version: number; markdown: string; relativePath: string }> = [];
+    const renderedPages: PreparedPageGeneration[] = [];
 
     try {
       for (const input of payload.pages) {
         if (!input.content.trim()) throw new Error(`Knowledge page content must not be empty: ${input.slug}`);
         const relativePath = pageRelativePath(input);
         const pageId = input.pageId ?? createKnowledgeId('page', `${project.id}:${input.slug}`);
-        const version = pageStore.getNextVersionNumber(project.id, pageId as never);
+        const sourceVersionIds = canonicalizeSourceVersionIds(input.sourceVersionIds);
+        const currentVersion = pageStore.getCurrentVersion(project.id, pageId as never);
+        const reusedMarkdown =
+          currentVersion === null
+            ? null
+            : this.renderer.renderKnowledgePage({
+                id: pageId,
+                type: input.type,
+                title: input.title,
+                slug: input.slug,
+                content: input.content,
+                sourceIds: sourceVersionIds,
+                provenance: input.provenance,
+                confidence: input.confidence,
+                generatorVersion,
+                generatedAt: currentVersion.createdAt,
+                version: currentVersion.versionNumber,
+              });
+
+        if (
+          currentVersion &&
+          reusedMarkdown &&
+          contentHash(reusedMarkdown) === currentVersion.contentHash &&
+          (currentVersion.summary ?? null) === (input.summary ?? null) &&
+          sameStrings(input.sourceVersionIds, currentVersion.sourceVersionIds)
+        ) {
+          renderedPages.push({
+            input,
+            pageId,
+            relativePath,
+            markdown: reusedMarkdown,
+            versionNumber: currentVersion.versionNumber,
+            reused: true,
+            reusedVersion: currentVersion,
+          });
+          continue;
+        }
+
+        const versionNumber = pageStore.getNextVersionNumber(project.id, pageId as never);
         const markdown = this.renderer.renderKnowledgePage({
           id: pageId,
           type: input.type,
           title: input.title,
           slug: input.slug,
           content: input.content,
-          sourceIds: input.sourceVersionIds,
+          sourceIds: sourceVersionIds,
           provenance: input.provenance,
           confidence: input.confidence,
           generatorVersion,
           generatedAt,
-          version,
+          version: versionNumber,
         });
-        renderedPages.push({ input, pageId, version, markdown, relativePath });
+        renderedPages.push({
+          input: {
+            ...input,
+            sourceVersionIds,
+          },
+          pageId,
+          relativePath,
+          markdown,
+          versionNumber,
+          reused: false,
+          reusedVersion: null,
+        });
       }
     } catch (error) {
       this.failJob(jobId, error);
@@ -240,14 +318,14 @@ export class KnowledgeGeneratorService {
     }
 
     const entries: KnowledgeIndexEntry[] = renderedPages
-      .map(({ input, pageId, version }) => ({
+      .map(({ input, pageId, versionNumber }) => ({
         id: pageId,
         type: input.type,
         title: input.title,
         slug: input.slug,
         summary: input.summary ?? null,
         status: 'active',
-        version,
+        version: versionNumber,
         updatedAt: generatedAt,
       }))
       .sort((left, right) => left.slug.localeCompare(right.slug) || left.id.localeCompare(right.id));
@@ -269,24 +347,28 @@ export class KnowledgeGeneratorService {
     let fileCommit: FileCommit | null = null;
     try {
       fileCommit = commitFiles(outputRoot, stagedFiles);
-      const versions = this.db.transaction(() =>
-        renderedPages.map(({ input, pageId, markdown, relativePath }) => {
+      const pageResults = this.db.transaction(() =>
+        renderedPages.map((prepared) => {
+          if (prepared.reused && prepared.reusedVersion) {
+            pageStore.activatePage(project.id, prepared.pageId as never, prepared.input.type, prepared.input.title, generatedAt);
+            return { page: prepared.reusedVersion, reused: true };
+          }
           const versionInput: CreatePageVersionInput = {
             projectId: project.id,
-            pageId: pageId as never,
-            type: input.type,
-            title: input.title,
-            slug: input.slug,
-            content: markdown,
-            contentPath: relativePath,
-            summary: input.summary,
-            sourceVersionIds: input.sourceVersionIds,
-            provenance: input.provenance,
-            confidence: input.confidence,
+            pageId: prepared.pageId as never,
+            type: prepared.input.type,
+            title: prepared.input.title,
+            slug: prepared.input.slug,
+            content: prepared.markdown,
+            contentPath: prepared.relativePath,
+            summary: prepared.input.summary,
+            sourceVersionIds: prepared.input.sourceVersionIds,
+            provenance: prepared.input.provenance,
+            confidence: prepared.input.confidence,
             generatorVersion,
             createdAt: generatedAt,
           };
-          return pageStore.createPageVersion(versionInput);
+          return { page: pageStore.createPageVersion(versionInput), reused: false };
         }),
       )();
       this.db
@@ -297,7 +379,15 @@ export class KnowledgeGeneratorService {
         )
         .run({ completedAt: generatedAt, id: jobId });
       fileCommit.finalize();
-      return { jobId, projectId: project.id, generatedAt, pages: versions, files: fileCommit.files, manifest };
+      return {
+        jobId,
+        projectId: project.id,
+        generatedAt,
+        pages: pageResults.map((result) => result.page),
+        pageResults,
+        files: fileCommit.files,
+        manifest,
+      };
     } catch (error) {
       if (fileCommit) fileCommit.rollback();
       this.failJob(jobId, error);

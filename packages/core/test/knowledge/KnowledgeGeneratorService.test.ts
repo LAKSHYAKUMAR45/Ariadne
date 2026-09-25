@@ -3,6 +3,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { openDatabase } from '../../src/db.js';
 import { KnowledgeGeneratorService } from '../../src/knowledge/KnowledgeGeneratorService.js';
+import { KnowledgePageStore } from '../../src/knowledge/KnowledgePageStore.js';
 
 describe('KnowledgeGeneratorService', () => {
   const databases: Array<{ close: () => void }> = [];
@@ -153,5 +154,164 @@ describe('KnowledgeGeneratorService', () => {
       /knowledge|workspace/i,
     );
     expect(existsSync(join(outputRoot, 'pages'))).toBe(false);
+  });
+
+  it('reuses the current page version when rerendered markdown is unchanged across deterministic reruns', async () => {
+    const workspaceRoot = mkdtempSync(join(process.cwd(), '.knowledge-generator-test-'));
+    const outputRoot = join(workspaceRoot, '.ariadne', 'knowledge');
+    directories.push(workspaceRoot);
+    const database = createDatabase(workspaceRoot);
+
+    database
+      .prepare(
+        `INSERT INTO knowledge_jobs
+         (id, project_id, job_kind, status, payload_json, requested_at)
+         VALUES (?, ?, ?, 'queued', ?, ?)`,
+      )
+      .run(
+        'job_deterministic_1',
+        'project_1',
+        'generate',
+        JSON.stringify({
+          outputRoot,
+          generatorVersion: 'deterministic:typescript-lezer:2.1.0',
+          generatedAt: '2026-01-05T00:00:00.000Z',
+          pages: [
+            {
+              pageId: 'page_source_1',
+              type: 'source',
+              title: 'src/weird-module.ts',
+              slug: 'source-src-weird-module-ts',
+              content: 'Deterministic body',
+            },
+          ],
+        }),
+        '2026-01-05T00:00:00.000Z',
+      );
+    const first = await new KnowledgeGeneratorService(database).runKnowledgeGeneration('job_deterministic_1');
+    new KnowledgePageStore(database).markPageStale('project_1', first.pages[0]!.pageId);
+
+    database
+      .prepare(
+        `INSERT INTO knowledge_jobs
+         (id, project_id, job_kind, status, payload_json, requested_at)
+         VALUES (?, ?, ?, 'queued', ?, ?)`,
+      )
+      .run(
+        'job_deterministic_2',
+        'project_1',
+        'generate',
+        JSON.stringify({
+          outputRoot,
+          generatorVersion: 'deterministic:typescript-lezer:2.1.0',
+          generatedAt: '2026-01-06T00:00:00.000Z',
+          pages: [
+            {
+              pageId: 'page_source_1',
+              type: 'source',
+              title: 'src/weird-module.ts',
+              slug: 'source-src-weird-module-ts',
+              content: 'Deterministic body',
+            },
+          ],
+        }),
+        '2026-01-06T00:00:00.000Z',
+      );
+
+    const second = await new KnowledgeGeneratorService(database).runKnowledgeGeneration('job_deterministic_2');
+
+    expect(database.prepare('SELECT COUNT(*) AS count FROM knowledge_page_versions').get()).toEqual({ count: 1 });
+    expect(second.pageResults).toEqual([
+      expect.objectContaining({
+        reused: true,
+        page: expect.objectContaining({
+          id: first.pages[0]?.id,
+          pageId: 'page_source_1',
+          versionNumber: 1,
+        }),
+      }),
+    ]);
+    expect(new KnowledgePageStore(database).getCurrentPage('project_1', 'page_source_1' as never)).toMatchObject({
+      status: 'active',
+      currentVersion: 1,
+    });
+    expect(readFileSync(join(outputRoot, 'pages/source/source-src-weird-module-ts.md'), 'utf8')).toContain(
+      'generated_at: "2026-01-05T00:00:00.000Z"',
+    );
+  });
+
+  it('creates a new version when metadata summaries change even if page markdown body is unchanged', async () => {
+    const workspaceRoot = mkdtempSync(join(process.cwd(), '.knowledge-generator-test-'));
+    const outputRoot = join(workspaceRoot, '.ariadne', 'knowledge');
+    directories.push(workspaceRoot);
+    const database = createDatabase(workspaceRoot);
+
+    database
+      .prepare(
+        `INSERT INTO knowledge_jobs
+         (id, project_id, job_kind, status, payload_json, requested_at)
+         VALUES (?, ?, ?, 'queued', ?, ?)`,
+      )
+      .run(
+        'job_summary_1',
+        'project_1',
+        'generate',
+        JSON.stringify({
+          outputRoot,
+          generatorVersion: 'deterministic:typescript-lezer:2.1.0',
+          generatedAt: '2026-01-07T00:00:00.000Z',
+          pages: [
+            {
+              pageId: 'page_source_summary',
+              type: 'source',
+              title: 'src/summary.ts',
+              slug: 'source-src-summary-ts',
+              content: 'Deterministic body',
+              summary: 'First summary',
+            },
+          ],
+        }),
+        '2026-01-07T00:00:00.000Z',
+      );
+    await new KnowledgeGeneratorService(database).runKnowledgeGeneration('job_summary_1');
+
+    database
+      .prepare(
+        `INSERT INTO knowledge_jobs
+         (id, project_id, job_kind, status, payload_json, requested_at)
+         VALUES (?, ?, ?, 'queued', ?, ?)`,
+      )
+      .run(
+        'job_summary_2',
+        'project_1',
+        'generate',
+        JSON.stringify({
+          outputRoot,
+          generatorVersion: 'deterministic:typescript-lezer:2.1.0',
+          generatedAt: '2026-01-08T00:00:00.000Z',
+          pages: [
+            {
+              pageId: 'page_source_summary',
+              type: 'source',
+              title: 'src/summary.ts',
+              slug: 'source-src-summary-ts',
+              content: 'Deterministic body',
+              summary: 'Updated summary',
+            },
+          ],
+        }),
+        '2026-01-08T00:00:00.000Z',
+      );
+
+    const second = await new KnowledgeGeneratorService(database).runKnowledgeGeneration('job_summary_2');
+
+    expect(database.prepare('SELECT COUNT(*) AS count FROM knowledge_page_versions').get()).toEqual({ count: 2 });
+    expect(second.pageResults[0]).toMatchObject({
+      reused: false,
+      page: expect.objectContaining({
+        versionNumber: 2,
+        summary: 'Updated summary',
+      }),
+    });
   });
 });

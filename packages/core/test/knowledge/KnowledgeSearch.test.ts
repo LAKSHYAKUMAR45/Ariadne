@@ -2,6 +2,8 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type Database from 'better-sqlite3';
 import { TaskStore } from '../../src/TaskStore.js';
 import { openDatabase } from '../../src/db.js';
+import type { DeterministicExtraction } from '../../src/knowledge/KnowledgeExtraction.js';
+import { KnowledgeExtractionStore } from '../../src/knowledge/KnowledgeExtractionStore.js';
 import { searchWorkspace } from '../../src/Search.js';
 import { applyKnowledgeMigrations } from '../../src/knowledge/knowledgeMigrations.js';
 import { KnowledgePageStore } from '../../src/knowledge/KnowledgePageStore.js';
@@ -31,12 +33,14 @@ describe('searchKnowledge', () => {
   let taskStore: TaskStore;
   let sourceStore: KnowledgeSourceStore;
   let pageStore: KnowledgePageStore;
+  let extractionStore: KnowledgeExtractionStore;
 
   beforeEach(() => {
     db = createKnowledgeDatabase();
     taskStore = new TaskStore(':memory:');
     sourceStore = new KnowledgeSourceStore(db);
     pageStore = new KnowledgePageStore(db);
+    extractionStore = new KnowledgeExtractionStore(db);
   });
 
   afterEach(() => {
@@ -298,5 +302,166 @@ describe('searchKnowledge', () => {
 
     expect(context.results).toEqual([]);
     expect(context.truncated.results).toBe(1);
+  });
+
+  it('ranks extraction-backed symbol and section matches ahead of path-only metadata, with bounded snippets and exact span coordinates', () => {
+    const source = sourceStore.register({
+      projectId: PROJECT_ID,
+      kind: 'file',
+      path: 'src/security_group_index.py',
+      content: 'def allocate_index_for_sg(security_group):\n    return security_group.index\n',
+      format: 'python',
+      mimeType: 'text/x-python',
+    });
+    const sourceVersionId = sourceStore.listVersions(PROJECT_ID, source.id)[0].id;
+    const extraction: DeterministicExtraction = {
+      analyzerId: 'python-lezer',
+      analyzerVersion: '1',
+      sourceVersionId,
+      title: 'src/security_group_index.py',
+      summary: 'Allocates security group indexes.',
+      sections: [
+        {
+          id: 'section:function',
+          kind: 'code',
+          title: 'allocate_index_for_sg',
+          text: 'def allocate_index_for_sg(security_group):\n    return security_group.index\n'.repeat(4),
+          span: {
+            startOffset: 0,
+            endOffset: 74,
+            startLine: 1,
+            startColumn: 1,
+            endLine: 2,
+            endColumn: 32,
+          },
+          confidence: 1,
+        },
+      ],
+      symbols: [
+        {
+          id: 'symbol:allocate',
+          kind: 'function',
+          name: 'allocate_index_for_sg',
+          qualifiedName: 'contrail.security.allocate_index_for_sg',
+          span: {
+            startOffset: 4,
+            endOffset: 25,
+            startLine: 1,
+            startColumn: 5,
+            endLine: 1,
+            endColumn: 26,
+          },
+          confidence: 1,
+        },
+      ],
+      relationships: [],
+      links: [],
+      diagnostics: [],
+    };
+    extractionStore.save({ projectId: PROJECT_ID, extraction });
+
+    sourceStore.register({
+      projectId: PROJECT_ID,
+      kind: 'file',
+      path: 'docs/security-group-index-notes.md',
+      content: 'metadata only',
+      format: 'markdown',
+    });
+    db.prepare(
+      `INSERT INTO knowledge_projects
+       (id, workspace_root, name, status, created_at, updated_at)
+       VALUES ('project_2', '/workspace/other', 'Other', 'active', ?, ?)`,
+    ).run(CREATED_AT, CREATED_AT);
+    const otherSourceStore = new KnowledgeSourceStore(db);
+    const otherExtractionStore = new KnowledgeExtractionStore(db);
+    const otherSource = otherSourceStore.register({
+      projectId: 'project_2',
+      kind: 'file',
+      path: 'src/security_group_index.py',
+      content: 'def allocate_index_for_sg(other):\n    return other\n',
+      format: 'python',
+      mimeType: 'text/x-python',
+    });
+    otherExtractionStore.save({
+      projectId: 'project_2',
+      extraction: {
+        ...extraction,
+        sourceVersionId: otherSourceStore.listVersions('project_2', otherSource.id)[0].id,
+      },
+    });
+
+    const results = searchKnowledge('allocate security group index', {
+      db,
+      projectId: PROJECT_ID,
+      mode: 'hybrid',
+    });
+
+    expect(results[0]).toMatchObject({
+      kind: 'source',
+      id: source.id,
+      snippet: expect.stringContaining('allocate_index_for_sg'),
+      metadata: expect.objectContaining({
+        sourceVersionId,
+      }),
+    });
+    expect(results[0]?.snippet.length).toBeLessThanOrEqual(180);
+    expect(results[0]?.citations[0]?.span).toMatchObject({
+      startOffset: expect.any(Number),
+      endOffset: expect.any(Number),
+      startLine: expect.any(Number),
+      startColumn: expect.any(Number),
+      endLine: expect.any(Number),
+      endColumn: expect.any(Number),
+    });
+    expect(results.some((result) => result.projectId === 'project_2')).toBe(false);
+    const metadataOnlyIndex = results.findIndex((result) => result.title === 'docs/security-group-index-notes.md');
+    expect(metadataOnlyIndex).toBeGreaterThan(0);
+  });
+
+  it('safely omits malformed or legacy extraction rows and falls back to bounded metadata search results', () => {
+    const source = sourceStore.register({
+      projectId: PROJECT_ID,
+      kind: 'file',
+      path: 'docs/legacy-search.md',
+      content: 'legacy search content',
+      format: 'markdown',
+    });
+    const sourceVersionId = sourceStore.listVersions(PROJECT_ID, source.id)[0].id;
+    db.prepare(
+      `INSERT INTO knowledge_extractions (
+         id,
+         project_id,
+         source_version_id,
+         extractor_kind,
+         analyzer_id,
+         analyzer_version,
+         result_path,
+         content_hash,
+         extraction_hash,
+         result_json,
+         diagnostics_json,
+         status,
+         created_at,
+         updated_at,
+         completed_at
+       ) VALUES (?, ?, ?, 'deterministic', 'markdown', '1', 'knowledge/extractions/legacy.json', 'content-hash', 'hash', '{not-json}', '[]', 'completed', ?, ?, ?)`,
+    ).run('extraction_legacy', PROJECT_ID, sourceVersionId, CREATED_AT, CREATED_AT, CREATED_AT);
+
+    const results = searchKnowledge('legacy search', { db, projectId: PROJECT_ID, mode: 'sources' });
+
+    expect(results).toEqual([
+      expect.objectContaining({
+        kind: 'source',
+        id: source.id,
+        title: 'docs/legacy-search.md',
+        snippet: expect.stringContaining('legacy-search'),
+        citations: [
+          expect.objectContaining({
+            sourceId: source.id,
+            span: null,
+          }),
+        ],
+      }),
+    ]);
   });
 });

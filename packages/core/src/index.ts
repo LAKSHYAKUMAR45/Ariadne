@@ -283,11 +283,18 @@ export type {
   KnowledgeIndexEntry,
 } from './knowledge/KnowledgeRenderer.js';
 export {
+  buildDeterministicPagePayload,
+} from './knowledge/DeterministicPageBuilder.js';
+export type {
+  DeterministicPageBuildInput,
+} from './knowledge/DeterministicPageBuilder.js';
+export {
   KnowledgeGeneratorService,
   runKnowledgeGeneration,
 } from './knowledge/KnowledgeGeneratorService.js';
 export type {
   KnowledgeGenerationPageInput,
+  KnowledgeGenerationPageResult,
   KnowledgeGenerationPayload,
   KnowledgeGenerationResult,
   KnowledgeGeneratorServiceOptions,

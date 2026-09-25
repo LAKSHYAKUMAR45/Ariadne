@@ -31,6 +31,25 @@ function yamlScalar(value: string): string {
   return JSON.stringify(value);
 }
 
+function escapeMarkdownText(value: string): string {
+  return value
+    .replace(/\r?\n/g, ' ')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/\\/g, '\\\\')
+    .replace(/\[/g, '\\[')
+    .replace(/\]/g, '\\]')
+    .replace(/\(/g, '\\(')
+    .replace(/\)/g, '\\)')
+    .replace(/\|/g, '\\|')
+    .replace(/`/g, '\\`');
+}
+
+function safeRelativeLink(type: string, slug: string): string {
+  return `<pages/${type}/${slug.replace(/>/g, '%3E')}.md>`;
+}
+
 function yamlList(values: string[]): string {
   return values.length === 0 ? '[]' : `\n${values.map((value) => `  - ${yamlScalar(value)}`).join('\n')}`;
 }
@@ -41,6 +60,10 @@ function requireFiniteConfidence(value: number | null | undefined): number | nul
     throw new Error('Knowledge page confidence must be between 0 and 1');
   }
   return value;
+}
+
+function optionalFiniteNumber(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
 }
 
 export function renderKnowledgePage(page: KnowledgePageRenderInput | KnowledgePage): string {
@@ -64,9 +87,26 @@ export function renderKnowledgePage(page: KnowledgePageRenderInput | KnowledgePa
             (reference) =>
               `  - kind: ${yamlScalar(reference.kind)}\n    id: ${yamlScalar(reference.id)}${
                 reference.path ? `\n    path: ${yamlScalar(reference.path)}` : ''
-              }${reference.startLine !== undefined ? `\n    start_line: ${reference.startLine}` : ''}${
-                reference.endLine !== undefined ? `\n    end_line: ${reference.endLine}` : ''
-              }${reference.confidence !== undefined ? `\n    confidence: ${reference.confidence}` : ''}`,
+              }${reference.sourceVersionId ? `\n    source_version_id: ${yamlScalar(reference.sourceVersionId)}` : ''}${
+                optionalFiniteNumber(reference.startOffset) !== undefined
+                  ? `\n    start_offset: ${optionalFiniteNumber(reference.startOffset)}`
+                  : ''
+              }${optionalFiniteNumber(reference.endOffset) !== undefined
+                  ? `\n    end_offset: ${optionalFiniteNumber(reference.endOffset)}`
+                  : ''
+              }${optionalFiniteNumber(reference.startLine) !== undefined
+                ? `\n    start_line: ${optionalFiniteNumber(reference.startLine)}`
+                : ''}${optionalFiniteNumber(reference.startColumn) !== undefined
+                ? `\n    start_column: ${optionalFiniteNumber(reference.startColumn)}`
+                : ''}${optionalFiniteNumber(reference.endLine) !== undefined
+                ? `\n    end_line: ${optionalFiniteNumber(reference.endLine)}`
+                : ''}${optionalFiniteNumber(reference.endColumn) !== undefined
+                ? `\n    end_column: ${optionalFiniteNumber(reference.endColumn)}`
+                : ''}${
+                reference.label ? `\n    label: ${yamlScalar(reference.label)}` : ''
+              }${requireFiniteConfidence(reference.confidence) !== null
+                ? `\n    confidence: ${requireFiniteConfidence(reference.confidence)}`
+                : ''}`,
           )
           .join('\n')}`;
 
@@ -96,8 +136,8 @@ export function renderKnowledgeIndex(entries: KnowledgeIndexEntry[]): string {
     '# Knowledge Index',
     '',
     ...sorted.flatMap((entry) => [
-      `- [${entry.title}](pages/${entry.type}/${entry.slug}.md) — ${entry.type}; version ${entry.version}; updated ${entry.updatedAt}`,
-      entry.summary ? `  ${entry.summary}` : '',
+      `- [${escapeMarkdownText(entry.title)}](${safeRelativeLink(entry.type, entry.slug)}) — ${entry.type}; version ${entry.version}; updated ${entry.updatedAt}`,
+      entry.summary ? `  ${escapeMarkdownText(entry.summary)}` : '',
     ]),
     '',
   ].filter((line) => line !== '').join('\n');
@@ -110,13 +150,13 @@ export function renderKnowledgeOverview(
 ): string {
   const sorted = [...entries].sort((left, right) => left.slug.localeCompare(right.slug) || left.id.localeCompare(right.id));
   return [
-    `# ${projectName}`,
+    `# ${escapeMarkdownText(projectName)}`,
     '',
-    summary?.trim() || 'Generated knowledge overview.',
+    summary?.trim() ? escapeMarkdownText(summary.trim()) : 'Generated knowledge overview.',
     '',
     `Pages: ${sorted.length}`,
     '',
-    ...sorted.map((entry) => `- ${entry.title} (${entry.type})`),
+    ...sorted.map((entry) => `- ${escapeMarkdownText(entry.title)} (${entry.type})`),
     '',
   ].join('\n');
 }

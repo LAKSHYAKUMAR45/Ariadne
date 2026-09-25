@@ -2,6 +2,7 @@ import type Database from 'better-sqlite3';
 import { estimateTokens } from '../ContextBuilder.js';
 import { searchWorkspace, type SearchResult as WorkspaceSearchResult } from '../Search.js';
 import type { TaskStore } from '../TaskStore.js';
+import { validateDeterministicExtraction, type KnowledgeSourceSpan } from './KnowledgeExtraction.js';
 import type {
   KnowledgePageId,
   KnowledgePageType,
@@ -22,6 +23,10 @@ export interface KnowledgeSearchCitation {
     id: string;
     startOffset: number;
     endOffset: number;
+    startLine?: number;
+    startColumn?: number;
+    endLine?: number;
+    endColumn?: number;
     label: string | null;
   } | null;
 }
@@ -89,8 +94,13 @@ interface SourceSearchRow {
   current_hash: string | null;
   status: string;
   updated_at: string;
+  source_version_id: string | null;
   content_path: string | null;
   mime_type: string | null;
+  extraction_id: string | null;
+  extraction_result_json: string | null;
+  extraction_analyzer_id: string | null;
+  extraction_analyzer_version: string | null;
 }
 
 interface CitationRow {
@@ -101,10 +111,39 @@ interface CitationRow {
   span_id: string | null;
   start_offset: number | null;
   end_offset: number | null;
+  start_line: number | null;
+  start_column: number | null;
+  end_line: number | null;
+  end_column: number | null;
   label: string | null;
 }
 
+interface PersistedSpanRow {
+  id: string;
+  start_offset: number;
+  end_offset: number;
+  start_line: number | null;
+  start_column: number | null;
+  end_line: number | null;
+  end_column: number | null;
+  label: string | null;
+}
+
+interface SearchableField {
+  text: string;
+  weight: number;
+  span: PersistedSpanRow | null;
+}
+
+interface ExtractionSearchData {
+  extractionId: string;
+  analyzerId: string | null;
+  analyzerVersion: string | null;
+  fields: SearchableField[];
+}
+
 const DEFAULT_LIMIT = 20;
+const SOURCE_SNIPPET_LIMIT = 180;
 
 function normalize(value: string): string {
   return value.trim().toLocaleLowerCase();
@@ -167,7 +206,12 @@ function sourceRows(db: Database.Database, projectId: string): SourceSearchRow[]
     .prepare(
       `SELECT s.id, s.project_id, s.source_kind, s.source_path, s.source_url,
               s.current_hash, s.status, s.updated_at,
-              v.content_path, v.mime_type
+              v.id AS source_version_id,
+              v.content_path, v.mime_type,
+              e.id AS extraction_id,
+              e.result_json AS extraction_result_json,
+              e.analyzer_id AS extraction_analyzer_id,
+              e.analyzer_version AS extraction_analyzer_version
        FROM knowledge_sources s
        LEFT JOIN knowledge_source_versions v
          ON v.project_id = s.project_id
@@ -176,6 +220,19 @@ function sourceRows(db: Database.Database, projectId: string): SourceSearchRow[]
           SELECT MAX(version_number)
           FROM knowledge_source_versions latest
           WHERE latest.project_id = s.project_id AND latest.source_id = s.id
+        )
+       LEFT JOIN knowledge_extractions e
+         ON e.project_id = s.project_id
+        AND e.source_version_id = v.id
+        AND e.rowid = (
+          SELECT latest_extraction.rowid
+          FROM knowledge_extractions latest_extraction
+          WHERE latest_extraction.project_id = s.project_id
+            AND latest_extraction.source_version_id = v.id
+            AND latest_extraction.completed_at IS NOT NULL
+            AND latest_extraction.result_json IS NOT NULL
+          ORDER BY latest_extraction.updated_at DESC, latest_extraction.created_at DESC, latest_extraction.id DESC
+          LIMIT 1
         )
        WHERE s.project_id = ? AND s.status = 'active'
        ORDER BY s.updated_at DESC, s.id ASC`,
@@ -194,6 +251,10 @@ function citationsForPage(db: Database.Database, projectId: string, pageId: stri
               span.id AS span_id,
               span.start_offset,
               span.end_offset,
+              span.start_line,
+              span.start_column,
+              span.end_line,
+              span.end_column,
               span.label
        FROM knowledge_page_sources ps
        LEFT JOIN knowledge_source_versions sv
@@ -226,6 +287,10 @@ function rowToCitation(row: CitationRow): KnowledgeSearchCitation {
             id: row.span_id,
             startOffset: row.start_offset,
             endOffset: row.end_offset,
+            ...(row.start_line !== null ? { startLine: row.start_line } : {}),
+            ...(row.start_column !== null ? { startColumn: row.start_column } : {}),
+            ...(row.end_line !== null ? { endLine: row.end_line } : {}),
+            ...(row.end_column !== null ? { endColumn: row.end_column } : {}),
             label: row.label,
           },
   };
@@ -253,12 +318,129 @@ function dedupeCitations(citations: KnowledgeSearchCitation[]): KnowledgeSearchC
       citation.span?.id ?? '',
       citation.span?.startOffset ?? '',
       citation.span?.endOffset ?? '',
+      citation.span?.startLine ?? '',
+      citation.span?.startColumn ?? '',
+      citation.span?.endLine ?? '',
+      citation.span?.endColumn ?? '',
     ].join('\0');
     if (seen.has(key)) continue;
     seen.add(key);
     deduped.push(citation);
   }
   return deduped;
+}
+
+function findMatchIndex(text: string, query: string): { index: number; length: number } | null {
+  const normalizedText = text.toLocaleLowerCase();
+  const normalizedQuery = query.toLocaleLowerCase();
+  const phraseIndex = normalizedText.indexOf(normalizedQuery);
+  if (phraseIndex !== -1) {
+    return { index: phraseIndex, length: normalizedQuery.length };
+  }
+  for (const term of terms(query)) {
+    const index = normalizedText.indexOf(term);
+    if (index !== -1) {
+      return { index, length: term.length };
+    }
+  }
+  return null;
+}
+
+function buildBoundedSnippet(text: string, query: string, limit = SOURCE_SNIPPET_LIMIT): string {
+  const compact = text.replace(/\s+/g, ' ').trim();
+  if (compact.length <= limit) return compact;
+  const match = findMatchIndex(compact, query);
+  if (!match) return `${compact.slice(0, Math.max(0, limit - 1)).trimEnd()}…`;
+  const start = Math.max(0, match.index - Math.floor((limit - match.length) / 2));
+  const boundedStart = Math.min(start, Math.max(0, compact.length - limit));
+  const end = Math.min(compact.length, boundedStart + limit);
+  const prefix = boundedStart > 0 ? '…' : '';
+  const suffix = end < compact.length ? '…' : '';
+  const available = Math.max(0, limit - prefix.length - suffix.length);
+  const snippet = compact.slice(boundedStart, boundedStart + available).trim();
+  return `${prefix}${snippet}${suffix}`;
+}
+
+function loadPersistedSpans(db: Database.Database, projectId: string, sourceVersionId: string): PersistedSpanRow[] {
+  return db
+    .prepare(
+      `SELECT id, start_offset, end_offset, start_line, start_column, end_line, end_column, label
+       FROM knowledge_source_spans
+       WHERE project_id = ? AND source_version_id = ?
+       ORDER BY start_offset ASC, end_offset ASC, id ASC`,
+    )
+    .all(projectId, sourceVersionId) as PersistedSpanRow[];
+}
+
+function matchPersistedSpan(
+  spans: PersistedSpanRow[],
+  span: KnowledgeSourceSpan | null | undefined,
+): PersistedSpanRow | null {
+  if (!span) return null;
+  return (
+    spans.find(
+      (candidate) =>
+        candidate.start_offset === span.startOffset &&
+        candidate.end_offset === span.endOffset &&
+        candidate.start_line === span.startLine &&
+        candidate.start_column === span.startColumn &&
+        candidate.end_line === span.endLine &&
+        candidate.end_column === span.endColumn &&
+        (candidate.label ?? null) === (span.label ?? null),
+    ) ?? null
+  );
+}
+
+function parseExtractionSearchData(db: Database.Database, row: SourceSearchRow): ExtractionSearchData | null {
+  if (!row.source_version_id || !row.extraction_id || !row.extraction_result_json) return null;
+  try {
+    const extraction = validateDeterministicExtraction(JSON.parse(row.extraction_result_json) as unknown);
+    const spans = loadPersistedSpans(db, row.project_id, row.source_version_id);
+    const fields: SearchableField[] = [
+      ...extraction.symbols.flatMap((symbol) => [
+        ...(symbol.qualifiedName
+          ? [{ text: symbol.qualifiedName, weight: 10, span: matchPersistedSpan(spans, symbol.span) }]
+          : []),
+        { text: symbol.name, weight: 8, span: matchPersistedSpan(spans, symbol.span) },
+      ]),
+      ...extraction.sections.flatMap((section) => [
+        ...(section.title ? [{ text: section.title, weight: 7, span: matchPersistedSpan(spans, section.span) }] : []),
+        { text: section.text, weight: 5, span: matchPersistedSpan(spans, section.span) },
+      ]),
+      { text: extraction.title, weight: 6, span: null },
+      { text: extraction.summary, weight: 3, span: null },
+    ];
+    return {
+      extractionId: row.extraction_id,
+      analyzerId: row.extraction_analyzer_id,
+      analyzerVersion: row.extraction_analyzer_version,
+      fields,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function sourceCitationFromMatch(row: SourceSearchRow, span: PersistedSpanRow | null): KnowledgeSearchCitation {
+  return {
+    pageId: null,
+    sourceId: row.id as KnowledgeSourceId,
+    path: row.source_path ?? row.content_path,
+    url: row.source_url,
+    span:
+      span === null
+        ? null
+        : {
+            id: span.id,
+            startOffset: span.start_offset,
+            endOffset: span.end_offset,
+            ...(span.start_line !== null ? { startLine: span.start_line } : {}),
+            ...(span.start_column !== null ? { startColumn: span.start_column } : {}),
+            ...(span.end_line !== null ? { endLine: span.end_line } : {}),
+            ...(span.end_column !== null ? { endColumn: span.end_column } : {}),
+            label: span.label,
+          },
+  };
 }
 
 function withGraphExpansions(result: KnowledgeSearchResult, options: KnowledgeSearchOptions): KnowledgeSearchResult {
@@ -310,14 +492,26 @@ function searchSources(query: string, options: KnowledgeSearchOptions): Knowledg
   const results: KnowledgeSearchResult[] = [];
   for (const row of sourceRows(options.db, options.projectId)) {
     const title = row.source_path ?? row.source_url ?? row.content_path ?? row.id;
-    const score = lexicalScore(query, [
-      { text: row.source_path, weight: 6 },
-      { text: row.source_url, weight: 6 },
-      { text: row.content_path, weight: 4 },
+    const extractionData = parseExtractionSearchData(options.db, row);
+    const fieldMatches =
+      extractionData?.fields
+        .map((field) => ({
+          field,
+          score: lexicalScore(query, [{ text: field.text, weight: field.weight }]),
+        }))
+        .filter((match) => match.score > 0) ?? [];
+    const bestMatch =
+      fieldMatches.sort((left, right) => right.score - left.score || right.field.weight - left.field.weight)[0] ?? null;
+    const extractionScore = fieldMatches.reduce((sum, match) => sum + match.score, 0);
+    const metadataScore = lexicalScore(query, [
+      { text: row.source_path, weight: 2 },
+      { text: row.source_url, weight: 2 },
+      { text: row.content_path, weight: 2 },
       { text: row.source_kind, weight: 1 },
       { text: row.mime_type, weight: 1 },
       { text: row.current_hash, weight: 1 },
     ]);
+    const score = extractionScore + metadataScore;
     if (score === 0) continue;
     results.push(
       withGraphExpansions(
@@ -327,14 +521,20 @@ function searchSources(query: string, options: KnowledgeSearchOptions): Knowledg
           id: row.id,
           projectId: row.project_id as KnowledgeProjectId,
           title,
-          snippet: row.content_path ?? row.source_url ?? row.source_path ?? '',
+          snippet: bestMatch
+            ? buildBoundedSnippet(bestMatch.field.text, query)
+            : buildBoundedSnippet(row.content_path ?? row.source_url ?? row.source_path ?? '', query),
           score,
-          citations: [sourceCitation(row)],
+          citations: [bestMatch ? sourceCitationFromMatch(row, bestMatch.field.span) : sourceCitation(row)],
           graphExpansions: [],
           metadata: {
             kind: row.source_kind,
             contentHash: row.current_hash,
             mimeType: row.mime_type,
+            sourceVersionId: row.source_version_id,
+            extractionId: extractionData?.extractionId ?? null,
+            analyzerId: extractionData?.analyzerId ?? null,
+            analyzerVersion: extractionData?.analyzerVersion ?? null,
           },
         },
         options,
