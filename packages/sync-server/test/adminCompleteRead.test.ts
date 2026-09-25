@@ -140,6 +140,9 @@ describe('sync-server: complete admin read APIs', () => {
   }
 
   async function seedOverviewData(): Promise<void> {
+    const failedOperationCreatedAt = new Date(Date.now() - 60 * 60 * 1000);
+    const failedOperationCompletedAt = new Date(failedOperationCreatedAt.getTime() + 5_000);
+
     await pool.query(
       `INSERT INTO tasks (
          local_id, owner_user_id, title, status, team_id, created_at, updated_at
@@ -178,13 +181,13 @@ describe('sync-server: complete admin read APIs', () => {
       type: 'deployment_apply',
       summary: 'Deploy revision',
       source: 'admin_api',
-      createdAt: '2026-09-23T10:00:00.000Z',
+      createdAt: failedOperationCreatedAt.toISOString(),
     });
     await store.transitionOperation({
       id: 'op-failed',
       nextState: 'failed',
       source: 'operator',
-      occurredAt: '2026-09-23T10:00:05.000Z',
+      occurredAt: failedOperationCompletedAt.toISOString(),
       output: 'deployment failed',
     });
     await store.upsertBackupRecord({
