@@ -55,7 +55,7 @@ a:focus-visible {
   left: 12px;
   padding: 8px 12px;
   transform: translateY(-160%);
-  border-radius: 4px;
+  border-radius: 7px;
   background: var(--text);
   color: var(--canvas);
 }
@@ -84,7 +84,7 @@ a:focus-visible {
   height: 30px;
   place-items: center;
   border: 1px solid var(--line-strong);
-  border-radius: 6px;
+  border-radius: 10px;
   background: var(--surface-selected);
   color: var(--blue);
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
@@ -232,7 +232,7 @@ a:focus-visible {
   min-height: 46px;
   padding: 0 13px;
   border: 1px solid var(--line-strong);
-  border-radius: 6px;
+  border-radius: 10px;
   background: var(--surface-sunken);
   color: var(--text);
 }
@@ -245,7 +245,7 @@ a:focus-visible {
 .quiet-action {
   min-height: 40px;
   border: 0;
-  border-radius: 6px;
+  border-radius: 10px;
   font-weight: 750;
   cursor: pointer;
 }
@@ -377,7 +377,7 @@ a:focus-visible {
   gap: 11px;
   padding: 0 10px;
   border: 0;
-  border-radius: 5px;
+  border-radius: 9px;
   background: transparent;
   color: #d6dcea;
   font-size: 13px;
@@ -404,7 +404,7 @@ a:focus-visible {
   height: 24px;
   place-items: center;
   border: 1px solid currentColor;
-  border-radius: 4px;
+  border-radius: 7px;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 8px;
   letter-spacing: 0.04em;
@@ -531,12 +531,12 @@ a:focus-visible {
 .overview-grid {
   display: grid;
   grid-template-columns: 2fr 1fr 1fr;
-  gap: 14px;
+  gap: 20px;
 }
 
 .panel {
   min-width: 0;
-  padding: 20px;
+  padding: 26px;
   border: 1px solid var(--line);
   border-radius: var(--radius);
   background: var(--surface);
@@ -678,7 +678,7 @@ a:focus-visible {
 
 .status-card {
   display: grid;
-  gap: 16px;
+  gap: 18px;
 }
 
 .status-card__summary {
@@ -690,7 +690,7 @@ a:focus-visible {
 
 .status-rows {
   display: grid;
-  gap: 10px;
+  gap: 12px;
 }
 
 .status-row {
@@ -698,9 +698,9 @@ a:focus-visible {
   grid-template-columns: minmax(0, 1fr) auto auto;
   align-items: center;
   gap: 12px;
-  padding: 12px 14px;
+  padding: 14px 16px;
   border: 1px solid var(--line);
-  border-radius: 8px;
+  border-radius: 12px;
   background: var(--surface-sunken);
 }
 
@@ -734,15 +734,15 @@ a:focus-visible {
 
 .timestamp-grid {
   display: grid;
-  gap: 10px;
+  gap: 12px;
 }
 
 .status-timestamp {
   display: grid;
   gap: 6px;
-  padding: 12px 14px;
+  padding: 14px 16px;
   border: 1px solid var(--line);
-  border-radius: 8px;
+  border-radius: 12px;
   background: var(--surface-sunken);
 }
 
@@ -799,7 +799,7 @@ a:focus-visible {
   margin-top: 16px;
   padding: 11px 14px;
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: 10px;
   font-size: 12px;
 }
 
@@ -1030,7 +1030,7 @@ a:focus-visible {
   min-width: 140px;
   padding: 0 30px 0 11px;
   border: 1px solid var(--line-strong);
-  border-radius: 5px;
+  border-radius: 9px;
   background: var(--surface);
   color: var(--text);
 }
@@ -1139,7 +1139,7 @@ a:focus-visible {
   padding: 12px;
   overflow: auto;
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: 10px;
   background: var(--surface-sunken);
   white-space: pre-wrap;
 }
@@ -1185,7 +1185,7 @@ a:focus-visible {
   margin-top: 18px;
   padding: 12px;
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: 10px;
   background: var(--surface-sunken);
 }
 
@@ -1227,7 +1227,7 @@ a:focus-visible {
   min-height: 44px;
   padding: 0 12px;
   border: 1px solid var(--line-strong);
-  border-radius: 5px;
+  border-radius: 9px;
   background: var(--surface-sunken);
   color: var(--text);
 }
@@ -1379,7 +1379,7 @@ a:focus-visible {
 .export-menu__item {
   padding: 8px 10px;
   border: 0;
-  border-radius: 5px;
+  border-radius: 9px;
   background: transparent;
   color: var(--text);
   font-size: 12px;
@@ -1406,7 +1406,7 @@ a:focus-visible {
   min-height: 36px;
   padding: 0 11px;
   border: 1px solid var(--line);
-  border-radius: 5px;
+  border-radius: 9px;
   background: var(--surface-sunken);
   color: var(--text);
   font-size: 11px;
@@ -1531,7 +1531,7 @@ a:focus-visible {
   height: 28px;
   place-items: center;
   border: 1px solid var(--line-strong);
-  border-radius: 5px;
+  border-radius: 9px;
   background: var(--surface-sunken);
   color: var(--text-muted);
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
@@ -1595,7 +1595,7 @@ a:focus-visible {
   gap: 10px;
   padding: 7px 8px;
   border: 1px solid transparent;
-  border-radius: 4px;
+  border-radius: 7px;
   background: var(--surface-sunken);
   color: var(--text-muted);
   text-align: left;
@@ -1627,7 +1627,7 @@ a:focus-visible {
   display: flex;
   padding: 2px;
   border: 1px solid var(--line);
-  border-radius: 5px;
+  border-radius: 9px;
   background: var(--surface-sunken);
 }
 
@@ -1635,7 +1635,7 @@ a:focus-visible {
   min-height: 25px;
   padding: 0 8px;
   border: 0;
-  border-radius: 3px;
+  border-radius: 5px;
   background: transparent;
   color: var(--text-muted);
   font-size: 9px;

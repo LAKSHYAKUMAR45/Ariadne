@@ -5,8 +5,12 @@
    pattern so both dashboards behave the same way. */
 :root {
   color-scheme: light;
+  /* Matches jcnr-triage's Tabler-core font stack (system-ui first, no
+     web-font fetch) so both apps render body text in the visitor's own
+     platform UI font instead of Ariadne rendering in a different typeface. */
   font-family:
-    Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    system-ui, -apple-system, BlinkMacSystemFont, "San Francisco", "Segoe UI", Roboto,
+    "Helvetica Neue", sans-serif;
   --canvas: #f8f9fe;
   --surface: #ffffff;
   --surface-raised: #f3f6ff;
@@ -37,7 +41,10 @@
   --danger-text: #c81e3f;
   --success-text: #1f8f5f;
   --avatar-bg: #dfe6fb;
-  --radius: 10px;
+  /* jcnr-triage rounds cards/inputs/buttons/navbar uniformly at 0.85rem
+     (dashboard.css, scaled by its 112.5% root font-size to ~15px) - matched
+     here instead of the previous, noticeably squarer 10px. */
+  --radius: 15px;
   --shadow: 0 20px 27px rgb(17 24 39 / 6%);
 }
 
@@ -63,6 +70,7 @@
   --danger-text: #ffb4b8;
   --success-text: #9cedc3;
   --avatar-bg: #26324a;
-  --radius: 8px;
+  /* --radius intentionally not overridden: jcnr-triage keeps the same
+     corner rounding in both themes, so this inherits :root's 15px. */
   --shadow: 0 18px 50px rgb(0 0 0 / 28%);
 }
