@@ -296,9 +296,26 @@ export type {
   KnowledgeGenerationPageInput,
   KnowledgeGenerationPageResult,
   KnowledgeGenerationPayload,
+  KnowledgeGenerationRunOptions,
   KnowledgeGenerationResult,
   KnowledgeGeneratorServiceOptions,
 } from './knowledge/KnowledgeGeneratorService.js';
+export {
+  KnowledgeWorker,
+  knowledgeWorkerFailure,
+} from './knowledge/KnowledgeWorker.js';
+export type {
+  KnowledgeEnrichmentInput,
+  KnowledgeEnrichmentInsightInput,
+  KnowledgeEnrichmentResult,
+  KnowledgeEnrichmentReviewInput,
+  KnowledgeEnrichmentService,
+  KnowledgeWorkerDependencies,
+  KnowledgeWorkerFailureCode,
+  KnowledgeWorkerOptions,
+  KnowledgeWorkerRunResult,
+  KnowledgeWorkerWarning,
+} from './knowledge/KnowledgeWorker.js';
 export {
   KnowledgeQueue,
   enqueueKnowledgeJob,

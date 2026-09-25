@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import type Database from 'better-sqlite3';
+import { redact } from '../Redactor.js';
 import { buildKnowledgeManifest, type KnowledgeManifest } from './KnowledgeManifest.js';
 import { createKnowledgeId, normalizeKnowledgePath } from './KnowledgeIds.js';
 import { KnowledgePageStore, type CreatePageVersionInput, type KnowledgePageVersion } from './KnowledgePageStore.js';
@@ -48,6 +49,11 @@ export interface KnowledgeGeneratorServiceOptions {
   workerId?: string;
   renderer?: KnowledgeRenderer;
   now?: () => string;
+  leaseDurationMs?: number;
+}
+
+export interface KnowledgeGenerationRunOptions {
+  completeJob?: boolean;
 }
 
 interface JobRow {
@@ -83,6 +89,8 @@ interface PreparedPageGeneration {
 }
 
 const GENERATION_LEASE_DURATION_MS = 60_000;
+const MAX_FAILURE_MESSAGE_LENGTH = 500;
+const TRUNCATION_SUFFIX = ' …[truncated]';
 
 function parsePayload(value: string): KnowledgeGenerationPayload {
   const payload: unknown = JSON.parse(value);
@@ -98,8 +106,17 @@ function leaseExpired(leaseExpiresAt: string | null, now: string): boolean {
   return leaseExpiresAt !== null && Date.parse(leaseExpiresAt) <= Date.parse(now);
 }
 
-function nextLeaseExpiry(now: string): string {
-  return new Date(Date.parse(now) + GENERATION_LEASE_DURATION_MS).toISOString();
+function nextLeaseExpiry(now: string, leaseDurationMs: number): string {
+  return new Date(Date.parse(now) + leaseDurationMs).toISOString();
+}
+
+function boundedRedactedMessage(value: string): string {
+  const redacted = redact(value).replace(/\s+/g, ' ').trim();
+  if (redacted.length <= MAX_FAILURE_MESSAGE_LENGTH) {
+    return redacted;
+  }
+  const budget = Math.max(0, MAX_FAILURE_MESSAGE_LENGTH - TRUNCATION_SUFFIX.length);
+  return `${redacted.slice(0, budget)}${TRUNCATION_SUFFIX}`;
 }
 
 function writeDurable(filePath: string, content: string): void {
@@ -207,6 +224,7 @@ export class KnowledgeGeneratorService {
   private readonly renderer: KnowledgeRenderer;
   private readonly workerId: string;
   private readonly now: () => string;
+  private readonly leaseDurationMs: number;
 
   public constructor(
     private readonly db: Database.Database,
@@ -216,9 +234,14 @@ export class KnowledgeGeneratorService {
     this.workerId =
       options.workerId ?? `knowledge-generator-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2, 10)}`;
     this.now = options.now ?? (() => new Date().toISOString());
+    this.leaseDurationMs = options.leaseDurationMs ?? GENERATION_LEASE_DURATION_MS;
   }
 
-  public async runKnowledgeGeneration(jobId: string): Promise<KnowledgeGenerationResult> {
+  public async runKnowledgeGeneration(
+    jobId: string,
+    payloadOverride?: KnowledgeGenerationPayload,
+    options: KnowledgeGenerationRunOptions = {},
+  ): Promise<KnowledgeGenerationResult> {
     const job = this.db
       .prepare('SELECT id, project_id, status, payload_json, worker_id, lease_expires_at FROM knowledge_jobs WHERE id = ?')
       .get(jobId) as JobRow | undefined;
@@ -232,7 +255,7 @@ export class KnowledgeGeneratorService {
                started_at = COALESCE(started_at, @now)
            WHERE id = @id AND status = 'queued'`,
         )
-        .run({ workerId: this.workerId, leaseExpiresAt: nextLeaseExpiry(claimNow), now: claimNow, id: jobId });
+        .run({ workerId: this.workerId, leaseExpiresAt: nextLeaseExpiry(claimNow, this.leaseDurationMs), now: claimNow, id: jobId });
       if (claimed.changes !== 1) {
         throw new Error(`Knowledge job could not be claimed: ${jobId}`);
       }
@@ -259,9 +282,10 @@ export class KnowledgeGeneratorService {
       .get(claimedJob.project_id) as ProjectRow | undefined;
     if (!project) throw new Error(`Knowledge project not found: ${claimedJob.project_id}`);
 
-    const payload = parsePayload(claimedJob.payload_json);
+    const payload = payloadOverride ?? parsePayload(claimedJob.payload_json);
     const generatedAt = payload.generatedAt ?? this.now();
     const generatorVersion = payload.generatorVersion ?? '1';
+    const completeJob = options.completeJob ?? true;
     const workspaceRoot = realpathSync(project.workspace_root);
     const approvedOutputRoot = path.join(workspaceRoot, '.ariadne', 'knowledge');
     const outputRoot = path.resolve(payload.outputRoot ?? approvedOutputRoot);
@@ -289,7 +313,9 @@ export class KnowledgeGeneratorService {
       }
       this.renewLease(jobId, this.now());
     } catch (error) {
-      this.failJob(jobId, error);
+      if (completeJob) {
+        this.failJob(jobId, error);
+      }
       throw error;
     }
 
@@ -402,18 +428,21 @@ export class KnowledgeGeneratorService {
       ];
       fileCommit = commitFiles(workspaceRoot, outputRoot, stagedFiles);
       const completionNow = this.now();
-      const completion = this.db
-        .prepare(
-          `UPDATE knowledge_jobs
-           SET status = 'completed', completed_at = @completedAt, worker_id = NULL, lease_expires_at = NULL
-           WHERE id = @id
-             AND status = 'running'
-             AND worker_id = @workerId
-             AND (lease_expires_at IS NULL OR lease_expires_at > @leaseCheckAt)`,
-        )
-        .run({ completedAt: completionNow, leaseCheckAt: completionNow, workerId: this.workerId, id: jobId });
-      if (completion.changes !== 1) {
-        throw new Error(`Knowledge job lease lost before completion: ${jobId}`);
+      this.renewLease(jobId, completionNow);
+      if (completeJob) {
+        const completion = this.db
+          .prepare(
+            `UPDATE knowledge_jobs
+             SET status = 'completed', completed_at = @completedAt, worker_id = NULL, lease_expires_at = NULL
+             WHERE id = @id
+               AND status = 'running'
+               AND worker_id = @workerId
+               AND (lease_expires_at IS NULL OR lease_expires_at > @leaseCheckAt)`,
+          )
+          .run({ completedAt: completionNow, leaseCheckAt: completionNow, workerId: this.workerId, id: jobId });
+        if (completion.changes !== 1) {
+          throw new Error(`Knowledge job lease lost before completion: ${jobId}`);
+        }
       }
       this.db.exec('COMMIT');
       transactionOpen = false;
@@ -430,7 +459,9 @@ export class KnowledgeGeneratorService {
     } catch (error) {
       if (transactionOpen) this.db.exec('ROLLBACK');
       if (fileCommit) fileCommit.rollback();
-      this.failJob(jobId, error);
+      if (completeJob) {
+        this.failJob(jobId, error);
+      }
       throw error;
     }
   }
@@ -450,7 +481,7 @@ export class KnowledgeGeneratorService {
         completedAt: this.now(),
         id: jobId,
         workerId: this.workerId,
-        failureMessage: error instanceof Error ? error.message : 'Knowledge generation failed',
+        failureMessage: boundedRedactedMessage(error instanceof Error ? error.message : 'Knowledge generation failed'),
       });
   }
 
@@ -468,7 +499,7 @@ export class KnowledgeGeneratorService {
         id: jobId,
         workerId: this.workerId,
         now,
-        leaseExpiresAt: nextLeaseExpiry(now),
+        leaseExpiresAt: nextLeaseExpiry(now, this.leaseDurationMs),
       });
     if (renewed.changes !== 1) {
       throw new Error(`Knowledge job lease lost before persistence: ${jobId}`);

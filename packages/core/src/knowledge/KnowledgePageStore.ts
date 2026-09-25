@@ -179,7 +179,7 @@ function resolveSourceSpanId(db: Database.Database, input: CreatePageVersionInpu
   }
   const row = db
     .prepare(
-      `SELECT id
+      `SELECT span.id
        FROM knowledge_source_spans span
        JOIN knowledge_source_versions version
          ON version.project_id = span.project_id

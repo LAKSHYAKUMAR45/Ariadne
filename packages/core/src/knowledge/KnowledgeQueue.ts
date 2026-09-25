@@ -1,5 +1,5 @@
 import type Database from 'better-sqlite3';
-import { redactLines } from '../Redactor.js';
+import { redact, redactLines } from '../Redactor.js';
 import { createKnowledgeId } from './KnowledgeIds.js';
 import type { KnowledgeJobId, KnowledgeJobStatus } from './KnowledgeTypes.js';
 
@@ -102,6 +102,16 @@ interface ProgressRow {
 }
 
 const DEFAULT_LEASE_DURATION_MS = 60_000;
+const MAX_RESULT_WARNINGS = 8;
+const MAX_WARNING_MESSAGE_LENGTH = 280;
+const MAX_WARNING_CODE_LENGTH = 64;
+const MAX_FAILURE_MESSAGE_LENGTH = 500;
+const MAX_PROGRESS_DETAIL_ENTRIES = 12;
+const MAX_PROGRESS_DETAIL_DEPTH = 3;
+const MAX_PROGRESS_ARRAY_ITEMS = 12;
+const MAX_PROGRESS_STRING_LENGTH = 240;
+const MAX_PROGRESS_KEY_LENGTH = 80;
+const MAX_PROGRESS_STAGE_LENGTH = 64;
 
 function parseObject(value: string): Record<string, unknown> {
   const parsed: unknown = JSON.parse(value);
@@ -168,11 +178,72 @@ function sanitizePersistedResult(result: KnowledgeJobResult): KnowledgeJobResult
   const validated = validateKnowledgeJobResult(result);
   return {
     ...validated,
-    warnings: validated.warnings.map((warning) => ({
-      ...warning,
-      message: redactLines(warning.message),
+    pageVersionIds: validated.pageVersionIds.slice(0, MAX_PROGRESS_ARRAY_ITEMS),
+    warnings: validated.warnings.slice(0, MAX_RESULT_WARNINGS).map((warning) => ({
+      code: boundedRedactedCode(warning.code),
+      message: boundedRedactedLine(warning.message, MAX_WARNING_MESSAGE_LENGTH),
     })),
   };
+}
+
+function boundedRedactedLine(value: string, maxLength: number): string {
+  const redactedValue = redact(value);
+  if (redactedValue.length <= maxLength) {
+    return redactedValue;
+  }
+  const suffix = ' …[truncated]';
+  const budget = Math.max(0, maxLength - suffix.length);
+  return `${redactedValue.slice(0, budget)}${suffix}`;
+}
+
+function boundedRedactedKey(value: string): string {
+  return boundedRedactedLine(value, MAX_PROGRESS_KEY_LENGTH);
+}
+
+function boundedRedactedCode(value: string): string {
+  return boundedRedactedLine(value, MAX_WARNING_CODE_LENGTH);
+}
+
+function boundedRedactedStage(value: string): string {
+  return boundedRedactedLine(value, MAX_PROGRESS_STAGE_LENGTH);
+}
+
+function sanitizeProgressValue(value: unknown, depth = 0): unknown {
+  if (typeof value === 'string') {
+    return boundedRedactedLine(value, MAX_PROGRESS_STRING_LENGTH);
+  }
+  if (
+    typeof value === 'number' ||
+    typeof value === 'boolean' ||
+    value === null
+  ) {
+    return value;
+  }
+  if (Array.isArray(value)) {
+    if (depth >= MAX_PROGRESS_DETAIL_DEPTH) {
+      return value.length;
+    }
+    return value.slice(0, MAX_PROGRESS_ARRAY_ITEMS).map((entry) => sanitizeProgressValue(entry, depth + 1));
+  }
+  if (typeof value === 'object' && value !== null) {
+    if (depth >= MAX_PROGRESS_DETAIL_DEPTH) {
+      return '[object]';
+    }
+    return Object.fromEntries(
+      Object.entries(value)
+        .slice(0, MAX_PROGRESS_DETAIL_ENTRIES)
+        .map(([key, entry]) => [boundedRedactedKey(key), sanitizeProgressValue(entry, depth + 1)]),
+    );
+  }
+  return boundedRedactedLine(String(value), MAX_PROGRESS_STRING_LENGTH);
+}
+
+function sanitizeProgressDetail(detail: Record<string, unknown>): Record<string, unknown> {
+  return Object.fromEntries(
+    Object.entries(detail)
+      .slice(0, MAX_PROGRESS_DETAIL_ENTRIES)
+      .map(([key, value]) => [boundedRedactedKey(key), sanitizeProgressValue(value)]),
+  );
 }
 
 function rowToJob(row: JobRow): KnowledgeJobRecord {
@@ -216,6 +287,10 @@ export class KnowledgeQueue {
 
   public setNow(now: () => string): void {
     this.now = now;
+  }
+
+  public getLeaseDurationMs(): number {
+    return this.leaseDurationMs;
   }
 
   public enqueue(input: EnqueueKnowledgeJobInput): KnowledgeJobRecord {
@@ -330,7 +405,7 @@ export class KnowledgeQueue {
         id: jobId,
         now: this.now(),
         failureCode,
-        failureMessage,
+        failureMessage: boundedRedactedLine(failureMessage, MAX_FAILURE_MESSAGE_LENGTH),
         retryCount,
       });
     return this.require(jobId);
@@ -467,12 +542,13 @@ export class KnowledgeQueue {
     if (!Number.isInteger(completedUnits) || completedUnits < 0 || !Number.isInteger(totalUnits) || totalUnits < 0) {
       throw new Error('Knowledge progress units must be non-negative integers');
     }
+    const safeDetail = sanitizeProgressDetail(detail);
     const event = {
       id: createKnowledgeId('job-event'),
       projectId: job.projectId,
       jobId,
       eventKind: 'progress',
-      detailJson: JSON.stringify({ stage, completedUnits, totalUnits, detail }),
+      detailJson: JSON.stringify({ stage: boundedRedactedStage(stage), completedUnits, totalUnits, detail: safeDetail }),
       createdAt: this.now(),
     };
     this.db
@@ -489,7 +565,7 @@ export class KnowledgeQueue {
     const rows = this.db
       .prepare(
         `SELECT * FROM knowledge_job_events
-         WHERE job_id = ? AND event_kind = 'progress' ORDER BY created_at, id`,
+         WHERE job_id = ? AND event_kind = 'progress' ORDER BY created_at, rowid`,
       )
       .all(jobId) as ProgressRow[];
     return rows.map((row) => this.progressFromEvent({
