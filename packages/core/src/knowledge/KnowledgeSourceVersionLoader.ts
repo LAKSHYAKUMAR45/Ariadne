@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { existsSync, lstatSync, readFileSync, realpathSync } from 'node:fs';
+import type { Stats } from 'node:fs';
 import path from 'node:path';
 import type Database from 'better-sqlite3';
 import type { KnowledgeSourceKind } from './KnowledgeTypes.js';
@@ -51,6 +52,11 @@ interface SourceVersionRow {
   workspace_root: string;
 }
 
+interface ResolvedStoredContent {
+  absolutePath: string;
+  stats: Stats;
+}
+
 function knowledgeRoot(workspaceRoot: string): string {
   return path.join(workspaceRoot, '.ariadne', 'knowledge');
 }
@@ -63,11 +69,15 @@ function sha256(value: Buffer): string {
   return createHash('sha256').update(value).digest('hex');
 }
 
+function hasDisallowedControlCharacters(content: string): boolean {
+  return /[\u0000-\u0008\u000B\u000E-\u001F\u007F-\u009F]/u.test(content);
+}
+
 function decodeUtf8(content: Buffer): string {
   try {
     const decoded = new TextDecoder('utf-8', { fatal: true }).decode(content);
-    if (decoded.includes('\u0000')) {
-      throw new Error('Knowledge source content must not contain NUL bytes');
+    if (hasDisallowedControlCharacters(decoded)) {
+      throw new Error('Knowledge source content must not contain disallowed control characters');
     }
     return decoded;
   } catch (error: unknown) {
@@ -79,7 +89,7 @@ function decodeUtf8(content: Buffer): string {
   }
 }
 
-function resolveStoredContentPath(workspaceRoot: string, contentPath: string): string {
+function resolveStoredContentPath(workspaceRoot: string, contentPath: string): ResolvedStoredContent {
   let normalizedPath: string;
   try {
     normalizedPath = normalizeKnowledgePath(contentPath);
@@ -102,6 +112,14 @@ function resolveStoredContentPath(workspaceRoot: string, contentPath: string): s
   try {
     assertNoSymlinkComponents(sourceStorageRoot, candidate, 'Knowledge source content path');
   } catch (error: unknown) {
+    const errorCode = (error as NodeJS.ErrnoException).code;
+    if (errorCode !== undefined) {
+      throw new KnowledgeSourceVersionLoadError(
+        'source_content_missing',
+        'Knowledge source content path could not be inspected',
+        { cause: error },
+      );
+    }
     throw new KnowledgeSourceVersionLoadError(
       'source_path_rejected',
       'Knowledge source content path must not traverse symbolic links',
@@ -113,13 +131,18 @@ function resolveStoredContentPath(workspaceRoot: string, contentPath: string): s
     throw new KnowledgeSourceVersionLoadError('source_content_missing', 'Knowledge source content file is missing');
   }
 
-  let stats: ReturnType<typeof lstatSync>;
+  let stats: Stats;
   try {
     stats = lstatSync(candidate);
   } catch (error: unknown) {
-    throw new KnowledgeSourceVersionLoadError('source_content_missing', 'Knowledge source content file is missing', {
-      cause: error,
-    });
+    const errorCode = (error as NodeJS.ErrnoException).code;
+    throw new KnowledgeSourceVersionLoadError(
+      'source_content_missing',
+      errorCode === 'ENOENT'
+        ? 'Knowledge source content file is missing'
+        : 'Knowledge source content file could not be inspected',
+      { cause: error },
+    );
   }
 
   if (!stats.isFile()) {
@@ -138,10 +161,11 @@ function resolveStoredContentPath(workspaceRoot: string, contentPath: string): s
         'Knowledge source content path must stay within .ariadne/knowledge/sources',
       );
     }
-    return canonicalCandidate;
+    return { absolutePath: canonicalCandidate, stats };
   } catch (error: unknown) {
     if (error instanceof KnowledgeSourceVersionLoadError) throw error;
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+    const errorCode = (error as NodeJS.ErrnoException).code;
+    if (errorCode === 'ENOENT') {
       throw new KnowledgeSourceVersionLoadError(
         'source_content_missing',
         'Knowledge source content file is missing',
@@ -149,8 +173,8 @@ function resolveStoredContentPath(workspaceRoot: string, contentPath: string): s
       );
     }
     throw new KnowledgeSourceVersionLoadError(
-      'source_path_rejected',
-      'Knowledge source content path could not be resolved safely',
+      'source_content_missing',
+      'Knowledge source content file could not be resolved',
       { cause: error },
     );
   }
@@ -180,9 +204,26 @@ export function loadKnowledgeSourceVersion(
     );
   }
 
-  const absolutePath = resolveStoredContentPath(row.workspace_root, row.content_path);
-  const bytes = readFileSync(absolutePath);
   const maxBytes = input.maxBytes;
+  const resolvedContent = resolveStoredContentPath(row.workspace_root, row.content_path);
+  if (maxBytes !== undefined && resolvedContent.stats.size > maxBytes) {
+    throw new KnowledgeSourceVersionLoadError(
+      'source_too_large',
+      `Knowledge source content exceeds the ${maxBytes} byte limit`,
+    );
+  }
+
+  let bytes: Buffer;
+  try {
+    bytes = readFileSync(resolvedContent.absolutePath);
+  } catch (error: unknown) {
+    throw new KnowledgeSourceVersionLoadError(
+      'source_content_missing',
+      'Knowledge source content file could not be read',
+      { cause: error },
+    );
+  }
+
   if (maxBytes !== undefined && bytes.byteLength > maxBytes) {
     throw new KnowledgeSourceVersionLoadError(
       'source_too_large',

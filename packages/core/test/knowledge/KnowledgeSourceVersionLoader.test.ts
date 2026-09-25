@@ -15,22 +15,22 @@ describe('KnowledgeSourceVersionLoader', () => {
   let db: Database.Database;
   let store: KnowledgeSourceStore;
   let workspaceRoot: string;
+  let workspaceRoots: string[];
 
   beforeEach(() => {
-    workspaceRoot = mkdtempSync(join(process.cwd(), '.knowledge-source-version-loader-test-'));
+    workspaceRoots = [];
+    workspaceRoot = createWorkspaceRoot('project_1');
     db = openDatabase(':memory:');
     applyKnowledgeMigrations(db);
-    db.prepare(
-      `INSERT INTO knowledge_projects
-       (id, workspace_root, name, status, created_at, updated_at)
-       VALUES (?, ?, ?, 'active', ?, ?)`,
-    ).run('project_1', workspaceRoot, 'Loader Test', new Date().toISOString(), new Date().toISOString());
+    insertProject('project_1', workspaceRoot, 'Loader Test');
     store = new KnowledgeSourceStore(db);
   });
 
   afterEach(() => {
     db.close();
-    rmSync(workspaceRoot, { recursive: true, force: true });
+    for (const root of workspaceRoots) {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it('loads immutable version content from registered source storage after the workspace file changes', () => {
@@ -45,7 +45,7 @@ describe('KnowledgeSourceVersionLoader', () => {
       contentPath: storedPath,
       mimeType: 'text/markdown',
     });
-    const version = latestVersion(source.id);
+    const version = latestVersion('project_1', source.id);
 
     writeFileSync(workspaceFile, 'version two\n', 'utf8');
 
@@ -70,6 +70,26 @@ describe('KnowledgeSourceVersionLoader', () => {
     );
   });
 
+  it('fails when the requested source version belongs to a different project', () => {
+    const otherWorkspaceRoot = createWorkspaceRoot('project_2');
+    insertProject('project_2', otherWorkspaceRoot, 'Other Loader Test');
+    writeStoredContentForWorkspace(otherWorkspaceRoot, 'sources/metadata/docs-other.md', Buffer.from('other\n', 'utf8'));
+    const otherSource = store.register({
+      projectId: 'project_2',
+      kind: 'file',
+      path: 'docs/other.md',
+      content: 'other\n',
+      contentPath: 'sources/metadata/docs-other.md',
+      mimeType: 'text/markdown',
+    });
+    const otherVersion = latestVersion('project_2', otherSource.id);
+
+    expectLoadError(
+      () => loadKnowledgeSourceVersion(db, { projectId: 'project_1', sourceVersionId: otherVersion.id }),
+      'source_version_missing',
+    );
+  });
+
   it('fails when the stored content file is missing', () => {
     const source = store.register({
       projectId: 'project_1',
@@ -79,7 +99,7 @@ describe('KnowledgeSourceVersionLoader', () => {
       contentPath: 'sources/metadata/docs-missing.md',
       mimeType: 'text/markdown',
     });
-    const version = latestVersion(source.id);
+    const version = latestVersion('project_1', source.id);
 
     expectLoadError(
       () => loadKnowledgeSourceVersion(db, { projectId: 'project_1', sourceVersionId: version.id }),
@@ -97,7 +117,7 @@ describe('KnowledgeSourceVersionLoader', () => {
       contentPath: 'sources/metadata/docs-hash.md',
       mimeType: 'text/markdown',
     });
-    const version = latestVersion(source.id);
+    const version = latestVersion('project_1', source.id);
 
     expectLoadError(
       () => loadKnowledgeSourceVersion(db, { projectId: 'project_1', sourceVersionId: version.id }),
@@ -106,7 +126,7 @@ describe('KnowledgeSourceVersionLoader', () => {
   });
 
   it('rejects stored paths that escape the approved source storage root', () => {
-    writeStoredFileRelativeToWorkspace('.ariadne/knowledge/escape.txt', Buffer.from('escape\n', 'utf8'));
+    writeStoredFileRelativeToWorkspace(workspaceRoot, '.ariadne/knowledge/escape.txt', Buffer.from('escape\n', 'utf8'));
     const source = store.register({
       projectId: 'project_1',
       kind: 'file',
@@ -115,7 +135,7 @@ describe('KnowledgeSourceVersionLoader', () => {
       contentPath: 'sources/metadata/docs-escape.md',
       mimeType: 'text/markdown',
     });
-    const version = latestVersion(source.id);
+    const version = latestVersion('project_1', source.id);
     db.prepare('UPDATE knowledge_source_versions SET content_path = ? WHERE id = ?').run('../escape.txt', version.id);
 
     expectLoadError(
@@ -138,7 +158,25 @@ describe('KnowledgeSourceVersionLoader', () => {
       contentPath: 'sources/linked/content.md',
       mimeType: 'text/markdown',
     });
-    const version = latestVersion(source.id);
+    const version = latestVersion('project_1', source.id);
+
+    expectLoadError(
+      () => loadKnowledgeSourceVersion(db, { projectId: 'project_1', sourceVersionId: version.id }),
+      'source_path_rejected',
+    );
+  });
+
+  it('rejects stored paths that resolve to a directory', () => {
+    mkdirSync(join(workspaceRoot, '.ariadne', 'knowledge', 'sources', 'metadata', 'directory-only'), { recursive: true });
+    const source = store.register({
+      projectId: 'project_1',
+      kind: 'file',
+      path: 'docs/directory.md',
+      content: 'directory\n',
+      contentPath: 'sources/metadata/directory-only',
+      mimeType: 'text/markdown',
+    });
+    const version = latestVersion('project_1', source.id);
 
     expectLoadError(
       () => loadKnowledgeSourceVersion(db, { projectId: 'project_1', sourceVersionId: version.id }),
@@ -156,7 +194,7 @@ describe('KnowledgeSourceVersionLoader', () => {
       contentPath: 'sources/metadata/docs-large.md',
       mimeType: 'text/plain',
     });
-    const version = latestVersion(source.id);
+    const version = latestVersion('project_1', source.id);
 
     expectLoadError(
       () => loadKnowledgeSourceVersion(db, { projectId: 'project_1', sourceVersionId: version.id, maxBytes: 4 }),
@@ -175,7 +213,7 @@ describe('KnowledgeSourceVersionLoader', () => {
       contentPath: 'sources/media/docs-binary.bin',
       mimeType: 'application/octet-stream',
     });
-    const version = latestVersion(source.id);
+    const version = latestVersion('project_1', source.id);
     db.prepare('UPDATE knowledge_source_versions SET byte_length = ? WHERE id = ?').run(bytes.byteLength, version.id);
 
     expectLoadError(
@@ -183,6 +221,41 @@ describe('KnowledgeSourceVersionLoader', () => {
       'unsupported_source',
     );
   });
+
+  it('rejects valid utf-8 content that contains disallowed control bytes', () => {
+    const bytes = Buffer.from('hello\u0007world\n', 'utf8');
+    writeStoredContent('sources/media/docs-control.txt', bytes);
+    const source = store.register({
+      projectId: 'project_1',
+      kind: 'file',
+      path: 'docs/control.txt',
+      contentHash: createHash('sha256').update(bytes).digest('hex'),
+      contentPath: 'sources/media/docs-control.txt',
+      mimeType: 'text/plain',
+    });
+    const version = latestVersion('project_1', source.id);
+    db.prepare('UPDATE knowledge_source_versions SET byte_length = ? WHERE id = ?').run(bytes.byteLength, version.id);
+
+    expectLoadError(
+      () => loadKnowledgeSourceVersion(db, { projectId: 'project_1', sourceVersionId: version.id }),
+      'unsupported_source',
+    );
+  });
+
+  function createWorkspaceRoot(projectId: string): string {
+    const root = mkdtempSync(join(process.cwd(), `.knowledge-source-version-loader-${projectId}-`));
+    workspaceRoots.push(root);
+    return root;
+  }
+
+  function insertProject(projectId: string, projectWorkspaceRoot: string, name: string): void {
+    const timestamp = new Date().toISOString();
+    db.prepare(
+      `INSERT INTO knowledge_projects
+       (id, workspace_root, name, status, created_at, updated_at)
+       VALUES (?, ?, ?, 'active', ?, ?)`,
+    ).run(projectId, projectWorkspaceRoot, name, timestamp, timestamp);
+  }
 
   function writeWorkspaceFile(relativePath: string, content: string): string {
     const absolutePath = join(workspaceRoot, relativePath);
@@ -192,17 +265,21 @@ describe('KnowledgeSourceVersionLoader', () => {
   }
 
   function writeStoredContent(relativePath: string, content: Buffer): void {
-    writeStoredFileRelativeToWorkspace(`.ariadne/knowledge/${relativePath}`, content);
+    writeStoredContentForWorkspace(workspaceRoot, relativePath, content);
   }
 
-  function writeStoredFileRelativeToWorkspace(relativePath: string, content: Buffer): void {
-    const absolutePath = join(workspaceRoot, relativePath);
+  function writeStoredContentForWorkspace(projectWorkspaceRoot: string, relativePath: string, content: Buffer): void {
+    writeStoredFileRelativeToWorkspace(projectWorkspaceRoot, `.ariadne/knowledge/${relativePath}`, content);
+  }
+
+  function writeStoredFileRelativeToWorkspace(projectWorkspaceRoot: string, relativePath: string, content: Buffer): void {
+    const absolutePath = join(projectWorkspaceRoot, relativePath);
     mkdirSync(dirname(absolutePath), { recursive: true });
     writeFileSync(absolutePath, content);
   }
 
-  function latestVersion(sourceId: string) {
-    const version = store.listVersions('project_1', sourceId as never).at(-1);
+  function latestVersion(projectId: string, sourceId: string) {
+    const version = store.listVersions(projectId, sourceId as never).at(-1);
     expect(version).toBeDefined();
     return version!;
   }
