@@ -10,7 +10,12 @@ body,
 }
 
 body {
-  background: var(--canvas);
+  /* Same top-of-page primary-tinted wash jcnr-triage uses on its body
+     (dashboard.css), so surfaces read consistently against the shared
+     Argon/Tabler palette in both light and dark mode. */
+  background:
+    linear-gradient(180deg, rgb(var(--blue-rgb) / 8%), rgb(255 255 255 / 0%)) 0 0 / 100% 80%,
+    var(--canvas);
   color: var(--text);
 }
 
@@ -50,7 +55,7 @@ a:focus-visible {
   left: 12px;
   padding: 8px 12px;
   transform: translateY(-160%);
-  border-radius: 4px;
+  border-radius: 7px;
   background: var(--text);
   color: var(--canvas);
 }
@@ -79,7 +84,7 @@ a:focus-visible {
   height: 30px;
   place-items: center;
   border: 1px solid var(--line-strong);
-  border-radius: 6px;
+  border-radius: 10px;
   background: var(--surface-selected);
   color: var(--blue);
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
@@ -106,8 +111,8 @@ a:focus-visible {
   justify-items: center;
   gap: 20px;
   background:
-    linear-gradient(90deg, rgb(90 167 255 / 3%) 1px, transparent 1px),
-    linear-gradient(rgb(90 167 255 / 3%) 1px, transparent 1px),
+    linear-gradient(90deg, rgb(var(--blue-rgb) / 3%) 1px, transparent 1px),
+    linear-gradient(rgb(var(--blue-rgb) / 3%) 1px, transparent 1px),
     var(--canvas);
   background-size: 32px 32px;
   color: var(--text-muted);
@@ -125,12 +130,16 @@ a:focus-visible {
   justify-content: center;
   padding: clamp(48px, 8vw, 120px);
   border-right: 1px solid var(--line);
+  /* Matches jcnr-triage's .login-shell wash (dashboard.css): a primary
+     radial-gradient top-left plus its --argon-info cyan top-right, layered
+     over the same grid-dot pattern this panel already had. */
   background:
-    radial-gradient(circle at 18% 20%, rgb(47 134 232 / 14%), transparent 34%),
-    linear-gradient(90deg, rgb(90 167 255 / 3%) 1px, transparent 1px),
-    linear-gradient(rgb(90 167 255 / 3%) 1px, transparent 1px),
+    radial-gradient(circle at 18% 20%, rgb(var(--blue-rgb) / 22%), transparent 32%),
+    radial-gradient(circle at 82% 8%, rgb(var(--info-rgb) / 18%), transparent 28%),
+    linear-gradient(90deg, rgb(var(--blue-rgb) / 3%) 1px, transparent 1px),
+    linear-gradient(rgb(var(--blue-rgb) / 3%) 1px, transparent 1px),
     var(--canvas);
-  background-size: auto, 32px 32px, 32px 32px, auto;
+  background-size: auto, auto, 32px 32px, 32px 32px, auto;
 }
 
 .login-story .brand-lockup {
@@ -178,17 +187,17 @@ a:focus-visible {
   flex: 0 0 auto;
   border-radius: 50%;
   background: var(--green);
-  box-shadow: 0 0 0 4px rgb(71 209 140 / 10%);
+  box-shadow: 0 0 0 4px rgb(var(--green-rgb) / 10%);
 }
 
 .status-dot--warning {
   background: var(--amber);
-  box-shadow: 0 0 0 4px rgb(242 189 88 / 10%);
+  box-shadow: 0 0 0 4px rgb(var(--amber-rgb) / 10%);
 }
 
 .status-dot--bad {
   background: var(--red);
-  box-shadow: 0 0 0 4px rgb(255 107 114 / 10%);
+  box-shadow: 0 0 0 4px rgb(var(--red-rgb) / 10%);
 }
 
 .login-panel {
@@ -223,7 +232,7 @@ a:focus-visible {
   min-height: 46px;
   padding: 0 13px;
   border: 1px solid var(--line-strong);
-  border-radius: 6px;
+  border-radius: 10px;
   background: var(--surface-sunken);
   color: var(--text);
 }
@@ -236,7 +245,7 @@ a:focus-visible {
 .quiet-action {
   min-height: 40px;
   border: 0;
-  border-radius: 6px;
+  border-radius: 10px;
   font-weight: 750;
   cursor: pointer;
 }
@@ -292,7 +301,37 @@ a:focus-visible {
   flex-direction: column;
   padding: 24px 16px 16px;
   border-right: 1px solid var(--line);
-  background: var(--surface-sunken);
+  /* jcnr-triage's .app-sidebar is always this dark navy gradient regardless of
+     the page's light/dark theme (dashboard.css has no [data-bs-theme="dark"]
+     override for it) - mirrored here rather than following --surface-sunken,
+     which would otherwise flip pale in light mode. */
+  background: linear-gradient(180deg, #172033, #111827);
+  color: #d6dcea;
+}
+
+.sidebar .brand-lockup {
+  color: #ffffff;
+}
+
+.sidebar .brand-mark {
+  border-color: transparent;
+  background: linear-gradient(135deg, var(--blue), #825ee4);
+  color: #ffffff;
+}
+
+.sidebar .environment,
+.sidebar .sidebar-footer {
+  border-color: rgb(255 255 255 / 13%);
+}
+
+.sidebar .environment strong,
+.sidebar .sidebar-footer strong {
+  color: #ffffff;
+}
+
+.sidebar .environment span:last-child,
+.sidebar .sidebar-footer span:last-child {
+  color: #8893a7;
 }
 
 .environment {
@@ -338,23 +377,25 @@ a:focus-visible {
   gap: 11px;
   padding: 0 10px;
   border: 0;
-  border-radius: 5px;
+  border-radius: 9px;
   background: transparent;
-  color: var(--text-muted);
+  color: #d6dcea;
   font-size: 13px;
   font-weight: 650;
   text-align: left;
+  text-decoration: none;
   cursor: pointer;
 }
 
 .nav-item:hover {
-  background: var(--surface);
-  color: var(--text);
+  background: rgb(255 255 255 / 6%);
+  color: #ffffff;
 }
 
 .nav-item--active {
-  background: var(--surface-selected);
-  color: var(--text);
+  background: linear-gradient(90deg, var(--blue), #697dea);
+  color: #ffffff;
+  box-shadow: 0 5px 12px rgb(var(--blue-rgb) / 35%);
 }
 
 .nav-glyph {
@@ -363,7 +404,7 @@ a:focus-visible {
   height: 24px;
   place-items: center;
   border: 1px solid currentColor;
-  border-radius: 4px;
+  border-radius: 7px;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 8px;
   letter-spacing: 0.04em;
@@ -383,13 +424,13 @@ a:focus-visible {
   padding: 6px;
   border: 0;
   background: transparent;
-  color: var(--text-muted);
+  color: #8893a7;
   font-size: 9px;
   cursor: pointer;
 }
 
 .logout-action:hover {
-  color: var(--text);
+  color: #ffffff;
 }
 
 .theme-toggle {
@@ -490,12 +531,12 @@ a:focus-visible {
 .overview-grid {
   display: grid;
   grid-template-columns: 2fr 1fr 1fr;
-  gap: 14px;
+  gap: 20px;
 }
 
 .panel {
   min-width: 0;
-  padding: 20px;
+  padding: 26px;
   border: 1px solid var(--line);
   border-radius: var(--radius);
   background: var(--surface);
@@ -535,17 +576,17 @@ a:focus-visible {
 }
 
 .status-pill--good {
-  border-color: rgb(71 209 140 / 35%);
+  border-color: rgb(var(--green-rgb) / 35%);
   color: var(--green);
 }
 
 .status-pill--warning {
-  border-color: rgb(242 189 88 / 35%);
+  border-color: rgb(var(--amber-rgb) / 35%);
   color: var(--amber);
 }
 
 .status-pill--bad {
-  border-color: rgb(255 107 114 / 35%);
+  border-color: rgb(var(--red-rgb) / 35%);
   color: var(--red);
 }
 
@@ -575,7 +616,7 @@ a:focus-visible {
   flex: 0 0 auto;
   border-radius: 50%;
   background: var(--blue);
-  box-shadow: 0 0 0 7px rgb(90 167 255 / 10%);
+  box-shadow: 0 0 0 7px rgb(var(--blue-rgb) / 10%);
 }
 
 .metric-panel {
@@ -637,7 +678,7 @@ a:focus-visible {
 
 .status-card {
   display: grid;
-  gap: 16px;
+  gap: 18px;
 }
 
 .status-card__summary {
@@ -649,7 +690,7 @@ a:focus-visible {
 
 .status-rows {
   display: grid;
-  gap: 10px;
+  gap: 12px;
 }
 
 .status-row {
@@ -657,15 +698,15 @@ a:focus-visible {
   grid-template-columns: minmax(0, 1fr) auto auto;
   align-items: center;
   gap: 12px;
-  padding: 12px 14px;
+  padding: 14px 16px;
   border: 1px solid var(--line);
-  border-radius: 8px;
+  border-radius: 12px;
   background: var(--surface-sunken);
 }
 
 .status-row--attention {
-  border-color: rgb(255 107 114 / 22%);
-  background: rgb(255 107 114 / 5%);
+  border-color: rgb(var(--red-rgb) / 22%);
+  background: rgb(var(--red-rgb) / 5%);
 }
 
 .status-row__copy {
@@ -693,15 +734,15 @@ a:focus-visible {
 
 .timestamp-grid {
   display: grid;
-  gap: 10px;
+  gap: 12px;
 }
 
 .status-timestamp {
   display: grid;
   gap: 6px;
-  padding: 12px 14px;
+  padding: 14px 16px;
   border: 1px solid var(--line);
-  border-radius: 8px;
+  border-radius: 12px;
   background: var(--surface-sunken);
 }
 
@@ -758,19 +799,19 @@ a:focus-visible {
   margin-top: 16px;
   padding: 11px 14px;
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: 10px;
   font-size: 12px;
 }
 
 .notice--error {
-  border-color: rgb(255 107 114 / 45%);
-  background: rgb(255 107 114 / 8%);
+  border-color: rgb(var(--red-rgb) / 45%);
+  background: rgb(var(--red-rgb) / 8%);
   color: var(--danger-text);
 }
 
 .notice--success {
-  border-color: rgb(71 209 140 / 40%);
-  background: rgb(71 209 140 / 8%);
+  border-color: rgb(var(--green-rgb) / 40%);
+  background: rgb(var(--green-rgb) / 8%);
   color: var(--success-text);
 }
 
@@ -989,7 +1030,7 @@ a:focus-visible {
   min-width: 140px;
   padding: 0 30px 0 11px;
   border: 1px solid var(--line-strong);
-  border-radius: 5px;
+  border-radius: 9px;
   background: var(--surface);
   color: var(--text);
 }
@@ -1098,7 +1139,7 @@ a:focus-visible {
   padding: 12px;
   overflow: auto;
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: 10px;
   background: var(--surface-sunken);
   white-space: pre-wrap;
 }
@@ -1144,7 +1185,7 @@ a:focus-visible {
   margin-top: 18px;
   padding: 12px;
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: 10px;
   background: var(--surface-sunken);
 }
 
@@ -1186,7 +1227,7 @@ a:focus-visible {
   min-height: 44px;
   padding: 0 12px;
   border: 1px solid var(--line-strong);
-  border-radius: 5px;
+  border-radius: 9px;
   background: var(--surface-sunken);
   color: var(--text);
 }
@@ -1290,6 +1331,20 @@ a:focus-visible {
   gap: 8px;
 }
 
+/* Export/Delete capture sit in a 58px pane-heading strip - the default
+   .quiet-action sizing (40px tall, 14px side padding, 750 weight) reads
+   oversized there, especially once "Delete capture" no longer needs to
+   fit an inline capture id. Scoped to these two containers only, so
+   .quiet-action elsewhere (Members refresh, row actions, dialogs) is
+   unaffected. */
+.pane-actions .quiet-action,
+.file-pane__controls .quiet-action {
+  min-height: 30px;
+  padding: 0 11px;
+  font-size: 11px;
+  font-weight: 700;
+}
+
 .pane-actions span {
   flex: 0 0 auto;
 }
@@ -1304,6 +1359,17 @@ a:focus-visible {
   gap: 6px;
   list-style: none;
   user-select: none;
+  /* Export was reading as just another plain outlined button next to the
+     also-plain Delete capture button - tinted blue (jcnr-triage's primary
+     hue) so the two read as distinct action types at a glance. */
+  border-color: rgb(var(--blue-rgb) / 40%);
+  background: rgb(var(--blue-rgb) / 8%);
+  color: var(--blue-strong);
+}
+
+.export-menu__trigger:hover {
+  border-color: rgb(var(--blue-rgb) / 65%);
+  background: rgb(var(--blue-rgb) / 14%);
 }
 
 .export-menu__trigger::-webkit-details-marker {
@@ -1317,7 +1383,7 @@ a:focus-visible {
 }
 
 .export-menu[open] .export-menu__trigger {
-  background: var(--surface-raised);
+  background: rgb(var(--blue-rgb) / 16%);
 }
 
 .export-menu__list {
@@ -1338,7 +1404,7 @@ a:focus-visible {
 .export-menu__item {
   padding: 8px 10px;
   border: 0;
-  border-radius: 5px;
+  border-radius: 9px;
   background: transparent;
   color: var(--text);
   font-size: 12px;
@@ -1365,7 +1431,7 @@ a:focus-visible {
   min-height: 36px;
   padding: 0 11px;
   border: 1px solid var(--line);
-  border-radius: 5px;
+  border-radius: 9px;
   background: var(--surface-sunken);
   color: var(--text);
   font-size: 11px;
@@ -1452,8 +1518,10 @@ a:focus-visible {
 .capture-count {
   min-width: 20px;
   padding: 3px 5px;
-  border: 1px solid var(--line-strong);
+  border: 1px solid rgb(var(--blue-rgb) / 35%);
   border-radius: 999px;
+  background: rgb(var(--blue-rgb) / 10%);
+  color: var(--blue);
   text-align: center;
 }
 
@@ -1490,7 +1558,7 @@ a:focus-visible {
   height: 28px;
   place-items: center;
   border: 1px solid var(--line-strong);
-  border-radius: 5px;
+  border-radius: 9px;
   background: var(--surface-sunken);
   color: var(--text-muted);
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
@@ -1499,13 +1567,39 @@ a:focus-visible {
 }
 
 .event-glyph--error {
-  border-color: rgb(255 107 114 / 55%);
+  border-color: rgb(var(--red-rgb) / 55%);
+  background: rgb(var(--red-rgb) / 10%);
   color: var(--red);
 }
 
 .event-glyph--capture {
-  border-color: rgb(90 167 255 / 55%);
+  border-color: rgb(var(--blue-rgb) / 55%);
+  background: rgb(var(--blue-rgb) / 10%);
   color: var(--blue);
+}
+
+.event-glyph--checkpoint {
+  border-color: rgb(var(--purple-rgb) / 55%);
+  background: rgb(var(--purple-rgb) / 10%);
+  color: var(--purple);
+}
+
+.event-glyph--command {
+  border-color: rgb(var(--info-rgb) / 55%);
+  background: rgb(var(--info-rgb) / 10%);
+  color: var(--info);
+}
+
+.event-glyph--decision {
+  border-color: rgb(var(--amber-rgb) / 55%);
+  background: rgb(var(--amber-rgb) / 12%);
+  color: #a6790a;
+}
+
+.event-glyph--commit {
+  border-color: rgb(var(--green-rgb) / 55%);
+  background: rgb(var(--green-rgb) / 10%);
+  color: var(--green);
 }
 
 .event-copy {
@@ -1554,7 +1648,7 @@ a:focus-visible {
   gap: 10px;
   padding: 7px 8px;
   border: 1px solid transparent;
-  border-radius: 4px;
+  border-radius: 7px;
   background: var(--surface-sunken);
   color: var(--text-muted);
   text-align: left;
@@ -1563,9 +1657,13 @@ a:focus-visible {
 
 .file-row:hover,
 .file-row--selected {
-  border-color: var(--line-strong);
-  background: var(--surface-selected);
+  border-color: rgb(var(--blue-rgb) / 45%);
+  background: rgb(var(--blue-rgb) / 8%);
   color: var(--text);
+}
+
+.file-row--selected {
+  box-shadow: inset 2px 0 0 var(--blue);
 }
 
 .file-row span {
@@ -1586,15 +1684,15 @@ a:focus-visible {
   display: flex;
   padding: 2px;
   border: 1px solid var(--line);
-  border-radius: 5px;
+  border-radius: 9px;
   background: var(--surface-sunken);
 }
 
 .segmented-control button {
-  min-height: 25px;
-  padding: 0 8px;
+  min-height: 22px;
+  padding: 0 7px;
   border: 0;
-  border-radius: 3px;
+  border-radius: 5px;
   background: transparent;
   color: var(--text-muted);
   font-size: 9px;
@@ -1602,18 +1700,19 @@ a:focus-visible {
 }
 
 .segmented-control button.is-active {
-  background: var(--surface-selected);
-  color: var(--text);
+  background: var(--blue);
+  color: #ffffff;
+  box-shadow: 0 2px 6px rgb(var(--blue-rgb) / 35%);
 }
 
 .destructive-action {
-  border-color: rgb(255 107 114 / 40%);
+  border-color: rgb(var(--red-rgb) / 40%);
   color: var(--danger-text);
 }
 
 .destructive-action:hover {
-  border-color: rgb(255 107 114 / 65%);
-  background: rgb(255 107 114 / 10%);
+  border-color: rgb(var(--red-rgb) / 65%);
+  background: rgb(var(--red-rgb) / 10%);
 }
 
 .file-content {

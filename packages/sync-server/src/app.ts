@@ -32,6 +32,8 @@ import { createAuthRouter } from './routes/auth.js';
 import { createSyncRouter } from './routes/sync.js';
 import { createTaskHistoryRouter } from './routes/taskHistory.js';
 import { createTaskHistoryStore } from './taskHistoryStore.js';
+import { createInternalSsoRouter } from './routes/internalSso.js';
+import { createSsoCallbackRouter } from './routes/ssoCallback.js';
 
 export interface CreateAppOptions {
   /** Required: the server must never run without a loaded keyring. */
@@ -56,6 +58,8 @@ export interface CreateAppOptions {
   adminAuthRateLimiter?: AdminAuthRateLimiter;
   /** Built dashboard directory. Omit in API-only tests and development. */
   dashboardDistDir?: string | null;
+  /** Shared secret for SSO code minting (server-to-server); tests can override. */
+  ssoSharedSecret?: string;
 }
 
 const CALLBACK_TOKEN_PATTERN = /^[0-9a-f]{64}$/;
@@ -137,6 +141,15 @@ export function createApp(pool: Pool, jwtSecret: string, options: CreateAppOptio
 
   app.use(express.json());
 
+  // Internal SSO code minting endpoint (server-to-server, shared-secret authenticated).
+  // Mounted after the global JSON parser so the body is available for validation.
+  const ssoSharedSecret = options?.ssoSharedSecret ?? '';
+  app.use('/internal/sso', createInternalSsoRouter(pool, ssoSharedSecret));
+
+  // Public SSO callback endpoint. The browser is redirected here with an opaque code
+  // that is exchanged exactly once for an admin session cookie.
+  app.use('/sso/callback', createSsoCallbackRouter(pool, { cookieSecure: adminCookieSecure }));
+
   app.use('/api/v1/auth', createAuthRouter(pool, jwtSecret));
 
   // The dashboard is browser-facing, so it authenticates with a database-backed
@@ -158,10 +171,17 @@ export function createApp(pool: Pool, jwtSecret: string, options: CreateAppOptio
     requireAdminSession(pool),
     requireCsrf({ allowedOrigin: adminPublicOrigin }),
   ];
+  const taskSession = [
+    requireAdminSession(pool, { allowMember: true }),
+    requireCsrf({ allowedOrigin: adminPublicOrigin }),
+  ];
 
+  // Mounted at a distinct sub-path (not the shared '/api/v1/admin' prefix) so
+  // its member-permissive session middleware never runs for unrelated
+  // /api/v1/admin/* routes (e.g. strict-admin-only /members, /backups).
+  app.use('/api/v1/admin/tasks', ...taskSession, createAdminTasksRouter(pool, taskHistoryStore));
   app.use('/api/v1/admin', ...adminSession, createAdminMembersRouter(pool));
   app.use('/api/v1/admin', ...adminSession, createMembersRouter(pool));
-  app.use('/api/v1/admin', ...adminSession, createAdminTasksRouter(pool, taskHistoryStore));
   app.use(
     '/api/v1/admin',
     ...adminSession,

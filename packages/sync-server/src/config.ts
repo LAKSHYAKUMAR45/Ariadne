@@ -33,6 +33,8 @@ export interface SyncServerConfig {
   adminCookieSecure: boolean;
   /** Absolute path containing the built dashboard index.html and assets. */
   dashboardDistDir: string | null;
+  /** Shared secret for server-to-server SSO code minting (jcnr-triage → Ariadne). */
+  ssoSharedSecret: string;
 }
 
 export class SyncServerConfigError extends Error {
@@ -125,6 +127,13 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): SyncServerConf
     throw new SyncServerConfigError('SYNC_SERVER_JWT_SECRET environment variable is required');
   }
 
+  const ssoSharedSecret = env.ARIADNE_SSO_SHARED_SECRET;
+  if (!ssoSharedSecret) {
+    throw new SyncServerConfigError(
+      'ARIADNE_SSO_SHARED_SECRET environment variable is required',
+    );
+  }
+
   const host = env.HOST ?? '127.0.0.1';
   const port = env.PORT ? Number(env.PORT) : 4300;
   if (!Number.isInteger(port) || port < 1 || port > 65535) {
@@ -163,5 +172,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): SyncServerConf
     adminPublicOrigin,
     adminCookieSecure,
     dashboardDistDir,
+    ssoSharedSecret,
   };
 }

@@ -6,6 +6,7 @@ describe('sync server configuration', () => {
     DATABASE_URL: 'postgresql://localhost/ariadne',
     ENCRYPTION_KEY_DIR: '/etc/ariadne/keys',
     SYNC_SERVER_JWT_SECRET: 'test-secret',
+    ARIADNE_SSO_SHARED_SECRET: 'test-sso-shared-secret',
   };
 
   it('binds to loopback by default for tunnel-only deployments', () => {
@@ -38,6 +39,14 @@ describe('sync server configuration', () => {
   it('requires ENCRYPTION_KEY_DIR to be absolute so key loading never depends on the working directory', () => {
     expect(() => loadConfig({ ...required, ENCRYPTION_KEY_DIR: 'relative/keys' })).toThrow(
       'ENCRYPTION_KEY_DIR must be an absolute path',
+    );
+  });
+
+  it('requires ARIADNE_SSO_SHARED_SECRET so the internal SSO code-mint endpoint is never left unauthenticated', () => {
+    const { ARIADNE_SSO_SHARED_SECRET: _ignored, ...withoutSsoSharedSecret } = required;
+
+    expect(() => loadConfig(withoutSsoSharedSecret)).toThrow(
+      'ARIADNE_SSO_SHARED_SECRET environment variable is required',
     );
   });
 

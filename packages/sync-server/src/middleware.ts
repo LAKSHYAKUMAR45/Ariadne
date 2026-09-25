@@ -2,6 +2,7 @@ import { parse as parseCookieHeader } from 'cookie';
 import type { ErrorRequestHandler, NextFunction, Request, RequestHandler, Response } from 'express';
 import type { Pool } from 'pg';
 import { requireSingletonAdmin } from './adminAccess.js';
+import { requireActiveMembership } from './teamAccess.js';
 import {
   ADMIN_SESSION_COOKIE_NAME,
   findActiveAdminSession,
@@ -25,6 +26,7 @@ export interface AdminSessionRequest extends AuthenticatedRequest {
     userId: string;
     csrfHash: string;
     reauthenticatedUntil: string | null;
+    role?: 'admin' | 'member';
   };
   adminReauthenticated?: boolean;
 }
@@ -178,8 +180,14 @@ function rejectWith(res: Response, status: number, code: string, message: string
  * Active singleton-admin membership is re-queried on every request, so a
  * demotion or deactivation takes effect on the admin's very next call rather
  * than when their session happens to expire.
+ *
+ * When allowMember is true, the middleware allows member-role users through
+ * as well, enabling read-only access to certain dashboard features.
  */
-export function requireAdminSession(pool: Pool): RequestHandler {
+export function requireAdminSession(
+  pool: Pool,
+  options: { allowMember?: boolean } = {},
+): RequestHandler {
   return (req: AdminSessionRequest, res: Response, next: NextFunction): void => {
     void (async () => {
       const token = readAdminSessionCookie(req);
@@ -198,8 +206,15 @@ export function requireAdminSession(pool: Pool): RequestHandler {
         return;
       }
 
+      let membershipRole: 'admin' | 'member';
       try {
-        await requireSingletonAdmin(pool, session.userId);
+        if (options.allowMember) {
+          const membership = await requireActiveMembership(pool, session.userId);
+          membershipRole = membership.role;
+        } else {
+          const membership = await requireSingletonAdmin(pool, session.userId);
+          membershipRole = membership.role;
+        }
       } catch (error: unknown) {
         if (error instanceof ApiError) {
           applyAdminNoStore(res);
@@ -209,7 +224,7 @@ export function requireAdminSession(pool: Pool): RequestHandler {
         rethrowDatabaseUnavailable(error);
       }
 
-      attachAdminSession(req, session);
+      attachAdminSession(req, session, membershipRole);
       next();
     })().catch((error: unknown) => {
       try {
@@ -221,13 +236,18 @@ export function requireAdminSession(pool: Pool): RequestHandler {
   };
 }
 
-function attachAdminSession(req: AdminSessionRequest, session: AdminSessionRecord): void {
+function attachAdminSession(
+  req: AdminSessionRequest,
+  session: AdminSessionRecord,
+  role: 'admin' | 'member',
+): void {
   req.userId = session.userId;
   req.adminSession = {
     id: session.id,
     userId: session.userId,
     csrfHash: session.csrfHash,
     reauthenticatedUntil: session.reauthenticatedUntil,
+    role,
   };
   req.adminReauthenticated = isReauthenticated(session);
 }

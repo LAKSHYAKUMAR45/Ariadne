@@ -29,18 +29,18 @@ type Section =
   | 'knowledge-search'
   | 'knowledge-reviews';
 
-const sections: ReadonlyArray<{ id: Section; label: string; glyph: string }> = [
-  { id: 'overview', label: 'Overview', glyph: 'OV' },
-  { id: 'members', label: 'Members', glyph: 'MB' },
+const sections: ReadonlyArray<{ id: Section; label: string; glyph: string; adminOnly?: true }> = [
+  { id: 'overview', label: 'Overview', glyph: 'OV', adminOnly: true },
+  { id: 'members', label: 'Members', glyph: 'MB', adminOnly: true },
   { id: 'tasks', label: 'Tasks', glyph: 'TK' },
-  { id: 'backups', label: 'Backups', glyph: 'BK' },
-  { id: 'services', label: 'Services', glyph: 'SV' },
-  { id: 'deployments', label: 'Deployments', glyph: 'DP' },
-  { id: 'logs', label: 'Logs', glyph: 'LG' },
-  { id: 'audit', label: 'Audit', glyph: 'AT' },
-  { id: 'knowledge-overview', label: 'Knowledge', glyph: 'KN' },
-  { id: 'knowledge-search', label: 'Search', glyph: 'SR' },
-  { id: 'knowledge-reviews', label: 'Reviews', glyph: 'RV' },
+  { id: 'backups', label: 'Backups', glyph: 'BK', adminOnly: true },
+  { id: 'services', label: 'Services', glyph: 'SV', adminOnly: true },
+  { id: 'deployments', label: 'Deployments', glyph: 'DP', adminOnly: true },
+  { id: 'logs', label: 'Logs', glyph: 'LG', adminOnly: true },
+  { id: 'audit', label: 'Audit', glyph: 'AT', adminOnly: true },
+  { id: 'knowledge-overview', label: 'Knowledge', glyph: 'KN', adminOnly: true },
+  { id: 'knowledge-search', label: 'Search', glyph: 'SR', adminOnly: true },
+  { id: 'knowledge-reviews', label: 'Reviews', glyph: 'RV', adminOnly: true },
 ];
 
 const REAUTHENTICATION_REQUEST: ConfirmationRequest = {
@@ -60,21 +60,33 @@ function ConsoleShell() {
     reauthenticationRequired,
     session,
   } = useAuth();
-  const [section, setSection] = useState<Section>('overview');
+  const canViewAdminSections = session?.role === 'admin';
+  const [section, setSection] = useState<Section>(
+    canViewAdminSections ? 'overview' : 'tasks',
+  );
   const [reauthenticating, setReauthenticating] = useState(false);
   const [reauthenticationError, setReauthenticationError] = useState<string | null>(null);
   const [theme, setTheme] = useState<Theme>('light');
   const mainRef = useRef<HTMLElement | null>(null);
+  const visibleSections = canViewAdminSections
+    ? sections
+    : sections.filter((item) => !item.adminOnly);
 
   useEffect(() => {
     setTheme(getStoredTheme());
   }, []);
 
+  useEffect(() => {
+    if (!visibleSections.some((item) => item.id === section)) {
+      setSection('tasks');
+    }
+  }, [section, visibleSections]);
+
   if (!session) {
     return null;
   }
 
-  const activeSection = sections.find((item) => item.id === section);
+  const activeSection = visibleSections.find((item) => item.id === section);
 
   const skipToContent = useCallback((event: MouseEvent<HTMLAnchorElement>) => {
     event.preventDefault();
@@ -98,7 +110,7 @@ function ConsoleShell() {
           </div>
         </div>
         <nav aria-label="Primary">
-          {sections.map((item) => (
+          {visibleSections.map((item) => (
             <button
               id={`nav-${item.id}`}
               className={item.id === section ? 'nav-item nav-item--active' : 'nav-item'}
@@ -111,12 +123,22 @@ function ConsoleShell() {
               {item.label}
             </button>
           ))}
+          <a className="nav-item" href="http://nodem2:8090/">
+            <span className="nav-glyph" aria-hidden="true">↗</span>
+            Back to jcnr-triage
+          </a>
         </nav>
         <div className="sidebar-footer">
           <span className="avatar" aria-hidden="true">{session.username.slice(0, 1).toUpperCase()}</span>
           <div>
             <strong>{session.username}</strong>
-            <span>Administrator</span>
+            <span>
+              {session.role === 'admin'
+                ? 'Administrator'
+                : session.role === 'member'
+                  ? 'Member'
+                  : 'Restricted'}
+            </span>
           </div>
           <button className="logout-action" type="button" onClick={() => void logout()}>
             Sign out

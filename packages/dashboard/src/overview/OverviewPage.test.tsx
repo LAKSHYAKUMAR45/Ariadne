@@ -17,6 +17,7 @@ function sessionBody(overrides: Partial<Record<'reauthenticatedUntil', string | 
   return {
     userId: 'admin-id',
     username: 'admin',
+    role: 'admin' as const,
     csrfToken: 'csrf-token',
     reauthenticatedUntil: overrides.reauthenticatedUntil ?? null,
   };

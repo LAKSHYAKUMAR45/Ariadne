@@ -118,6 +118,7 @@ describe('AuthProvider', () => {
         json({
           userId: 'admin-id',
           username: 'admin',
+          role: 'admin',
           csrfToken: 'rotated-csrf-token',
           reauthenticatedUntil: null,
         }),
@@ -198,6 +199,7 @@ describe('AuthProvider', () => {
           json({
             userId: 'admin-id',
             username: 'admin',
+            role: 'admin',
             csrfToken: 'csrf-token',
             reauthenticatedUntil: null,
           }),
@@ -264,6 +266,7 @@ describe('AuthProvider', () => {
         json({
           userId: 'admin-id',
           username: 'admin',
+          role: 'admin',
           csrfToken: 'fresh-csrf-token',
           reauthenticatedUntil: null,
         }, 201),
@@ -306,6 +309,7 @@ describe('AuthProvider', () => {
         json({
           userId: 'admin-id',
           username: 'admin',
+          role: 'admin',
           csrfToken: 'csrf-token',
           reauthenticatedUntil: '2026-09-23T08:05:00.000Z',
         }),
@@ -350,6 +354,7 @@ describe('AuthProvider', () => {
         json({
           userId: 'admin-id',
           username: 'admin',
+          role: 'admin',
           csrfToken: 'csrf-token',
           reauthenticatedUntil: '2026-09-23T08:05:00.000Z',
         }),

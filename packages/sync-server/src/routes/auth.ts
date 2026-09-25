@@ -11,6 +11,13 @@ const credentialsSchema = z.object({
   password: z.string().min(1).max(256),
 });
 
+/**
+ * A bcrypt hash of a value no caller can supply. Verifying against it keeps
+ * the "no such user" path as expensive as the real one, and prevents crashes
+ * when a user has NULL password_hash (e.g., SSO-provisioned accounts).
+ */
+const DUMMY_PASSWORD_HASH = '$2a$12$C6UzMDM.H6dfI/f/IKcEe.Vw1AM7bJmWpQrXbFNu4SeL9r7Fg3lKa';
+
 export function createAuthRouter(pool: Pool, jwtSecret: string): Router {
   const router = Router();
 
@@ -52,12 +59,13 @@ export function createAuthRouter(pool: Pool, jwtSecret: string): Router {
     }
     const { username, password } = parsed.data;
 
-    const { rows } = await pool.query<{ id: string; password_hash: string }>(
+    const { rows } = await pool.query<{ id: string; password_hash: string | null }>(
       'SELECT id, password_hash FROM users WHERE username = $1',
       [username]
     );
     const user = rows[0];
-    const valid = user ? await verifyPassword(password, user.password_hash) : false;
+    const passwordHash = user?.password_hash ?? DUMMY_PASSWORD_HASH;
+    const valid = user ? await verifyPassword(password, passwordHash) : false;
     if (!user || !valid) {
       const err = new ApiError(401, 'invalid_credentials', 'Invalid username or password');
       res.status(err.status).json(errorBody(err));

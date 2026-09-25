@@ -699,6 +699,7 @@ export function TasksPage() {
                 <button
                   className="quiet-action destructive-action"
                   type="button"
+                  aria-label={`Delete capture ${selectedCapture.id}`}
                   onClick={() => {
                     setDeleteError(null);
                     setStatusMessage(null);
@@ -710,7 +711,7 @@ export function TasksPage() {
                     });
                   }}
                 >
-                  Delete capture {selectedCapture.id}
+                  Delete capture
                 </button>
               ) : null}
               {selectedCapture ? (
