@@ -125,16 +125,26 @@ function citation(path: string | null, span: KnowledgeSourceSpan): string {
   return `${source}:${span.startLine}:${span.startColumn}-${span.endLine}:${span.endColumn}`;
 }
 
-function findLastSpan(extraction: DeterministicExtraction): KnowledgeSourceSpan | null {
-  const spans = [
+function collectSpans(extraction: DeterministicExtraction): KnowledgeSourceSpan[] {
+  return [
     ...extraction.sections.map((section) => section.span),
     ...extraction.symbols.map((symbol) => symbol.span),
     ...extraction.relationships.flatMap((relationship) => (relationship.span ? [relationship.span] : [])),
     ...extraction.links.flatMap((link) => (link.span ? [link.span] : [])),
     ...extraction.diagnostics.flatMap((diagnostic) => (diagnostic.span ? [diagnostic.span] : [])),
   ];
+}
+
+function findProvenanceBounds(extraction: DeterministicExtraction): Pick<
+  KnowledgeProvenanceRef,
+  'startLine' | 'startColumn' | 'endLine' | 'endColumn' | 'startOffset' | 'endOffset'
+> | null {
+  const spans = collectSpans(extraction);
   if (spans.length === 0) return null;
-  return spans.reduce((latest, candidate) =>
+  const first = spans.reduce((earliest, candidate) =>
+    compareSpans(candidate, earliest) < 0 ? candidate : earliest,
+  );
+  const last = spans.reduce((latest, candidate) =>
     candidate.endLine > latest.endLine ||
     (candidate.endLine === latest.endLine && candidate.endColumn > latest.endColumn) ||
     (candidate.endLine === latest.endLine &&
@@ -143,30 +153,13 @@ function findLastSpan(extraction: DeterministicExtraction): KnowledgeSourceSpan 
       ? candidate
       : latest,
   );
-}
-
-function fallbackLineRange(extraction: DeterministicExtraction): Pick<
-  KnowledgeProvenanceRef,
-  'startLine' | 'startColumn' | 'endLine' | 'endColumn' | 'startOffset' | 'endOffset'
-> {
-  const lastSpan = findLastSpan(extraction);
-  if (!lastSpan) {
-    return {
-      startOffset: 0,
-      endOffset: 0,
-      startLine: 1,
-      startColumn: 1,
-      endLine: 1,
-      endColumn: 1,
-    };
-  }
   return {
-    startOffset: 0,
-    endOffset: lastSpan.endOffset,
-    startLine: 1,
-    startColumn: 1,
-    endLine: lastSpan.endLine,
-    endColumn: lastSpan.endColumn,
+    startOffset: first.startOffset,
+    endOffset: last.endOffset,
+    startLine: first.startLine,
+    startColumn: first.startColumn,
+    endLine: last.endLine,
+    endColumn: last.endColumn,
   };
 }
 
@@ -270,7 +263,7 @@ export function buildDeterministicPagePayload(input: DeterministicPageBuildInput
     id: input.sourceId,
     path: input.sourcePath ?? undefined,
     sourceVersionId: input.sourceVersionId,
-    ...fallbackLineRange(input.extraction),
+    ...(findProvenanceBounds(input.extraction) ?? {}),
     confidence: 1,
   };
   const lines = [

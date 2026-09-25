@@ -124,8 +124,11 @@ describe('buildDeterministicPagePayload', () => {
           id: 'source_1',
           path: 'src/weird-module.ts',
           sourceVersionId: extraction.sourceVersionId,
+          startOffset: 0,
           startLine: 1,
+          endOffset: 98,
           endLine: 6,
+          endColumn: 2,
           confidence: 1,
         }),
       ],
@@ -186,5 +189,101 @@ describe('buildDeterministicPagePayload', () => {
 
     expect(payload.pages[0]?.slug.endsWith(`-${extraction.sourceVersionId.slice(-8)}`)).toBe(true);
     expect(payload.pages[0]?.slug.length).toBeLessThanOrEqual(96);
+  });
+
+  it('derives top-level provenance from real extracted span bounds instead of fabricating source coverage', () => {
+    const extraction = createExtraction();
+    extraction.sections = [
+      {
+        ...extraction.sections[0]!,
+        span: {
+          startOffset: 12,
+          endOffset: 44,
+          startLine: 3,
+          startColumn: 5,
+          endLine: 4,
+          endColumn: 20,
+        },
+      },
+    ];
+    extraction.symbols = [
+      {
+        ...extraction.symbols[0]!,
+        span: {
+          startOffset: 50,
+          endOffset: 76,
+          startLine: 6,
+          startColumn: 2,
+          endLine: 6,
+          endColumn: 28,
+        },
+      },
+    ];
+    extraction.relationships = [
+      {
+        ...extraction.relationships[0]!,
+        span: {
+          startOffset: 81,
+          endOffset: 99,
+          startLine: 8,
+          startColumn: 1,
+          endLine: 8,
+          endColumn: 19,
+        },
+      },
+    ];
+    extraction.diagnostics = [];
+
+    const payload = buildDeterministicPagePayload({
+      projectId: 'project_1',
+      sourceId: 'source_1',
+      sourceVersionId: extraction.sourceVersionId,
+      sourcePath: 'src/weird-module.ts',
+      extraction,
+    });
+
+    expect(payload.pages[0]?.provenance).toEqual([
+      expect.objectContaining({
+        kind: 'source',
+        id: 'source_1',
+        sourceVersionId: extraction.sourceVersionId,
+        startOffset: 12,
+        endOffset: 99,
+        startLine: 3,
+        startColumn: 5,
+        endLine: 8,
+        endColumn: 19,
+      }),
+    ]);
+  });
+
+  it('omits unavailable top-level provenance coordinates when no extracted spans exist', () => {
+    const extraction = createExtraction();
+    extraction.sections = [];
+    extraction.symbols = [];
+    extraction.relationships = [];
+    extraction.diagnostics = [];
+
+    const payload = buildDeterministicPagePayload({
+      projectId: 'project_1',
+      sourceId: 'source_1',
+      sourceVersionId: extraction.sourceVersionId,
+      sourcePath: 'src/weird-module.ts',
+      extraction,
+    });
+
+    expect(payload.pages[0]?.provenance).toEqual([
+      expect.not.objectContaining({
+        startOffset: expect.anything(),
+      }),
+    ]);
+    expect(payload.pages[0]?.provenance?.[0]).toEqual(
+      expect.objectContaining({
+        kind: 'source',
+        id: 'source_1',
+        sourceVersionId: extraction.sourceVersionId,
+        confidence: 1,
+      }),
+    );
   });
 });

@@ -304,6 +304,29 @@ describe('searchKnowledge', () => {
     expect(context.truncated.results).toBe(1);
   });
 
+  it('redacts page titles, summaries, and content metadata before returning knowledge-mode results', () => {
+    const page = pageStore.createPageVersion({
+      projectId: PROJECT_ID,
+      type: 'concept',
+      title: 'Secret policy ghp_abcdefghijklmnopqrstuvwxyz0123456789',
+      slug: 'secret-policy-ghp-abcdefghijklmnopqrstuvwxyz0123456789',
+      content: 'Generated',
+      contentPath: 'pages/concept/secret-policy-ghp_abcdefghijklmnopqrstuvwxyz0123456789.md',
+      summary: 'password=hunter2 rotation policy',
+    });
+
+    const results = searchKnowledge('secret policy', { db, projectId: PROJECT_ID, mode: 'knowledge' });
+
+    expect(results[0]).toMatchObject({
+      id: page.pageId,
+      title: expect.not.stringContaining('ghp_abcdefghijklmnopqrstuvwxyz0123456789'),
+      snippet: expect.stringContaining('password=***'),
+      metadata: expect.objectContaining({
+        contentPath: expect.not.stringContaining('ghp_abcdefghijklmnopqrstuvwxyz0123456789'),
+      }),
+    });
+  });
+
   it('ranks extraction-backed symbol and section matches ahead of path-only metadata, with bounded snippets and exact span coordinates', () => {
     const source = sourceStore.register({
       projectId: PROJECT_ID,
@@ -455,6 +478,228 @@ describe('searchKnowledge', () => {
         id: source.id,
         title: 'docs/legacy-search.md',
         snippet: expect.stringContaining('legacy-search'),
+        citations: [
+          expect.objectContaining({
+            sourceId: source.id,
+            span: null,
+          }),
+        ],
+      }),
+    ]);
+  });
+
+  it('keeps extraction-backed matches ahead of repeated path-only metadata matches', () => {
+    const strongSource = sourceStore.register({
+      projectId: PROJECT_ID,
+      kind: 'file',
+      path: 'src/search-ranking.ts',
+      content: 'export function allocateIndexForGroup() { return "group-index"; }',
+      format: 'typescript',
+      mimeType: 'text/typescript',
+    });
+    const strongVersionId = sourceStore.listVersions(PROJECT_ID, strongSource.id)[0].id;
+    extractionStore.save({
+      projectId: PROJECT_ID,
+      extraction: {
+        analyzerId: 'typescript-lezer',
+        analyzerVersion: '1',
+        sourceVersionId: strongVersionId,
+        title: 'src/search-ranking.ts',
+        summary: 'Handles group index allocation.',
+        sections: [
+          {
+            id: 'section:allocate',
+            kind: 'code',
+            title: 'allocate index',
+            text: 'export function allocateIndexForGroup() { return "group-index"; }',
+            span: {
+              startOffset: 0,
+              endOffset: 63,
+              startLine: 1,
+              startColumn: 1,
+              endLine: 1,
+              endColumn: 64,
+            },
+            confidence: 1,
+          },
+        ],
+        symbols: [
+          {
+            id: 'symbol:allocate',
+            kind: 'function',
+            name: 'allocateIndexForGroup',
+            qualifiedName: 'wiki.allocateIndexForGroup',
+            span: {
+              startOffset: 16,
+              endOffset: 37,
+              startLine: 1,
+              startColumn: 17,
+              endLine: 1,
+              endColumn: 38,
+            },
+            confidence: 1,
+          },
+        ],
+        relationships: [],
+        links: [],
+        diagnostics: [],
+      },
+    });
+
+    const metadataOnlySource = sourceStore.register({
+      projectId: PROJECT_ID,
+      kind: 'file',
+      path: `docs/${'allocate-index-'.repeat(20)}notes.md`,
+      content: 'metadata only',
+      format: 'markdown',
+    });
+
+    const results = searchKnowledge('allocate index', { db, projectId: PROJECT_ID, mode: 'sources' });
+
+    expect(results[0]).toMatchObject({
+      kind: 'source',
+      id: strongSource.id,
+      snippet: expect.stringContaining('allocate index'),
+    });
+    expect(results.findIndex((result) => result.id === metadataOnlySource.id)).toBeGreaterThan(0);
+  });
+
+  it('redacts extraction-backed snippets before returning source-backed excerpts and exact citations', () => {
+    const source = sourceStore.register({
+      projectId: PROJECT_ID,
+      kind: 'file',
+      path: 'src/secrets.ts',
+      content: 'export const config = "production";',
+      format: 'typescript',
+      mimeType: 'text/typescript',
+    });
+    const sourceVersionId = sourceStore.listVersions(PROJECT_ID, source.id)[0].id;
+    extractionStore.save({
+      projectId: PROJECT_ID,
+      extraction: {
+        analyzerId: 'typescript-lezer',
+        analyzerVersion: '1',
+        sourceVersionId,
+        title: 'src/secrets.ts',
+        summary: 'Production config with secrets.',
+        sections: [
+          {
+            id: 'section:config',
+            kind: 'code',
+            title: 'production config',
+            text: [
+              'const apiKey = "sk-ABCDEFGHIJKLMNOPQRSTUVWXYZ123456";',
+              'const github = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";',
+              'const password = "hunter2";',
+              'const aws = "AKIA1234567890ABCDEF";',
+            ].join('\n'),
+            span: {
+              startOffset: 0,
+              endOffset: 180,
+              startLine: 1,
+              startColumn: 1,
+              endLine: 4,
+              endColumn: 45,
+            },
+            confidence: 1,
+          },
+        ],
+        symbols: [],
+        relationships: [],
+        links: [],
+        diagnostics: [],
+      },
+    });
+
+    const results = searchKnowledge('apiKey password', { db, projectId: PROJECT_ID, mode: 'sources' });
+
+    expect(results[0]).toMatchObject({
+      kind: 'source',
+      id: source.id,
+      citations: [
+        expect.objectContaining({
+          sourceId: source.id,
+          span: expect.objectContaining({
+            startLine: 1,
+            endLine: 4,
+          }),
+        }),
+      ],
+    });
+    expect(results[0]?.snippet).toContain('***');
+    expect(results[0]?.snippet).not.toContain('sk-ABCDEFGHIJKLMNOPQRSTUVWXYZ123456');
+    expect(results[0]?.snippet).not.toContain('ghp_abcdefghijklmnopqrstuvwxyz0123456789');
+    expect(results[0]?.snippet).not.toContain('hunter2');
+    expect(results[0]?.snippet).not.toContain('AKIA1234567890ABCDEF');
+  });
+
+  it('skips oversized extraction payloads and overlong queries without crashing source search', () => {
+    const source = sourceStore.register({
+      projectId: PROJECT_ID,
+      kind: 'file',
+      path: 'docs/oversized-search-knowledge.md',
+      content: 'oversized knowledge',
+      format: 'markdown',
+    });
+    const sourceVersionId = sourceStore.listVersions(PROJECT_ID, source.id)[0].id;
+    const oversizedExtraction = JSON.stringify({
+      analyzerId: 'markdown',
+      analyzerVersion: '1',
+      sourceVersionId,
+      title: 'docs/oversized-search-knowledge.md',
+      summary: 'Oversized summary',
+      sections: [
+        {
+          id: 'section:oversized',
+          kind: 'paragraph',
+          title: 'oversized knowledge',
+          text: 'x'.repeat(400_000),
+          span: {
+            startOffset: 0,
+            endOffset: 400000,
+            startLine: 1,
+            startColumn: 1,
+            endLine: 1,
+            endColumn: 400001,
+          },
+          confidence: 1,
+        },
+      ],
+      symbols: [],
+      relationships: [],
+      links: [],
+      diagnostics: [],
+    });
+    db.prepare(
+      `INSERT INTO knowledge_extractions (
+         id,
+         project_id,
+         source_version_id,
+         extractor_kind,
+         analyzer_id,
+         analyzer_version,
+         result_path,
+         content_hash,
+         extraction_hash,
+         result_json,
+         diagnostics_json,
+         status,
+         created_at,
+         updated_at,
+         completed_at
+       ) VALUES (?, ?, ?, 'deterministic', 'markdown', '1', 'knowledge/extractions/oversized.json', 'content-hash', 'hash', ?, '[]', 'completed', ?, ?, ?)`,
+    ).run('extraction_oversized', PROJECT_ID, sourceVersionId, oversizedExtraction, CREATED_AT, CREATED_AT, CREATED_AT);
+
+    expect(searchKnowledge('query '.repeat(80), { db, projectId: PROJECT_ID, mode: 'sources' })).toEqual([]);
+
+    const results = searchKnowledge('oversized search knowledge', { db, projectId: PROJECT_ID, mode: 'sources' });
+
+    expect(results).toEqual([
+      expect.objectContaining({
+        kind: 'source',
+        id: source.id,
+        title: 'docs/oversized-search-knowledge.md',
+        snippet: expect.stringContaining('oversized-search-knowledge'),
         citations: [
           expect.objectContaining({
             sourceId: source.id,

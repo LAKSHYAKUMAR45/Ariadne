@@ -48,6 +48,7 @@ export interface KnowledgeGeneratorServiceOptions {
   workerId?: string;
   renderer?: KnowledgeRenderer;
   now?: () => string;
+  beforePersist?: () => Promise<void> | void;
 }
 
 interface JobRow {
@@ -56,6 +57,7 @@ interface JobRow {
   status: string;
   payload_json: string;
   worker_id: string | null;
+  lease_expires_at: string | null;
 }
 
 interface ProjectRow {
@@ -79,11 +81,9 @@ interface PreparedPageGeneration {
   input: KnowledgeGenerationPageInput;
   pageId: string;
   relativePath: string;
-  markdown: string;
-  versionNumber: number;
-  reused: boolean;
-  reusedVersion: KnowledgePageVersion | null;
 }
+
+const GENERATION_LEASE_DURATION_MS = 60_000;
 
 function parsePayload(value: string): KnowledgeGenerationPayload {
   const payload: unknown = JSON.parse(value);
@@ -93,6 +93,14 @@ function parsePayload(value: string): KnowledgeGenerationPayload {
   const candidate = payload as Partial<KnowledgeGenerationPayload>;
   if (!Array.isArray(candidate.pages)) throw new Error('Knowledge generation payload requires pages');
   return candidate as KnowledgeGenerationPayload;
+}
+
+function leaseExpired(leaseExpiresAt: string | null, now: string): boolean {
+  return leaseExpiresAt !== null && Date.parse(leaseExpiresAt) <= Date.parse(now);
+}
+
+function nextLeaseExpiry(now: string): string {
+  return new Date(Date.parse(now) + GENERATION_LEASE_DURATION_MS).toISOString();
 }
 
 function writeDurable(filePath: string, content: string): void {
@@ -148,6 +156,7 @@ function commitFiles(root: string, files: StagedFile[]): FileCommit {
   try {
     for (const file of staged) writeDurable(path.join(stagingRoot, file.relativePath), file.content);
     for (const target of targets) {
+      assertNoSymlinkComponents(absoluteRoot, path.dirname(target), 'Knowledge generation output path');
       if (!existsSync(target)) continue;
       const backup = path.join(backupRoot, path.relative(absoluteRoot, target));
       mkdirSync(path.dirname(backup), { recursive: true });
@@ -156,6 +165,7 @@ function commitFiles(root: string, files: StagedFile[]): FileCommit {
     }
     for (const file of staged) {
       const target = file.absolutePath;
+      assertNoSymlinkComponents(absoluteRoot, path.dirname(target), 'Knowledge generation output path');
       mkdirSync(path.dirname(target), { recursive: true });
       renameSync(path.join(stagingRoot, file.relativePath), target);
     }
@@ -196,39 +206,61 @@ export class KnowledgeGeneratorService {
   private readonly renderer: KnowledgeRenderer;
   private readonly workerId: string;
   private readonly now: () => string;
+  private readonly beforePersist?: () => Promise<void> | void;
 
   public constructor(
     private readonly db: Database.Database,
     options: KnowledgeGeneratorServiceOptions = {},
   ) {
     this.renderer = options.renderer ?? new KnowledgeRenderer();
-    this.workerId = options.workerId ?? `knowledge-generator-${process.pid}`;
+    this.workerId =
+      options.workerId ?? `knowledge-generator-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2, 10)}`;
     this.now = options.now ?? (() => new Date().toISOString());
+    this.beforePersist = options.beforePersist;
   }
 
   public async runKnowledgeGeneration(jobId: string): Promise<KnowledgeGenerationResult> {
     const job = this.db
-      .prepare('SELECT id, project_id, status, payload_json, worker_id FROM knowledge_jobs WHERE id = ?')
+      .prepare('SELECT id, project_id, status, payload_json, worker_id, lease_expires_at FROM knowledge_jobs WHERE id = ?')
       .get(jobId) as JobRow | undefined;
     if (!job) throw new Error(`Knowledge job not found: ${jobId}`);
+    const claimNow = this.now();
     if (job.status === 'queued') {
-      this.db
+      const claimed = this.db
         .prepare(
           `UPDATE knowledge_jobs
-           SET status = 'running', worker_id = @workerId, started_at = COALESCE(started_at, @now)
+           SET status = 'running', worker_id = @workerId, lease_expires_at = @leaseExpiresAt,
+               started_at = COALESCE(started_at, @now)
            WHERE id = @id AND status = 'queued'`,
         )
-        .run({ workerId: this.workerId, now: this.now(), id: jobId });
+        .run({ workerId: this.workerId, leaseExpiresAt: nextLeaseExpiry(claimNow), now: claimNow, id: jobId });
+      if (claimed.changes !== 1) {
+        throw new Error(`Knowledge job could not be claimed: ${jobId}`);
+      }
     } else if (job.status !== 'running') {
       throw new Error(`Cannot generate knowledge for ${job.status} job`);
     }
+    const claimedJob = this.db
+      .prepare('SELECT id, project_id, status, payload_json, worker_id, lease_expires_at FROM knowledge_jobs WHERE id = ?')
+      .get(jobId) as JobRow | undefined;
+    if (!claimedJob) throw new Error(`Knowledge job not found: ${jobId}`);
+    if (claimedJob.status !== 'running') {
+      throw new Error(`Cannot generate knowledge for ${claimedJob.status} job`);
+    }
+    if (claimedJob.worker_id !== this.workerId) {
+      throw new Error(`Knowledge job is already claimed by another worker: ${jobId}`);
+    }
+    if (leaseExpired(claimedJob.lease_expires_at, claimNow)) {
+      throw new Error(`Knowledge job lease expired before generation: ${jobId}`);
+    }
+    this.renewLease(jobId, claimNow);
 
     const project = this.db
       .prepare('SELECT id, workspace_root, name FROM knowledge_projects WHERE id = ?')
-      .get(job.project_id) as ProjectRow | undefined;
-    if (!project) throw new Error(`Knowledge project not found: ${job.project_id}`);
+      .get(claimedJob.project_id) as ProjectRow | undefined;
+    if (!project) throw new Error(`Knowledge project not found: ${claimedJob.project_id}`);
 
-    const payload = parsePayload(job.payload_json);
+    const payload = parsePayload(claimedJob.payload_json);
     const generatedAt = payload.generatedAt ?? this.now();
     const generatorVersion = payload.generatorVersion ?? '1';
     const workspaceRoot = realpathSync(project.workspace_root);
@@ -240,27 +272,48 @@ export class KnowledgeGeneratorService {
     assertNoSymlinkComponents(workspaceRoot, outputRoot, 'Knowledge generation output root');
     const manifest = buildKnowledgeManifest(project.id, generatedAt);
     const pageStore = new KnowledgePageStore(this.db);
-    const renderedPages: PreparedPageGeneration[] = [];
+    const preparedPages: PreparedPageGeneration[] = [];
 
     try {
       for (const input of payload.pages) {
         if (!input.content.trim()) throw new Error(`Knowledge page content must not be empty: ${input.slug}`);
         const relativePath = pageRelativePath(input);
         const pageId = input.pageId ?? createKnowledgeId('page', `${project.id}:${input.slug}`);
-        const sourceVersionIds = canonicalizeSourceVersionIds(input.sourceVersionIds);
-        const currentVersion = pageStore.getCurrentVersion(project.id, pageId as never);
+        preparedPages.push({
+          input: {
+            ...input,
+            sourceVersionIds: canonicalizeSourceVersionIds(input.sourceVersionIds),
+          },
+          pageId,
+          relativePath,
+        });
+      }
+      await this.beforePersist?.();
+      this.renewLease(jobId, this.now());
+    } catch (error) {
+      this.failJob(jobId, error);
+      throw error;
+    }
+
+    let fileCommit: FileCommit | null = null;
+    let transactionOpen = false;
+    try {
+      this.db.exec('BEGIN IMMEDIATE');
+      transactionOpen = true;
+      const pageResults = preparedPages.map((prepared) => {
+        const currentVersion = pageStore.getCurrentVersion(project.id, prepared.pageId as never);
         const reusedMarkdown =
           currentVersion === null
             ? null
             : this.renderer.renderKnowledgePage({
-                id: pageId,
-                type: input.type,
-                title: input.title,
-                slug: input.slug,
-                content: input.content,
-                sourceIds: sourceVersionIds,
-                provenance: input.provenance,
-                confidence: input.confidence,
+                id: prepared.pageId,
+                type: prepared.input.type,
+                title: prepared.input.title,
+                slug: prepared.input.slug,
+                content: prepared.input.content,
+                sourceIds: prepared.input.sourceVersionIds,
+                provenance: prepared.input.provenance,
+                confidence: prepared.input.confidence,
                 generatorVersion,
                 generatedAt: currentVersion.createdAt,
                 version: currentVersion.versionNumber,
@@ -270,114 +323,102 @@ export class KnowledgeGeneratorService {
           currentVersion &&
           reusedMarkdown &&
           contentHash(reusedMarkdown) === currentVersion.contentHash &&
-          (currentVersion.summary ?? null) === (input.summary ?? null) &&
-          sameStrings(input.sourceVersionIds, currentVersion.sourceVersionIds)
+          (currentVersion.summary ?? null) === (prepared.input.summary ?? null) &&
+          sameStrings(prepared.input.sourceVersionIds, currentVersion.sourceVersionIds)
         ) {
-          renderedPages.push({
-            input,
-            pageId,
-            relativePath,
-            markdown: reusedMarkdown,
-            versionNumber: currentVersion.versionNumber,
+          pageStore.activatePage(project.id, prepared.pageId as never, prepared.input.type, prepared.input.title, generatedAt);
+          return {
+            page: currentVersion,
             reused: true,
-            reusedVersion: currentVersion,
-          });
-          continue;
+            markdown: reusedMarkdown,
+            relativePath: prepared.relativePath,
+            input: prepared.input,
+          };
         }
 
-        const versionNumber = pageStore.getNextVersionNumber(project.id, pageId as never);
+        const versionNumber = pageStore.getNextVersionNumber(project.id, prepared.pageId as never);
         const markdown = this.renderer.renderKnowledgePage({
-          id: pageId,
-          type: input.type,
-          title: input.title,
-          slug: input.slug,
-          content: input.content,
-          sourceIds: sourceVersionIds,
-          provenance: input.provenance,
-          confidence: input.confidence,
+          id: prepared.pageId,
+          type: prepared.input.type,
+          title: prepared.input.title,
+          slug: prepared.input.slug,
+          content: prepared.input.content,
+          sourceIds: prepared.input.sourceVersionIds,
+          provenance: prepared.input.provenance,
+          confidence: prepared.input.confidence,
           generatorVersion,
           generatedAt,
           version: versionNumber,
         });
-        renderedPages.push({
-          input: {
-            ...input,
-            sourceVersionIds,
-          },
-          pageId,
-          relativePath,
-          markdown,
-          versionNumber,
+        const versionInput: CreatePageVersionInput = {
+          projectId: project.id,
+          pageId: prepared.pageId as never,
+          type: prepared.input.type,
+          title: prepared.input.title,
+          slug: prepared.input.slug,
+          content: markdown,
+          contentPath: prepared.relativePath,
+          summary: prepared.input.summary,
+          sourceVersionIds: prepared.input.sourceVersionIds,
+          provenance: prepared.input.provenance,
+          confidence: prepared.input.confidence,
+          generatorVersion,
+          createdAt: generatedAt,
+        };
+        return {
+          page: pageStore.createPageVersion(versionInput),
           reused: false,
-          reusedVersion: null,
-        });
-      }
-    } catch (error) {
-      this.failJob(jobId, error);
-      throw error;
-    }
-
-    const entries: KnowledgeIndexEntry[] = renderedPages
-      .map(({ input, pageId, versionNumber }) => ({
-        id: pageId,
-        type: input.type,
-        title: input.title,
-        slug: input.slug,
-        summary: input.summary ?? null,
-        status: 'active',
-        version: versionNumber,
-        updatedAt: generatedAt,
-      }))
-      .sort((left, right) => left.slug.localeCompare(right.slug) || left.id.localeCompare(right.id));
-    const existingLog = existsSync(path.join(outputRoot, 'log.md'))
-      ? readFileSync(path.join(outputRoot, 'log.md'), 'utf8')
-      : '';
-    const stagedFiles: StagedFile[] = [
-      ...renderedPages.map(({ markdown, relativePath }) => ({
-        relativePath,
-        content: markdown,
-      })),
-      { relativePath: 'index.md', content: renderKnowledgeIndex(entries) },
-      { relativePath: 'overview.md', content: renderKnowledgeOverview(project.name, entries, payload.overview) },
-      { relativePath: 'log.md', content: renderKnowledgeLog({ jobId, generatedAt, pageCount: entries.length }, existingLog) },
-      { relativePath: 'index.json', content: `${JSON.stringify({ projectId: project.id, generatedAt, pages: entries }, null, 2)}\n` },
-      { relativePath: 'manifest.json', content: `${JSON.stringify(manifest, null, 2)}\n` },
-    ];
-
-    let fileCommit: FileCommit | null = null;
-    try {
+          markdown,
+          relativePath: prepared.relativePath,
+          input: prepared.input,
+        };
+      });
+      const entries: KnowledgeIndexEntry[] = pageResults
+        .map((result) => ({
+          id: result.page.pageId,
+          type: result.input.type,
+          title: result.input.title,
+          slug: result.input.slug,
+          summary: result.input.summary ?? null,
+          status: 'active',
+          version: result.page.versionNumber,
+          updatedAt: generatedAt,
+        }))
+        .sort((left, right) => left.slug.localeCompare(right.slug) || left.id.localeCompare(right.id));
+      const existingLog = existsSync(path.join(outputRoot, 'log.md'))
+        ? readFileSync(path.join(outputRoot, 'log.md'), 'utf8')
+        : '';
+      const stagedFiles: StagedFile[] = [
+        ...pageResults.map((result) => ({
+          relativePath: result.relativePath,
+          content: result.markdown,
+        })),
+        { relativePath: 'index.md', content: renderKnowledgeIndex(entries) },
+        { relativePath: 'overview.md', content: renderKnowledgeOverview(project.name, entries, payload.overview) },
+        { relativePath: 'log.md', content: renderKnowledgeLog({ jobId, generatedAt, pageCount: entries.length }, existingLog) },
+        {
+          relativePath: 'index.json',
+          content: `${JSON.stringify({ projectId: project.id, generatedAt, pages: entries }, null, 2)}\n`,
+        },
+        { relativePath: 'manifest.json', content: `${JSON.stringify(manifest, null, 2)}\n` },
+      ];
       fileCommit = commitFiles(outputRoot, stagedFiles);
-      const pageResults = this.db.transaction(() =>
-        renderedPages.map((prepared) => {
-          if (prepared.reused && prepared.reusedVersion) {
-            pageStore.activatePage(project.id, prepared.pageId as never, prepared.input.type, prepared.input.title, generatedAt);
-            return { page: prepared.reusedVersion, reused: true };
-          }
-          const versionInput: CreatePageVersionInput = {
-            projectId: project.id,
-            pageId: prepared.pageId as never,
-            type: prepared.input.type,
-            title: prepared.input.title,
-            slug: prepared.input.slug,
-            content: prepared.markdown,
-            contentPath: prepared.relativePath,
-            summary: prepared.input.summary,
-            sourceVersionIds: prepared.input.sourceVersionIds,
-            provenance: prepared.input.provenance,
-            confidence: prepared.input.confidence,
-            generatorVersion,
-            createdAt: generatedAt,
-          };
-          return { page: pageStore.createPageVersion(versionInput), reused: false };
-        }),
-      )();
-      this.db
+      const completionNow = this.now();
+      const completion = this.db
         .prepare(
           `UPDATE knowledge_jobs
            SET status = 'completed', completed_at = @completedAt, worker_id = NULL, lease_expires_at = NULL
-           WHERE id = @id`,
+           WHERE id = @id
+             AND status = 'running'
+             AND worker_id = @workerId
+             AND (lease_expires_at IS NULL OR lease_expires_at > @leaseCheckAt)`,
         )
-        .run({ completedAt: generatedAt, id: jobId });
+        .run({ completedAt: completionNow, leaseCheckAt: completionNow, workerId: this.workerId, id: jobId });
+      if (completion.changes !== 1) {
+        throw new Error(`Knowledge job lease lost before completion: ${jobId}`);
+      }
+      this.db.exec('COMMIT');
+      transactionOpen = false;
       fileCommit.finalize();
       return {
         jobId,
@@ -389,6 +430,7 @@ export class KnowledgeGeneratorService {
         manifest,
       };
     } catch (error) {
+      if (transactionOpen) this.db.exec('ROLLBACK');
       if (fileCommit) fileCommit.rollback();
       this.failJob(jobId, error);
       throw error;
@@ -401,13 +443,38 @@ export class KnowledgeGeneratorService {
         `UPDATE knowledge_jobs
          SET status = 'failed', completed_at = @completedAt, failure_code = 'generation_failed',
              failure_message = @failureMessage, worker_id = NULL, lease_expires_at = NULL
-         WHERE id = @id`,
+         WHERE id = @id
+           AND status = 'running'
+           AND worker_id = @workerId
+           AND (lease_expires_at IS NULL OR lease_expires_at > @completedAt)`,
       )
       .run({
         completedAt: this.now(),
         id: jobId,
+        workerId: this.workerId,
         failureMessage: error instanceof Error ? error.message : 'Knowledge generation failed',
       });
+  }
+
+  private renewLease(jobId: string, now: string): void {
+    const renewed = this.db
+      .prepare(
+        `UPDATE knowledge_jobs
+         SET lease_expires_at = @leaseExpiresAt
+         WHERE id = @id
+           AND status = 'running'
+           AND worker_id = @workerId
+           AND (lease_expires_at IS NULL OR lease_expires_at > @now)`,
+      )
+      .run({
+        id: jobId,
+        workerId: this.workerId,
+        now,
+        leaseExpiresAt: nextLeaseExpiry(now),
+      });
+    if (renewed.changes !== 1) {
+      throw new Error(`Knowledge job lease lost before persistence: ${jobId}`);
+    }
   }
 }
 

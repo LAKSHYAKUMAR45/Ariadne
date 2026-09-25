@@ -156,6 +156,35 @@ describe('KnowledgeGeneratorService', () => {
     expect(existsSync(join(outputRoot, 'pages'))).toBe(false);
   });
 
+  it('refuses to run a job already claimed by another worker', async () => {
+    const workspaceRoot = mkdtempSync(join(process.cwd(), '.knowledge-generator-test-'));
+    const outputRoot = join(workspaceRoot, '.ariadne', 'knowledge');
+    directories.push(workspaceRoot);
+    const database = createDatabase(workspaceRoot);
+    database
+      .prepare(
+        `INSERT INTO knowledge_jobs
+         (id, project_id, job_kind, status, payload_json, requested_at, worker_id, lease_expires_at, started_at)
+         VALUES (?, ?, ?, 'running', ?, ?, 'other-worker', ?, ?)`,
+      )
+      .run(
+        'job_claimed_elsewhere',
+        'project_1',
+        'generate',
+        JSON.stringify({
+          outputRoot,
+          pages: [{ type: 'concept', title: 'Claimed', slug: 'claimed', content: 'Generated' }],
+        }),
+        '2026-01-04T00:00:00.000Z',
+        '2026-01-04T00:10:00.000Z',
+        '2026-01-04T00:00:00.000Z',
+      );
+
+    await expect(new KnowledgeGeneratorService(database).runKnowledgeGeneration('job_claimed_elsewhere')).rejects.toThrow(
+      /claimed by another worker/i,
+    );
+  });
+
   it('reuses the current page version when rerendered markdown is unchanged across deterministic reruns', async () => {
     const workspaceRoot = mkdtempSync(join(process.cwd(), '.knowledge-generator-test-'));
     const outputRoot = join(workspaceRoot, '.ariadne', 'knowledge');
@@ -313,5 +342,96 @@ describe('KnowledgeGeneratorService', () => {
         summary: 'Updated summary',
       }),
     });
+  });
+
+  it('reuses the current version when an identical generation commits between preparation and persistence', async () => {
+    const workspaceRoot = mkdtempSync(join(process.cwd(), '.knowledge-generator-test-'));
+    const outputRoot = join(workspaceRoot, '.ariadne', 'knowledge');
+    directories.push(workspaceRoot);
+    const database = createDatabase(workspaceRoot);
+
+    database
+      .prepare(
+        `INSERT INTO knowledge_jobs
+         (id, project_id, job_kind, status, payload_json, requested_at)
+         VALUES (?, ?, ?, 'queued', ?, ?)`,
+      )
+      .run(
+        'job_race_seed',
+        'project_1',
+        'generate',
+        JSON.stringify({
+          outputRoot,
+          generatorVersion: 'deterministic:typescript-lezer:2.1.0',
+          generatedAt: '2026-01-09T00:00:00.000Z',
+          pages: [
+            {
+              pageId: 'page_source_race',
+              type: 'source',
+              title: 'src/race.ts',
+              slug: 'source-src-race-ts',
+              content: 'Original body',
+            },
+          ],
+        }),
+        '2026-01-09T00:00:00.000Z',
+      );
+    await new KnowledgeGeneratorService(database).runKnowledgeGeneration('job_race_seed');
+
+    for (const [jobId, generatedAt] of [
+      ['job_race_first', '2026-01-10T00:00:00.000Z'],
+      ['job_race_second', '2026-01-11T00:00:00.000Z'],
+    ] as const) {
+      database
+        .prepare(
+          `INSERT INTO knowledge_jobs
+           (id, project_id, job_kind, status, payload_json, requested_at)
+           VALUES (?, ?, ?, 'queued', ?, ?)`,
+        )
+        .run(
+          jobId,
+          'project_1',
+          'generate',
+          JSON.stringify({
+            outputRoot,
+            generatorVersion: 'deterministic:typescript-lezer:2.1.0',
+            generatedAt,
+            pages: [
+              {
+                pageId: 'page_source_race',
+                type: 'source',
+                title: 'src/race.ts',
+                slug: 'source-src-race-ts',
+                content: 'Changed once',
+              },
+            ],
+          }),
+          generatedAt,
+        );
+    }
+
+    let interleaved = false;
+    const result = await new KnowledgeGeneratorService(database, {
+      beforePersist: async () => {
+        if (interleaved) return;
+        interleaved = true;
+        await new KnowledgeGeneratorService(database).runKnowledgeGeneration('job_race_second');
+      },
+    }).runKnowledgeGeneration('job_race_first');
+
+    expect(database.prepare('SELECT COUNT(*) AS count FROM knowledge_page_versions').get()).toEqual({ count: 2 });
+    expect(result.pageResults).toEqual([
+      expect.objectContaining({
+        reused: true,
+        page: expect.objectContaining({
+          pageId: 'page_source_race',
+          versionNumber: 2,
+          createdAt: '2026-01-11T00:00:00.000Z',
+        }),
+      }),
+    ]);
+    expect(readFileSync(join(outputRoot, 'pages/source/source-src-race-ts.md'), 'utf8')).toContain(
+      'generated_at: "2026-01-11T00:00:00.000Z"',
+    );
   });
 });
