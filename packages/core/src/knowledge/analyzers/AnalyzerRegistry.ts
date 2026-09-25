@@ -1,7 +1,9 @@
 import path from 'node:path';
 import type { DeterministicExtraction } from '../KnowledgeExtraction.js';
 import type { KnowledgeSourceKind } from '../KnowledgeTypes.js';
+import { JavaScriptAnalyzer } from './JavaScriptAnalyzer.js';
 import { MarkdownAnalyzer } from './MarkdownAnalyzer.js';
+import { PythonAnalyzer } from './PythonAnalyzer.js';
 import { TextAnalyzer } from './TextAnalyzer.js';
 
 export interface AnalyzerSelectionInput {
@@ -49,6 +51,8 @@ export class AnalyzerRegistry {
 
 export function createDefaultAnalyzerRegistry(): AnalyzerRegistry {
   const registry = new AnalyzerRegistry();
+  registry.register(new PythonAnalyzer());
+  registry.register(new JavaScriptAnalyzer());
   registry.register(new MarkdownAnalyzer());
   registry.register(new TextAnalyzer());
   return registry;

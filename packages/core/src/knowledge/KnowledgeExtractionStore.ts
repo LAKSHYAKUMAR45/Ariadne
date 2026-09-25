@@ -8,6 +8,8 @@ import {
   validateDeterministicExtraction,
   type DeterministicExtraction,
   type ExtractionDiagnostic,
+  type ExtractedMetadata,
+  type ExtractedMetadataValue,
   type ExtractedSection,
   type KnowledgeSourceSpan,
 } from './KnowledgeExtraction.js';
@@ -17,6 +19,7 @@ export {
   validateDeterministicExtraction,
   type DeterministicExtraction,
   type ExtractedLink,
+  type ExtractedMetadataValue,
   type ExtractedRelationship,
   type ExtractedRelationshipType,
   type ExtractedSection,
@@ -161,6 +164,25 @@ function redactPersistedSpan(span: KnowledgeSourceSpan): KnowledgeSourceSpan {
   };
 }
 
+function redactMetadataValue(value: ExtractedMetadataValue): ExtractedMetadataValue {
+  if (typeof value === 'string') {
+    return redactLines(value);
+  }
+  if (Array.isArray(value)) {
+    return value.map((entry) => redactLines(entry));
+  }
+  return value;
+}
+
+function redactMetadata(metadata: ExtractedMetadata | null | undefined): ExtractedMetadata | null | undefined {
+  if (!metadata) {
+    return metadata;
+  }
+  return Object.fromEntries(
+    Object.entries(metadata).map(([key, value]) => [key, redactMetadataValue(value)]),
+  );
+}
+
 function redactPersistedExtraction(extraction: DeterministicExtraction): DeterministicExtraction {
   return canonicalizeDeterministicExtraction({
     ...extraction,
@@ -171,6 +193,7 @@ function redactPersistedExtraction(extraction: DeterministicExtraction): Determi
       title: redactOptionalString(section.title) ?? undefined,
       text: redactLines(section.text),
       span: redactPersistedSpan(section.span),
+      confidence: section.confidence,
     })),
     symbols: extraction.symbols.map((symbol) => ({
       ...symbol,
@@ -179,17 +202,20 @@ function redactPersistedExtraction(extraction: DeterministicExtraction): Determi
       signature: redactOptionalString(symbol.signature) ?? undefined,
       detail: redactOptionalString(symbol.detail) ?? undefined,
       span: redactPersistedSpan(symbol.span),
+      metadata: redactMetadata(symbol.metadata) ?? undefined,
     })),
     relationships: extraction.relationships.map((relationship) => ({
       ...relationship,
       detail: redactOptionalString(relationship.detail) ?? undefined,
       span: relationship.span ? redactPersistedSpan(relationship.span) : relationship.span,
+      metadata: redactMetadata(relationship.metadata) ?? undefined,
     })),
     links: extraction.links.map((link) => ({
       ...link,
       target: redactLines(link.target),
       title: redactOptionalString(link.title) ?? undefined,
       span: link.span ? redactPersistedSpan(link.span) : link.span,
+      confidence: link.confidence,
     })),
     diagnostics: extraction.diagnostics.map((diagnostic) => ({
       ...diagnostic,
@@ -232,6 +258,7 @@ function loadSections(
     kind: section.kind,
     title: section.title ?? null,
     text: section.text,
+    confidence: section.confidence,
     span: {
       ...section.span,
       label: section.span.label ?? null,

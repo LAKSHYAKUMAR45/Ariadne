@@ -17,6 +17,9 @@
     "lint": "echo \"(no lint configured yet)\""
   },
   "dependencies": {
+    "@lezer/common": "^1.2.3",
+    "@lezer/javascript": "^1.5.1",
+    "@lezer/python": "^1.1.18",
     "better-sqlite3": "^11.3.0",
     "ulid": "^2.3.0"
   },

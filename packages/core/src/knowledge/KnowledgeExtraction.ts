@@ -22,6 +22,7 @@ export interface ExtractedSection {
   title?: string | null;
   text: string;
   span: KnowledgeSourceSpan;
+  confidence: number;
 }
 
 export type ExtractedSymbolKind =
@@ -43,6 +44,8 @@ export interface ExtractedSymbol {
   signature?: string | null;
   detail?: string | null;
   span: KnowledgeSourceSpan;
+  confidence: number;
+  metadata?: ExtractedMetadata | null;
 }
 
 export type ExtractedRelationshipType =
@@ -59,10 +62,15 @@ export type ExtractedRelationshipType =
 export interface ExtractedRelationship {
   id: string;
   type: ExtractedRelationshipType;
-  fromId: string;
-  toId: string;
+  fromId?: string | null;
+  toId?: string | null;
+  sourceSymbolId?: string | null;
+  targetSymbolId?: string | null;
+  targetReference?: string | null;
   span?: KnowledgeSourceSpan | null;
   detail?: string | null;
+  confidence: number;
+  metadata?: ExtractedMetadata | null;
 }
 
 export interface ExtractedLink {
@@ -70,7 +78,11 @@ export interface ExtractedLink {
   target: string;
   title?: string | null;
   span?: KnowledgeSourceSpan | null;
+  confidence: number;
 }
+
+export type ExtractedMetadataValue = string | string[] | null;
+export type ExtractedMetadata = Record<string, ExtractedMetadataValue>;
 
 export type ExtractionDiagnosticSeverity = 'info' | 'warning' | 'error';
 
@@ -155,6 +167,39 @@ function optionalString(value: unknown, label: string): string | null | undefine
   return trimmed.length === 0 ? null : trimmed;
 }
 
+function optionalConfidence(value: unknown, label: string): number {
+  if (value === undefined) {
+    return 1;
+  }
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0 || value > 1) {
+    throw new Error(`${label} must be a finite number between 0 and 1`);
+  }
+  return value;
+}
+
+function optionalMetadata(value: unknown, label: string): ExtractedMetadata | null | undefined {
+  if (value === undefined) return undefined;
+  if (value === null) return null;
+  const candidate = expectObject(value, label);
+  const metadata: ExtractedMetadata = {};
+  for (const [key, entry] of Object.entries(candidate)) {
+    if (typeof entry === 'string') {
+      metadata[key] = entry;
+      continue;
+    }
+    if (entry === null) {
+      metadata[key] = null;
+      continue;
+    }
+    if (Array.isArray(entry) && entry.every((item) => typeof item === 'string')) {
+      metadata[key] = [...entry];
+      continue;
+    }
+    throw new Error(`${label}.${key} must be a string, null, or string array`);
+  }
+  return metadata;
+}
+
 function expectInteger(value: unknown, label: string): number {
   if (typeof value !== 'number' || !Number.isInteger(value)) {
     throw new Error(`${label} must be an integer`);
@@ -185,6 +230,7 @@ function validateSpan(value: unknown, label: string): KnowledgeSourceSpan {
   if (endLine < startLine || (endLine === startLine && endColumn < startColumn)) {
     throw new Error(`${label} has invalid line or column positions`);
   }
+  const labelValue = optionalString(candidate.label, `${label}.label`);
   return {
     startOffset,
     endOffset,
@@ -192,7 +238,7 @@ function validateSpan(value: unknown, label: string): KnowledgeSourceSpan {
     startColumn,
     endLine,
     endColumn,
-    label: optionalString(candidate.label, `${label}.label`) ?? undefined,
+    ...(labelValue !== undefined ? { label: labelValue ?? undefined } : {}),
   };
 }
 
@@ -203,12 +249,14 @@ function expectArray(value: unknown, label: string): unknown[] {
 
 function validateSection(value: unknown, index: number): ExtractedSection {
   const candidate = expectObject(value, `sections[${index}]`);
+  const title = optionalString(candidate.title, `sections[${index}].title`);
   return {
     id: expectString(candidate.id, `sections[${index}].id`),
     kind: expectString(candidate.kind, `sections[${index}].kind`),
-    title: optionalString(candidate.title, `sections[${index}].title`) ?? undefined,
     text: expectSourceText(candidate.text, `sections[${index}].text`),
     span: validateSpan(candidate.span, `sections[${index}].span`),
+    confidence: optionalConfidence(candidate.confidence, `sections[${index}].confidence`),
+    ...(title !== undefined ? { title } : {}),
   };
 }
 
@@ -218,14 +266,20 @@ function validateSymbol(value: unknown, index: number): ExtractedSymbol {
   if (!SYMBOL_KINDS.has(kind)) {
     throw new Error(`symbols[${index}].kind must be one of ${[...SYMBOL_KINDS].join(', ')}`);
   }
+  const qualifiedName = optionalString(candidate.qualifiedName, `symbols[${index}].qualifiedName`);
+  const signature = optionalString(candidate.signature, `symbols[${index}].signature`);
+  const detail = optionalString(candidate.detail, `symbols[${index}].detail`);
+  const metadata = optionalMetadata(candidate.metadata, `symbols[${index}].metadata`);
   return {
     id: expectString(candidate.id, `symbols[${index}].id`),
     kind,
     name: expectString(candidate.name, `symbols[${index}].name`),
-    qualifiedName: optionalString(candidate.qualifiedName, `symbols[${index}].qualifiedName`) ?? undefined,
-    signature: optionalString(candidate.signature, `symbols[${index}].signature`) ?? undefined,
-    detail: optionalString(candidate.detail, `symbols[${index}].detail`) ?? undefined,
     span: validateSpan(candidate.span, `symbols[${index}].span`),
+    confidence: optionalConfidence(candidate.confidence, `symbols[${index}].confidence`),
+    ...(qualifiedName !== undefined ? { qualifiedName } : {}),
+    ...(signature !== undefined ? { signature } : {}),
+    ...(detail !== undefined ? { detail } : {}),
+    ...(metadata !== undefined ? { metadata } : {}),
   };
 }
 
@@ -235,23 +289,39 @@ function validateRelationship(value: unknown, index: number): ExtractedRelations
   if (!RELATIONSHIP_TYPES.has(type)) {
     throw new Error(`relationships[${index}].type must be one of ${[...RELATIONSHIP_TYPES].join(', ')}`);
   }
+  const fromId = optionalString(candidate.fromId, `relationships[${index}].fromId`);
+  const toId = optionalString(candidate.toId, `relationships[${index}].toId`);
+  const sourceSymbolId = optionalString(candidate.sourceSymbolId, `relationships[${index}].sourceSymbolId`);
+  const targetSymbolId = optionalString(candidate.targetSymbolId, `relationships[${index}].targetSymbolId`);
+  const targetReference = optionalString(candidate.targetReference, `relationships[${index}].targetReference`);
+  const span = optionalSpan(candidate.span, `relationships[${index}].span`);
+  const detail = optionalString(candidate.detail, `relationships[${index}].detail`);
+  const metadata = optionalMetadata(candidate.metadata, `relationships[${index}].metadata`);
   return {
     id: expectString(candidate.id, `relationships[${index}].id`),
     type,
-    fromId: expectString(candidate.fromId, `relationships[${index}].fromId`),
-    toId: expectString(candidate.toId, `relationships[${index}].toId`),
-    span: optionalSpan(candidate.span, `relationships[${index}].span`) ?? undefined,
-    detail: optionalString(candidate.detail, `relationships[${index}].detail`) ?? undefined,
+    confidence: optionalConfidence(candidate.confidence, `relationships[${index}].confidence`),
+    ...(fromId !== undefined ? { fromId } : {}),
+    ...(toId !== undefined ? { toId } : {}),
+    ...(sourceSymbolId !== undefined ? { sourceSymbolId } : {}),
+    ...(targetSymbolId !== undefined ? { targetSymbolId } : {}),
+    ...(targetReference !== undefined ? { targetReference } : {}),
+    ...(span !== undefined ? { span } : {}),
+    ...(detail !== undefined ? { detail } : {}),
+    ...(metadata !== undefined ? { metadata } : {}),
   };
 }
 
 function validateLink(value: unknown, index: number): ExtractedLink {
   const candidate = expectObject(value, `links[${index}]`);
+  const title = optionalString(candidate.title, `links[${index}].title`);
+  const span = optionalSpan(candidate.span, `links[${index}].span`);
   return {
     id: expectString(candidate.id, `links[${index}].id`),
     target: expectString(candidate.target, `links[${index}].target`),
-    title: optionalString(candidate.title, `links[${index}].title`) ?? undefined,
-    span: optionalSpan(candidate.span, `links[${index}].span`) ?? undefined,
+    confidence: optionalConfidence(candidate.confidence, `links[${index}].confidence`),
+    ...(title !== undefined ? { title } : {}),
+    ...(span !== undefined ? { span } : {}),
   };
 }
 
@@ -288,9 +358,35 @@ function assertRelationshipEndpoints(
   symbols: ExtractedSymbol[],
 ): void {
   const endpointIds = new Set([...sections, ...symbols].map((item) => item.id));
+  const symbolIds = new Set(symbols.map((symbol) => symbol.id));
   for (const relationship of relationships) {
-    if (!endpointIds.has(relationship.fromId) || !endpointIds.has(relationship.toId)) {
+    const hasLegacyEndpoints = relationship.fromId !== undefined || relationship.toId !== undefined;
+    const hasSymbolEndpoints =
+      relationship.sourceSymbolId !== undefined ||
+      relationship.targetSymbolId !== undefined ||
+      relationship.targetReference !== undefined;
+
+    if (!hasLegacyEndpoints && !hasSymbolEndpoints) {
+      throw new Error(`Relationship "${relationship.id}" must reference legacy or symbol endpoints`);
+    }
+
+    if (
+      hasLegacyEndpoints &&
+      (!relationship.fromId || !relationship.toId || !endpointIds.has(relationship.fromId) || !endpointIds.has(relationship.toId))
+    ) {
       throw new Error(`Relationship "${relationship.id}" references an unknown endpoint`);
+    }
+
+    if (relationship.sourceSymbolId !== undefined && relationship.sourceSymbolId !== null && !symbolIds.has(relationship.sourceSymbolId)) {
+      throw new Error(`Relationship "${relationship.id}" references an unknown source symbol`);
+    }
+
+    if (relationship.targetSymbolId !== undefined && relationship.targetSymbolId !== null && !symbolIds.has(relationship.targetSymbolId)) {
+      throw new Error(`Relationship "${relationship.id}" references an unknown target symbol`);
+    }
+
+    if (relationship.targetSymbolId === null && !relationship.targetReference) {
+      throw new Error(`Relationship "${relationship.id}" must include a targetReference when targetSymbolId is null`);
     }
   }
 }

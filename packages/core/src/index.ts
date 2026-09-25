@@ -98,6 +98,8 @@ export {
 } from './knowledge/KnowledgeExtraction.js';
 export type {
   DeterministicExtraction,
+  ExtractedMetadata,
+  ExtractedMetadataValue,
   ExtractedLink,
   ExtractedRelationship,
   ExtractedRelationshipType,
@@ -110,7 +112,14 @@ export type {
   KnowledgeSourceSpan,
 } from './knowledge/KnowledgeExtraction.js';
 export { KnowledgeExtractionStore } from './knowledge/KnowledgeExtractionStore.js';
-export { AnalyzerRegistry, createDefaultAnalyzerRegistry, MarkdownAnalyzer, TextAnalyzer } from './knowledge/analyzers/index.js';
+export {
+  AnalyzerRegistry,
+  createDefaultAnalyzerRegistry,
+  JavaScriptAnalyzer,
+  MarkdownAnalyzer,
+  PythonAnalyzer,
+  TextAnalyzer,
+} from './knowledge/analyzers/index.js';
 export type { AnalyzerInput, AnalyzerSelectionInput, DeterministicAnalyzer } from './knowledge/analyzers/index.js';
 export type {
   KnowledgeExtractionRecord,

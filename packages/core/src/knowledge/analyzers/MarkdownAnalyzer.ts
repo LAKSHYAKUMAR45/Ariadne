@@ -43,6 +43,7 @@ function addContainsRelationship(relationships: ExtractedRelationship[], fromId:
     type: 'contains',
     fromId,
     toId,
+    confidence: 1,
   });
 }
 
@@ -75,12 +76,14 @@ function findLinks(content: string, section: ExtractedSection): LinkMatch[] {
         title: match[1],
         text: match[2],
         span,
+        confidence: 1,
       },
       link: {
         id: `link:${span.startLine}:${span.startColumn}`,
         target: match[2],
         title: match[1],
         span,
+        confidence: 1,
       },
       relationship: {
         id: `relationship:links_to:${section.id}->${sectionId}`,
@@ -88,6 +91,7 @@ function findLinks(content: string, section: ExtractedSection): LinkMatch[] {
         fromId: section.id,
         toId: sectionId,
         span,
+        confidence: 1,
       },
     });
   }
@@ -106,12 +110,14 @@ function findLinks(content: string, section: ExtractedSection): LinkMatch[] {
         title,
         text: target,
         span,
+        confidence: 1,
       },
       link: {
         id: `link:${span.startLine}:${span.startColumn}`,
         target,
         title,
         span,
+        confidence: 1,
       },
       relationship: {
         id: `relationship:links_to:${section.id}->${sectionId}`,
@@ -119,6 +125,7 @@ function findLinks(content: string, section: ExtractedSection): LinkMatch[] {
         fromId: section.id,
         toId: sectionId,
         span,
+        confidence: 1,
       },
     });
   }
@@ -194,6 +201,7 @@ export class MarkdownAnalyzer implements DeterministicAnalyzer {
           title,
           text: line.text,
           span: spanFromOffsets(content, line.startOffset, line.endOffset),
+          confidence: 1,
         };
         while (headingStack.length > 0 && headingStack[headingStack.length - 1]!.level >= headingMatch[1].length) {
           headingStack.pop();
@@ -227,6 +235,7 @@ export class MarkdownAnalyzer implements DeterministicAnalyzer {
             codeLines[0]!.startOffset,
             codeLines[codeLines.length - 1]!.endOffset,
           ),
+          confidence: 1,
         };
         sections.push(section);
         if (headingStack.length > 0) {
@@ -252,6 +261,7 @@ export class MarkdownAnalyzer implements DeterministicAnalyzer {
             kind: 'list',
             text: content.slice(chunk.startOffset, chunk.endOffset),
             span: spanFromOffsets(content, chunk.startOffset, chunk.endOffset),
+            confidence: 1,
           };
           sections.push(section);
           if (headingStack.length > 0) {
@@ -288,6 +298,7 @@ export class MarkdownAnalyzer implements DeterministicAnalyzer {
           kind: 'paragraph',
           text: content.slice(chunk.startOffset, chunk.endOffset),
           span: spanFromOffsets(content, chunk.startOffset, chunk.endOffset),
+          confidence: 1,
         };
         sections.push(paragraph);
         if (headingStack.length > 0) {

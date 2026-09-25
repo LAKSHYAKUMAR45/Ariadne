@@ -39,6 +39,7 @@ function buildSections(content: string): ExtractedSection[] {
         kind: 'paragraph',
         text: content.slice(chunk.startOffset, chunk.endOffset),
         span: spanFromOffsets(content, chunk.startOffset, chunk.endOffset),
+        confidence: 1,
       });
     }
     lineIndex += 1;

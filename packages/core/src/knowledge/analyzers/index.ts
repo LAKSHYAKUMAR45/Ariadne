@@ -9,3 +9,5 @@ export type {
 } from './AnalyzerRegistry.js';
 export { TextAnalyzer } from './TextAnalyzer.js';
 export { MarkdownAnalyzer } from './MarkdownAnalyzer.js';
+export { PythonAnalyzer } from './PythonAnalyzer.js';
+export { JavaScriptAnalyzer } from './JavaScriptAnalyzer.js';
