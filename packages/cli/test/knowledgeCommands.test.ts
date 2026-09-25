@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
-import { closeRegistry } from '@ariadne-dev/core';
+import { closeRegistry, openDatabase } from '@ariadne-dev/core';
 import { program } from '../src/index.js';
 
 // Functional coverage for `ariadne knowledge ...`: parses argv through the
@@ -63,6 +63,20 @@ describe('ariadne knowledge commands', () => {
     await run('project', 'create', name, '--json');
     const created = lastJson();
     return (created.data as { id: string }).id;
+  }
+
+  function insertProject(id: string, workspaceRoot: string, name: string): void {
+    const db = openDatabase(path.join(root, '.ariadne', 'state.db'));
+    try {
+      const createdAt = new Date().toISOString();
+      db.prepare(
+        `INSERT INTO knowledge_projects
+         (id, workspace_root, name, status, created_at, updated_at)
+         VALUES (?, ?, ?, 'active', ?, ?)`,
+      ).run(id, workspaceRoot, name, createdAt, createdAt);
+    } finally {
+      db.close();
+    }
   }
 
   describe('project', () => {
@@ -145,6 +159,27 @@ describe('ariadne knowledge commands', () => {
 
       await run('queue', 'cancel', job.id, '--json');
       expect((lastJson().data as { status: string }).status).toBe('cancelled');
+    });
+
+    it('claims only jobs from the requested project', async () => {
+      fs.writeFileSync(path.join(root, 'project-a.md'), 'a\n');
+      fs.writeFileSync(path.join(root, 'project-b.md'), 'b\n');
+      const projectA = await createProject('Project A');
+      const projectB = 'project_b';
+      insertProject(projectB, '/alternate-workspace', 'Project B');
+
+      await run('ingest', 'file', projectA, 'project-a.md', '--json');
+      await run('ingest', 'file', projectB, 'project-b.md', '--json');
+
+      await run('queue', 'claim', projectB, '--worker', 'worker-b', '--json');
+      const claimed = lastJson().data as { projectId: string; status: string };
+      expect(claimed.projectId).toBe(projectB);
+      expect(claimed.status).toBe('running');
+
+      await run('queue', 'list', projectA, '--json');
+      const projectAJobs = lastJson().data as Array<{ status: string }>;
+      expect(projectAJobs).toHaveLength(1);
+      expect(projectAJobs[0].status).toBe('queued');
     });
   });
 

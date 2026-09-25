@@ -292,11 +292,16 @@ export function registerKnowledgeTools(server: McpServer, context: KnowledgeMcpC
     {
       title: 'Cancel a knowledge job',
       description: 'Cancels queued or running work. Set confirm=true to authorize.',
-      inputSchema: { jobId: z.string().min(1), confirm: z.boolean().optional() },
+      inputSchema: { projectId: z.string().min(1), jobId: z.string().min(1), confirm: z.boolean().optional() },
     },
     async (args) => {
       try {
         requireWrite(args.confirm);
+        project(db, args.projectId);
+        const job = queue.get(args.jobId);
+        if (!job || job.projectId !== args.projectId) {
+          throw new Error(`Knowledge job not found for project: ${args.jobId}`);
+        }
         const result = queue.cancel(args.jobId);
         return jsonResult(envelope(result, [{ kind: 'job', id: result.id }]));
       } catch (err) {

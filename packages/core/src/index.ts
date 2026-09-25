@@ -284,6 +284,8 @@ export {
 export type {
   EnqueueKnowledgeJobInput,
   KnowledgeJobRecord,
+  KnowledgeJobResult,
+  KnowledgeQueueStatus,
   KnowledgeProgressEvent,
   KnowledgeQueueOptions,
 } from './knowledge/KnowledgeQueue.js';

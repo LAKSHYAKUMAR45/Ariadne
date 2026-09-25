@@ -85,4 +85,40 @@ describe('knowledge MCP tools', () => {
       cleanup(state);
     }
   });
+
+  it('does not let one project cancel another project’s queued job', async () => {
+    const state = setup();
+    try {
+      const projectA = JSON.parse((await state.tools.knowledge_project_create.handler({ name: 'Project A', confirm: true })).content[0].text).data.id as string;
+      const projectB = 'project-b';
+      const createdAt = new Date().toISOString();
+      state.db.prepare(
+        `INSERT INTO knowledge_projects
+         (id, workspace_root, name, status, created_at, updated_at)
+         VALUES (?, ?, ?, 'active', ?, ?)`,
+      ).run(projectB, '/workspace-b', 'Project B', createdAt, createdAt);
+
+      const enqueued = await state.tools.knowledge_queue_enqueue.handler({
+        projectId: projectA,
+        jobKind: 'extract',
+        payload: { path: 'a.md' },
+        confirm: true,
+      });
+      const jobId = JSON.parse(enqueued.content[0].text).data.id as string;
+
+      const rejected = await state.tools.knowledge_queue_cancel.handler({
+        projectId: projectB,
+        jobId,
+        confirm: true,
+      });
+      expect(rejected.isError).toBe(true);
+      expect(rejected.content[0].text).toMatch(/not found for project/i);
+
+      const listed = await state.tools.knowledge_queue_list.handler({ projectId: projectA });
+      const jobs = JSON.parse(listed.content[0].text).data as Array<{ id: string; status: string }>;
+      expect(jobs).toEqual([expect.objectContaining({ id: jobId, status: 'queued' })]);
+    } finally {
+      cleanup(state);
+    }
+  });
 });

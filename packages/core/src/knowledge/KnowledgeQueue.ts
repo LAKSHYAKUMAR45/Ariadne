@@ -1,4 +1,5 @@
 import type Database from 'better-sqlite3';
+import { redactLines } from '../Redactor.js';
 import { createKnowledgeId } from './KnowledgeIds.js';
 import type { KnowledgeJobId, KnowledgeJobStatus } from './KnowledgeTypes.js';
 
@@ -26,6 +27,33 @@ export interface KnowledgeJobRecord {
   maxRetries: number;
   workerId: string | null;
   leaseExpiresAt: string | null;
+  result: KnowledgeJobResult | null;
+}
+
+export interface KnowledgeJobResultWarning {
+  code: string;
+  message: string;
+}
+
+export interface KnowledgeJobResult {
+  processingMode: 'deterministic' | 'enriched';
+  analyzerId: string;
+  analyzerVersion: string;
+  extractionId: string;
+  pageVersionIds: string[];
+  graphNodeCount: number;
+  graphEdgeCount: number;
+  warnings: KnowledgeJobResultWarning[];
+}
+
+export interface KnowledgeQueueStatus {
+  projectId: string;
+  queuedCount: number;
+  runningCount: number;
+  completedCount: number;
+  failedCount: number;
+  cancelledCount: number;
+  oldestQueuedAgeMs: number | null;
 }
 
 export interface KnowledgeProgressEvent {
@@ -51,6 +79,7 @@ interface JobRow {
   source_version_id: string | null;
   status: KnowledgeJobStatus;
   payload_json: string;
+  result_json: string | null;
   requested_at: string;
   started_at: string | null;
   completed_at: string | null;
@@ -81,6 +110,70 @@ function parseObject(value: string): Record<string, unknown> {
   return parsed as Record<string, unknown>;
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function requireNonEmptyString(value: unknown, label: string): string {
+  if (typeof value !== 'string' || value.trim().length === 0) {
+    throw new Error(`Knowledge queue ${label} must be a non-empty string`);
+  }
+  return value;
+}
+
+function requireNonNegativeInteger(value: unknown, label: string): number {
+  if (!Number.isInteger(value) || (value as number) < 0) {
+    throw new Error(`Knowledge queue ${label} must be a non-negative integer`);
+  }
+  return value as number;
+}
+
+function validateKnowledgeJobResult(value: unknown): KnowledgeJobResult {
+  if (!isRecord(value)) throw new Error('Knowledge queue result must be an object');
+  const processingMode = value.processingMode;
+  if (processingMode !== 'deterministic' && processingMode !== 'enriched') {
+    throw new Error('Knowledge queue result processingMode must be deterministic or enriched');
+  }
+  if (!Array.isArray(value.pageVersionIds)) {
+    throw new Error('Knowledge queue result pageVersionIds must be an array');
+  }
+  if (!Array.isArray(value.warnings)) {
+    throw new Error('Knowledge queue result warnings must be an array');
+  }
+  return {
+    processingMode,
+    analyzerId: requireNonEmptyString(value.analyzerId, 'result analyzerId'),
+    analyzerVersion: requireNonEmptyString(value.analyzerVersion, 'result analyzerVersion'),
+    extractionId: requireNonEmptyString(value.extractionId, 'result extractionId'),
+    pageVersionIds: value.pageVersionIds.map((item) => requireNonEmptyString(item, 'result pageVersionId')),
+    graphNodeCount: requireNonNegativeInteger(value.graphNodeCount, 'result graphNodeCount'),
+    graphEdgeCount: requireNonNegativeInteger(value.graphEdgeCount, 'result graphEdgeCount'),
+    warnings: value.warnings.map((warning) => {
+      if (!isRecord(warning)) throw new Error('Knowledge queue result warning must be an object');
+      return {
+        code: requireNonEmptyString(warning.code, 'result warning code'),
+        message: requireNonEmptyString(warning.message, 'result warning message'),
+      };
+    }),
+  };
+}
+
+function parseResult(value: string | null): KnowledgeJobResult | null {
+  if (value === null) return null;
+  return validateKnowledgeJobResult(JSON.parse(value) as unknown);
+}
+
+function sanitizePersistedResult(result: KnowledgeJobResult): KnowledgeJobResult {
+  const validated = validateKnowledgeJobResult(result);
+  return {
+    ...validated,
+    warnings: validated.warnings.map((warning) => ({
+      ...warning,
+      message: redactLines(warning.message),
+    })),
+  };
+}
+
 function rowToJob(row: JobRow): KnowledgeJobRecord {
   return {
     id: row.id as KnowledgeJobId,
@@ -98,6 +191,7 @@ function rowToJob(row: JobRow): KnowledgeJobRecord {
     maxRetries: row.max_retries,
     workerId: row.worker_id,
     leaseExpiresAt: row.lease_expires_at,
+    result: parseResult(row.result_json),
   };
 }
 
@@ -170,7 +264,8 @@ export class KnowledgeQueue {
     return rows.map(rowToJob);
   }
 
-  public claim(workerId: string): KnowledgeJobRecord | null {
+  public claim(projectId: string, workerId: string): KnowledgeJobRecord | null {
+    if (!projectId.trim()) throw new Error('Knowledge queue project ID must not be empty');
     if (!workerId.trim()) throw new Error('Knowledge queue worker ID must not be empty');
     const now = this.now();
     const leaseExpiresAt = new Date(Date.parse(now) + this.leaseDurationMs).toISOString();
@@ -178,34 +273,36 @@ export class KnowledgeQueue {
       const row = this.db
         .prepare(
           `SELECT * FROM knowledge_jobs
-           WHERE status = 'queued'
+           WHERE project_id = @projectId AND status = 'queued'
            ORDER BY requested_at, id
            LIMIT 1`,
         )
-        .get() as JobRow | undefined;
+        .get({ projectId }) as JobRow | undefined;
       if (!row) return null;
       const result = this.db
         .prepare(
           `UPDATE knowledge_jobs
            SET status = 'running', worker_id = @workerId, lease_expires_at = @leaseExpiresAt,
                started_at = COALESCE(started_at, @now)
-           WHERE id = @id AND status = 'queued'`,
+           WHERE id = @id AND project_id = @projectId AND status = 'queued'`,
         )
-        .run({ id: row.id, workerId, leaseExpiresAt, now });
+        .run({ id: row.id, projectId, workerId, leaseExpiresAt, now });
       return result.changes === 1 ? this.get(row.id) : null;
     })();
   }
 
-  public complete(jobId: string, workerId?: string): KnowledgeJobRecord {
+  public complete(jobId: string, workerId?: string, result?: KnowledgeJobResult): KnowledgeJobRecord {
     const job = this.require(jobId);
     this.assertRunning(job, workerId);
+    const persistedResult = result === undefined ? null : sanitizePersistedResult(result);
     this.db
       .prepare(
         `UPDATE knowledge_jobs
-         SET status = 'completed', completed_at = @now, worker_id = NULL, lease_expires_at = NULL
+         SET status = 'completed', completed_at = @now, worker_id = NULL, lease_expires_at = NULL,
+             result_json = @resultJson
          WHERE id = @id`,
       )
-      .run({ id: jobId, now: this.now() });
+      .run({ id: jobId, now: this.now(), resultJson: persistedResult === null ? null : JSON.stringify(persistedResult) });
     return this.require(jobId);
   }
 
@@ -265,15 +362,34 @@ export class KnowledgeQueue {
     return this.require(jobId);
   }
 
-  public recoverExpiredKnowledgeJobs(): string[] {
+  public renewLease(jobId: string, workerId: string): KnowledgeJobRecord {
+    if (!workerId.trim()) throw new Error('Knowledge queue worker ID must not be empty');
+    const job = this.require(jobId);
+    this.assertRunning(job, workerId);
+    const now = this.now();
+    const leaseExpiresAt = new Date(Date.parse(now) + this.leaseDurationMs).toISOString();
+    this.db
+      .prepare(
+        `UPDATE knowledge_jobs
+         SET lease_expires_at = @leaseExpiresAt
+         WHERE id = @id AND status = 'running' AND worker_id = @workerId`,
+      )
+      .run({ id: jobId, workerId, leaseExpiresAt });
+    return this.require(jobId);
+  }
+
+  public recoverExpiredKnowledgeJobs(projectId?: string): string[] {
     const now = this.now();
     const expired = this.db
       .prepare(
         `SELECT * FROM knowledge_jobs
-         WHERE status = 'running' AND lease_expires_at IS NOT NULL AND lease_expires_at <= ?
+         WHERE status = 'running'
+           AND lease_expires_at IS NOT NULL
+           AND lease_expires_at <= @now
+           AND (@projectId IS NULL OR project_id = @projectId)
          ORDER BY requested_at, id`,
       )
-      .all(now) as JobRow[];
+      .all({ now, projectId: projectId ?? null }) as JobRow[];
     const recovered: string[] = [];
     this.db.transaction(() => {
       for (const job of expired) {
@@ -286,13 +402,49 @@ export class KnowledgeQueue {
                  failure_code = CASE WHEN @status = 'failed' THEN 'lease_expired' ELSE NULL END,
                  failure_message = CASE WHEN @status = 'failed' THEN 'Worker lease expired' ELSE NULL END,
                  retry_count = @retryCount, worker_id = NULL, lease_expires_at = NULL
-             WHERE id = @id AND status = 'running'`,
+             WHERE id = @id AND project_id = @projectId AND status = 'running'`,
           )
-          .run({ id: job.id, status, now, retryCount });
+          .run({ id: job.id, projectId: job.project_id, status, now, retryCount });
         if (status === 'queued') recovered.push(job.id);
       }
     })();
     return recovered;
+  }
+
+  public getQueueStatus(projectId: string): KnowledgeQueueStatus {
+    if (!projectId.trim()) throw new Error('Knowledge queue project ID must not be empty');
+    const row = this.db
+      .prepare(
+        `SELECT
+           SUM(CASE WHEN status = 'queued' THEN 1 ELSE 0 END) AS queued_count,
+           SUM(CASE WHEN status = 'running' THEN 1 ELSE 0 END) AS running_count,
+           SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) AS completed_count,
+           SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed_count,
+           SUM(CASE WHEN status = 'cancelled' THEN 1 ELSE 0 END) AS cancelled_count,
+           MIN(CASE WHEN status = 'queued' THEN requested_at END) AS oldest_queued_requested_at
+         FROM knowledge_jobs
+         WHERE project_id = ?`,
+      )
+      .get(projectId) as {
+        queued_count: number | null;
+        running_count: number | null;
+        completed_count: number | null;
+        failed_count: number | null;
+        cancelled_count: number | null;
+        oldest_queued_requested_at: string | null;
+      };
+    const oldestQueuedAgeMs = row.oldest_queued_requested_at === null
+      ? null
+      : Math.max(0, Date.parse(this.now()) - Date.parse(row.oldest_queued_requested_at));
+    return {
+      projectId,
+      queuedCount: row.queued_count ?? 0,
+      runningCount: row.running_count ?? 0,
+      completedCount: row.completed_count ?? 0,
+      failedCount: row.failed_count ?? 0,
+      cancelledCount: row.cancelled_count ?? 0,
+      oldestQueuedAgeMs,
+    };
   }
 
   public recordProgress(
@@ -403,7 +555,8 @@ export function enqueueKnowledgeJob(
 
 export function claimKnowledgeJob(
   db: Database.Database,
+  projectId: string,
   workerId: string,
 ): KnowledgeJobRecord | null {
-  return new KnowledgeQueue(db).claim(workerId);
+  return new KnowledgeQueue(db).claim(projectId, workerId);
 }

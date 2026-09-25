@@ -375,8 +375,8 @@ export function registerKnowledgeCommands(program: Command): void {
     .description('Claim the next queued job for a worker')
     .option('--worker <id>', 'Worker id')
     .option('--json', 'Output JSON')
-    .action(async (_projectId: string, opts: { worker?: string; json?: boolean }) => {
-      await runKnowledgeAction(opts, () => withKnowledgeDb((db) => new KnowledgeQueue(db).claim(opts.worker ?? `cli-${process.pid}`)),
+    .action(async (projectId: string, opts: { worker?: string; json?: boolean }) => {
+      await runKnowledgeAction(opts, () => withKnowledgeDb((db) => new KnowledgeQueue(db).claim(projectId, opts.worker ?? `cli-${process.pid}`)),
         (job) => console.log(job ? `Claimed job ${job.id} (${job.jobKind}).` : 'No queued jobs available.'));
     });
 
