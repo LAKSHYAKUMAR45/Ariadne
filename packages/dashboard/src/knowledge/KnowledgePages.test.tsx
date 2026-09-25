@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react';
-import { render, screen } from '@testing-library/react';
+import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AuthProvider } from '../auth/AuthProvider';
@@ -18,6 +18,7 @@ function renderWithProvider(child: ReactNode) {
 const session = {
   userId: 'admin-id',
   username: 'admin',
+  role: 'admin',
   csrfToken: 'csrf-token',
   reauthenticatedUntil: null,
 };
@@ -184,5 +185,69 @@ describe('knowledge dashboard pages', () => {
     renderWithProvider(<KnowledgeReviewsPage />);
     await user.click(await screen.findByRole('button', { name: 'Accept' }));
     expect(await screen.findByText('No pending reviews')).toBeVisible();
+  });
+
+  it('ignores a review mutation response after switching projects', async () => {
+    let resolveMutation: ((response: Response) => void) | undefined;
+    const secondProject = { ...projects.projects[0], id: 'project-2', name: 'Second project' };
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === '/api/v1/admin/session') return Promise.resolve(json(session));
+      if (url === '/api/v1/admin/knowledge/projects') {
+        return Promise.resolve(json({ projects: [projects.projects[0], secondProject] }));
+      }
+      if (url === '/api/v1/admin/knowledge/projects/project-1/reviews?status=pending') {
+        return Promise.resolve(json({ reviews: [{
+          id: 'review-1',
+          projectId: 'project-1',
+          pageVersionId: 'version-1',
+          status: 'pending',
+          requestedAt: '2026-09-24T12:00:00.000Z',
+          reviewedAt: null,
+          reviewerId: null,
+          summary: 'First project review',
+        }] }));
+      }
+      if (url === '/api/v1/admin/knowledge/projects/project-2/reviews?status=pending') {
+        return Promise.resolve(json({ reviews: [{
+          id: 'review-2',
+          projectId: 'project-2',
+          pageVersionId: 'version-2',
+          status: 'pending',
+          requestedAt: '2026-09-24T12:00:00.000Z',
+          reviewedAt: null,
+          reviewerId: null,
+          summary: 'Second project review',
+        }] }));
+      }
+      if (url.endsWith('/reviews/review-1') && init?.method === 'PATCH') {
+        return new Promise<Response>((resolve) => {
+          resolveMutation = resolve;
+        });
+      }
+      return Promise.resolve(new Response(null, { status: 404 }));
+    }));
+    const user = userEvent.setup();
+
+    renderWithProvider(<KnowledgeReviewsPage />);
+    await user.click(await screen.findByRole('button', { name: 'Accept' }));
+    await user.selectOptions(screen.getByLabelText('Knowledge project'), 'project-2');
+    expect(screen.queryByText('First project review')).not.toBeInTheDocument();
+    expect(await screen.findByText('Second project review')).toBeVisible();
+
+    resolveMutation?.(json({
+      review: {
+        id: 'review-1',
+        projectId: 'project-1',
+        pageVersionId: 'version-1',
+        status: 'approved',
+        requestedAt: '2026-09-24T12:00:00.000Z',
+        reviewedAt: '2026-09-24T12:01:00.000Z',
+        reviewerId: 'admin-id',
+        summary: 'First project review',
+      },
+    }));
+
+    await waitFor(() => expect(screen.getByText('Second project review')).toBeVisible());
   });
 });

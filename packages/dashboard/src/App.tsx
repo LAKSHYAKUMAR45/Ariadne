@@ -82,17 +82,17 @@ function ConsoleShell() {
     }
   }, [section, visibleSections]);
 
-  if (!session) {
-    return null;
-  }
-
-  const activeSection = visibleSections.find((item) => item.id === section);
-
   const skipToContent = useCallback((event: MouseEvent<HTMLAnchorElement>) => {
     event.preventDefault();
     window.history.replaceState(null, '', '#main-content');
     mainRef.current?.focus();
   }, []);
+
+  if (!session) {
+    return null;
+  }
+
+  const activeSection = visibleSections.find((item) => item.id === section);
 
   return (
     <div className="app-shell">

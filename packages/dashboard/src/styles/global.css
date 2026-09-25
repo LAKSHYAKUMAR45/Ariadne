@@ -367,7 +367,10 @@ a:focus-visible {
 
 .sidebar nav {
   display: grid;
+  min-height: 0;
+  flex: 1 1 auto;
   gap: 4px;
+  overflow-y: auto;
 }
 
 .nav-item {

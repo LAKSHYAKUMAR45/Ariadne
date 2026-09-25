@@ -22,6 +22,18 @@ export function KnowledgeReviewsPage() {
   const [error, setError] = useState<string | null>(null);
   const [pendingActionId, setPendingActionId] = useState<string | null>(null);
   const controllerRef = useRef<AbortController | null>(null);
+  const actionControllerRef = useRef<AbortController | null>(null);
+  const projectIdRef = useRef(projectId);
+  const resolvedReviewIdsRef = useRef(new Set<string>());
+
+  useEffect(() => {
+    projectIdRef.current = projectId;
+    actionControllerRef.current?.abort();
+    setPendingActionId(null);
+    setReviews([]);
+  }, [projectId]);
+
+  useEffect(() => () => actionControllerRef.current?.abort(), []);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -57,7 +69,7 @@ export function KnowledgeReviewsPage() {
       if (response.reviews.some((review) => review.projectId !== projectId)) {
         throw new Error('The review response did not match the selected knowledge project.');
       }
-      setReviews(response.reviews);
+      setReviews(response.reviews.filter((review) => !resolvedReviewIdsRef.current.has(review.id)));
       setError(null);
     } catch (loadError: unknown) {
       if (!isAbortError(loadError) && !controller.signal.aborted) {
@@ -75,20 +87,36 @@ export function KnowledgeReviewsPage() {
   }, [loadReviews]);
 
   const resolveReview = useCallback(async (review: KnowledgeReview, action: KnowledgeReviewAction): Promise<void> => {
+    if (review.projectId !== projectId) {
+      setError('The selected review no longer belongs to the active knowledge project.');
+      return;
+    }
+    actionControllerRef.current?.abort();
+    const controller = new AbortController();
+    const actionProjectId = projectId;
+    actionControllerRef.current = controller;
     setPendingActionId(review.id);
     setError(null);
     try {
       const response = await api.mutate(
         'PATCH',
-        `/api/v1/admin/knowledge/projects/${encodeURIComponent(projectId)}/reviews/${encodeURIComponent(review.id)}`,
+        `/api/v1/admin/knowledge/projects/${encodeURIComponent(actionProjectId)}/reviews/${encodeURIComponent(review.id)}`,
         { action, evidence: { kind: 'dashboard', id: review.id } },
         isKnowledgeReviewMutationResponse,
+        controller.signal,
       );
+      if (controller.signal.aborted || projectIdRef.current !== actionProjectId) return;
+      resolvedReviewIdsRef.current.add(response.review.id);
       setReviews((current) => current.filter((item) => item.id !== response.review.id));
     } catch (resolveError: unknown) {
-      setError(resolveError instanceof Error ? resolveError.message : 'Unable to resolve the knowledge review.');
+      if (!isAbortError(resolveError) && !controller.signal.aborted && projectIdRef.current === actionProjectId) {
+        setError(resolveError instanceof Error ? resolveError.message : 'Unable to resolve the knowledge review.');
+      }
     } finally {
-      setPendingActionId(null);
+      if (actionControllerRef.current === controller) {
+        actionControllerRef.current = null;
+        setPendingActionId(null);
+      }
     }
   }, [api, projectId]);
 
@@ -104,7 +132,15 @@ export function KnowledgeReviewsPage() {
       </header>
       <label className="source-select knowledge-project-picker">
         <span>Project</span>
-        <select aria-label="Knowledge project" value={projectId} onChange={(event) => setProjectId(event.target.value)}>
+        <select
+          aria-label="Knowledge project"
+          value={projectId}
+          onChange={(event) => {
+            actionControllerRef.current?.abort();
+            setReviews([]);
+            setProjectId(event.target.value);
+          }}
+        >
           <option value="">Select a project</option>
           {projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
         </select>
