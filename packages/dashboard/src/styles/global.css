@@ -1331,6 +1331,20 @@ a:focus-visible {
   gap: 8px;
 }
 
+/* Export/Delete capture sit in a 58px pane-heading strip - the default
+   .quiet-action sizing (40px tall, 14px side padding, 750 weight) reads
+   oversized there, especially once "Delete capture" no longer needs to
+   fit an inline capture id. Scoped to these two containers only, so
+   .quiet-action elsewhere (Members refresh, row actions, dialogs) is
+   unaffected. */
+.pane-actions .quiet-action,
+.file-pane__controls .quiet-action {
+  min-height: 30px;
+  padding: 0 11px;
+  font-size: 11px;
+  font-weight: 700;
+}
+
 .pane-actions span {
   flex: 0 0 auto;
 }
@@ -1632,8 +1646,8 @@ a:focus-visible {
 }
 
 .segmented-control button {
-  min-height: 25px;
-  padding: 0 8px;
+  min-height: 22px;
+  padding: 0 7px;
   border: 0;
   border-radius: 5px;
   background: transparent;
