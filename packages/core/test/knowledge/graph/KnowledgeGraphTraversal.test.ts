@@ -64,4 +64,47 @@ describe('KnowledgeGraph traversal', () => {
     databases.push(db);
     expect(graph.findGraphPath('d' as never, 'a' as never, { directed: true, maxHops: 2 })).toBeNull();
   });
+
+  it('traverses across legacy edges with sanitized nested metadata', () => {
+    const { db, graph } = createGraph();
+    databases.push(db);
+    db.prepare(
+      `INSERT INTO knowledge_graph_edges
+       (id, project_id, source_node_id, target_node_id, edge_type, evidence_json, confidence, created_at, updated_at)
+       VALUES (?, 'project-1', 'a', 'd', 'link', ?, 1, ?, ?)`,
+    ).run(
+      'legacy-traversal-edge',
+      JSON.stringify({
+        evidence: ['explicit_link'],
+        weight: 1,
+        provenance: [
+          {
+            kind: 'file',
+            id: 'docs/a.md',
+            path: 'docs/a.md',
+            metadata: {
+              nested: {
+                branch: [{ label: 'kept' }],
+              },
+              prototype: { polluted: 'nope' },
+            },
+          },
+        ],
+      }),
+      '2026-09-24T00:00:00.000Z',
+      '2026-09-24T00:00:00.000Z',
+    );
+
+    const path = graph.findGraphPath('a' as never, 'd' as never, { maxHops: 1 });
+
+    expect(path?.nodeIds).toEqual(['a', 'd']);
+    expect(path?.edges[0]?.provenance[0]?.metadata).toMatchObject({
+      nested: {
+        branch: [{ label: 'kept' }],
+      },
+    });
+    expect(Object.getPrototypeOf((path?.edges[0]?.provenance[0] ?? {}) as object)).toBeNull();
+    expect(path?.edges[0]?.provenance[0]?.metadata).not.toHaveProperty('prototype');
+    expect(path?.edges[0]?.provenance[0]).not.toHaveProperty('prototype');
+  });
 });

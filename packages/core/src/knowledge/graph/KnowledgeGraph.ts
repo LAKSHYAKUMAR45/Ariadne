@@ -2,6 +2,8 @@ import type Database from 'better-sqlite3';
 import type { KnowledgeSourceSpan } from '../KnowledgeExtraction.js';
 import { createKnowledgeId, normalizeKnowledgePath } from '../KnowledgeIds.js';
 import {
+  sanitizeGraphJsonValue,
+  sanitizeLegacyProvenanceMetadata,
   sanitizeProvenanceMetadata,
   stableGraphJsonStringify,
 } from '../GraphMetadata.js';
@@ -127,6 +129,16 @@ const EVIDENCE_TYPES = new Set<KnowledgeEdgeEvidence>([
   'supersession',
 ]);
 
+const PROVENANCE_KINDS = new Set<KnowledgeProvenanceRef['kind']>([
+  'task',
+  'checkpoint',
+  'decision',
+  'file',
+  'commit',
+  'source',
+  'page',
+]);
+
 const EDGE_TYPES = new Set<KnowledgeGraphEdgeType>([
   'imports',
   'exports',
@@ -181,36 +193,125 @@ function normalizeProvenance(
   provenance: readonly KnowledgeProvenanceRef[],
   context: string,
   hydrateSourcePath?: (reference: KnowledgeProvenanceRef) => string | null,
+  options: { legacyMetadata?: boolean } = {},
 ): KnowledgeProvenanceRef[] {
+  const coerceText = (
+    value: unknown,
+    label: string,
+    input: { required?: boolean } = {},
+  ): string | undefined => {
+    if (value === undefined) {
+      if (input.required && !options.legacyMetadata) {
+        throw new Error(`${context} ${label} must be a string`);
+      }
+      return undefined;
+    }
+    if (typeof value !== 'string') {
+      if (options.legacyMetadata) return undefined;
+      throw new Error(`${context} ${label} must be a string`);
+    }
+    const trimmed = value.trim();
+    if (!trimmed) {
+      if (options.legacyMetadata) return undefined;
+      throw new Error(`${context} ${label} must not be empty`);
+    }
+    return trimmed;
+  };
+  const coerceInteger = (value: unknown, label: string): number | undefined => {
+    if (value === undefined) return undefined;
+    if (typeof value !== 'number' || !Number.isFinite(value) || !Number.isInteger(value)) {
+      if (options.legacyMetadata) return undefined;
+      throw new Error(`${context} ${label} must be a finite integer`);
+    }
+    return value;
+  };
+  const coerceUnit = (value: unknown, label: string): number | undefined => {
+    if (value === undefined) return undefined;
+    if (typeof value !== 'number' || !Number.isFinite(value) || value < 0 || value > 1) {
+      if (options.legacyMetadata) return undefined;
+      throw new Error(`${context} ${label} must be between 0 and 1`);
+    }
+    return value;
+  };
   return [...provenance]
     .map((reference, index) => {
-      const normalized =
-        reference.kind === 'file'
-          ? {
-              ...reference,
-              id: normalizeKnowledgePath(reference.id),
-              ...(reference.path ? { path: normalizeKnowledgePath(reference.path) } : {}),
-            }
-          : {
-              ...reference,
-            };
-      const metadata = reference.metadata
-        ? sanitizeProvenanceMetadata(reference.metadata, `${context} reference ${index + 1} metadata`)
-        : undefined;
-      return {
-        ...normalized,
-        ...(reference.kind === 'source'
-          ? (() => {
-              const authoritativePath = hydrateSourcePath?.(normalized as KnowledgeProvenanceRef) ?? null;
-              if (authoritativePath) {
-                return { path: authoritativePath };
-              }
-              return reference.path ? { path: reference.path } : {};
-            })()
-          : {}),
-        ...(metadata ? { metadata } : {}),
-      };
+      const metadataContext = `${context} reference ${index + 1} metadata`;
+      const kind = typeof reference.kind === 'string' && PROVENANCE_KINDS.has(reference.kind) ? reference.kind : null;
+      if (!kind) {
+        if (options.legacyMetadata) return null;
+        throw new Error(`${context} reference ${index + 1} kind is unsupported`);
+      }
+      const rawId = coerceText(reference.id, `reference ${index + 1} id`, { required: true });
+      if (!rawId) {
+        if (options.legacyMetadata) return null;
+        throw new Error(`${context} reference ${index + 1} id must not be empty`);
+      }
+      const metadata = (() => {
+        if (!reference.metadata) {
+          return undefined;
+        }
+        if (!options.legacyMetadata) {
+          return sanitizeProvenanceMetadata(reference.metadata, metadataContext);
+        }
+        try {
+          return sanitizeLegacyProvenanceMetadata(reference.metadata, metadataContext);
+        } catch (error) {
+          return sanitizeProvenanceMetadata(
+            {
+              diagnostic: sanitizeGraphJsonValue(
+                `legacy metadata omitted: ${error instanceof Error ? error.message : 'unsupported value'}`,
+                `${metadataContext} diagnostic`,
+              ),
+            },
+            `${metadataContext} diagnostic`,
+          );
+        }
+      })();
+      const normalized = Object.create(null) as KnowledgeProvenanceRef;
+      normalized.kind = kind;
+      try {
+        normalized.id = kind === 'file' ? normalizeKnowledgePath(rawId) : rawId;
+      } catch (error) {
+        if (options.legacyMetadata) return null;
+        throw error;
+      }
+      const sourceVersionId = coerceText(reference.sourceVersionId, `reference ${index + 1} sourceVersionId`);
+      if (sourceVersionId !== undefined) normalized.sourceVersionId = sourceVersionId;
+      const startOffset = coerceInteger(reference.startOffset, `reference ${index + 1} startOffset`);
+      if (startOffset !== undefined) normalized.startOffset = startOffset;
+      const endOffset = coerceInteger(reference.endOffset, `reference ${index + 1} endOffset`);
+      if (endOffset !== undefined) normalized.endOffset = endOffset;
+      const startLine = coerceInteger(reference.startLine, `reference ${index + 1} startLine`);
+      if (startLine !== undefined) normalized.startLine = startLine;
+      const startColumn = coerceInteger(reference.startColumn, `reference ${index + 1} startColumn`);
+      if (startColumn !== undefined) normalized.startColumn = startColumn;
+      const endLine = coerceInteger(reference.endLine, `reference ${index + 1} endLine`);
+      if (endLine !== undefined) normalized.endLine = endLine;
+      const endColumn = coerceInteger(reference.endColumn, `reference ${index + 1} endColumn`);
+      if (endColumn !== undefined) normalized.endColumn = endColumn;
+      const label = coerceText(reference.label, `reference ${index + 1} label`);
+      if (label !== undefined) normalized.label = label;
+      const confidence = coerceUnit(reference.confidence, `reference ${index + 1} confidence`);
+      if (confidence !== undefined) normalized.confidence = confidence;
+      const path = coerceText(reference.path, `reference ${index + 1} path`);
+      if (kind === 'source') {
+        const authoritativePath = hydrateSourcePath?.(normalized) ?? null;
+        if (authoritativePath) {
+          normalized.path = authoritativePath;
+        } else if (path !== undefined) {
+          normalized.path = path;
+        }
+      } else if (path !== undefined) {
+        try {
+          normalized.path = kind === 'file' ? normalizeKnowledgePath(path) : path;
+        } catch (error) {
+          if (!options.legacyMetadata) throw error;
+        }
+      }
+      if (metadata) normalized.metadata = metadata;
+      return normalized;
     })
+    .filter((reference): reference is KnowledgeProvenanceRef => reference !== null)
     .sort(
       (left, right) =>
         left.id.localeCompare(right.id) ||
@@ -275,7 +376,9 @@ function parseStoredEvidence(
       evidence: Array.isArray(stored.evidence) ? stored.evidence.filter((entry): entry is KnowledgeEdgeEvidence => EVIDENCE_TYPES.has(entry as KnowledgeEdgeEvidence)) : [],
       weight: typeof stored.weight === 'number' && Number.isFinite(stored.weight) ? stored.weight : 1,
       provenance: Array.isArray(stored.provenance)
-        ? normalizeProvenance(stored.provenance, `Knowledge graph edge ${edgeId} stored provenance`, hydrateSourcePath)
+        ? normalizeProvenance(stored.provenance, `Knowledge graph edge ${edgeId} stored provenance`, hydrateSourcePath, {
+            legacyMetadata: true,
+          })
         : [],
     };
   } catch (error) {

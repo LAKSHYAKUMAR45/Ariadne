@@ -10,11 +10,13 @@ export const GRAPH_METADATA_LIMITS = {
 } as const;
 
 const TRUNCATION_SUFFIX = ' …[truncated]';
+const UNSAFE_OBJECT_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
 
 const DEFAULT_PROVENANCE_METADATA_KEYS = new Set([
   'callee',
   'confidence',
   'context',
+  'diagnostic',
   'detail',
   'edgeType',
   'exportKind',
@@ -75,6 +77,10 @@ interface SanitizeOptions {
   allowKeys?: ReadonlySet<string>;
   allowNestedObjects: boolean;
   state?: SanitizeState;
+}
+
+function createSafeRecord<T>(): Record<string, T> {
+  return Object.create(null) as Record<string, T>;
 }
 
 function truncateString(value: string): string {
@@ -148,12 +154,15 @@ function sanitizeValue(
     throw new Error(`${options.context} contains a circular reference`);
   }
   state.seen.add(value);
-  const output: Record<string, GraphJsonLike> = {};
+  const output = createSafeRecord<GraphJsonLike>();
   try {
     for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
       state.entries += 1;
       if (state.entries > GRAPH_METADATA_LIMITS.maxEntries) {
         throw new Error(`${options.context} exceeds maximum entry count of ${GRAPH_METADATA_LIMITS.maxEntries}`);
+      }
+      if (UNSAFE_OBJECT_KEYS.has(key)) {
+        continue;
       }
       if (options.allowKeys && !options.allowKeys.has(key)) {
         continue;
@@ -202,6 +211,16 @@ export function sanitizeGraphifyMetadata(
   return sanitizeObjectMetadata(value, {
     context,
     allowKeys,
+    allowNestedObjects: true,
+  });
+}
+
+export function sanitizeLegacyProvenanceMetadata(
+  value: unknown,
+  context: string,
+): Record<string, GraphJsonLike> | undefined {
+  return sanitizeObjectMetadata(value, {
+    context,
     allowNestedObjects: true,
   });
 }

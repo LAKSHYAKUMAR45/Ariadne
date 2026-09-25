@@ -319,11 +319,41 @@ describe('KnowledgeGraph', () => {
     expect(graph.listGraphEdges('project-1')).toEqual([]);
   });
 
-  it('fails contextual read paths for legacy metadata that exceeds recursion bounds', () => {
+  it('reads legacy nested provenance metadata safely and omits invalid metadata diagnostically', () => {
     const { db, graph } = createGraph();
     databases.push(db);
     graph.upsertGraphNode({ id: 'node-a' as never, projectId: 'project-1', nodeType: 'page', label: 'A' });
     graph.upsertGraphNode({ id: 'node-b' as never, projectId: 'project-1', nodeType: 'page', label: 'B' });
+
+    db.prepare(
+      `INSERT INTO knowledge_graph_edges
+       (id, project_id, source_node_id, target_node_id, edge_type, evidence_json, confidence, created_at, updated_at)
+       VALUES (?, 'project-1', 'node-a', 'node-b', 'relates_to', ?, 1, ?, ?)`,
+    ).run(
+      'legacy-safe-edge',
+      JSON.stringify({
+        evidence: ['explicit_link'],
+        weight: 1,
+        provenance: [
+          {
+            kind: 'source',
+            id: 'source-1',
+            sourceVersionId: 'source-version-1',
+            prototype: { polluted: 'top-level' },
+            metadata: {
+              topic: 'legacy',
+              nested: {
+                branch: [{ label: 'kept' }],
+              },
+              __proto__: { polluted: 'yes' },
+              constructor: { prototype: { polluted: 'still-no' } },
+            },
+          },
+        ],
+      }),
+      '2026-09-24T00:00:00.000Z',
+      '2026-09-24T00:00:00.000Z',
+    );
 
     let nested = '"leaf"';
     for (let depth = 0; depth < 80; depth += 1) {
@@ -332,14 +362,44 @@ describe('KnowledgeGraph', () => {
     db.prepare(
       `INSERT INTO knowledge_graph_edges
        (id, project_id, source_node_id, target_node_id, edge_type, evidence_json, confidence, created_at, updated_at)
-       VALUES (?, 'project-1', 'node-a', 'node-b', 'relates_to', ?, 1, ?, ?)`,
+       VALUES (?, 'project-1', 'node-b', 'node-a', 'relates_to', ?, 1, ?, ?)`,
     ).run(
-      'legacy-edge',
+      'legacy-invalid-edge',
       `{"evidence":["explicit_link"],"weight":1,"provenance":[{"kind":"source","id":"source-1","sourceVersionId":"source-version-1","metadata":{"context":${nested}}}]}`,
       '2026-09-24T00:00:00.000Z',
       '2026-09-24T00:00:00.000Z',
     );
+    db.prepare(
+      `INSERT INTO knowledge_graph_edges
+       (id, project_id, source_node_id, target_node_id, edge_type, evidence_json, confidence, created_at, updated_at)
+       VALUES (?, 'project-1', 'node-a', 'node-b', 'link', ?, 1, ?, ?)`,
+    ).run(
+      'legacy-poisoned-ref-edge',
+      '{"evidence":["explicit_link"],"weight":1,"provenance":[{"kind":"file","id":{},"path":42,"startLine":"oops"}]}',
+      '2026-09-24T00:00:00.000Z',
+      '2026-09-24T00:00:00.000Z',
+    );
 
-    expect(() => graph.listGraphEdges('project-1')).toThrow(/legacy-edge|invalid stored evidence/i);
+    const edges = graph.listGraphEdges('project-1');
+    const safeEdge = edges.find((edge) => edge.id === 'legacy-safe-edge');
+    const invalidEdge = edges.find((edge) => edge.id === 'legacy-invalid-edge');
+    const poisonedRefEdge = edges.find((edge) => edge.id === 'legacy-poisoned-ref-edge');
+
+    expect(safeEdge?.provenance[0]?.metadata).toMatchObject({
+      topic: 'legacy',
+      nested: {
+        branch: [{ label: 'kept' }],
+      },
+    });
+    expect(Object.getPrototypeOf((safeEdge?.provenance[0] ?? {}) as object)).toBeNull();
+    expect(safeEdge?.provenance[0]).not.toHaveProperty('prototype');
+    expect(Object.getPrototypeOf((safeEdge?.provenance[0]?.metadata ?? {}) as object)).toBeNull();
+    expect(safeEdge?.provenance[0]?.metadata).not.toHaveProperty('__proto__');
+    expect(({} as Record<string, unknown> & { polluted?: string }).polluted).toBeUndefined();
+    expect(invalidEdge?.provenance[0]?.metadata).toMatchObject({
+      diagnostic: expect.stringMatching(/legacy metadata omitted/i),
+    });
+    expect(Object.getPrototypeOf((invalidEdge?.provenance[0]?.metadata ?? {}) as object)).toBeNull();
+    expect(poisonedRefEdge?.provenance).toEqual([]);
   });
 });

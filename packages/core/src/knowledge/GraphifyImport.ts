@@ -69,6 +69,18 @@ export interface GraphImportResult {
   rejectedEdges: Array<{ sourceNodeId: string; targetNodeId: string; reason: string }>;
 }
 
+function createSafeMetadataRecord(): Record<string, GraphJsonLike> {
+  return Object.create(null) as Record<string, GraphJsonLike>;
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : 'unsupported value';
+}
+
+function buildDiagnostic(message: string, context: string): string {
+  return sanitizeGraphJsonValue(message, context) as string;
+}
+
 function record(value: unknown): UnknownRecord {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Graphify JSON must be an object');
   return value as UnknownRecord;
@@ -99,21 +111,23 @@ function normalizedPath(value: unknown): string | null {
 }
 
 function filteredMetadata(value: UnknownRecord, reservedKeys: ReadonlySet<string>, context: string): Record<string, GraphJsonLike> {
-  const metadataEntries = Object.entries(value)
-    .filter(([key]) => !reservedKeys.has(key))
-    .map(([key, entry]) => {
+  const metadata = createSafeMetadataRecord();
+  for (const [key, entry] of Object.entries(value)) {
+    if (reservedKeys.has(key)) {
+      continue;
+    }
       let sanitized: GraphJsonLike | undefined;
       try {
         sanitized = sanitizeGraphJsonValue(entry, `${context}.${key}`);
       } catch {
         sanitized = undefined;
       }
-      return sanitized === undefined ? null : ([key, sanitized] as const);
-    })
-    .filter((entry): entry is readonly [string, GraphJsonLike] => entry !== null);
-  const metadata = Object.fromEntries(metadataEntries);
+      if (sanitized !== undefined) {
+        metadata[key] = sanitized;
+      }
+  }
   const bounded = sanitizeGraphJsonValue(metadata, context);
-  return bounded && typeof bounded === 'object' && !Array.isArray(bounded) ? bounded : {};
+  return bounded && typeof bounded === 'object' && !Array.isArray(bounded) ? bounded : createSafeMetadataRecord();
 }
 
 function relationType(value: UnknownRecord): { edgeType: KnowledgeGraphEdgeType; originalEdgeType?: string } {
@@ -214,13 +228,31 @@ function parseLineLocation(value: unknown):
 function buildEdgeProvenance(value: UnknownRecord): {
   provenance: KnowledgeProvenanceRef[];
   unparsedSourceLocation?: GraphJsonLike;
+  sourceLocationDiagnostic?: string;
 } {
   const sourcePath = normalizedPath(value.source_file ?? value.sourceFile);
   const rawLocation = value.source_location ?? value.sourceLocation;
+  const captureLocationFallback = (): Pick<
+    ReturnType<typeof buildEdgeProvenance>,
+    'unparsedSourceLocation' | 'sourceLocationDiagnostic'
+  > => {
+    try {
+      return {
+        unparsedSourceLocation: sanitizeGraphJsonValue(rawLocation, 'Graphify edge source_location'),
+      };
+    } catch (error) {
+      return {
+        sourceLocationDiagnostic: buildDiagnostic(
+          `Graphify edge source_location omitted: ${errorMessage(error)}`,
+          'Graphify edge source_location diagnostic',
+        ),
+      };
+    }
+  };
   if (!sourcePath) {
     return rawLocation === undefined
       ? { provenance: [] }
-      : { provenance: [], unparsedSourceLocation: sanitizeGraphJsonValue(rawLocation, 'Graphify edge source_location') };
+      : { provenance: [], ...captureLocationFallback() };
   }
   if (rawLocation === undefined) {
     return {
@@ -231,7 +263,7 @@ function buildEdgeProvenance(value: UnknownRecord): {
   if (!parsedLocation.parsed) {
     return {
       provenance: [{ kind: 'file', id: sourcePath, path: sourcePath }],
-      unparsedSourceLocation: sanitizeGraphJsonValue(rawLocation, 'Graphify edge source_location'),
+      ...captureLocationFallback(),
     };
   }
   return {
@@ -293,16 +325,24 @@ export function importGraphifyJson(input: string | unknown): GraphImportResult {
     }
     const inferred = value.inferred === true || value.kind === 'inferred' || value.explicit === false;
     const { edgeType, originalEdgeType } = relationType(value);
-    const { provenance, unparsedSourceLocation } = buildEdgeProvenance(value);
+    const { provenance, unparsedSourceLocation, sourceLocationDiagnostic } = buildEdgeProvenance(value);
     const original = sanitizeGraphifyMetadata(
       filteredMetadata(value, new Set(['from', 'id', 'source', 'target', 'to']), `Graphify edge ${sourceNodeId}->${targetNodeId} metadata`),
       `Graphify edge ${sourceNodeId}->${targetNodeId} metadata.original`,
     );
-    const metadata: Record<string, GraphJsonLike> = {
-      ...(original ? { original } : {}),
-      ...(originalEdgeType ? { originalEdgeType } : {}),
-      ...(unparsedSourceLocation !== undefined ? { unparsedSourceLocation } : {}),
-    };
+    const metadata = createSafeMetadataRecord();
+    if (original) {
+      metadata.original = original;
+    }
+    if (originalEdgeType) {
+      metadata.originalEdgeType = originalEdgeType;
+    }
+    if (unparsedSourceLocation !== undefined) {
+      metadata.unparsedSourceLocation = unparsedSourceLocation;
+    }
+    if (sourceLocationDiagnostic) {
+      metadata.sourceLocationDiagnostic = sourceLocationDiagnostic;
+    }
     edges.push({
       sourceNodeId,
       targetNodeId,

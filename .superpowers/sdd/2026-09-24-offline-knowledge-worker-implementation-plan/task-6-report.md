@@ -2,7 +2,7 @@
 
 ## Scope completed
 
-Implemented deterministic, project-scoped native graph materialization for deterministic extraction symbols and relationships, plus hardened Graphify/native provenance handling for authoritative source paths, zero-based columns, metadata safety bounds, collision rejection, and legacy-read guards.
+Implemented deterministic, project-scoped native graph materialization for deterministic extraction symbols and relationships, plus hardened Graphify/native provenance handling for authoritative source paths, zero-based columns, metadata safety bounds, collision rejection, legacy-read guards, and Task 6 review-round-2 security/compatibility fixes.
 
 ## Design decisions
 
@@ -24,8 +24,11 @@ Implemented deterministic, project-scoped native graph materialization for deter
   - maximum entry count: `64`
   - maximum string length: `512`
   - maximum serialized byte size: `4096`
+- Graph metadata sanitization now drops `__proto__`, `constructor`, and `prototype` keys at every nested object level and rebuilds sanitized objects with null prototypes so JSON-parsed and direct-object inputs cannot poison output objects or downstream merges.
+- Legacy stored graph provenance now rehydrates through a compatibility path that preserves bounded nested JSON, redacts/truncates secrets, drops unsafe top-level and nested keys, emits bounded `diagnostic` metadata when legacy nested metadata is invalid, and omits malformed legacy provenance refs instead of aborting list/traversal reads.
+- Optional Graphify `source_location` parsing now degrades safely for cyclic, over-deep, or oversized values by keeping the edge, preserving file-level provenance when possible, and storing a bounded `sourceLocationDiagnostic` marker when raw malformed input itself cannot be safely retained.
 - Provenance/import metadata now uses the repository redaction boundary (`Redactor`) plus strict allowlists and bounded truncation/rejection instead of persisting arbitrary nested objects, secrets, or oversized blobs verbatim.
-- Legacy stored graph-edge metadata is re-read through the same bounded sanitizer/stringifier paths, so bounded legacy rows remain readable and invalid rows fail with contextual errors instead of unbounded recursion.
+- Legacy stored graph-edge metadata is re-read through bounded sanitizer/stringifier paths, so bounded legacy rows remain readable and invalid rows degrade contextually instead of failing the entire edge/traversal read.
 
 ## Files changed
 
@@ -48,6 +51,9 @@ pnpm --filter @ariadne-dev/core test -- KnowledgeGraphMaterializer.test.ts Graph
 
 Observed failures after adding the new regression cases:
 
+- Graph metadata sanitization still allowed attacker-controlled prototype keys to survive in sanitized output objects and nested arrays, leaving prototype-pollution gadgets reachable from JSON-parsed import payloads;
+- optional Graphify `source_location` values that were cyclic, over-deep, or oversized still aborted the whole import instead of preserving the edge with a bounded diagnostic marker;
+- legacy graph traversal/list reads still either rejected bounded nested provenance metadata outright or threw on malformed legacy provenance refs/unsafe top-level keys instead of degrading safely;
 - Graphify object-shaped `source_location` dropped valid zero-based columns and accepted invalid fractional/negative columns as if they were absent;
 - materialized node/edge provenance lacked authoritative source paths and allowed deterministic node-ID collisions to overwrite earlier symbols inside the same source-version refresh;
 - graph-edge provenance metadata persisted unallowlisted/secret-like values verbatim and lacked bounded recursion/entry-size guards;
@@ -61,7 +67,7 @@ Focused graph validation:
 pnpm --filter @ariadne-dev/core test -- KnowledgeGraphMaterializer.test.ts GraphifyImport.test.ts KnowledgeGraph.test.ts KnowledgeGraphTraversal.test.ts knowledgeMigrations.test.ts
 ```
 
-Result: pass (`61` files / `477` tests passed in the filtered Vitest run environment).
+Result: pass (`61` files / `480` tests passed in the filtered Vitest run environment).
 
 Full core validation:
 
@@ -69,7 +75,7 @@ Full core validation:
 pnpm --filter @ariadne-dev/core test
 ```
 
-Result: pass (`61` files / `477` tests).
+Result: pass (`61` files / `480` tests).
 
 Core build:
 
@@ -98,4 +104,4 @@ Result: pass.
 - Materialization now runs in a graph transaction so source-version refresh is all-or-nothing.
 - File provenance is canonicalized to normalized workspace-relative paths before persistence and must resolve to a known project source record before graph-edge storage accepts it.
 - Relationship/import metadata persistence is now bounded and allowlisted: secrets are redacted, long strings are truncated, nested objects are rejected on provenance writes, and oversized/wide metadata fails with stable contextual errors and no partial writes.
-- Legacy stored graph-edge metadata is guarded by the same bounded stable-stringify/sanitizer path used for writes; bounded rows remain readable, and invalid rows fail contextually instead of recursing until crash.
+- Legacy stored graph-edge metadata is guarded by bounded compatibility sanitizers: bounded nested rows remain readable, unsafe prototype keys are dropped, malformed legacy refs are omitted, and invalid metadata degrades to bounded diagnostics instead of recursing until crash or aborting traversal/list reads.
