@@ -246,6 +246,22 @@ describe('ariadne knowledge commands', () => {
       await run('review', 'reopen', id, '--actor', 'tester', '--source', 'cli', '--json');
       expect((lastJson().data as { status: string }).status).toBe('pending');
     });
+
+    it('reuses an existing pending review for the same project identity', async () => {
+      const projectId = await createProject();
+
+      await run('review', 'create', projectId, '--summary', 'Check this claim', '--json');
+      const first = lastJson().data as { id: string; requestedAt: string };
+
+      await run('review', 'create', projectId, '--summary', 'Check this claim', '--json');
+      const second = lastJson().data as { id: string; requestedAt: string };
+
+      expect(second.id).toBe(first.id);
+      expect(second.requestedAt).toBe(first.requestedAt);
+
+      await run('review', 'list', projectId, '--json');
+      expect(lastJson().data as unknown[]).toHaveLength(1);
+    });
   });
 
   describe('research (no provider configured)', () => {

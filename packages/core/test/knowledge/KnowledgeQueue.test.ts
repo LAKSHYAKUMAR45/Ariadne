@@ -285,6 +285,39 @@ describe('KnowledgeQueue', () => {
     });
   });
 
+  it('rejects manual cancellation for expired running leases until recovery accounts for lease expiry', () => {
+    const job = queue.enqueue({
+      projectId: 'project_1',
+      jobKind: 'leased',
+      payload: {},
+      maxRetries: 2,
+    });
+    expect(queue.claim('project_1', 'worker-a')?.id).toBe(job.id);
+
+    queue.setNow(() => '2026-01-01T00:00:02.000Z');
+
+    expect(() => queue.cancel(job.id)).toThrow(/lease/i);
+    expect(queue.get(job.id)).toMatchObject({
+      id: job.id,
+      status: 'running',
+      retryCount: 0,
+      failureCode: null,
+      workerId: 'worker-a',
+      leaseExpiresAt: '2026-01-01T00:00:01.000Z',
+    });
+
+    expect(queue.recoverExpiredKnowledgeJobs('project_1')).toEqual([job.id]);
+    expect(queue.get(job.id)).toMatchObject({
+      id: job.id,
+      status: 'queued',
+      retryCount: 1,
+      failureCode: null,
+      failureMessage: null,
+      workerId: null,
+      leaseExpiresAt: null,
+    });
+  });
+
   it('rejects cancel and retry races instead of overwriting concurrent owner or claim changes', () => {
     const workspaceRoot = mkdtempSync(join(process.cwd(), '.knowledge-queue-race-'));
     temporaryDirectories.push(workspaceRoot);

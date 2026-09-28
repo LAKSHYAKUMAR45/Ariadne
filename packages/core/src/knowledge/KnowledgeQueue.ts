@@ -287,6 +287,10 @@ function leaseLostTransitionError(jobId: string, workerId: string): KnowledgeQue
   return new KnowledgeQueueTransitionError(`Knowledge job lease lost for ${jobId} and worker ${workerId}`);
 }
 
+function hasActiveLease(leaseExpiresAt: string | null, now: string): boolean {
+  return leaseExpiresAt !== null && leaseExpiresAt > now;
+}
+
 export class KnowledgeQueueTransitionError extends Error {
   public constructor(message: string) {
     super(message);
@@ -495,6 +499,7 @@ export class KnowledgeQueue {
     if (job.status !== 'queued' && job.status !== 'running') {
       throw new Error(`Cannot cancel job ${jobId} from ${job.status} state`);
     }
+    const now = this.now();
     const statement = job.status === 'queued'
       ? this.db.prepare(
           `UPDATE knowledge_jobs
@@ -515,13 +520,25 @@ export class KnowledgeQueue {
              AND status = 'running'
              AND worker_id = @workerId
              AND lease_expires_at IS NOT NULL
+             AND lease_expires_at > @now
              AND completed_at IS NULL
              AND failure_code IS NULL
              AND failure_message IS NULL
              AND result_json IS NULL`,
         );
-    const cancellation = statement.run({ id: jobId, now: this.now(), workerId: job.workerId });
+    const cancellation = statement.run({ id: jobId, now, workerId: job.workerId });
     if (cancellation.changes !== 1) {
+      const latest = this.get(jobId);
+      if (
+        job.status === 'running' &&
+        latest?.status === 'running' &&
+        latest.workerId === job.workerId &&
+        !hasActiveLease(latest.leaseExpiresAt, now)
+      ) {
+        throw new KnowledgeQueueTransitionError(
+          `Knowledge job ${jobId} is not running with an active lease for worker ${job.workerId}`,
+        );
+      }
       throw new KnowledgeQueueTransitionError(`Knowledge job ${jobId} changed before cancellation could be applied`);
     }
     return this.require(jobId);

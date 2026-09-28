@@ -341,6 +341,7 @@ export type {
 export {
   KNOWLEDGE_REVIEW_ACTIONS,
   createKnowledgeReview,
+  KnowledgeReviewConflictError,
   listKnowledgeReviews,
   resolveKnowledgeReview,
   reopenKnowledgeReview,

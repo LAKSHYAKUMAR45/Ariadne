@@ -72,6 +72,13 @@ export interface BulkResolveKnowledgeReviewsResult {
   skippedIds: KnowledgeReviewId[];
 }
 
+export class KnowledgeReviewConflictError extends Error {
+  public constructor(message: string) {
+    super(message);
+    this.name = 'KnowledgeReviewConflictError';
+  }
+}
+
 interface KnowledgeReviewRow {
   id: string;
   project_id: string;
@@ -174,6 +181,26 @@ function findPendingReview(
   return row ? rowToKnowledgeReview(row) : null;
 }
 
+function findReusablePendingReview(
+  db: Database.Database,
+  projectId: string,
+  pageVersionId: string | null,
+  summary: string | null,
+): KnowledgeReviewRecord | null {
+  return summary === null ? null : findPendingReview(db, projectId, pageVersionId, summary);
+}
+
+function isUniqueConstraintError(error: unknown): error is Error & { code?: string } {
+  return error instanceof Error
+    && (((error as { code?: string }).code === 'SQLITE_CONSTRAINT_UNIQUE') || error.message.includes('UNIQUE constraint failed'));
+}
+
+function pendingReviewConflictMessage(input: { projectId: string; pageVersionId: string | null; summary: string | null }): string {
+  const scope = input.pageVersionId === null ? 'project-level' : `page version ${input.pageVersionId}`;
+  const summary = input.summary === null ? 'without a summary' : `for summary "${input.summary}"`;
+  return `Knowledge pending review already exists for project ${input.projectId} (${scope}, ${summary})`;
+}
+
 function recordReviewAction(
   db: Database.Database,
   input: {
@@ -266,11 +293,32 @@ export function createKnowledgeReview(
     summary: input.summary ?? null,
     requestedAt: input.requestedAt ?? new Date().toISOString(),
   };
-  db.prepare(
-    `INSERT INTO knowledge_reviews
-     (id, project_id, page_version_id, status, requested_at, summary)
-     VALUES (@id, @projectId, @pageVersionId, 'pending', @requestedAt, @summary)`,
-  ).run(review);
+  const existing = findReusablePendingReview(db, review.projectId, review.pageVersionId, review.summary);
+  if (existing) {
+    return existing;
+  }
+  try {
+    db.prepare(
+      `INSERT INTO knowledge_reviews
+       (id, project_id, page_version_id, status, requested_at, summary)
+       VALUES (@id, @projectId, @pageVersionId, 'pending', @requestedAt, @summary)`,
+    ).run(review);
+  } catch (error) {
+    if (!isUniqueConstraintError(error)) {
+      throw error;
+    }
+    const reused = findReusablePendingReview(db, review.projectId, review.pageVersionId, review.summary);
+    if (reused) {
+      return reused;
+    }
+    throw new KnowledgeReviewConflictError(
+      pendingReviewConflictMessage({
+        projectId: review.projectId,
+        pageVersionId: review.pageVersionId,
+        summary: review.summary,
+      }),
+    );
+  }
   return requireReview(db, review.id);
 }
 

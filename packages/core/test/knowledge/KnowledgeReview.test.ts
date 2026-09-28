@@ -4,6 +4,7 @@ import { applyKnowledgeMigrations } from '../../src/knowledge/knowledgeMigration
 import {
   bulkResolveKnowledgeReviews,
   createKnowledgeReview,
+  KnowledgeReviewConflictError,
   ensurePendingKnowledgeReview,
   listKnowledgeReviews,
   reopenKnowledgeReview,
@@ -64,6 +65,55 @@ describe('KnowledgeReview', () => {
       { summary: 'Review generated architecture summary', status: 'pending' },
       { summary: 'Review source attribution', status: 'pending' },
     ]);
+  });
+
+  it('reuses an existing pending review for the same logical identity instead of surfacing a SQLite uniqueness error', () => {
+    const db = createDatabase();
+    databases.push(db);
+
+    const first = createKnowledgeReview(db, {
+      projectId: 'project-1',
+      summary: 'Review generated architecture summary',
+      requestedAt: '2026-09-24T01:00:00.000Z',
+    });
+    const reused = createKnowledgeReview(db, {
+      projectId: 'project-1',
+      summary: 'Review generated architecture summary',
+      requestedAt: '2026-09-24T02:00:00.000Z',
+    });
+
+    expect(reused).toEqual(first);
+    expect(listKnowledgeReviews(db, 'project-1')).toHaveLength(1);
+  });
+
+  it('throws a stable domain error when review creation conflicts without a reusable pending identity', () => {
+    const db = createDatabase();
+    databases.push(db);
+
+    db.exec(`DROP INDEX IF EXISTS idx_knowledge_reviews_pending_project_identity;`);
+    db.exec(
+      `CREATE UNIQUE INDEX idx_knowledge_reviews_pending_project_summaryless
+       ON knowledge_reviews(project_id)
+       WHERE status = 'pending' AND page_version_id IS NULL AND summary IS NULL`,
+    );
+
+    createKnowledgeReview(db, {
+      projectId: 'project-1',
+      requestedAt: '2026-09-24T01:00:00.000Z',
+    });
+
+    expect(() =>
+      createKnowledgeReview(db, {
+        projectId: 'project-1',
+        requestedAt: '2026-09-24T02:00:00.000Z',
+      }),
+    ).toThrow(KnowledgeReviewConflictError);
+    expect(() =>
+      createKnowledgeReview(db, {
+        projectId: 'project-1',
+        requestedAt: '2026-09-24T02:00:00.000Z',
+      }),
+    ).toThrow(/pending review already exists/i);
   });
 
   it('requires an allowlisted action and evidence before resolving a review', () => {
@@ -213,6 +263,42 @@ describe('KnowledgeReview', () => {
       const reused = ensurePendingKnowledgeReview(second, {
         projectId: 'project-1',
         pageVersionId: 'page-version-1',
+        summary: 'Review the generated contradiction',
+        requestedAt: '2026-09-24T04:00:01.000Z',
+      });
+      second.exec('COMMIT');
+
+      expect(reused.id).toBe(created.id);
+      expect(listKnowledgeReviews(first, 'project-1')).toHaveLength(1);
+    } finally {
+      rmSync(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('reuses the pending review for concurrent create requests across SQLite connections', () => {
+    const workspaceRoot = mkdtempSync(join(process.cwd(), '.knowledge-review-create-test-'));
+    const databasePath = join(workspaceRoot, '.ariadne', 'reviews.db');
+
+    try {
+      const first = openDatabase(databasePath);
+      const second = openDatabase(databasePath);
+      databases.push(first, second);
+      first.prepare(
+        `INSERT INTO knowledge_projects (id, workspace_root, name, created_at, updated_at)
+         VALUES ('project-1', ?, 'Workspace', ?, ?)`,
+      ).run(workspaceRoot, CREATED_AT, CREATED_AT);
+
+      first.exec('BEGIN IMMEDIATE');
+      const created = createKnowledgeReview(first, {
+        projectId: 'project-1',
+        summary: 'Review the generated contradiction',
+        requestedAt: '2026-09-24T04:00:00.000Z',
+      });
+      first.exec('COMMIT');
+
+      second.exec('BEGIN IMMEDIATE');
+      const reused = createKnowledgeReview(second, {
+        projectId: 'project-1',
         summary: 'Review the generated contradiction',
         requestedAt: '2026-09-24T04:00:01.000Z',
       });
