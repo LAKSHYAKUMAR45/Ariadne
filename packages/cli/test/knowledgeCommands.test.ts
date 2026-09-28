@@ -5,6 +5,7 @@ import * as os from 'node:os';
 import * as http from 'node:http';
 import { closeRegistry, openDatabase, KnowledgeQueue } from '@ariadne-dev/core';
 import { program } from '../src/index.js';
+import { buildCliWorkerStatus } from '../src/knowledgeCommands.js';
 
 // Functional coverage for `ariadne knowledge ...`: parses argv through the
 // real `program` (same convention as curation.test.ts/status.test.ts)
@@ -420,6 +421,62 @@ describe('ariadne knowledge commands', () => {
         expect(((status.data as { activeWorkers: { leases: unknown[] } }).activeWorkers.leases).length).toBeLessThanOrEqual(8);
       });
 
+      it('excludes expired running leases from active status details while keeping raw running counts explicit', async () => {
+        const projectId = await createProject();
+        const db = openDatabase(path.join(root, '.ariadne', 'state.db'));
+        try {
+          const queue = new KnowledgeQueue(db);
+          const expiredJob = queue.enqueue({
+            projectId,
+            jobKind: 'analyze',
+            payload: { index: 'expired' },
+          });
+          const activeJob = queue.enqueue({
+            projectId,
+            jobKind: 'analyze',
+            payload: { index: 'active' },
+          });
+          queue.claim(projectId, 'worker-expired');
+          queue.claim(projectId, 'worker-active');
+          db.prepare(
+            `UPDATE knowledge_jobs
+             SET lease_expires_at = ?
+             WHERE id = ?`,
+          ).run(new Date(Date.now() - 60_000).toISOString(), expiredJob.id);
+          db.prepare(
+            `UPDATE knowledge_jobs
+             SET lease_expires_at = ?
+             WHERE id = ?`,
+          ).run(new Date(Date.now() + 60_000).toISOString(), activeJob.id);
+        } finally {
+          db.close();
+        }
+
+        clearConsole();
+        await run('worker', 'status', projectId, '--json');
+        const status = lastJson();
+        expect(status.ok).toBe(true);
+        expect(status.data).toMatchObject({
+          queue: {
+            runningCount: 2,
+          },
+          activeWorkers: {
+            workerCount: 1,
+            runningCount: 1,
+          },
+        });
+        expect((status.data as {
+          activeWorkers: { leases: Array<{ workerId: string }> };
+        }).activeWorkers.leases).toEqual([
+          expect.objectContaining({ workerId: 'worker-active' }),
+        ]);
+
+        clearConsole();
+        resetCommanderOptionState(program);
+        await run('worker', 'status', projectId);
+        expect(allConsoleText()).toContain('2 running (1 with active leases)');
+      });
+
       it('bounds provider diagnostics in worker status output', async () => {
         const projectId = await createProject();
         const db = openDatabase(path.join(root, '.ariadne', 'state.db'));
@@ -478,6 +535,121 @@ describe('ariadne knowledge commands', () => {
         });
         expect((status.data as { warnings: Array<{ code: string }> }).warnings).toEqual(
           expect.arrayContaining([expect.objectContaining({ code: 'job_result_invalid' })]),
+        );
+      });
+
+      it('uses persisted completion metadata plus bounded legacy batches for deterministic and enriched totals', async () => {
+        const projectId = await createProject();
+        const db = openDatabase(path.join(root, '.ariadne', 'state.db'));
+        const createdAt = new Date().toISOString();
+        try {
+          for (let index = 0; index < 120; index += 1) {
+            db.prepare(
+              `INSERT INTO knowledge_jobs
+               (id, project_id, job_kind, status, payload_json, requested_at, started_at, completed_at, retry_count, max_retries, result_json, result_processing_mode)
+               VALUES (?, ?, 'analyze', 'completed', '{}', ?, ?, ?, 0, 3, ?, ?)`,
+            ).run(
+              `job_meta_det_${index.toString().padStart(3, '0')}`,
+              projectId,
+              createdAt,
+              createdAt,
+              createdAt,
+              '{"processingMode":"deterministic"}',
+              'deterministic',
+            );
+          }
+          for (let index = 0; index < 70; index += 1) {
+            db.prepare(
+              `INSERT INTO knowledge_jobs
+               (id, project_id, job_kind, status, payload_json, requested_at, started_at, completed_at, retry_count, max_retries, result_json, result_processing_mode)
+               VALUES (?, ?, 'analyze', 'completed', '{}', ?, ?, ?, 0, 3, ?, ?)`,
+            ).run(
+              `job_meta_enriched_${index.toString().padStart(3, '0')}`,
+              projectId,
+              createdAt,
+              createdAt,
+              createdAt,
+              '{"processingMode":"enriched"}',
+              'enriched',
+            );
+          }
+          for (let index = 0; index < 65; index += 1) {
+            db.prepare(
+              `INSERT INTO knowledge_jobs
+               (id, project_id, job_kind, status, payload_json, requested_at, started_at, completed_at, retry_count, max_retries, result_json, result_processing_mode)
+               VALUES (?, ?, 'analyze', 'completed', '{}', ?, ?, ?, 0, 3, ?, NULL)`,
+            ).run(
+              `job_legacy_det_${index.toString().padStart(3, '0')}`,
+              projectId,
+              createdAt,
+              createdAt,
+              createdAt,
+              '{"processingMode":"deterministic","warnings":[]}',
+            );
+          }
+          for (let index = 0; index < 45; index += 1) {
+            db.prepare(
+              `INSERT INTO knowledge_jobs
+               (id, project_id, job_kind, status, payload_json, requested_at, started_at, completed_at, retry_count, max_retries, result_json, result_processing_mode)
+               VALUES (?, ?, 'analyze', 'completed', '{}', ?, ?, ?, 0, 3, ?, NULL)`,
+            ).run(
+              `job_legacy_enriched_${index.toString().padStart(3, '0')}`,
+              projectId,
+              createdAt,
+              createdAt,
+              createdAt,
+              '{"processingMode":"enriched","warnings":[]}',
+            );
+          }
+          db.prepare(
+            `INSERT INTO knowledge_jobs
+             (id, project_id, job_kind, status, payload_json, requested_at, started_at, completed_at, retry_count, max_retries, result_json, result_processing_mode)
+             VALUES (?, ?, 'analyze', 'completed', '{}', ?, ?, ?, 0, 3, ?, NULL)`,
+          ).run('job_legacy_bad', projectId, createdAt, createdAt, createdAt, '{bad-json');
+        } finally {
+          db.close();
+        }
+
+        const queryShapes: string[] = [];
+        const observedDb = openDatabase(path.join(root, '.ariadne', 'state.db'));
+        try {
+          const proxiedDb = new Proxy(observedDb, {
+            get(target, property, receiver) {
+              if (property !== 'prepare') {
+                return Reflect.get(target, property, receiver);
+              }
+              return (sql: string) => {
+                  if (sql.includes('FROM knowledge_jobs') && sql.includes('result_processing_mode')) {
+                  queryShapes.push(sql.replace(/\s+/g, ' ').trim());
+                }
+                return target.prepare(sql);
+              };
+            },
+          });
+
+          const status = buildCliWorkerStatus(proxiedDb, projectId);
+          expect(status.completions).toEqual({
+            deterministic: 185,
+            enriched: 115,
+          });
+          expect(status.warnings).toEqual(
+            expect.arrayContaining([expect.objectContaining({ code: 'job_result_invalid' })]),
+          );
+        } finally {
+          observedDb.close();
+        }
+
+        expect(queryShapes).toEqual(
+          expect.arrayContaining([
+            expect.stringMatching(/SUM\(CASE WHEN result_processing_mode = 'deterministic'/),
+            expect.stringMatching(/SUM\(CASE WHEN result_processing_mode = 'enriched'/),
+            expect.stringMatching(/SELECT id, result_json .* result_processing_mode IS NULL .* LIMIT \?/),
+          ]),
+        );
+        expect(queryShapes).not.toEqual(
+          expect.arrayContaining([
+            expect.stringMatching(/^SELECT result_json FROM knowledge_jobs WHERE project_id = \? AND status = 'completed' AND result_json IS NOT NULL$/),
+          ]),
         );
       });
     });

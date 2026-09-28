@@ -57,11 +57,16 @@ export function applyKnowledgeQueueMigration(db: Database.Database): void {
     ['max_retries', 'INTEGER NOT NULL DEFAULT 3'],
     ['worker_id', 'TEXT'],
     ['lease_expires_at', 'TEXT'],
+    ['result_processing_mode', 'TEXT'],
   ] as const) {
     if (!hasColumn(db, 'knowledge_jobs', column)) {
       db.exec(`ALTER TABLE knowledge_jobs ADD COLUMN ${column} ${definition}`);
     }
   }
+  db.exec(
+    `CREATE INDEX IF NOT EXISTS idx_knowledge_jobs_project_completed_mode
+     ON knowledge_jobs(project_id, status, result_processing_mode, id)`,
+  );
   db.exec(
     `CREATE UNIQUE INDEX IF NOT EXISTS idx_knowledge_jobs_source_version
      ON knowledge_jobs(project_id, job_kind, source_version_id)

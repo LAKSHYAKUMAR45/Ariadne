@@ -54,7 +54,7 @@ Required validation order:
 
 ```bash
 pnpm --filter @ariadne-dev/core build
-pnpm --filter @ariadne-dev/core test -- OpenAICompatibleProvider.test.ts KnowledgeWorker.test.ts KnowledgeProviderProfiles.test.ts KnowledgeAnalysis.test.ts
+pnpm --filter @ariadne-dev/core test -- KnowledgeQueue.test.ts knowledgeMigrations.test.ts
 pnpm --filter @ariadne-dev/cli test -- knowledgeCommands.test.ts
 pnpm --filter @ariadne-dev/cli test
 pnpm --filter @ariadne-dev/cli build
@@ -66,8 +66,8 @@ Results:
 
 - core build: pass (`tsc -p tsconfig.json`)
 - targeted core suites: pass (`65` files / `566` tests)
-- focused CLI suite: pass (`12` files / `126` tests)
-- full CLI suite: pass (`12` files / `126` tests)
+- focused CLI suite: pass (`12` files / `128` tests)
+- full CLI suite: pass (`12` files / `128` tests)
 - CLI build: pass (`tsc -p tsconfig.json`)
 - help verification: pass; both `knowledge worker` and `knowledge provider`
   trees list the documented commands
@@ -152,12 +152,31 @@ Behavior:
 
 - `worker status` still bounds the returned lease list, failure codes, and
   analyzer-version rows
-- the total active worker count is now computed separately, so projects with
-  more than eight active workers still report the full count accurately
+- the status snapshot now captures one consistent `now`, keeps
+  `queue.runningCount` as the raw database status count, and reports
+  `activeWorkers.runningCount`/`workerCount` only for leases whose
+  `lease_expires_at > now`
+- expired running leases are excluded from active-worker details without
+  attempting recovery in the read-only status command
+- the total active worker count is computed separately, so projects with more
+  than eight active workers still report the full count accurately
 - provider-profile diagnostics in `worker status` are now capped too, so the
   JSON envelope stays bounded even with many malformed legacy rows
 
-### 6. Docs and operator guidance updated
+### 6. Completion-mode totals are now indexed first and legacy-safe
+
+- completed jobs now persist `result_processing_mode` alongside `result_json`
+- status totals use indexed SQL for current rows instead of parsing every
+  completed result payload
+- backward-compatible legacy rows with null metadata are summarized in bounded
+  ordered batches, so status stays correct without an unbounded `.all()` read
+- malformed legacy results still do not count toward deterministic/enriched
+  totals and still emit the existing `job_result_invalid` warning once
+- the CLI test suite now includes a performance-shaped assertion over the
+  status query shape plus correctness coverage for deterministic, enriched, and
+  malformed legacy rows
+
+### 7. Docs and operator guidance updated
 
 - Added `docs/knowledge-worker.md`
 - Updated `.github/skills/ariadne/SKILL.md`
@@ -181,8 +200,13 @@ status totals with actual provider use.
 - `docs/knowledge-worker.md`
 - `packages/cli/src/knowledgeCommands.ts`
 - `packages/cli/test/knowledgeCommands.test.ts`
+- `packages/core/src/knowledge/KnowledgeQueue.ts`
 - `packages/core/src/knowledge/KnowledgeWorker.ts`
+- `packages/core/src/knowledge/knowledgeMigrations.ts`
+- `packages/core/src/knowledge/knowledgeSchema.ts`
+- `packages/core/test/knowledge/KnowledgeQueue.test.ts`
 - `packages/core/test/knowledge/KnowledgeWorker.test.ts`
+- `packages/core/test/knowledge/knowledgeMigrations.test.ts`
 - `packages/core/src/knowledge/providers/OpenAICompatibleProvider.ts`
 - `packages/core/test/knowledge/OpenAICompatibleProvider.test.ts`
 - `task-10-report.md`

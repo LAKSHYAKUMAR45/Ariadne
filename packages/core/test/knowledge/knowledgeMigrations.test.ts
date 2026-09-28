@@ -48,6 +48,7 @@ const REQUIRED_INDEXES = [
   'idx_knowledge_sources_project_hash',
   'idx_knowledge_pages_project_type',
   'idx_knowledge_jobs_project_status',
+  'idx_knowledge_jobs_project_completed_mode',
   'idx_knowledge_reviews_project_status',
   'idx_knowledge_reviews_pending_page_identity',
   'idx_knowledge_reviews_pending_project_identity',
@@ -88,7 +89,7 @@ describe('knowledge schema migrations', () => {
 
     expect(tableNames(db)).toEqual(expect.arrayContaining(KNOWLEDGE_TABLES));
     expect(indexNames(db)).toEqual(expect.arrayContaining(REQUIRED_INDEXES));
-    expect(KNOWLEDGE_SCHEMA_VERSION).toBe(4);
+    expect(KNOWLEDGE_SCHEMA_VERSION).toBe(5);
     expect(columns(db, 'knowledge_extractions')).toEqual(
       expect.arrayContaining([
         'analyzer_id',
@@ -120,7 +121,12 @@ describe('knowledge schema migrations', () => {
         'span_label',
       ]),
     );
-    expect(columns(db, 'knowledge_jobs')).toContain('result_json');
+    expect(columns(db, 'knowledge_jobs')).toEqual(
+      expect.arrayContaining([
+        'result_json',
+        'result_processing_mode',
+      ]),
+    );
 
     db.close();
   });

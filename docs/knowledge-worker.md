@@ -72,11 +72,16 @@ successful deterministic run.
 `knowledge worker status` reports bounded project-local metadata only:
 
 - queued/running/completed/failed/cancelled counts
-- active worker count and lease expiries
+- active worker count, active leased running-job count, and lease expiries
 - oldest queued job timestamp and age
 - recent failure codes
 - analyzer ids/versions currently persisted
 - deterministic versus enriched completion totals
+
+`queue.runningCount` is the raw database count of jobs still marked `running`.
+Active worker counts/details are stricter: they only include rows whose
+`lease_expires_at` is still greater than the single observation time used for
+that status snapshot, so expired leases do not look active.
 
 It does **not** print source contents, full private filesystem paths, provider
 responses, environment-variable values, or secret material.

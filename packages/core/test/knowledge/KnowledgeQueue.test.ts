@@ -77,8 +77,11 @@ describe('KnowledgeQueue', () => {
         warnings: [{ code: 'provider_warning', message: expect.stringContaining('***') }],
       }),
     });
-    const persisted = db.prepare('SELECT result_json FROM knowledge_jobs WHERE id = ?').get(job.id) as { result_json: string };
+    const persisted = db.prepare(
+      'SELECT result_json, result_processing_mode FROM knowledge_jobs WHERE id = ?',
+    ).get(job.id) as { result_json: string; result_processing_mode: string };
     expect(persisted.result_json).toContain('"processingMode":"deterministic"');
+    expect(persisted.result_processing_mode).toBe('deterministic');
     expect(persisted.result_json).not.toContain('secret-value');
   });
 

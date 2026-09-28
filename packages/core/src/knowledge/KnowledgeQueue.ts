@@ -93,6 +93,7 @@ interface JobRow {
   status: KnowledgeJobStatus;
   payload_json: string;
   result_json: string | null;
+  result_processing_mode: KnowledgeJobResult['processingMode'] | null;
   requested_at: string;
   started_at: string | null;
   completed_at: string | null;
@@ -424,7 +425,7 @@ export class KnowledgeQueue {
         .prepare(
           `UPDATE knowledge_jobs
            SET status = 'completed', completed_at = @now, worker_id = NULL, lease_expires_at = NULL,
-               result_json = @resultJson
+               result_json = @resultJson, result_processing_mode = @resultProcessingMode
            WHERE id = @id
              AND status = 'running'
              AND worker_id = @workerId
@@ -440,6 +441,7 @@ export class KnowledgeQueue {
           workerId,
           now,
           resultJson: persistedResult === null ? null : JSON.stringify(persistedResult),
+          resultProcessingMode: persistedResult?.processingMode ?? null,
         });
       if (completion.changes !== 1) {
         throw new KnowledgeQueueTransitionError(

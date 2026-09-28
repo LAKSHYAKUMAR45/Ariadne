@@ -78,6 +78,7 @@ interface CliWorkerStatus {
   };
   activeWorkers: {
     workerCount: number;
+    runningCount: number;
     leases: Array<{
       workerId: string;
       runningCount: number;
@@ -111,6 +112,7 @@ const MAX_STATUS_FAILURE_CODES = 5;
 const MAX_STATUS_LEASES = 8;
 const MAX_STATUS_ANALYZER_VERSIONS = 8;
 const MAX_STATUS_WARNINGS = 8;
+const LEGACY_COMPLETION_BATCH_SIZE = 100;
 const LOOPBACK_PROVIDER_HOSTS = new Set(['127.0.0.1', '::1']);
 
 /** Opens the shared workspace state database (knowledge tables live alongside task tables) and guarantees it is closed, mirroring `withStore` in index.ts but without requiring a `TaskStore`. */
@@ -277,7 +279,64 @@ export function createCliKnowledgeWorker(
   );
 }
 
-function buildCliWorkerStatus(db: KnowledgeDb, projectId: string): CliWorkerStatus {
+function summarizeLegacyCompletionModes(db: KnowledgeDb, projectId: string): {
+  deterministic: number;
+  enriched: number;
+  warnings: Array<{ code: string; message: string }>;
+} {
+  const warnings: Array<{ code: string; message: string }> = [];
+  let deterministic = 0;
+  let enriched = 0;
+  let afterId = '';
+  const recordInvalidResultWarning = (): void => {
+    if (!warnings.some((warning) => warning.code === 'job_result_invalid')) {
+      warnings.push({
+        code: 'job_result_invalid',
+        message: 'Skipped one or more malformed completed job results while summarizing processing modes.',
+      });
+    }
+  };
+  const statement = db.prepare(
+    `SELECT id, result_json
+     FROM knowledge_jobs
+     WHERE project_id = ?
+       AND status = 'completed'
+       AND result_processing_mode IS NULL
+       AND result_json IS NOT NULL
+       AND id > ?
+     ORDER BY id ASC
+     LIMIT ?`,
+  );
+
+  while (true) {
+    const rows = statement.all(projectId, afterId, LEGACY_COMPLETION_BATCH_SIZE) as Array<{
+      id: string;
+      result_json: string;
+    }>;
+    if (rows.length === 0) {
+      break;
+    }
+    for (const row of rows) {
+      try {
+        const result = JSON.parse(row.result_json) as { processingMode?: string };
+        if (result.processingMode === 'enriched') {
+          enriched += 1;
+        } else if (result.processingMode === 'deterministic') {
+          deterministic += 1;
+        } else {
+          recordInvalidResultWarning();
+        }
+      } catch {
+        recordInvalidResultWarning();
+      }
+    }
+    afterId = rows.at(-1)?.id ?? afterId;
+  }
+
+  return { deterministic, enriched, warnings };
+}
+
+export function buildCliWorkerStatus(db: KnowledgeDb, projectId: string): CliWorkerStatus {
   const scopedProjectId = projectId.trim();
   if (scopedProjectId.length === 0) {
     throw new Error('Knowledge worker project ID must not be empty');
@@ -287,7 +346,8 @@ function buildCliWorkerStatus(db: KnowledgeDb, projectId: string): CliWorkerStat
     throw new Error(`Knowledge project not found: ${scopedProjectId}`);
   }
 
-  const queue = new KnowledgeQueue(db);
+  const observedNow = new Date().toISOString();
+  const queue = new KnowledgeQueue(db, { now: () => observedNow });
   const queueStatus = queue.getQueueStatus(scopedProjectId);
   const oldestQueuedRequestedAt = (
     db.prepare(
@@ -305,28 +365,26 @@ function buildCliWorkerStatus(db: KnowledgeDb, projectId: string): CliWorkerStat
        AND status = 'running'
        AND worker_id IS NOT NULL
        AND lease_expires_at IS NOT NULL
+       AND lease_expires_at > ?
      GROUP BY worker_id
      ORDER BY lease_expires_at ASC, worker_id ASC
      LIMIT ?`,
-  ).all(scopedProjectId, MAX_STATUS_LEASES) as Array<{
+  ).all(scopedProjectId, observedNow, MAX_STATUS_LEASES) as Array<{
     worker_id: string;
     running_count: number;
     lease_expires_at: string;
   }>;
-  const activeWorkerCount = (
+  const activeWorkerSummary = (
     db.prepare(
-      `SELECT COUNT(*) AS worker_count
-       FROM (
-         SELECT worker_id
-         FROM knowledge_jobs
-         WHERE project_id = ?
-           AND status = 'running'
-           AND worker_id IS NOT NULL
-           AND lease_expires_at IS NOT NULL
-         GROUP BY worker_id
-       ) active_workers`,
-    ).get(scopedProjectId) as { worker_count: number }
-  ).worker_count;
+      `SELECT COUNT(DISTINCT worker_id) AS worker_count, COUNT(*) AS running_count
+       FROM knowledge_jobs
+       WHERE project_id = ?
+         AND status = 'running'
+         AND worker_id IS NOT NULL
+         AND lease_expires_at IS NOT NULL
+         AND lease_expires_at > ?`,
+    ).get(scopedProjectId, observedNow) as { worker_count: number; running_count: number }
+  );
   const failureRows = db.prepare(
     `SELECT failure_code, completed_at
      FROM knowledge_jobs
@@ -370,33 +428,19 @@ function buildCliWorkerStatus(db: KnowledgeDb, projectId: string): CliWorkerStat
     analyzer_version: string;
     extraction_count: number;
   }>;
-  const completionRows = db.prepare(
-    `SELECT result_json
+  const completionCounts = db.prepare(
+    `SELECT
+       SUM(CASE WHEN result_processing_mode = 'deterministic' THEN 1 ELSE 0 END) AS deterministic_count,
+       SUM(CASE WHEN result_processing_mode = 'enriched' THEN 1 ELSE 0 END) AS enriched_count
      FROM knowledge_jobs
      WHERE project_id = ?
        AND status = 'completed'
-       AND result_json IS NOT NULL`,
-  ).all(scopedProjectId) as Array<{ result_json: string }>;
-  let deterministic = 0;
-  let enriched = 0;
-  const statusWarnings: Array<{ code: string; message: string }> = [];
-  for (const row of completionRows) {
-    try {
-      const result = JSON.parse(row.result_json) as { processingMode?: string };
-      if (result.processingMode === 'enriched') {
-        enriched += 1;
-        continue;
-      }
-      deterministic += 1;
-    } catch {
-      if (!statusWarnings.some((warning) => warning.code === 'job_result_invalid')) {
-        statusWarnings.push({
-          code: 'job_result_invalid',
-          message: 'Skipped one or more malformed completed job results while summarizing processing modes.',
-        });
-      }
-    }
-  }
+       AND result_processing_mode IS NOT NULL`,
+  ).get(scopedProjectId) as {
+    deterministic_count: number | null;
+    enriched_count: number | null;
+  };
+  const legacyCompletionSummary = summarizeLegacyCompletionModes(db, scopedProjectId);
 
   const providerStore = new KnowledgeProviderProfileStore(db);
   const listedProviders = providerStore.listWithDiagnostics(scopedProjectId);
@@ -412,7 +456,8 @@ function buildCliWorkerStatus(db: KnowledgeDb, projectId: string): CliWorkerStat
       oldestQueuedAgeMs: queueStatus.oldestQueuedAgeMs,
     },
     activeWorkers: {
-      workerCount: activeWorkerCount,
+      workerCount: activeWorkerSummary.worker_count ?? 0,
+      runningCount: activeWorkerSummary.running_count ?? 0,
       leases: leaseRows.map((row) => ({
         workerId: row.worker_id,
         runningCount: row.running_count,
@@ -426,14 +471,14 @@ function buildCliWorkerStatus(db: KnowledgeDb, projectId: string): CliWorkerStat
       extractionCount: row.extraction_count,
     })),
     completions: {
-      deterministic,
-      enriched,
+      deterministic: (completionCounts.deterministic_count ?? 0) + legacyCompletionSummary.deterministic,
+      enriched: (completionCounts.enriched_count ?? 0) + legacyCompletionSummary.enriched,
     },
     providerProfiles: {
       total: listedProviders.profiles.length,
       enabled: listedProviders.profiles.filter((profile) => profile.enabled).length,
     },
-    warnings: [...statusWarnings, ...listedProviders.warnings].slice(0, MAX_STATUS_WARNINGS),
+    warnings: [...legacyCompletionSummary.warnings, ...listedProviders.warnings].slice(0, MAX_STATUS_WARNINGS),
   };
 }
 
@@ -869,7 +914,7 @@ export function registerKnowledgeCommands(program: Command): void {
         (status) => {
           console.log(
             [
-              `Queue: ${status.queue.queuedCount} queued, ${status.queue.runningCount} running, ${status.queue.completedCount} completed, ${status.queue.failedCount} failed, ${status.queue.cancelledCount} cancelled.`,
+              `Queue: ${status.queue.queuedCount} queued, ${status.queue.runningCount} running (${status.activeWorkers.runningCount} with active leases), ${status.queue.completedCount} completed, ${status.queue.failedCount} failed, ${status.queue.cancelledCount} cancelled.`,
               `Workers: ${status.activeWorkers.workerCount} active.`,
               `Completions: ${status.completions.deterministic} deterministic, ${status.completions.enriched} enriched.`,
             ].join(' '),

@@ -1,4 +1,4 @@
-export const KNOWLEDGE_SCHEMA_VERSION = 4;
+export const KNOWLEDGE_SCHEMA_VERSION = 5;
 
 export const KNOWLEDGE_SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS knowledge_projects (
@@ -325,6 +325,7 @@ CREATE TABLE IF NOT EXISTS knowledge_jobs (
   status TEXT NOT NULL,
   payload_json TEXT NOT NULL,
   result_json TEXT,
+  result_processing_mode TEXT CHECK (result_processing_mode IN ('deterministic', 'enriched') OR result_processing_mode IS NULL),
   requested_at TEXT NOT NULL,
   started_at TEXT,
   completed_at TEXT,
@@ -337,6 +338,8 @@ CREATE TABLE IF NOT EXISTS knowledge_jobs (
   UNIQUE (project_id, id)
 );
 CREATE INDEX IF NOT EXISTS idx_knowledge_jobs_project_status ON knowledge_jobs(project_id, status, requested_at);
+CREATE INDEX IF NOT EXISTS idx_knowledge_jobs_project_completed_mode
+  ON knowledge_jobs(project_id, status, result_processing_mode, id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_knowledge_jobs_source_version
   ON knowledge_jobs(project_id, job_kind, source_version_id)
   WHERE source_version_id IS NOT NULL;
