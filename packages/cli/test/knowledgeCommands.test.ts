@@ -516,9 +516,9 @@ describe('ariadne knowledge commands', () => {
           const createdAt = new Date().toISOString();
           db.prepare(
             `INSERT INTO knowledge_jobs
-             (id, project_id, job_kind, source_version_id, status, payload_json, requested_at, started_at, completed_at, retry_count, max_retries, result_json)
-             VALUES (?, ?, 'analyze', NULL, 'completed', '{}', ?, ?, ?, 0, 3, ?)`,
-          ).run('job_malformed_result', projectId, createdAt, createdAt, createdAt, '{not-json');
+             (id, project_id, job_kind, source_version_id, status, payload_json, requested_at, started_at, completed_at, retry_count, max_retries, result_json, result_processing_mode)
+             VALUES (?, ?, 'analyze', NULL, 'completed', '{}', ?, ?, ?, 0, 3, ?, ?)`,
+          ).run('job_malformed_result', projectId, createdAt, createdAt, createdAt, '{not-json', 'unknown');
         } finally {
           db.close();
         }
@@ -531,18 +531,25 @@ describe('ariadne knowledge commands', () => {
           completions: {
             deterministic: 0,
             enriched: 0,
+            unknown: 1,
           },
+          unknownCompletionCount: 1,
         });
         expect((status.data as { warnings: Array<{ code: string }> }).warnings).toEqual(
-          expect.arrayContaining([expect.objectContaining({ code: 'job_result_invalid' })]),
+          expect.arrayContaining([expect.objectContaining({ code: 'job_result_unknown' })]),
         );
       });
 
-      it('uses persisted completion metadata plus bounded legacy batches for deterministic and enriched totals', async () => {
+      it('uses indexed aggregate SQL for deterministic, enriched, and unknown completion totals', async () => {
         const projectId = await createProject();
         const db = openDatabase(path.join(root, '.ariadne', 'state.db'));
         const createdAt = new Date().toISOString();
         try {
+          db.prepare(
+            `INSERT INTO knowledge_projects
+             (id, workspace_root, name, status, created_at, updated_at)
+             VALUES ('project_other', ?, 'Other Project', 'active', ?, ?)`,
+          ).run(path.join(root, 'other-project'), createdAt, createdAt);
           for (let index = 0; index < 120; index += 1) {
             db.prepare(
               `INSERT INTO knowledge_jobs
@@ -577,35 +584,55 @@ describe('ariadne knowledge commands', () => {
             db.prepare(
               `INSERT INTO knowledge_jobs
                (id, project_id, job_kind, status, payload_json, requested_at, started_at, completed_at, retry_count, max_retries, result_json, result_processing_mode)
-               VALUES (?, ?, 'analyze', 'completed', '{}', ?, ?, ?, 0, 3, ?, NULL)`,
+               VALUES (?, ?, 'analyze', 'completed', '{}', ?, ?, ?, 0, 3, ?, ?)`,
             ).run(
-              `job_legacy_det_${index.toString().padStart(3, '0')}`,
+              `job_det_${index.toString().padStart(3, '0')}`,
               projectId,
               createdAt,
               createdAt,
               createdAt,
               '{"processingMode":"deterministic","warnings":[]}',
+              'deterministic',
             );
           }
           for (let index = 0; index < 45; index += 1) {
             db.prepare(
               `INSERT INTO knowledge_jobs
                (id, project_id, job_kind, status, payload_json, requested_at, started_at, completed_at, retry_count, max_retries, result_json, result_processing_mode)
-               VALUES (?, ?, 'analyze', 'completed', '{}', ?, ?, ?, 0, 3, ?, NULL)`,
+               VALUES (?, ?, 'analyze', 'completed', '{}', ?, ?, ?, 0, 3, ?, ?)`,
             ).run(
-              `job_legacy_enriched_${index.toString().padStart(3, '0')}`,
+              `job_enriched_${index.toString().padStart(3, '0')}`,
               projectId,
               createdAt,
               createdAt,
               createdAt,
               '{"processingMode":"enriched","warnings":[]}',
+              'enriched',
             );
           }
           db.prepare(
             `INSERT INTO knowledge_jobs
              (id, project_id, job_kind, status, payload_json, requested_at, started_at, completed_at, retry_count, max_retries, result_json, result_processing_mode)
-             VALUES (?, ?, 'analyze', 'completed', '{}', ?, ?, ?, 0, 3, ?, NULL)`,
-          ).run('job_legacy_bad', projectId, createdAt, createdAt, createdAt, '{bad-json');
+             VALUES (?, ?, 'analyze', 'completed', '{}', ?, ?, ?, 0, 3, ?, ?)`,
+          ).run('job_unknown_bad_json', projectId, createdAt, createdAt, createdAt, '{bad-json', 'unknown');
+          db.prepare(
+            `INSERT INTO knowledge_jobs
+             (id, project_id, job_kind, status, payload_json, requested_at, started_at, completed_at, retry_count, max_retries, result_json, result_processing_mode)
+             VALUES (?, ?, 'analyze', 'completed', '{}', ?, ?, ?, 0, 3, NULL, ?)`,
+          ).run('job_unknown_missing_result', projectId, createdAt, createdAt, createdAt, 'unknown');
+          db.prepare(
+            `INSERT INTO knowledge_jobs
+             (id, project_id, job_kind, status, payload_json, requested_at, started_at, completed_at, retry_count, max_retries, result_json, result_processing_mode)
+             VALUES (?, ?, 'analyze', 'completed', '{}', ?, ?, ?, 0, 3, ?, ?)`,
+          ).run(
+            'job_other_project',
+            'project_other',
+            createdAt,
+            createdAt,
+            createdAt,
+            '{"processingMode":"deterministic"}',
+            'deterministic',
+          );
         } finally {
           db.close();
         }
@@ -631,9 +658,11 @@ describe('ariadne knowledge commands', () => {
           expect(status.completions).toEqual({
             deterministic: 185,
             enriched: 115,
+            unknown: 2,
           });
+          expect(status.unknownCompletionCount).toBe(2);
           expect(status.warnings).toEqual(
-            expect.arrayContaining([expect.objectContaining({ code: 'job_result_invalid' })]),
+            expect.arrayContaining([expect.objectContaining({ code: 'job_result_unknown' })]),
           );
         } finally {
           observedDb.close();
@@ -641,13 +670,14 @@ describe('ariadne knowledge commands', () => {
 
         expect(queryShapes).toEqual(
           expect.arrayContaining([
-            expect.stringMatching(/SUM\(CASE WHEN result_processing_mode = 'deterministic'/),
-            expect.stringMatching(/SUM\(CASE WHEN result_processing_mode = 'enriched'/),
-            expect.stringMatching(/SELECT id, result_json .* result_processing_mode IS NULL .* LIMIT \?/),
+            expect.stringMatching(
+              /SELECT result_processing_mode, COUNT\(\*\) AS completion_count FROM knowledge_jobs WHERE project_id = \? AND status = 'completed' AND result_processing_mode IS NOT NULL GROUP BY result_processing_mode/,
+            ),
           ]),
         );
         expect(queryShapes).not.toEqual(
           expect.arrayContaining([
+            expect.stringMatching(/SELECT id, result_json .* result_processing_mode IS NULL .* LIMIT \?/),
             expect.stringMatching(/^SELECT result_json FROM knowledge_jobs WHERE project_id = \? AND status = 'completed' AND result_json IS NOT NULL$/),
           ]),
         );

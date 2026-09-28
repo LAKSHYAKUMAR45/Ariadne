@@ -163,18 +163,35 @@ Behavior:
 - provider-profile diagnostics in `worker status` are now capped too, so the
   JSON envelope stays bounded even with many malformed legacy rows
 
-### 6. Completion-mode totals are now indexed first and legacy-safe
+### 6. Completion-mode totals are now migration-backed and index-only at runtime
 
-- completed jobs now persist `result_processing_mode` alongside `result_json`
-- status totals use indexed SQL for current rows instead of parsing every
-  completed result payload
-- backward-compatible legacy rows with null metadata are summarized in bounded
-  ordered batches, so status stays correct without an unbounded `.all()` read
-- malformed legacy results still do not count toward deterministic/enriched
-  totals and still emit the existing `job_result_invalid` warning once
-- the CLI test suite now includes a performance-shaped assertion over the
-  status query shape plus correctness coverage for deterministic, enriched, and
-  malformed legacy rows
+- completed jobs now always persist `result_processing_mode` alongside
+  `result_json`, with new completions using one of:
+  - `deterministic`
+  - `enriched`
+  - `unknown` when a completed row has no structured result metadata
+- the base `KNOWLEDGE_SCHEMA_SQL` no longer creates the
+  `idx_knowledge_jobs_project_completed_mode` index before older databases
+  receive the additive `result_processing_mode` column
+- migration/open now performs a **one-time transactional backfill** for legacy
+  completed rows whose `result_processing_mode` is null
+- the backfill parses legacy `result_json` in **bounded ordered batches** and
+  stores explicit `unknown` for malformed, missing, or unrecognized results
+- rollback is atomic: if any row update fails, the entire backfill transaction
+  rolls back and the completion-mode index is not left half-created
+- after migration, `worker status` uses **indexed aggregate SQL only**; the
+  runtime no longer loops through legacy rows or calls `JSON.parse(...)` during
+  status generation
+- status now reports `unknownCompletionCount` plus a bounded
+  `job_result_unknown` warning when legacy malformed/missing rows were migrated
+  to explicit unknown mode
+- the CLI/core regression coverage now includes:
+  - actual pre-column/pre-v5 schema reproduction
+  - large legacy-row backfill
+  - malformed JSON fallback to `unknown`
+  - idempotent rerun
+  - transactional rollback on injected failure
+  - indexed project-scoped aggregation query shape
 
 ### 7. Docs and operator guidance updated
 
@@ -204,6 +221,7 @@ status totals with actual provider use.
 - `packages/core/src/knowledge/KnowledgeWorker.ts`
 - `packages/core/src/knowledge/knowledgeMigrations.ts`
 - `packages/core/src/knowledge/knowledgeSchema.ts`
+- `packages/core/src/migrations.ts`
 - `packages/core/test/knowledge/KnowledgeQueue.test.ts`
 - `packages/core/test/knowledge/KnowledgeWorker.test.ts`
 - `packages/core/test/knowledge/knowledgeMigrations.test.ts`

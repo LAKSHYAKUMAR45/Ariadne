@@ -76,7 +76,22 @@ successful deterministic run.
 - oldest queued job timestamp and age
 - recent failure codes
 - analyzer ids/versions currently persisted
-- deterministic versus enriched completion totals
+- deterministic, enriched, and unknown completion totals
+
+On database open, Ariadne performs a one-time knowledge-job completion-mode
+backfill for legacy completed rows whose `result_processing_mode` is still
+missing. The migration runs transactionally, parses legacy `result_json`
+payloads in bounded ID-ordered batches, and stores one of:
+
+- `deterministic`
+- `enriched`
+- `unknown` for missing/malformed/unrecognized legacy results
+
+After that one-time backfill, `knowledge worker status` uses only indexed
+aggregate SQL over persisted `result_processing_mode` values. It does **not**
+scan and `JSON.parse(...)` completed results at status time. When unknown rows
+exist, status exposes `unknownCompletionCount` and a bounded warning so callers
+can distinguish malformed legacy history from deterministic/enriched totals.
 
 `queue.runningCount` is the raw database count of jobs still marked `running`.
 Active worker counts/details are stricter: they only include rows whose

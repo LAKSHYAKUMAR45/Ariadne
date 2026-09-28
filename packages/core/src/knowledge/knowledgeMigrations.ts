@@ -3,10 +3,217 @@ import { KNOWLEDGE_SCHEMA_SQL, KNOWLEDGE_SCHEMA_VERSION } from './knowledgeSchem
 
 export { KNOWLEDGE_SCHEMA_VERSION } from './knowledgeSchema.js';
 
+const KNOWLEDGE_COMPLETION_BACKFILL_BATCH_SIZE = 250;
+
 function hasColumn(db: Database.Database, table: string, column: string): boolean {
   return (db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).some(
     (entry) => entry.name === column,
   );
+}
+
+function hasTable(db: Database.Database, table: string): boolean {
+  return (
+    db.prepare(`SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = ?`).get(table) as
+      | { present: number }
+      | undefined
+  )?.present === 1;
+}
+
+function tableSql(db: Database.Database, table: string): string | null {
+  return (
+    db.prepare(`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?`).get(table) as
+      | { sql: string | null }
+      | undefined
+  )?.sql ?? null;
+}
+
+function knowledgeJobsNeedsConstraintUpgrade(db: Database.Database): boolean {
+  const sql = tableSql(db, 'knowledge_jobs');
+  return sql !== null && sql.includes('result_processing_mode') && !sql.includes(`'unknown'`);
+}
+
+function createKnowledgeJobsSupportingObjects(db: Database.Database): void {
+  db.exec(
+    `CREATE INDEX IF NOT EXISTS idx_knowledge_jobs_project_status
+     ON knowledge_jobs(project_id, status, requested_at)`,
+  );
+  db.exec(
+    `CREATE INDEX IF NOT EXISTS idx_knowledge_jobs_project_completed_mode
+     ON knowledge_jobs(project_id, status, result_processing_mode, id)`,
+  );
+  db.exec(
+    `CREATE UNIQUE INDEX IF NOT EXISTS idx_knowledge_jobs_source_version
+     ON knowledge_jobs(project_id, job_kind, source_version_id)
+     WHERE source_version_id IS NOT NULL`,
+  );
+}
+
+function createKnowledgeJobEventsTable(db: Database.Database): void {
+  db.exec(
+    `CREATE TABLE IF NOT EXISTS knowledge_job_events (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL REFERENCES knowledge_projects(id) ON DELETE CASCADE,
+      job_id TEXT NOT NULL,
+      event_kind TEXT NOT NULL,
+      detail_json TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      FOREIGN KEY (project_id, job_id) REFERENCES knowledge_jobs(project_id, id) ON DELETE CASCADE
+    )`,
+  );
+  db.exec(
+    `CREATE INDEX IF NOT EXISTS idx_knowledge_job_events_job_created
+     ON knowledge_job_events(job_id, created_at)`,
+  );
+}
+
+function recreateKnowledgeJobsWithUnknownCompletionMode(db: Database.Database): void {
+  if (!knowledgeJobsNeedsConstraintUpgrade(db)) {
+    return;
+  }
+
+  db.exec(`
+    DROP INDEX IF EXISTS idx_knowledge_jobs_project_status;
+    DROP INDEX IF EXISTS idx_knowledge_jobs_project_completed_mode;
+    DROP INDEX IF EXISTS idx_knowledge_jobs_source_version;
+  `);
+  if (hasTable(db, 'knowledge_job_events')) {
+    db.exec(`
+      DROP TABLE IF EXISTS knowledge_job_events_backup;
+      CREATE TABLE knowledge_job_events_backup AS
+      SELECT id, project_id, job_id, event_kind, detail_json, created_at
+      FROM knowledge_job_events;
+      DROP TABLE knowledge_job_events;
+    `);
+  }
+  db.exec(`
+    CREATE TABLE knowledge_jobs_next (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL REFERENCES knowledge_projects(id) ON DELETE CASCADE,
+      job_kind TEXT NOT NULL,
+      source_version_id TEXT,
+      status TEXT NOT NULL,
+      payload_json TEXT NOT NULL,
+      result_json TEXT,
+      result_processing_mode TEXT CHECK (result_processing_mode IN ('deterministic', 'enriched', 'unknown') OR result_processing_mode IS NULL),
+      requested_at TEXT NOT NULL,
+      started_at TEXT,
+      completed_at TEXT,
+      failure_code TEXT,
+      failure_message TEXT,
+      retry_count INTEGER NOT NULL DEFAULT 0,
+      max_retries INTEGER NOT NULL DEFAULT 3,
+      worker_id TEXT,
+      lease_expires_at TEXT,
+      UNIQUE (project_id, id)
+    );
+    INSERT INTO knowledge_jobs_next (
+      id,
+      project_id,
+      job_kind,
+      source_version_id,
+      status,
+      payload_json,
+      result_json,
+      result_processing_mode,
+      requested_at,
+      started_at,
+      completed_at,
+      failure_code,
+      failure_message,
+      retry_count,
+      max_retries,
+      worker_id,
+      lease_expires_at
+    )
+    SELECT
+      id,
+      project_id,
+      job_kind,
+      source_version_id,
+      status,
+      payload_json,
+      result_json,
+      result_processing_mode,
+      requested_at,
+      started_at,
+      completed_at,
+      failure_code,
+      failure_message,
+      retry_count,
+      max_retries,
+      worker_id,
+      lease_expires_at
+    FROM knowledge_jobs;
+    DROP TABLE knowledge_jobs;
+    ALTER TABLE knowledge_jobs_next RENAME TO knowledge_jobs;
+  `);
+  createKnowledgeJobsSupportingObjects(db);
+  createKnowledgeJobEventsTable(db);
+  if (hasTable(db, 'knowledge_job_events_backup')) {
+    db.exec(`
+      INSERT INTO knowledge_job_events (id, project_id, job_id, event_kind, detail_json, created_at)
+      SELECT id, project_id, job_id, event_kind, detail_json, created_at
+      FROM knowledge_job_events_backup;
+      DROP TABLE knowledge_job_events_backup;
+    `);
+  }
+}
+
+function completionModeForStoredResult(resultJson: string | null): 'deterministic' | 'enriched' | 'unknown' {
+  if (resultJson === null) {
+    return 'unknown';
+  }
+  try {
+    const parsed = JSON.parse(resultJson) as { processingMode?: unknown };
+    return parsed.processingMode === 'deterministic' || parsed.processingMode === 'enriched'
+      ? parsed.processingMode
+      : 'unknown';
+  } catch {
+    return 'unknown';
+  }
+}
+
+function backfillKnowledgeJobCompletionModes(db: Database.Database): void {
+  if (!hasColumn(db, 'knowledge_jobs', 'result_processing_mode')) {
+    return;
+  }
+  const selectBatch = db.prepare(
+    `SELECT id, result_json
+     FROM knowledge_jobs
+     WHERE status = 'completed'
+       AND result_processing_mode IS NULL
+       AND id > ?
+     ORDER BY id ASC
+     LIMIT ?`,
+  );
+  const updateMode = db.prepare(
+    `UPDATE knowledge_jobs
+     SET result_processing_mode = @resultProcessingMode
+     WHERE id = @id
+       AND status = 'completed'
+       AND result_processing_mode IS NULL`,
+  );
+
+  let afterId = '';
+  while (true) {
+    const rows = selectBatch.all(afterId, KNOWLEDGE_COMPLETION_BACKFILL_BATCH_SIZE) as Array<{
+      id: string;
+      result_json: string | null;
+    }>;
+    if (rows.length === 0) {
+      return;
+    }
+    for (const row of rows) {
+      const result = updateMode.run({
+        id: row.id,
+        resultProcessingMode: completionModeForStoredResult(row.result_json),
+      });
+      if (result.changes !== 1) {
+        throw new Error(`Knowledge job completion-mode backfill could not update ${row.id}`);
+      }
+    }
+    afterId = rows.at(-1)?.id ?? afterId;
+  }
 }
 
 export function applyKnowledgeSchemaV2Migration(db: Database.Database): void {
@@ -63,15 +270,9 @@ export function applyKnowledgeQueueMigration(db: Database.Database): void {
       db.exec(`ALTER TABLE knowledge_jobs ADD COLUMN ${column} ${definition}`);
     }
   }
-  db.exec(
-    `CREATE INDEX IF NOT EXISTS idx_knowledge_jobs_project_completed_mode
-     ON knowledge_jobs(project_id, status, result_processing_mode, id)`,
-  );
-  db.exec(
-    `CREATE UNIQUE INDEX IF NOT EXISTS idx_knowledge_jobs_source_version
-     ON knowledge_jobs(project_id, job_kind, source_version_id)
-     WHERE source_version_id IS NOT NULL`,
-  );
+  recreateKnowledgeJobsWithUnknownCompletionMode(db);
+  backfillKnowledgeJobCompletionModes(db);
+  createKnowledgeJobsSupportingObjects(db);
 }
 
 export function applyKnowledgeGraphMetadataMigration(db: Database.Database): void {

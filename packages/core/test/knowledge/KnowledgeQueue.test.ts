@@ -85,6 +85,33 @@ describe('KnowledgeQueue', () => {
     expect(persisted.result_json).not.toContain('secret-value');
   });
 
+  it('persists unknown completion mode when a job completes without result metadata', () => {
+    const job = queue.enqueue({
+      projectId: 'project_1',
+      jobKind: 'extract',
+      payload: { source: 'source_2' },
+    });
+
+    expect(queue.claim('project_1', 'worker-a')).toMatchObject({
+      id: job.id,
+      status: 'running',
+      workerId: 'worker-a',
+    });
+
+    const completed = queue.complete(job.id, 'worker-a');
+    expect(completed).toMatchObject({
+      id: job.id,
+      status: 'completed',
+      result: null,
+    });
+
+    const persisted = db.prepare(
+      'SELECT result_json, result_processing_mode FROM knowledge_jobs WHERE id = ?',
+    ).get(job.id) as { result_json: string | null; result_processing_mode: string | null };
+    expect(persisted.result_json).toBeNull();
+    expect(persisted.result_processing_mode).toBe('unknown');
+  });
+
   it('rejects invalid transitions and enforces worker ownership', () => {
     const job = queue.enqueue({ projectId: 'project_1', jobKind: 'build', payload: {} });
 

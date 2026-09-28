@@ -98,7 +98,9 @@ interface CliWorkerStatus {
   completions: {
     deterministic: number;
     enriched: number;
+    unknown: number;
   };
+  unknownCompletionCount: number;
   providerProfiles: {
     total: number;
     enabled: number;
@@ -112,7 +114,6 @@ const MAX_STATUS_FAILURE_CODES = 5;
 const MAX_STATUS_LEASES = 8;
 const MAX_STATUS_ANALYZER_VERSIONS = 8;
 const MAX_STATUS_WARNINGS = 8;
-const LEGACY_COMPLETION_BATCH_SIZE = 100;
 const LOOPBACK_PROVIDER_HOSTS = new Set(['127.0.0.1', '::1']);
 
 /** Opens the shared workspace state database (knowledge tables live alongside task tables) and guarantees it is closed, mirroring `withStore` in index.ts but without requiring a `TaskStore`. */
@@ -279,63 +280,6 @@ export function createCliKnowledgeWorker(
   );
 }
 
-function summarizeLegacyCompletionModes(db: KnowledgeDb, projectId: string): {
-  deterministic: number;
-  enriched: number;
-  warnings: Array<{ code: string; message: string }>;
-} {
-  const warnings: Array<{ code: string; message: string }> = [];
-  let deterministic = 0;
-  let enriched = 0;
-  let afterId = '';
-  const recordInvalidResultWarning = (): void => {
-    if (!warnings.some((warning) => warning.code === 'job_result_invalid')) {
-      warnings.push({
-        code: 'job_result_invalid',
-        message: 'Skipped one or more malformed completed job results while summarizing processing modes.',
-      });
-    }
-  };
-  const statement = db.prepare(
-    `SELECT id, result_json
-     FROM knowledge_jobs
-     WHERE project_id = ?
-       AND status = 'completed'
-       AND result_processing_mode IS NULL
-       AND result_json IS NOT NULL
-       AND id > ?
-     ORDER BY id ASC
-     LIMIT ?`,
-  );
-
-  while (true) {
-    const rows = statement.all(projectId, afterId, LEGACY_COMPLETION_BATCH_SIZE) as Array<{
-      id: string;
-      result_json: string;
-    }>;
-    if (rows.length === 0) {
-      break;
-    }
-    for (const row of rows) {
-      try {
-        const result = JSON.parse(row.result_json) as { processingMode?: string };
-        if (result.processingMode === 'enriched') {
-          enriched += 1;
-        } else if (result.processingMode === 'deterministic') {
-          deterministic += 1;
-        } else {
-          recordInvalidResultWarning();
-        }
-      } catch {
-        recordInvalidResultWarning();
-      }
-    }
-    afterId = rows.at(-1)?.id ?? afterId;
-  }
-
-  return { deterministic, enriched, warnings };
-}
-
 export function buildCliWorkerStatus(db: KnowledgeDb, projectId: string): CliWorkerStatus {
   const scopedProjectId = projectId.trim();
   if (scopedProjectId.length === 0) {
@@ -428,19 +372,40 @@ export function buildCliWorkerStatus(db: KnowledgeDb, projectId: string): CliWor
     analyzer_version: string;
     extraction_count: number;
   }>;
-  const completionCounts = db.prepare(
-    `SELECT
-       SUM(CASE WHEN result_processing_mode = 'deterministic' THEN 1 ELSE 0 END) AS deterministic_count,
-       SUM(CASE WHEN result_processing_mode = 'enriched' THEN 1 ELSE 0 END) AS enriched_count
+  const completionRows = db.prepare(
+    `SELECT result_processing_mode, COUNT(*) AS completion_count
      FROM knowledge_jobs
      WHERE project_id = ?
        AND status = 'completed'
-       AND result_processing_mode IS NOT NULL`,
-  ).get(scopedProjectId) as {
-    deterministic_count: number | null;
-    enriched_count: number | null;
+       AND result_processing_mode IS NOT NULL
+     GROUP BY result_processing_mode`,
+  ).all(scopedProjectId) as Array<{
+    result_processing_mode: string;
+    completion_count: number;
+  }>;
+  const completionCounts = {
+    deterministic: 0,
+    enriched: 0,
+    unknown: 0,
   };
-  const legacyCompletionSummary = summarizeLegacyCompletionModes(db, scopedProjectId);
+  for (const row of completionRows) {
+    if (row.result_processing_mode === 'deterministic') {
+      completionCounts.deterministic += row.completion_count;
+      continue;
+    }
+    if (row.result_processing_mode === 'enriched') {
+      completionCounts.enriched += row.completion_count;
+      continue;
+    }
+    completionCounts.unknown += row.completion_count;
+  }
+  const statusWarnings: Array<{ code: string; message: string }> = [];
+  if (completionCounts.unknown > 0) {
+    statusWarnings.push({
+      code: 'job_result_unknown',
+      message: `Counted ${completionCounts.unknown} completed job result${completionCounts.unknown === 1 ? '' : 's'} with missing or malformed processing metadata as unknown during one-time migration backfill.`,
+    });
+  }
 
   const providerStore = new KnowledgeProviderProfileStore(db);
   const listedProviders = providerStore.listWithDiagnostics(scopedProjectId);
@@ -471,14 +436,16 @@ export function buildCliWorkerStatus(db: KnowledgeDb, projectId: string): CliWor
       extractionCount: row.extraction_count,
     })),
     completions: {
-      deterministic: (completionCounts.deterministic_count ?? 0) + legacyCompletionSummary.deterministic,
-      enriched: (completionCounts.enriched_count ?? 0) + legacyCompletionSummary.enriched,
+      deterministic: completionCounts.deterministic,
+      enriched: completionCounts.enriched,
+      unknown: completionCounts.unknown,
     },
+    unknownCompletionCount: completionCounts.unknown,
     providerProfiles: {
       total: listedProviders.profiles.length,
       enabled: listedProviders.profiles.filter((profile) => profile.enabled).length,
     },
-    warnings: [...legacyCompletionSummary.warnings, ...listedProviders.warnings].slice(0, MAX_STATUS_WARNINGS),
+    warnings: [...statusWarnings, ...listedProviders.warnings].slice(0, MAX_STATUS_WARNINGS),
   };
 }
 
@@ -916,7 +883,7 @@ export function registerKnowledgeCommands(program: Command): void {
             [
               `Queue: ${status.queue.queuedCount} queued, ${status.queue.runningCount} running (${status.activeWorkers.runningCount} with active leases), ${status.queue.completedCount} completed, ${status.queue.failedCount} failed, ${status.queue.cancelledCount} cancelled.`,
               `Workers: ${status.activeWorkers.workerCount} active.`,
-              `Completions: ${status.completions.deterministic} deterministic, ${status.completions.enriched} enriched.`,
+              `Completions: ${status.completions.deterministic} deterministic, ${status.completions.enriched} enriched, ${status.completions.unknown} unknown.`,
             ].join(' '),
           );
           if (status.queue.oldestQueuedRequestedAt) {

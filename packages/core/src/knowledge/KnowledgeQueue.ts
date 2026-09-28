@@ -35,6 +35,8 @@ export interface KnowledgeJobResultWarning {
   message: string;
 }
 
+export type KnowledgeJobProcessingMode = KnowledgeJobResult['processingMode'] | 'unknown';
+
 export interface KnowledgeJobResult {
   processingMode: 'deterministic' | 'enriched';
   analyzerId: string;
@@ -93,7 +95,7 @@ interface JobRow {
   status: KnowledgeJobStatus;
   payload_json: string;
   result_json: string | null;
-  result_processing_mode: KnowledgeJobResult['processingMode'] | null;
+  result_processing_mode: KnowledgeJobProcessingMode | null;
   requested_at: string;
   started_at: string | null;
   completed_at: string | null;
@@ -182,9 +184,16 @@ function validateKnowledgeJobResult(value: unknown): KnowledgeJobResult {
   };
 }
 
-function parseResult(value: string | null): KnowledgeJobResult | null {
+function parseResult(value: string | null, processingMode: KnowledgeJobProcessingMode | null): KnowledgeJobResult | null {
   if (value === null) return null;
-  return validateKnowledgeJobResult(JSON.parse(value) as unknown);
+  try {
+    return validateKnowledgeJobResult(JSON.parse(value) as unknown);
+  } catch (error: unknown) {
+    if (processingMode === 'unknown') {
+      return null;
+    }
+    throw new Error('Knowledge queue stored result is malformed', { cause: error });
+  }
 }
 
 function sanitizePersistedResult(result: KnowledgeJobResult): KnowledgeJobResult {
@@ -276,7 +285,7 @@ function rowToJob(row: JobRow): KnowledgeJobRecord {
     maxRetries: row.max_retries,
     workerId: row.worker_id,
     leaseExpiresAt: row.lease_expires_at,
-    result: parseResult(row.result_json),
+    result: parseResult(row.result_json, row.result_processing_mode),
   };
 }
 
@@ -441,7 +450,7 @@ export class KnowledgeQueue {
           workerId,
           now,
           resultJson: persistedResult === null ? null : JSON.stringify(persistedResult),
-          resultProcessingMode: persistedResult?.processingMode ?? null,
+          resultProcessingMode: persistedResult?.processingMode ?? 'unknown',
         });
       if (completion.changes !== 1) {
         throw new KnowledgeQueueTransitionError(

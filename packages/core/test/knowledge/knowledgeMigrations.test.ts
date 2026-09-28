@@ -73,6 +73,10 @@ function columns(db: Database.Database, table: string): string[] {
   return (db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map(({ name }) => name);
 }
 
+function indexColumns(db: Database.Database, index: string): string[] {
+  return (db.prepare(`PRAGMA index_info(${index})`).all() as Array<{ name: string }>).map(({ name }) => name);
+}
+
 afterEach(() => {
   for (const directory of temporaryDirectories.splice(0)) {
     rmSync(directory, { force: true, recursive: true });
@@ -89,7 +93,7 @@ describe('knowledge schema migrations', () => {
 
     expect(tableNames(db)).toEqual(expect.arrayContaining(KNOWLEDGE_TABLES));
     expect(indexNames(db)).toEqual(expect.arrayContaining(REQUIRED_INDEXES));
-    expect(KNOWLEDGE_SCHEMA_VERSION).toBe(5);
+    expect(KNOWLEDGE_SCHEMA_VERSION).toBe(6);
     expect(columns(db, 'knowledge_extractions')).toEqual(
       expect.arrayContaining([
         'analyzer_id',
@@ -127,6 +131,175 @@ describe('knowledge schema migrations', () => {
         'result_processing_mode',
       ]),
     );
+
+    db.close();
+  });
+
+  it('upgrades a pre-v5 knowledge jobs schema, backfills explicit completion modes, and reruns idempotently', () => {
+    const db = new Database(':memory:');
+    db.pragma('foreign_keys = ON');
+    db.exec(SCHEMA_SQL);
+    db.exec(`
+      CREATE TABLE knowledge_projects (
+        id TEXT PRIMARY KEY,
+        workspace_root TEXT NOT NULL,
+        name TEXT NOT NULL,
+        description TEXT,
+        status TEXT NOT NULL DEFAULT 'active',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE TABLE knowledge_jobs (
+        id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL REFERENCES knowledge_projects(id) ON DELETE CASCADE,
+        job_kind TEXT NOT NULL,
+        source_version_id TEXT,
+        status TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        result_json TEXT,
+        requested_at TEXT NOT NULL,
+        started_at TEXT,
+        completed_at TEXT,
+        failure_code TEXT,
+        failure_message TEXT,
+        retry_count INTEGER NOT NULL DEFAULT 0,
+        max_retries INTEGER NOT NULL DEFAULT 3,
+        worker_id TEXT,
+        lease_expires_at TEXT,
+        UNIQUE (project_id, id)
+      );
+      CREATE INDEX idx_knowledge_jobs_project_status ON knowledge_jobs(project_id, status, requested_at);
+      CREATE UNIQUE INDEX idx_knowledge_jobs_source_version
+        ON knowledge_jobs(project_id, job_kind, source_version_id)
+        WHERE source_version_id IS NOT NULL;
+    `);
+
+    const createdAt = '2026-09-24T00:00:00.000Z';
+    db.prepare(
+      `INSERT INTO knowledge_projects (id, workspace_root, name, created_at, updated_at)
+       VALUES ('project-1', '/workspace/one', 'One', ?, ?),
+              ('project-2', '/workspace/two', 'Two', ?, ?)`,
+    ).run(createdAt, createdAt, createdAt, createdAt);
+
+    const insertLegacyJob = db.prepare(
+      `INSERT INTO knowledge_jobs
+       (id, project_id, job_kind, status, payload_json, result_json, requested_at, started_at, completed_at, retry_count, max_retries)
+       VALUES (?, ?, 'analyze', ?, '{}', ?, ?, ?, ?, 0, 3)`,
+    );
+    for (let index = 0; index < 120; index += 1) {
+      const suffix = index.toString().padStart(3, '0');
+      insertLegacyJob.run(
+        `job-det-${suffix}`,
+        'project-1',
+        'completed',
+        '{"processingMode":"deterministic","warnings":[]}',
+        createdAt,
+        createdAt,
+        createdAt,
+      );
+    }
+    for (let index = 0; index < 75; index += 1) {
+      const suffix = index.toString().padStart(3, '0');
+      insertLegacyJob.run(
+        `job-enriched-${suffix}`,
+        'project-1',
+        'completed',
+        '{"processingMode":"enriched","warnings":[]}',
+        createdAt,
+        createdAt,
+        createdAt,
+      );
+    }
+    insertLegacyJob.run('job-malformed', 'project-1', 'completed', '{not-json', createdAt, createdAt, createdAt);
+    insertLegacyJob.run('job-missing-mode', 'project-1', 'completed', '{"warnings":[]}', createdAt, createdAt, createdAt);
+    insertLegacyJob.run('job-missing-result', 'project-1', 'completed', null, createdAt, createdAt, createdAt);
+    insertLegacyJob.run(
+      'job-project-2',
+      'project-2',
+      'completed',
+      '{"processingMode":"deterministic","warnings":[]}',
+      createdAt,
+      createdAt,
+      createdAt,
+    );
+    insertLegacyJob.run('job-failed', 'project-1', 'failed', null, createdAt, createdAt, createdAt);
+
+    applyKnowledgeMigrations(db);
+    applyKnowledgeMigrations(db);
+
+    expect(columns(db, 'knowledge_jobs')).toContain('result_processing_mode');
+    expect(indexNames(db)).toContain('idx_knowledge_jobs_project_completed_mode');
+    expect(indexColumns(db, 'idx_knowledge_jobs_project_completed_mode')).toEqual([
+      'project_id',
+      'status',
+      'result_processing_mode',
+      'id',
+    ]);
+    expect(
+      db.prepare(
+        `SELECT result_processing_mode AS mode, COUNT(*) AS count
+         FROM knowledge_jobs
+         WHERE project_id = 'project-1' AND status = 'completed'
+         GROUP BY result_processing_mode
+         ORDER BY mode`,
+      ).all(),
+    ).toEqual([
+      { mode: 'deterministic', count: 120 },
+      { mode: 'enriched', count: 75 },
+      { mode: 'unknown', count: 3 },
+    ]);
+    expect(
+      db.prepare(`SELECT result_processing_mode FROM knowledge_jobs WHERE id = 'job-project-2'`).get(),
+    ).toEqual({ result_processing_mode: 'deterministic' });
+    expect(
+      db.prepare(`SELECT result_processing_mode FROM knowledge_jobs WHERE id = 'job-failed'`).get(),
+    ).toEqual({ result_processing_mode: null });
+
+    db.close();
+  });
+
+  it('rolls back completion-mode backfill when a row update fails', () => {
+    const db = new Database(':memory:');
+    db.pragma('foreign_keys = ON');
+    db.exec(SCHEMA_SQL);
+    applyKnowledgeMigrations(db);
+
+    const createdAt = '2026-09-24T00:00:00.000Z';
+    db.exec(`DROP INDEX IF EXISTS idx_knowledge_jobs_project_completed_mode`);
+    db.prepare(
+      `INSERT INTO knowledge_projects (id, workspace_root, name, created_at, updated_at)
+       VALUES ('project-1', '/workspace/one', 'One', ?, ?)`,
+    ).run(createdAt, createdAt);
+    db.prepare(
+      `INSERT INTO knowledge_jobs
+       (id, project_id, job_kind, status, payload_json, result_json, result_processing_mode, requested_at, started_at, completed_at, retry_count, max_retries)
+       VALUES
+       ('job-det', 'project-1', 'analyze', 'completed', '{}', '{"processingMode":"deterministic"}', NULL, ?, ?, ?, 0, 3),
+       ('job-unknown', 'project-1', 'analyze', 'completed', '{}', NULL, NULL, ?, ?, ?, 0, 3)`,
+    ).run(createdAt, createdAt, createdAt, createdAt, createdAt, createdAt);
+    db.exec(`
+      CREATE TRIGGER trg_abort_unknown_completion_mode
+      BEFORE UPDATE OF result_processing_mode ON knowledge_jobs
+      WHEN NEW.id = 'job-unknown'
+      BEGIN
+        SELECT RAISE(ABORT, 'blocked completion-mode backfill');
+      END;
+    `);
+
+    expect(() => applyKnowledgeMigrations(db)).toThrow(/blocked completion-mode backfill/);
+    expect(
+      db.prepare(
+        `SELECT id, result_processing_mode
+         FROM knowledge_jobs
+         WHERE id IN ('job-det', 'job-unknown')
+         ORDER BY id`,
+      ).all(),
+    ).toEqual([
+      { id: 'job-det', result_processing_mode: null },
+      { id: 'job-unknown', result_processing_mode: null },
+    ]);
+    expect(indexNames(db)).not.toContain('idx_knowledge_jobs_project_completed_mode');
 
     db.close();
   });

@@ -185,6 +185,11 @@ export const MIGRATIONS: Migration[] = [
       applyKnowledgeReviewDeduplicationMigration(db);
     },
   },
+  {
+    version: 10,
+    description: 'Backfill knowledge job completion modes once and widen unknown-mode compatibility',
+    up: (db) => applyKnowledgeQueueMigration(db),
+  },
 ];
 
 function getSchemaVersion(db: Database.Database): number {
