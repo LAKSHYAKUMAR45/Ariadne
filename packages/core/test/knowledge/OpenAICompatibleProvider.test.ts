@@ -833,11 +833,84 @@ describe('OpenAICompatibleProvider', () => {
   });
 
   it('rejects alternate loopback spellings on the plain literal-IP path', async () => {
-    const provider = new OpenAICompatibleProvider({
-      hostPolicy: { allowedOrigins: new Set(['http://[::7f00:1]:11434']) },
-      transport: staticTransport(
-        async () =>
-          new Response(
+    const endpoints = [
+      'http://[::7f00:1]:11434/v1',
+      'http://127.1:11434/v1',
+      'http://2130706433:11434/v1',
+      'http://[0:0:0:0:0:0:0:1]:11434/v1',
+    ] as const;
+
+    for (const endpoint of endpoints) {
+      let requestCalls = 0;
+      const provider = new OpenAICompatibleProvider({
+        hostPolicy: { allowedOrigins: new Set([new URL(endpoint).origin]) },
+        transport: {
+          async request() {
+            requestCalls += 1;
+            return new Response('unexpected success');
+          },
+        },
+      });
+
+      await expect(() =>
+        provider.analyze({
+          profile: createProfile(endpoint, { apiKeyEnv: null }),
+          environment: {},
+          prompt: 'prompt',
+          sourceId: 'source-1',
+          sourceVersionId: 'source-version-1',
+          sourceSpans: [groundedSpan()],
+        }),
+      ).rejects.toThrow(/private|reserved|loopback/i);
+      expect(requestCalls, endpoint).toBe(0);
+    }
+  });
+
+  it('rejects mapped and special-use IPv6 literals before any direct request, while still allowing ordinary public IPv6 literals', async () => {
+    const rejectedEndpoints = [
+      'https://[::ffff:5db8:d822]/v1',
+      'https://[::ffff:127.0.0.1]/v1',
+      'https://[::ffff:0:7f00:1]/v1',
+      'https://[::ffff:0:a9fe:a9fe]/v1',
+      'https://[ff02::1]/v1',
+      'https://[100::1]/v1',
+      'https://[2001:2::1]/v1',
+      'https://[64:ff9b:1:1234::c000:201]/v1',
+    ] as const;
+
+    for (const endpoint of rejectedEndpoints) {
+      let requestCalls = 0;
+      const provider = new OpenAICompatibleProvider({
+        hostPolicy: { allowedOrigins: new Set([new URL(endpoint).origin]) },
+        transport: {
+          async request() {
+            requestCalls += 1;
+            return new Response('unexpected success');
+          },
+        },
+      });
+
+      await expect(() =>
+        provider.analyze({
+          profile: createProfile(endpoint, { apiKeyEnv: null }),
+          environment: {},
+          prompt: 'prompt',
+          sourceId: 'source-1',
+          sourceVersionId: 'source-version-1',
+          sourceSpans: [groundedSpan()],
+        }),
+      ).rejects.toThrow(/private|reserved|mapped|special/i);
+      expect(requestCalls, endpoint).toBe(0);
+    }
+
+    const plainRequestUrls: string[] = [];
+    const publicIpv6Endpoint = 'https://[2607:f8b0:4005:805::200e]/v1';
+    const publicIpv6Provider = new OpenAICompatibleProvider({
+      hostPolicy: { allowedOrigins: new Set([new URL(publicIpv6Endpoint).origin]) },
+      transport: {
+        async request(input) {
+          plainRequestUrls.push(input.url);
+          return new Response(
             JSON.stringify({
               choices: [
                 {
@@ -848,20 +921,22 @@ describe('OpenAICompatibleProvider', () => {
               ],
             }),
             { status: 200, headers: { 'content-type': 'application/json' } },
-          ),
-      ),
+          );
+        },
+      },
     });
 
-    await expect(() =>
-      provider.analyze({
-        profile: createProfile('http://[::7f00:1]:11434/v1', { apiKeyEnv: null }),
-        environment: {},
-        prompt: 'prompt',
-        sourceId: 'source-1',
-        sourceVersionId: 'source-version-1',
-        sourceSpans: [groundedSpan()],
-      }),
-    ).rejects.toThrow(/private|reserved/i);
+    const result = await publicIpv6Provider.analyze({
+      profile: createProfile(publicIpv6Endpoint, { apiKeyEnv: null }),
+      environment: {},
+      prompt: 'prompt',
+      sourceId: 'source-1',
+      sourceVersionId: 'source-version-1',
+      sourceSpans: [groundedSpan()],
+    });
+
+    expect(result.value.summary).toBe('Grounded summary');
+    expect(plainRequestUrls).toEqual(['https://[2607:f8b0:4005:805::200e]/v1/chat/completions']);
   });
 
   it('keeps literal loopback fixtures on the plain request path and preserves original TLS hostname metadata for named hosts', async () => {
@@ -1045,6 +1120,42 @@ describe('OpenAICompatibleProvider', () => {
         selectedAddress: { address: '93.184.216.34', family: 6 },
         errorPattern: /family/i,
       },
+      {
+        name: 'multicast ipv6',
+        resolvedAddresses: [{ address: 'ff02::1', family: 6 }],
+        selectedAddress: { address: 'ff02::1', family: 6 },
+        errorPattern: /private|reserved|special|multicast/i,
+      },
+      {
+        name: 'discard-only ipv6',
+        resolvedAddresses: [{ address: '100::1', family: 6 }],
+        selectedAddress: { address: '100::1', family: 6 },
+        errorPattern: /private|reserved|special|discard/i,
+      },
+      {
+        name: 'benchmarking ipv6',
+        resolvedAddresses: [{ address: '2001:2::1', family: 6 }],
+        selectedAddress: { address: '2001:2::1', family: 6 },
+        errorPattern: /private|reserved|special|benchmark/i,
+      },
+      {
+        name: 'translated ipv6 loopback',
+        resolvedAddresses: [{ address: '::ffff:0:7f00:1', family: 6 }],
+        selectedAddress: { address: '::ffff:0:7f00:1', family: 6 },
+        errorPattern: /private|reserved|special|mapped|embedded/i,
+      },
+      {
+        name: 'translated ipv6 metadata',
+        resolvedAddresses: [{ address: '::ffff:0:a9fe:a9fe', family: 6 }],
+        selectedAddress: { address: '::ffff:0:a9fe:a9fe', family: 6 },
+        errorPattern: /private|reserved|special|mapped|embedded/i,
+      },
+      {
+        name: 'expanded nat64 local-use ipv6',
+        resolvedAddresses: [{ address: '64:ff9b:1:1234::c000:201', family: 6 }],
+        selectedAddress: { address: '64:ff9b:1:1234::c000:201', family: 6 },
+        errorPattern: /private|reserved|special|nat64|embedded/i,
+      },
     ];
 
     for (const testCase of invalidCases) {
@@ -1219,6 +1330,42 @@ describe('OpenAICompatibleProvider', () => {
     });
 
     expect(result.value.summary).toBe('Grounded summary');
+  });
+
+  it('does not over-reject globally reachable special-purpose IPv4 literals', async () => {
+    const requestUrls: string[] = [];
+    const provider = new OpenAICompatibleProvider({
+      hostPolicy: { allowedOrigins: new Set(['https://192.0.0.9']) },
+      transport: {
+        async request(input) {
+          requestUrls.push(input.url);
+          return new Response(
+            JSON.stringify({
+              choices: [
+                {
+                  message: {
+                    content: JSON.stringify(analysisPayload('source-1')),
+                  },
+                },
+              ],
+            }),
+            { status: 200, headers: { 'content-type': 'application/json' } },
+          );
+        },
+      },
+    });
+
+    const result = await provider.analyze({
+      profile: createProfile('https://192.0.0.9/v1', { apiKeyEnv: null }),
+      environment: {},
+      prompt: 'prompt',
+      sourceId: 'source-1',
+      sourceVersionId: 'source-version-1',
+      sourceSpans: [groundedSpan()],
+    });
+
+    expect(result.value.summary).toBe('Grounded summary');
+    expect(requestUrls).toEqual(['https://192.0.0.9/v1/chat/completions']);
   });
 
   it('enforces response byte limits while streaming and cancels oversized bodies even when Content-Length lies', async () => {

@@ -111,6 +111,21 @@ describe('KnowledgeProviderProfileStore', () => {
       createProfile(store, projectId, { profileName: 'bad-http-localhost', endpoint: 'http://localhost:11434/v1' }),
     ).toThrow(/loopback ip literals/i);
     expect(() =>
+      createProfile(store, projectId, { profileName: 'bad-http-expanded-loopback', endpoint: 'http://[::7f00:1]:11434/v1' }),
+    ).toThrow(/loopback/i);
+    expect(() =>
+      createProfile(store, projectId, { profileName: 'bad-http-short-loopback', endpoint: 'http://127.1:11434/v1' }),
+    ).toThrow(/loopback/i);
+    expect(() =>
+      createProfile(store, projectId, { profileName: 'bad-http-integer-loopback', endpoint: 'http://2130706433:11434/v1' }),
+    ).toThrow(/loopback/i);
+    expect(() =>
+      createProfile(store, projectId, { profileName: 'bad-http-expanded-v6-loopback', endpoint: 'http://[0:0:0:0:0:0:0:1]:11434/v1' }),
+    ).toThrow(/loopback/i);
+    expect(() =>
+      createProfile(store, projectId, { profileName: 'bad-http-mapped-loopback', endpoint: 'http://[::ffff:127.0.0.1]:11434/v1' }),
+    ).toThrow(/loopback/i);
+    expect(() =>
       createProfile(store, projectId, { profileName: 'bad-https-loopback', endpoint: 'https://127.0.0.1/v1' }),
     ).toThrow(/private ip|localhost/i);
     expect(() =>
@@ -119,6 +134,15 @@ describe('KnowledgeProviderProfileStore', () => {
     expect(() =>
       createProfile(store, projectId, { profileName: 'bad-https-mapped-loopback', endpoint: 'https://[::ffff:127.0.0.1]/v1' }),
     ).toThrow(/private ip|localhost/i);
+    expect(() =>
+      createProfile(store, projectId, { profileName: 'bad-https-mapped-public', endpoint: 'https://[::ffff:5db8:d822]/v1' }),
+    ).toThrow(/private ip|localhost|special/i);
+    expect(() =>
+      createProfile(store, projectId, { profileName: 'bad-https-translated-loopback', endpoint: 'https://[::ffff:0:7f00:1]/v1' }),
+    ).toThrow(/private ip|localhost|special/i);
+    expect(() =>
+      createProfile(store, projectId, { profileName: 'bad-https-translated-metadata', endpoint: 'https://[::ffff:0:a9fe:a9fe]/v1' }),
+    ).toThrow(/private ip|localhost|special/i);
     expect(() =>
       createProfile(store, projectId, { profileName: 'bad-https-embedded-loopback', endpoint: 'https://[::127.0.0.1]/v1' }),
     ).toThrow(/private ip|localhost/i);
@@ -129,6 +153,18 @@ describe('KnowledgeProviderProfileStore', () => {
       createProfile(store, projectId, { profileName: 'bad-https-nat64-local-metadata', endpoint: 'https://[64:ff9b:1::a9fe:a9fe]/v1' }),
     ).toThrow(/private ip|localhost/i);
     expect(() =>
+      createProfile(store, projectId, { profileName: 'bad-https-nat64-local-expanded', endpoint: 'https://[64:ff9b:1:1234::c000:201]/v1' }),
+    ).toThrow(/private ip|localhost|special/i);
+    expect(() =>
+      createProfile(store, projectId, { profileName: 'bad-https-multicast', endpoint: 'https://[ff02::1]/v1' }),
+    ).toThrow(/private ip|localhost|special/i);
+    expect(() =>
+      createProfile(store, projectId, { profileName: 'bad-https-discard-only', endpoint: 'https://[100::1]/v1' }),
+    ).toThrow(/private ip|localhost|special/i);
+    expect(() =>
+      createProfile(store, projectId, { profileName: 'bad-https-benchmarking', endpoint: 'https://[2001:2::1]/v1' }),
+    ).toThrow(/private ip|localhost|special/i);
+    expect(() =>
       createProfile(store, projectId, { profileName: 'bad-creds', endpoint: 'http://user:pass@example.com/v1?token=secret#frag' }),
     ).toThrow(/credentials|query|fragment/i);
     expect(() =>
@@ -136,6 +172,9 @@ describe('KnowledgeProviderProfileStore', () => {
     ).toThrow(/hostname/i);
     expect(() =>
       createProfile(store, projectId, { profileName: 'ipv6-loopback', endpoint: 'http://[::1]:11434/v1' }),
+    ).not.toThrow();
+    expect(() =>
+      createProfile(store, projectId, { profileName: 'ipv4-anycast', endpoint: 'https://192.0.0.9/v1' }),
     ).not.toThrow();
     expect(() =>
       createProfile(store, projectId, { profileName: 'bad-model', model: 'x'.repeat(257) }),

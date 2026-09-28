@@ -2,6 +2,7 @@ import net from 'node:net';
 import type Database from 'better-sqlite3';
 import { redact } from '../Redactor.js';
 import { createKnowledgeId } from './KnowledgeIds.js';
+import { classifyProviderEndpointIp, tryParseCanonicalIpLiteral } from './ProviderEndpointIpPolicy.js';
 import type { KnowledgeProviderCapability } from './KnowledgeProviders.js';
 
 const PROFILE_NAME_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,62}[A-Za-z0-9])?$/;
@@ -142,27 +143,25 @@ function canonicalizeHostname(hostname: string): string {
   return hostname.startsWith('[') && hostname.endsWith(']') ? hostname.slice(1, -1) : hostname;
 }
 
-function canonicalizeIpLiteral(hostname: string): string | null {
-  const normalized = canonicalizeHostname(hostname).toLowerCase();
-  if (net.isIP(normalized) === 6) {
-    if (normalized.startsWith('::ffff:')) {
-      const mapped = normalized.slice('::ffff:'.length);
-      if (net.isIP(mapped) === 4) {
-        return mapped;
-      }
-    }
-    const embeddedMatch = normalized.match(/^(?:::ffff:|::|64:ff9b::|64:ff9b:1::)([0-9a-f]{1,4}):([0-9a-f]{1,4})$/);
-    if (embeddedMatch) {
-      const values = embeddedMatch.slice(1).map((part) => Number.parseInt(part, 16));
-      return [
-        (values[0]! >> 8) & 0xff,
-        values[0]! & 0xff,
-        (values[1]! >> 8) & 0xff,
-        values[1]! & 0xff,
-      ].join('.');
-    }
+function extractRawHostnameToken(endpoint: string): string | null {
+  const schemeSeparator = endpoint.indexOf('://');
+  if (schemeSeparator < 0) {
+    return null;
   }
-  return net.isIP(normalized) > 0 ? normalized : null;
+  const afterScheme = endpoint.slice(schemeSeparator + 3);
+  const authority = afterScheme.split(/[/?#]/, 1)[0] ?? '';
+  if (authority.length === 0 || authority.includes('@')) {
+    return null;
+  }
+  if (authority.startsWith('[')) {
+    const closingBracket = authority.indexOf(']');
+    return closingBracket === -1 ? null : authority.slice(0, closingBracket + 1);
+  }
+  const portSeparator = authority.lastIndexOf(':');
+  if (portSeparator === -1) {
+    return authority;
+  }
+  return authority.slice(0, portSeparator);
 }
 
 function validateProfileName(profileName: string): string {
@@ -186,82 +185,6 @@ function validateTimeout(timeoutMs: number): number {
     throw new Error(`Knowledge provider timeout must be an integer between ${MIN_TIMEOUT_MS} and ${MAX_TIMEOUT_MS}ms`);
   }
   return timeoutMs;
-}
-
-function isLoopbackHostname(hostname: string): boolean {
-  const normalized = canonicalizeHostname(hostname).toLowerCase();
-  const canonicalIp = canonicalizeIpLiteral(normalized);
-  if (normalized === 'localhost' || normalized.endsWith('.localhost')) {
-    return true;
-  }
-  if (canonicalIp === null) {
-    return false;
-  }
-  return (
-    canonicalIp === '127.0.0.1' ||
-    canonicalIp === '::1' ||
-    canonicalIp.startsWith('127.')
-  );
-}
-
-function isPrivateOrReservedIp(hostname: string): boolean {
-  const normalized = canonicalizeHostname(hostname).toLowerCase();
-  const canonicalIp = canonicalizeIpLiteral(normalized);
-  if (canonicalIp === null) {
-    return false;
-  }
-  const ipVersion = net.isIP(canonicalIp);
-  if (ipVersion === 4) {
-    const octets = canonicalIp.split('.').map((segment) => Number(segment));
-    const [first = 0, second = 0] = octets;
-    const [third = 0] = octets.slice(2);
-    if (first === 0 || first === 10 || first === 127) {
-      return true;
-    }
-    if (first === 169 && second === 254) {
-      return true;
-    }
-    if (first === 172 && second >= 16 && second <= 31) {
-      return true;
-    }
-    if (first === 192 && second === 168) {
-      return true;
-    }
-    if (first === 100 && second >= 64 && second <= 127) {
-      return true;
-    }
-    if (first === 192 && second === 0 && third <= 2) {
-      return true;
-    }
-    if (first === 192 && second === 0 && third === 0) {
-      return true;
-    }
-    if (first === 198 && (second === 18 || second === 19)) {
-      return true;
-    }
-    if (first === 198 && second === 51 && third === 100) {
-      return true;
-    }
-    if (first === 203 && second === 0 && third === 113) {
-      return true;
-    }
-    return first >= 224;
-  }
-  if (ipVersion === 6) {
-    const lowered = canonicalIp;
-    return (
-      lowered === '::' ||
-      lowered === '::1' ||
-      lowered.startsWith('fc') ||
-      lowered.startsWith('fd') ||
-      lowered.startsWith('fe8') ||
-      lowered.startsWith('fe9') ||
-      lowered.startsWith('fea') ||
-      lowered.startsWith('feb') ||
-      lowered.startsWith('2001:db8')
-    );
-  }
-  return false;
 }
 
 function isValidHostname(hostname: string): boolean {
@@ -311,20 +234,32 @@ export function normalizeOpenAICompatibleEndpoint(endpoint: string): string {
       throw new Error('Knowledge provider endpoint port must be between 1 and 65535');
     }
   }
-  if (parsed.protocol === 'http:' && net.isIP(canonicalizeHostname(parsed.hostname)) === 0) {
+  const normalizedHostname = canonicalizeHostname(parsed.hostname).toLowerCase();
+  const literalHostname = tryParseCanonicalIpLiteral(normalizedHostname);
+  const rawHostnameToken = extractRawHostnameToken(trimmed);
+  if (parsed.protocol === 'http:' && literalHostname === null) {
     throw new Error('Knowledge provider http endpoints must use explicit loopback IP literals');
   }
-  if (parsed.protocol === 'http:' && !isLoopbackHostname(parsed.hostname)) {
-    throw new Error('Knowledge provider http endpoints are limited to loopback IP addresses');
-  }
-  const normalizedHostname = canonicalizeHostname(parsed.hostname);
   if (
     parsed.protocol === 'https:' &&
-    (normalizedHostname === 'localhost' ||
-      normalizedHostname.endsWith('.localhost') ||
-      isPrivateOrReservedIp(normalizedHostname))
+    (normalizedHostname === 'localhost' || normalizedHostname.endsWith('.localhost'))
   ) {
-    throw new Error('Knowledge provider https endpoints must not target localhost or private IP ranges');
+    throw new Error('Knowledge provider https endpoints must not target localhost or private IP / special-use ranges');
+  }
+  if (parsed.protocol === 'http:') {
+    if (rawHostnameToken !== '127.0.0.1' && rawHostnameToken !== '[::1]') {
+      throw new Error('Knowledge provider http endpoints are limited to the exact loopback literals 127.0.0.1 and ::1');
+    }
+    const classification = classifyProviderEndpointIp(normalizedHostname);
+    if (!classification.isExactLoopbackLiteral) {
+      throw new Error('Knowledge provider http endpoints are limited to the exact loopback literals 127.0.0.1 and ::1');
+    }
+  }
+  if (parsed.protocol === 'https:' && literalHostname !== null) {
+    const classification = classifyProviderEndpointIp(normalizedHostname);
+    if (!classification.isGlobalDestination) {
+      throw new Error('Knowledge provider https endpoints must not target localhost or private IP / special-use ranges');
+    }
   }
   const normalizedPath = parsed.pathname.replace(/\/+$/g, '');
   return `${parsed.origin}${normalizedPath === '' || normalizedPath === '/' ? '' : normalizedPath}`;

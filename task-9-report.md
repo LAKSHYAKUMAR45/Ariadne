@@ -5,7 +5,7 @@ Fixed all Task 9 follow-up security and correctness findings in `packages/core` 
 
 The unrelated unstaged plan file `docs/superpowers/plans/2026-09-24-ariadne-knowledge-wiki-plan.md` was left untouched.
 
-This final pass closes the pinned-transport contract gap: pinned transports must now supply canonical IP literals with matching families, and the provider canonicalizes validated IPv6 spellings before membership comparison so equivalent expanded/compressed forms are handled deterministically.
+This final pass closes the remaining address-classification gap too: provider endpoint validation now routes every literal/pinned IP through one shared classifier, rejects additional IPv6 special-use classes and IPv4-embedded IPv6 wrappers, and enforces exact textual loopback literals for plain HTTP test/local endpoints.
 
 ## Host policy contract
 
@@ -25,17 +25,17 @@ This final pass closes the pinned-transport contract gap: pinned transports must
 - Hosts must inject an exact-origin allowlist/policy into `OpenAICompatibleProvider`.
 - Default behavior denies sending requests to unapproved origins.
 - Named hosts additionally require a transport implementing the new `requestPinned(...)` contract.
-- Plain-HTTP loopback endpoints must use explicit IP literals (`127.0.0.1` / `[::1]`), not hostname aliases.
+- Plain-HTTP loopback endpoints must use the exact literal spellings `127.0.0.1` or `[::1]`; hostname aliases, shorthand/numeric IPv4 spellings, expanded IPv6 loopback text, and mapped/translated variants are rejected.
 - Loopback fixture tests inject explicit host policy.
 
 ### Request-time network safety
-- Literal IP endpoints stay on the plain request path.
+- Literal IP endpoints stay on the plain request path, but only after shared canonical parsing/classification accepts the destination.
 - Named hosts resolve inside the injected transport, must validate the full resolved set, and must bind the request to a selected approved address plus original Host/TLS metadata before credentials are released.
 - Every pinned `resolvedAddresses[].address` must parse as a canonical IP literal; hostnames, arbitrary tokens, malformed literals, zone identifiers, and family mismatches are rejected before the Authorization-bearing payload is released.
 - Validated pinned addresses are canonicalized before membership comparison, so equivalent IPv6 expanded/compressed spellings compare deterministically and the returned approved set/connection target use the canonical literal.
 - `selectedAddress` / `connectionTarget.address` must exactly match one of the validated canonical literals with the same family.
-- Named-host mapped/private/reserved/loopback resolutions are rejected.
-- IPv4-mapped IPv6 loopback/private targets are canonicalized and rejected.
+- Named-host mapped/private/reserved/loopback/special-use resolutions are rejected by the same canonical classifier used for literal-IP endpoints.
+- IPv4-mapped, translated, compatible, NAT64-embedded, 6to4/Teredo, multicast, discard-only, benchmarking, documentation, unique-local, link-local, site-local, unspecified, and loopback IPv6 targets are rejected before a credential-bearing payload/request is released.
 - Redirects remain disabled.
 
 ## RED
@@ -59,7 +59,7 @@ Focused validation:
 pnpm --filter @ariadne-dev/core exec vitest run test/knowledge/KnowledgeProviderProfiles.test.ts test/knowledge/OpenAICompatibleProvider.test.ts test/knowledge/KnowledgeAnalysis.test.ts test/knowledge/KnowledgeWorker.test.ts test/knowledge/KnowledgeArchive.test.ts test/knowledge/knowledgeMigrations.test.ts
 ```
 
-Result: pass (`6` files / `61` tests).
+Result: pass (`6` files / `63` tests).
 
 Full validation:
 
@@ -69,7 +69,7 @@ pnpm --filter @ariadne-dev/core build
 ```
 
 Results:
-- full core tests: pass (`65` files / `559` tests)
+- full core tests: pass (`65` files / `561` tests)
 - core build: pass (`tsc -p tsconfig.json`)
 
 ## Fix summary
@@ -90,6 +90,7 @@ Results:
 - Loopback/private fixture origins are allowed only through injected test policy.
 
 ### 3. SSRF hardening
+- Added shared `ProviderEndpointIpPolicy` parsing/classification so profile validation, literal-IP requests, and named-host pinned validations all use the same canonical decision path.
 - Replaced the old `resolveHostname + pinsResolvedHostnames + fetch` split with a single named-host `requestPinned(...)` transport operation.
 - The provider now validates the resolved set and selected address before it constructs a credential-bearing pinned request payload.
 - Added literal parsing/canonicalization for pinned transport addresses:
@@ -98,9 +99,10 @@ Results:
   - rejects declared family mismatches;
   - rejects IPv4-mapped IPv6 pinned addresses directly;
   - canonicalizes accepted IPv6 literals before membership comparison and before constructing the approved connection target.
-- Tightened literal-IP handling so only explicit loopback literals (`127.0.0.1` / `::1`) stay on the allowed loopback path; alternate mapped/translated loopback spellings are rejected.
+- Tightened literal-IP handling so only the exact loopback literals (`127.0.0.1` / `::1`) stay on the allowed loopback path; alternate shorthand, numeric, expanded, mapped, and translated loopback spellings are rejected.
 - The validated pinned payload binds connection target IP/port separately from the original hostname Host/SNI metadata, making rebinding harder to misuse accidentally.
-- Rejected private/reserved/loopback destinations, including IPv4-mapped and embedded IPv6-to-IPv4 forms.
+- Rejected private/reserved/special-use destinations, including IPv4-mapped, translated, compatible, NAT64-local-use, and other IPv6-to-IPv4 embedded forms.
+- Preserved acceptance for ordinary public literals, including globally reachable special-purpose IPv4 anycast addresses such as `192.0.0.9`.
 - Exported clear host-policy / transport / pinned-request types plus a safe default fetch transport for literal-IP paths.
 - Default transport now fails closed for named hosts unless the host injects a compliant pinned transport.
 - Kept redirects disabled.
@@ -134,8 +136,11 @@ Results:
 - Optional enrichment remains warning-only; deterministic generation/reconciliation behavior is unchanged.
 
 ## Files changed
+- `packages/core/src/knowledge/ProviderEndpointIpPolicy.ts`
+- `packages/core/src/knowledge/KnowledgeProviderProfiles.ts`
 - `packages/core/src/knowledge/providers/OpenAICompatibleProvider.ts`
 - `packages/core/test/knowledge/OpenAICompatibleProvider.test.ts`
+- `packages/core/test/knowledge/KnowledgeProviderProfiles.test.ts`
 - `task-9-report.md`
 
 ## Remaining concerns

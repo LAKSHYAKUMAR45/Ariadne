@@ -1,4 +1,3 @@
-import net from 'node:net';
 import type Database from 'better-sqlite3';
 import {
   type KnowledgeAnalysis,
@@ -22,6 +21,11 @@ import {
   normalizeOpenAICompatibleEndpoint,
   resolveKnowledgeProviderApiKey,
 } from '../KnowledgeProviderProfiles.js';
+import {
+  classifyProviderEndpointIp,
+  parseCanonicalIpLiteral,
+  tryParseCanonicalIpLiteral,
+} from '../ProviderEndpointIpPolicy.js';
 import type { KnowledgePageVersion } from '../KnowledgePageStore.js';
 import { KnowledgePageStore } from '../KnowledgePageStore.js';
 import type {
@@ -151,13 +155,6 @@ export interface OpenAICompatibleValidatedPinnedTransportRequest {
   approvedAddresses: readonly OpenAICompatibleResolvedAddress[];
   connectionTarget: OpenAICompatiblePinnedConnectionTarget;
   payload: OpenAICompatiblePinnedRequestPayload;
-}
-
-interface CanonicalIpLiteral {
-  address: string;
-  family: 4 | 6;
-  embeddedIpv4Address: string | null;
-  isMappedIpv6: boolean;
 }
 
 function hasMatchingResolvedAddress(
@@ -369,219 +366,6 @@ function extractResponseContent(parsed: unknown): string {
   return content;
 }
 
-function normalizeIpLiteralCandidate(address: string): string {
-  return address.toLowerCase();
-}
-
-function parseIpv4Segments(address: string): number[] | null {
-  const parts = address.split('.');
-  if (parts.length !== 4) {
-    return null;
-  }
-
-  const segments: number[] = [];
-  for (const part of parts) {
-    if (!/^\d{1,3}$/.test(part)) {
-      return null;
-    }
-    if (part.length > 1 && part.startsWith('0')) {
-      return null;
-    }
-    const value = Number.parseInt(part, 10);
-    if (value < 0 || value > 255) {
-      return null;
-    }
-    segments.push(value);
-  }
-
-  return segments;
-}
-
-function parseIpv6Segments(address: string): number[] | null {
-  const lower = address.toLowerCase();
-  if (!/^[0-9a-f:.]+$/.test(lower)) {
-    return null;
-  }
-
-  const doubleColonIndex = lower.indexOf('::');
-  if (doubleColonIndex !== lower.lastIndexOf('::')) {
-    return null;
-  }
-
-  const hasCompression = doubleColonIndex !== -1;
-  const [headText, tailText] = hasCompression ? lower.split('::') : [lower, ''];
-  const parseSide = (side: string, allowIpv4Tail: boolean): number[] | null => {
-    if (side === '') {
-      return [];
-    }
-
-    const parts = side.split(':');
-    const segments: number[] = [];
-    for (const [index, part] of parts.entries()) {
-      if (part === '') {
-        return null;
-      }
-      const isLastPart = index === parts.length - 1;
-      if (part.includes('.')) {
-        if (!allowIpv4Tail || !isLastPart) {
-          return null;
-        }
-        const ipv4Segments = parseIpv4Segments(part);
-        if (!ipv4Segments) {
-          return null;
-        }
-        segments.push((ipv4Segments[0]! << 8) | ipv4Segments[1]!);
-        segments.push((ipv4Segments[2]! << 8) | ipv4Segments[3]!);
-        continue;
-      }
-      if (!/^[0-9a-f]{1,4}$/.test(part)) {
-        return null;
-      }
-      segments.push(Number.parseInt(part, 16));
-    }
-    return segments;
-  };
-
-  const headSegments = parseSide(headText, !hasCompression);
-  const tailSegments = parseSide(tailText, true);
-  if (!headSegments || !tailSegments) {
-    return null;
-  }
-
-  if (!hasCompression) {
-    return headSegments.length === 8 ? headSegments : null;
-  }
-
-  if (headSegments.length + tailSegments.length >= 8) {
-    return null;
-  }
-
-  const zeroSegments = new Array<number>(8 - headSegments.length - tailSegments.length).fill(0);
-  return [...headSegments, ...zeroSegments, ...tailSegments];
-}
-
-function canonicalizeIpv6Segments(segments: readonly number[]): string {
-  let bestStart = -1;
-  let bestLength = 0;
-  let currentStart = -1;
-  let currentLength = 0;
-
-  for (let index = 0; index < segments.length; index += 1) {
-    if (segments[index] === 0) {
-      if (currentStart === -1) {
-        currentStart = index;
-        currentLength = 1;
-      } else {
-        currentLength += 1;
-      }
-      if (currentLength > bestLength) {
-        bestStart = currentStart;
-        bestLength = currentLength;
-      }
-      continue;
-    }
-    currentStart = -1;
-    currentLength = 0;
-  }
-
-  if (bestLength < 2) {
-    bestStart = -1;
-  }
-
-  if (bestStart === -1) {
-    return segments.map((segment) => segment.toString(16)).join(':');
-  }
-
-  const before = segments.slice(0, bestStart).map((segment) => segment.toString(16)).join(':');
-  const after = segments.slice(bestStart + bestLength).map((segment) => segment.toString(16)).join(':');
-  if (before === '' && after === '') {
-    return '::';
-  }
-  if (before === '') {
-    return `::${after}`;
-  }
-  if (after === '') {
-    return `${before}::`;
-  }
-  return `${before}::${after}`;
-}
-
-function ipv4FromTailSegments(segments: readonly number[]): string {
-  const high = segments[6]!;
-  const low = segments[7]!;
-  return [
-    (high >> 8) & 0xff,
-    high & 0xff,
-    (low >> 8) & 0xff,
-    low & 0xff,
-  ].join('.');
-}
-
-function parseCanonicalIpLiteral(address: string): CanonicalIpLiteral {
-  const normalized = normalizeIpLiteralCandidate(address);
-  if (normalized.startsWith('[') || normalized.endsWith(']') || normalized.includes('[') || normalized.includes(']')) {
-    throw new Error(`Provider transport must supply bare IP literals for pinned addresses (${address})`);
-  }
-  if (normalized.includes('%')) {
-    throw new Error(`Provider transport must not use zone identifiers in pinned IP literals (${address})`);
-  }
-
-  const ipv4Segments = parseIpv4Segments(normalized);
-  if (ipv4Segments) {
-    return {
-      address: ipv4Segments.join('.'),
-      family: 4,
-      embeddedIpv4Address: null,
-      isMappedIpv6: false,
-    };
-  }
-
-  const ipv6Segments = parseIpv6Segments(normalized);
-  if (!ipv6Segments) {
-    throw new Error(`Provider transport must supply a valid IP literal for pinned addresses (${address})`);
-  }
-
-  const mappedIpv6 =
-    ipv6Segments[0] === 0 &&
-    ipv6Segments[1] === 0 &&
-    ipv6Segments[2] === 0 &&
-    ipv6Segments[3] === 0 &&
-    ipv6Segments[4] === 0 &&
-    ipv6Segments[5] === 0xffff;
-  const compatibleEmbeddedIpv4 =
-    ipv6Segments[0] === 0 &&
-    ipv6Segments[1] === 0 &&
-    ipv6Segments[2] === 0 &&
-    ipv6Segments[3] === 0 &&
-    ipv6Segments[4] === 0 &&
-    ipv6Segments[5] === 0 &&
-    !(ipv6Segments[6] === 0 && ipv6Segments[7] <= 1);
-  const nat64WellKnown =
-    ipv6Segments[0] === 0x64 &&
-    ipv6Segments[1] === 0xff9b &&
-    ipv6Segments[2] === 0 &&
-    ipv6Segments[3] === 0 &&
-    ipv6Segments[4] === 0 &&
-    ipv6Segments[5] === 0;
-  const nat64LocalUse =
-    ipv6Segments[0] === 0x64 &&
-    ipv6Segments[1] === 0xff9b &&
-    ipv6Segments[2] === 0x1 &&
-    ipv6Segments[3] === 0 &&
-    ipv6Segments[4] === 0 &&
-    ipv6Segments[5] === 0;
-  const embeddedIpv4Address = mappedIpv6 || compatibleEmbeddedIpv4 || nat64WellKnown || nat64LocalUse
-    ? ipv4FromTailSegments(ipv6Segments)
-    : null;
-
-  return {
-    address: canonicalizeIpv6Segments(ipv6Segments),
-    family: 6,
-    embeddedIpv4Address,
-    isMappedIpv6: mappedIpv6,
-  };
-}
-
 function validatePinnedResolvedAddress(address: OpenAICompatibleResolvedAddress): OpenAICompatibleResolvedAddress {
   const parsed = parseCanonicalIpLiteral(address.address);
   if (parsed.family !== address.family) {
@@ -596,68 +380,6 @@ function validatePinnedResolvedAddress(address: OpenAICompatibleResolvedAddress)
     address: parsed.address,
     family: parsed.family,
   };
-}
-
-function canonicalizeIpLiteral(address: string): string {
-  const parsed = parseCanonicalIpLiteral(address);
-  return parsed.embeddedIpv4Address ?? parsed.address;
-}
-
-function isPrivateOrReservedAddress(address: string): boolean {
-  let normalized: string;
-  try {
-    normalized = canonicalizeIpLiteral(address);
-  } catch {
-    return false;
-  }
-  const ipv4Parts = normalized.split('.');
-  if (ipv4Parts.length === 4 && ipv4Parts.every((part) => /^\d+$/.test(part))) {
-    const [first = 0, second = 0, third = 0] = ipv4Parts.map((part) => Number(part));
-    if (first === 0 || first === 10 || first === 127) return true;
-    if (first === 169 && second === 254) return true;
-    if (first === 172 && second >= 16 && second <= 31) return true;
-    if (first === 192 && second === 168) return true;
-    if (first === 100 && second >= 64 && second <= 127) return true;
-    if (first === 192 && second === 0 && third <= 2) return true;
-    if (first === 198 && (second === 18 || second === 19)) return true;
-    if (first === 198 && second === 51 && third === 100) return true;
-    if (first === 203 && second === 0 && third === 113) return true;
-    return first >= 224;
-  }
-  return (
-    normalized === '::' ||
-    normalized === '::1' ||
-    normalized.startsWith('fc') ||
-    normalized.startsWith('fd') ||
-    normalized.startsWith('fe8') ||
-    normalized.startsWith('fe9') ||
-    normalized.startsWith('fea') ||
-    normalized.startsWith('feb') ||
-    normalized.startsWith('fec') ||
-    normalized.startsWith('fed') ||
-    normalized.startsWith('fee') ||
-    normalized.startsWith('fef') ||
-    /^2001:db8(?::|$)/.test(normalized)
-  );
-}
-
-function isLoopbackAddress(address: string): boolean {
-  let normalized: string;
-  try {
-    normalized = canonicalizeIpLiteral(address);
-  } catch {
-    return false;
-  }
-  const ipv4Parts = normalized.split('.');
-  if (ipv4Parts.length === 4 && ipv4Parts.every((part) => /^\d+$/.test(part))) {
-    return normalized === '127.0.0.1' || normalized.startsWith('127.');
-  }
-  return normalized === '::1';
-}
-
-function isLoopbackHostnameLiteral(hostname: string): boolean {
-  const normalized = hostname.replace(/^\[/, '').replace(/\]$/, '').toLowerCase();
-  return normalized === 'localhost' || normalized.endsWith('.localhost') || isLoopbackAddress(normalized);
 }
 
 function sourceSpanFingerprint(span: KnowledgeAnalysisSourceSpan): string {
@@ -1083,6 +805,7 @@ export class OpenAICompatibleProvider implements KnowledgeProviderTestAdapter {
   ): Promise<Response> {
     const url = new URL(endpoint);
     const hostname = url.hostname.replace(/^\[/, '').replace(/\]$/, '');
+    const literalHostname = tryParseCanonicalIpLiteral(hostname);
     const originAllowed =
       this.hostPolicy.allowedOrigins?.has(url.origin) === true ||
       this.hostPolicy.isOriginAllowed?.({ origin: url.origin, profile, hasCredentials }) === true;
@@ -1094,7 +817,7 @@ export class OpenAICompatibleProvider implements KnowledgeProviderTestAdapter {
       );
     }
 
-    if (net.isIP(hostname) === 0) {
+    if (literalHostname === null) {
       if (!this.transport.requestPinned) {
         throw new Error(`Provider transport must implement requestPinned for named host ${hostname}`);
       }
@@ -1134,15 +857,13 @@ export class OpenAICompatibleProvider implements KnowledgeProviderTestAdapter {
       );
     }
 
-    this.validateLiteralIpDestination(url, hostname);
+    this.validateLiteralIpDestination(url, literalHostname.address);
     return await awaitWithAbort(this.transport.request(request), signal);
   }
 
-  private validateLiteralIpDestination(url: URL, hostname: string): void {
-    const parsed = parseCanonicalIpLiteral(hostname);
-    const privateOrReserved = isPrivateOrReservedAddress(parsed.address);
-    const approvedLoopback = parsed.address === '127.0.0.1' || parsed.address === '::1';
-    if (privateOrReserved && !approvedLoopback) {
+  private validateLiteralIpDestination(url: URL, address: string): void {
+    const classification = classifyProviderEndpointIp(address);
+    if (!classification.isGlobalDestination && !classification.isExactLoopbackLiteral) {
       throw new Error(`Provider endpoint ${url.origin} resolves to a private or reserved address`);
     }
   }
@@ -1155,7 +876,7 @@ export class OpenAICompatibleProvider implements KnowledgeProviderTestAdapter {
       throw new Error(`Provider endpoint ${url.origin} did not resolve to any addresses`);
     }
     const canonicalAddresses = addresses.map((address) => validatePinnedResolvedAddress(address));
-    const privateOrReserved = canonicalAddresses.some((address) => isPrivateOrReservedAddress(address.address));
+    const privateOrReserved = canonicalAddresses.some((address) => !classifyProviderEndpointIp(address.address).isGlobalDestination);
     if (privateOrReserved) {
       throw new Error(`Provider endpoint ${url.origin} resolves to a private or reserved address`);
     }
