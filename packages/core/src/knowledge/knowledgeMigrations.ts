@@ -97,10 +97,10 @@ export function applyKnowledgeReviewDeduplicationMigration(db: Database.Database
   ).all() as Array<{ project_id: string; page_version_id: string | null; summary: string }>;
 
   for (const duplicate of duplicates) {
-    const ids = (duplicate.page_version_id === null
+    const reviews = (duplicate.page_version_id === null
       ? db
           .prepare(
-            `SELECT id
+            `SELECT id, requested_at
              FROM knowledge_reviews
              WHERE project_id = ? AND page_version_id IS NULL AND status = 'pending' AND summary = ?
              ORDER BY requested_at, id`,
@@ -108,14 +108,55 @@ export function applyKnowledgeReviewDeduplicationMigration(db: Database.Database
           .all(duplicate.project_id, duplicate.summary)
       : db
           .prepare(
-            `SELECT id
+            `SELECT id, requested_at
              FROM knowledge_reviews
              WHERE project_id = ? AND page_version_id = ? AND status = 'pending' AND summary = ?
              ORDER BY requested_at, id`,
           )
-          .all(duplicate.project_id, duplicate.page_version_id, duplicate.summary)) as Array<{ id: string }>;
-    for (const extra of ids.slice(1)) {
-      db.prepare('DELETE FROM knowledge_reviews WHERE id = ?').run(extra.id);
+          .all(duplicate.project_id, duplicate.page_version_id, duplicate.summary)) as Array<{
+      id: string;
+      requested_at: string;
+    }>;
+    const [survivor, ...extras] = reviews;
+    if (!survivor) {
+      continue;
+    }
+    for (const extra of extras) {
+      const reparented = db.prepare(
+        `UPDATE knowledge_review_actions
+         SET review_id = @survivorId
+         WHERE project_id = @projectId AND review_id = @reviewId`,
+      ).run({
+        survivorId: survivor.id,
+        projectId: duplicate.project_id,
+        reviewId: extra.id,
+      });
+      const remainingActions = db.prepare(
+        `SELECT COUNT(*) AS count
+         FROM knowledge_review_actions
+         WHERE project_id = ? AND review_id = ?`,
+      ).get(duplicate.project_id, extra.id) as { count: number };
+      if (remainingActions.count !== 0) {
+        throw new Error(`Knowledge review dedupe could not move all actions from ${extra.id} to ${survivor.id}`);
+      }
+      const deleted = db.prepare(
+        `DELETE FROM knowledge_reviews
+         WHERE id = @id AND project_id = @projectId AND status = 'pending'`,
+      ).run({
+        id: extra.id,
+        projectId: duplicate.project_id,
+      });
+      if (deleted.changes !== 1) {
+        throw new Error(`Knowledge review dedupe could not remove duplicate review ${extra.id}`);
+      }
+      const mergedActions = db.prepare(
+        `SELECT COUNT(*) AS count
+         FROM knowledge_review_actions
+         WHERE project_id = ? AND review_id = ?`,
+      ).get(duplicate.project_id, survivor.id) as { count: number };
+      if (mergedActions.count < reparented.changes) {
+        throw new Error(`Knowledge review dedupe lost action history while merging ${extra.id} into ${survivor.id}`);
+      }
     }
   }
 

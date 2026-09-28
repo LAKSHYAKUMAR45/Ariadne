@@ -14,38 +14,37 @@
 - Added enrichment grounding for reviews and insights so provider output can only target current-run page versions or current source/page paths, with bounded `enrichment_ungrounded` warnings for skipped items.
 - Added atomic pending-review deduplication with migration-backed uniqueness plus `INSERT OR IGNORE`/reuse logic, including separate-connection regression coverage.
 - Required explicit project context for direct processing via `processJob(projectId, jobId)` and counted expired-lease terminal failures in `runOnce()` results.
+- Fix-all round 2 hardened lease renewal into a single guarded compare-and-swap, made admin cancel/retry transitions reject concurrent ownership/state drift, isolated invalid enrichment items into bounded per-item warnings without dropping valid siblings, and re-parented duplicate review audit actions during migration dedupe.
 
 ## RED evidence
 
 Regression RED run before the fixes:
 
 ```bash
-pnpm exec vitest run test/knowledge/KnowledgeWorker.test.ts test/knowledge/KnowledgeQueue.test.ts test/knowledge/KnowledgeReview.test.ts test/knowledge/knowledgeMigrations.test.ts test/knowledge/KnowledgeGeneratorService.test.ts test/knowledge/KnowledgeSearch.test.ts
+pnpm exec vitest run test/knowledge/KnowledgeQueue.test.ts test/knowledge/KnowledgeWorker.test.ts test/knowledge/knowledgeMigrations.test.ts
 ```
 
 Result: **failed** with the expected Task 8 review regressions:
 
-- missing atomic pending-review helper (`ensurePendingKnowledgeReview is not a function`)
-- stale direct processing API (`Knowledge job not found: project_a` when calling `processJob(projectId, jobId)`)
-- missing ungrounded enrichment warning / skip behavior
-- missing expired-lease recovery failure counts in `runOnce()`
-- leaked `completed` progress on completion failure
-- missing pending-review uniqueness index / migration assertion
+- lease renewal succeeded after expiry and after concurrent ownership drift
+- admin cancel/retry still overwrote concurrent owner/claim changes
+- one invalid enrichment item still collapsed the whole enrichment batch into `enrichment_failed`
+- duplicate pending-review migration still deleted later reviews without re-parenting their action audit history
 
 ## GREEN evidence
 
 Focused required validation:
 
 ```bash
-pnpm exec vitest run test/knowledge/KnowledgeWorker.test.ts test/knowledge/KnowledgeQueue.test.ts test/knowledge/KnowledgeReview.test.ts test/knowledge/knowledgeMigrations.test.ts test/knowledge/KnowledgeGeneratorService.test.ts test/knowledge/KnowledgeSearch.test.ts
+pnpm exec vitest run test/knowledge/KnowledgeQueue.test.ts test/knowledge/KnowledgeReview.test.ts test/knowledge/KnowledgeWorker.test.ts test/knowledge/knowledgeMigrations.test.ts test/knowledge/KnowledgeGeneratorService.test.ts test/knowledge/KnowledgeSearch.test.ts
 pnpm --filter @ariadne-dev/core test
 pnpm --filter @ariadne-dev/core build
 ```
 
 Final result: **pass**
 
-- Focused suite: `62 passed`.
-- Full core suite: `520 passed`.
+- Focused suite: `68 passed`.
+- Full core suite: `526 passed`.
 - Build: `tsc -p tsconfig.json` passed.
 
 ## Failure codes implemented
@@ -85,6 +84,7 @@ Notes:
 ## Idempotency outcomes verified
 
 - Reprocessing the same source version through a second analyze job does not duplicate extractions, graph nodes/edges, pages, page versions, reviews, or insights.
+- Mixed valid/invalid enrichment reruns keep the same grounded review/insight IDs while re-emitting only bounded warnings for the invalid siblings.
 - Deterministic page generation reuses unchanged page versions.
 - Pending contradiction reviews and research-gap insights are deduplicated on rerun.
 - Cross-project claiming and mutation remain isolated to the requested project.
@@ -95,15 +95,15 @@ Notes:
 
 ## Post-implementation review status
 
-Task 8 review remediation is **resolved**. The six reviewed blockers are now
-covered by regression tests and fixed in code:
+Task 8 review remediation is **resolved**. The remaining fix-all findings are
+now covered by regression tests and fixed in code:
 
-1. worker-owned terminal transitions are single guarded SQL updates
-2. final `completed` progress persists only with durable completion
-3. enrichment output is grounded to the current run scope
-4. pending enrichment reviews are atomically deduplicated
-5. expired-lease terminal recoveries count in `runOnce().failed`
-6. direct processing requires explicit project context
+1. lease renewal is a single guarded update that rejects expired or stolen leases
+2. admin cancel/retry paths use guarded state predicates and reject TOCTOU drift
+3. enrichment invalid items emit bounded per-item warnings while valid siblings persist
+4. duplicate pending-review migration re-parents `knowledge_review_actions` instead of deleting history
+5. lease-loss races during failure handling degrade to expected worker races instead of aborting the drain loop
+6. grounded project-level enrichment reviews remain supported when no page version ID is supplied
 
 Task 8 can be considered complete from the core worker perspective. Do not
 start Task 9 from this report update alone; follow the plan sequencing

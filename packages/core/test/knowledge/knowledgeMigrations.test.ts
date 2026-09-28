@@ -3,7 +3,11 @@ import Database from 'better-sqlite3';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { openDatabase } from '../../src/db.js';
-import { applyKnowledgeMigrations, KNOWLEDGE_SCHEMA_VERSION } from '../../src/knowledge/knowledgeMigrations.js';
+import {
+  applyKnowledgeMigrations,
+  applyKnowledgeReviewDeduplicationMigration,
+  KNOWLEDGE_SCHEMA_VERSION,
+} from '../../src/knowledge/knowledgeMigrations.js';
 import { SCHEMA_SQL } from '../../src/schema.js';
 
 const KNOWLEDGE_TABLES = [
@@ -250,6 +254,95 @@ describe('knowledge schema migrations', () => {
          ) VALUES (?, 'project-1', 'source-version-1', 'deterministic', 'python-lezer', '1', 'result-2.json', 'hash-2', 'hash-2', '{}', '[]', 'completed', ?, ?, ?)`,
       ).run('extraction-2', createdAt, createdAt, createdAt),
     ).toThrow(/UNIQUE/);
+
+    db.close();
+  });
+
+  it('reparents duplicate pending review actions onto the deterministic survivor without losing audit history', () => {
+    const db = new Database(':memory:');
+    db.pragma('foreign_keys = ON');
+    db.exec(SCHEMA_SQL);
+    applyKnowledgeMigrations(db);
+
+    const createdAt = '2026-09-24T00:00:00.000Z';
+    db.prepare(
+      `INSERT INTO knowledge_projects (id, workspace_root, name, created_at, updated_at)
+       VALUES ('project-1', '/workspace/one', 'One', ?, ?)`,
+    ).run(createdAt, createdAt);
+    db.prepare(
+      `INSERT INTO knowledge_pages (id, project_id, page_type, title, slug, status, created_at, updated_at)
+       VALUES ('page-1', 'project-1', 'source', 'src/app.py', 'source-src-app-py', 'active', ?, ?)`,
+    ).run(createdAt, createdAt);
+    db.prepare(
+      `INSERT INTO knowledge_page_versions
+       (id, project_id, page_id, version_number, content_hash, content_path, created_at)
+       VALUES ('page-version-1', 'project-1', 'page-1', 1, 'hash', 'pages/source/source-src-app-py.md', ?)`,
+    ).run(createdAt);
+    db.exec(`
+      DROP INDEX IF EXISTS idx_knowledge_reviews_pending_page_identity;
+      DROP INDEX IF EXISTS idx_knowledge_reviews_pending_project_identity;
+    `);
+
+    db.prepare(
+      `INSERT INTO knowledge_reviews
+       (id, project_id, page_version_id, status, requested_at, summary)
+       VALUES (?, 'project-1', 'page-version-1', 'pending', ?, 'Contradiction review')`,
+    ).run('review-earliest', '2026-09-24T01:00:00.000Z');
+    db.prepare(
+      `INSERT INTO knowledge_reviews
+       (id, project_id, page_version_id, status, requested_at, summary)
+       VALUES (?, 'project-1', 'page-version-1', 'pending', ?, 'Contradiction review')`,
+    ).run('review-latest', '2026-09-24T02:00:00.000Z');
+    db.prepare(
+      `INSERT INTO knowledge_review_actions
+       (id, project_id, review_id, action_kind, comment, created_at)
+       VALUES (?, 'project-1', ?, ?, ?, ?)`,
+    ).run('action-1', 'review-earliest', 'accept', '{"actorId":"a"}', '2026-09-24T01:10:00.000Z');
+    db.prepare(
+      `INSERT INTO knowledge_review_actions
+       (id, project_id, review_id, action_kind, comment, created_at)
+       VALUES (?, 'project-1', ?, ?, ?, ?)`,
+    ).run('action-2', 'review-earliest', 'reopen', '{"actorId":"b"}', '2026-09-24T01:20:00.000Z');
+    db.prepare(
+      `INSERT INTO knowledge_review_actions
+       (id, project_id, review_id, action_kind, comment, created_at)
+       VALUES (?, 'project-1', ?, ?, ?, ?)`,
+    ).run('action-3', 'review-latest', 'research', '{"actorId":"c"}', '2026-09-24T02:10:00.000Z');
+    db.prepare(
+      `INSERT INTO knowledge_review_actions
+       (id, project_id, review_id, action_kind, comment, created_at)
+       VALUES (?, 'project-1', ?, ?, ?, ?)`,
+    ).run('action-4', 'review-latest', 'label', '{"actorId":"d"}', '2026-09-24T02:20:00.000Z');
+
+    applyKnowledgeReviewDeduplicationMigration(db);
+    applyKnowledgeReviewDeduplicationMigration(db);
+
+    expect(
+      db.prepare(
+        `SELECT id, requested_at
+         FROM knowledge_reviews
+         WHERE project_id = 'project-1'
+         ORDER BY requested_at, id`,
+      ).all(),
+    ).toEqual([
+      {
+        id: 'review-earliest',
+        requested_at: '2026-09-24T01:00:00.000Z',
+      },
+    ]);
+    expect(
+      db.prepare(
+        `SELECT id, review_id, action_kind, created_at
+         FROM knowledge_review_actions
+         WHERE project_id = 'project-1'
+         ORDER BY created_at, id`,
+      ).all(),
+    ).toEqual([
+      { id: 'action-1', review_id: 'review-earliest', action_kind: 'accept', created_at: '2026-09-24T01:10:00.000Z' },
+      { id: 'action-2', review_id: 'review-earliest', action_kind: 'reopen', created_at: '2026-09-24T01:20:00.000Z' },
+      { id: 'action-3', review_id: 'review-earliest', action_kind: 'research', created_at: '2026-09-24T02:10:00.000Z' },
+      { id: 'action-4', review_id: 'review-earliest', action_kind: 'label', created_at: '2026-09-24T02:20:00.000Z' },
+    ]);
 
     db.close();
   });

@@ -336,6 +336,40 @@ describe('KnowledgeWorker', () => {
     expect(pageStore.listPages(PROJECT_A)).toHaveLength(0);
   });
 
+  it('treats lease loss during terminal failure handling as an expected race instead of aborting the worker loop', async () => {
+    const python = registerSource(PROJECT_A, 'src/lease-race.py', 'print("lease race")\n');
+    const job = queue.enqueue({
+      projectId: PROJECT_A,
+      jobKind: 'analyze',
+      sourceVersionId: python.sourceVersionId,
+      payload: { sourceVersionId: python.sourceVersionId },
+    });
+    const generator = {
+      async runKnowledgeGeneration() {
+        db.prepare(
+          `UPDATE knowledge_jobs
+           SET worker_id = 'worker-other', lease_expires_at = ?
+           WHERE id = ?`,
+        ).run('2026-09-25T00:00:00.001Z', job.id);
+        throw new Error('generation failed after ownership drift');
+      },
+    } as unknown as KnowledgeGeneratorService;
+    const worker = new KnowledgeWorker(
+      db,
+      { workerId: 'worker-lease-race', now: () => CREATED_AT },
+      { generator },
+    );
+
+    const result = await worker.runOnce(PROJECT_A);
+
+    expect(result).toMatchObject({ claimed: 1, completed: 0, failed: 0, cancelled: 0 });
+    expect(queue.get(job.id)).toMatchObject({
+      id: job.id,
+      status: 'running',
+      workerId: 'worker-other',
+    });
+  });
+
   it('requires explicit matching project context for direct job processing', async () => {
     const python = registerSource(PROJECT_A, 'src/direct.py', 'print("direct")\n');
     const job = queue.enqueue({
@@ -469,6 +503,124 @@ describe('KnowledgeWorker', () => {
          ORDER BY id`,
       ).all(PROJECT_A),
     ).toEqual(firstInsights);
+  });
+
+  it('persists grounded project-level enrichment reviews without requiring a page version id', async () => {
+    const python = registerSource(PROJECT_A, 'src/project-review.py', 'print("project review")\n');
+    const enrich: KnowledgeEnrichmentService = {
+      async enrich() {
+        return {
+          reviews: [
+            {
+              summary: 'Review: reconcile the generated overview with the current project scope',
+            },
+          ],
+        };
+      },
+    };
+    const worker = new KnowledgeWorker(db, { workerId: 'worker-project-review', now: () => CREATED_AT, enrich });
+
+    queue.enqueue({
+      projectId: PROJECT_A,
+      jobKind: 'analyze',
+      sourceVersionId: python.sourceVersionId,
+      payload: { sourceVersionId: python.sourceVersionId },
+    });
+    const result = await worker.runOnce(PROJECT_A);
+
+    expect(result).toMatchObject({ claimed: 1, completed: 1, failed: 0, cancelled: 0 });
+    expect(
+      listKnowledgeReviews(db, PROJECT_A).filter(
+        (review) => review.summary === 'Review: reconcile the generated overview with the current project scope',
+      ),
+    ).toEqual([
+      expect.objectContaining({
+        pageVersionId: null,
+        status: 'pending',
+      }),
+    ]);
+  });
+
+  it('keeps valid enrichment siblings when invalid items are interleaved and reruns idempotently', async () => {
+    const python = registerSource(PROJECT_A, 'src/mixed.py', 'print("mixed")\n');
+    const enrich: KnowledgeEnrichmentService = {
+      async enrich({ pageVersionIds }) {
+        return {
+          reviews: [
+            { pageVersionId: '', summary: 'invalid empty page version id' },
+            {
+              pageVersionId: pageVersionIds[0] ?? null,
+              summary: 'Contradiction: valid sibling survives invalid review entries',
+            },
+            { pageVersionId: pageVersionIds[0] ?? null, summary: '   ' },
+          ],
+          insights: [
+            { type: 'research_gap', contentPath: 'src/mixed.py', confidence: 0.61 },
+            { type: '', contentPath: 'src/mixed.py', confidence: 0.25 },
+            { type: 'research_gap', contentPath: 'src/mixed.py', confidence: Number.NaN },
+          ],
+        };
+      },
+    };
+    const worker = new KnowledgeWorker(db, { workerId: 'worker-mixed-enrich', now: () => CREATED_AT, enrich });
+
+    queue.enqueue({
+      projectId: PROJECT_A,
+      jobKind: 'analyze',
+      sourceVersionId: python.sourceVersionId,
+      payload: { sourceVersionId: python.sourceVersionId },
+    });
+    const firstRun = await worker.runOnce(PROJECT_A);
+
+    expect(firstRun).toMatchObject({ claimed: 1, completed: 1, failed: 0, cancelled: 0 });
+    expect(firstRun.warnings).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ code: 'enrichment_invalid_review' }),
+        expect.objectContaining({ code: 'enrichment_invalid_insight' }),
+      ]),
+    );
+    expect(
+      listKnowledgeReviews(db, PROJECT_A).filter(
+        (review) => review.summary === 'Contradiction: valid sibling survives invalid review entries',
+      ),
+    ).toHaveLength(1);
+    expect(
+      db.prepare(
+        `SELECT insight_type, content_path
+         FROM knowledge_insights
+         WHERE project_id = ?
+         ORDER BY id`,
+      ).all(PROJECT_A),
+    ).toEqual([
+      {
+        insight_type: 'research_gap',
+        content_path: 'src/mixed.py',
+      },
+    ]);
+    const firstReviewIds = listKnowledgeReviews(db, PROJECT_A).map((review) => review.id);
+    const firstInsightIds = (
+      db.prepare(`SELECT id FROM knowledge_insights WHERE project_id = ? ORDER BY id`).all(PROJECT_A) as Array<{ id: string }>
+    ).map(({ id }) => id);
+
+    db.prepare(
+      `INSERT INTO knowledge_jobs
+       (id, project_id, job_kind, source_version_id, status, payload_json, requested_at, retry_count, max_retries)
+       VALUES (?, ?, 'analyze', NULL, 'queued', ?, ?, 0, 3)`,
+    ).run(
+      createKnowledgeId('job', 'mixed-rerun'),
+      PROJECT_A,
+      JSON.stringify({ sourceVersionId: python.sourceVersionId }),
+      '2026-09-25T00:03:00.000Z',
+    );
+    const secondRun = await worker.runOnce(PROJECT_A);
+
+    expect(secondRun).toMatchObject({ claimed: 1, completed: 1, failed: 0, cancelled: 0 });
+    expect(listKnowledgeReviews(db, PROJECT_A).map((review) => review.id)).toEqual(firstReviewIds);
+    expect(
+      (db.prepare(`SELECT id FROM knowledge_insights WHERE project_id = ? ORDER BY id`).all(PROJECT_A) as Array<{ id: string }>).map(
+        ({ id }) => id,
+      ),
+    ).toEqual(firstInsightIds);
   });
 
   it('skips ungrounded enrichment identifiers instead of attaching them to unrelated project pages', async () => {

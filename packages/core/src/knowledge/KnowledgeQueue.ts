@@ -283,6 +283,10 @@ function getErrorMessage(code: string, id: string): Error {
   return new Error(`${code}: ${id}`);
 }
 
+function leaseLostTransitionError(jobId: string, workerId: string): KnowledgeQueueTransitionError {
+  return new KnowledgeQueueTransitionError(`Knowledge job lease lost for ${jobId} and worker ${workerId}`);
+}
+
 export class KnowledgeQueueTransitionError extends Error {
   public constructor(message: string) {
     super(message);
@@ -370,7 +374,14 @@ export class KnowledgeQueue {
       const row = this.db
         .prepare(
           `SELECT * FROM knowledge_jobs
-           WHERE project_id = @projectId AND status = 'queued'
+           WHERE project_id = @projectId
+             AND status = 'queued'
+             AND worker_id IS NULL
+             AND lease_expires_at IS NULL
+             AND completed_at IS NULL
+             AND failure_code IS NULL
+             AND failure_message IS NULL
+             AND result_json IS NULL
            ORDER BY requested_at, id
            LIMIT 1`,
         )
@@ -381,7 +392,15 @@ export class KnowledgeQueue {
           `UPDATE knowledge_jobs
            SET status = 'running', worker_id = @workerId, lease_expires_at = @leaseExpiresAt,
                started_at = COALESCE(started_at, @now)
-           WHERE id = @id AND project_id = @projectId AND status = 'queued'`,
+           WHERE id = @id
+             AND project_id = @projectId
+             AND status = 'queued'
+             AND worker_id IS NULL
+             AND lease_expires_at IS NULL
+             AND completed_at IS NULL
+             AND failure_code IS NULL
+             AND failure_message IS NULL
+             AND result_json IS NULL`,
         )
         .run({ id: row.id, projectId, workerId, leaseExpiresAt, now });
       return result.changes === 1 ? this.get(row.id) : null;
@@ -394,7 +413,6 @@ export class KnowledgeQueue {
     result?: KnowledgeJobResult,
     options: { progress?: KnowledgeTerminalProgressInput } = {},
   ): KnowledgeJobRecord {
-    const job = this.require(jobId);
     const persistedResult = result === undefined ? null : sanitizePersistedResult(result);
     return this.db.transaction(() => {
       const now = this.now();
@@ -407,7 +425,11 @@ export class KnowledgeQueue {
              AND status = 'running'
              AND worker_id = @workerId
              AND lease_expires_at IS NOT NULL
-             AND lease_expires_at > @now`,
+             AND lease_expires_at > @now
+             AND completed_at IS NULL
+             AND failure_code IS NULL
+             AND failure_message IS NULL
+             AND result_json IS NULL`,
         )
         .run({
           id: jobId,
@@ -420,10 +442,11 @@ export class KnowledgeQueue {
           `Knowledge job ${jobId} is not running with an active lease for worker ${workerId}`,
         );
       }
+      const completedJob = this.require(jobId);
       if (options.progress) {
-        this.insertProgressEvent(job.projectId, jobId, options.progress, now);
+        this.insertProgressEvent(completedJob.projectId, jobId, options.progress, now);
       }
-      return this.require(jobId);
+      return completedJob;
     })();
   }
 
@@ -433,7 +456,6 @@ export class KnowledgeQueue {
     failureMessage: string,
     workerId: string,
   ): KnowledgeJobRecord {
-    const job = this.require(jobId);
     return this.db.transaction(() => {
       const now = this.now();
       const failure = this.db
@@ -446,7 +468,11 @@ export class KnowledgeQueue {
              AND status = 'running'
              AND worker_id = @workerId
              AND lease_expires_at IS NOT NULL
-             AND lease_expires_at > @now`,
+             AND lease_expires_at > @now
+             AND completed_at IS NULL
+             AND failure_code IS NULL
+             AND failure_message IS NULL
+             AND result_json IS NULL`,
         )
         .run({
           id: jobId,
@@ -469,13 +495,35 @@ export class KnowledgeQueue {
     if (job.status !== 'queued' && job.status !== 'running') {
       throw new Error(`Cannot cancel job ${jobId} from ${job.status} state`);
     }
-    this.db
-      .prepare(
-        `UPDATE knowledge_jobs
-         SET status = 'cancelled', completed_at = @now, worker_id = NULL, lease_expires_at = NULL
-         WHERE id = @id`,
-      )
-      .run({ id: jobId, now: this.now() });
+    const statement = job.status === 'queued'
+      ? this.db.prepare(
+          `UPDATE knowledge_jobs
+           SET status = 'cancelled', completed_at = @now, worker_id = NULL, lease_expires_at = NULL
+           WHERE id = @id
+             AND status = 'queued'
+             AND worker_id IS NULL
+             AND lease_expires_at IS NULL
+             AND completed_at IS NULL
+             AND failure_code IS NULL
+             AND failure_message IS NULL
+             AND result_json IS NULL`,
+        )
+      : this.db.prepare(
+          `UPDATE knowledge_jobs
+           SET status = 'cancelled', completed_at = @now, worker_id = NULL, lease_expires_at = NULL
+           WHERE id = @id
+             AND status = 'running'
+             AND worker_id = @workerId
+             AND lease_expires_at IS NOT NULL
+             AND completed_at IS NULL
+             AND failure_code IS NULL
+             AND failure_message IS NULL
+             AND result_json IS NULL`,
+        );
+    const cancellation = statement.run({ id: jobId, now: this.now(), workerId: job.workerId });
+    if (cancellation.changes !== 1) {
+      throw new KnowledgeQueueTransitionError(`Knowledge job ${jobId} changed before cancellation could be applied`);
+    }
     return this.require(jobId);
   }
 
@@ -490,7 +538,11 @@ export class KnowledgeQueue {
            AND status = 'running'
            AND worker_id = @workerId
            AND lease_expires_at IS NOT NULL
-           AND lease_expires_at > @now`,
+           AND lease_expires_at > @now
+           AND completed_at IS NULL
+           AND failure_code IS NULL
+           AND failure_message IS NULL
+           AND result_json IS NULL`,
       )
       .run({ id: jobId, workerId, now });
     if (cancellation.changes !== 1) {
@@ -505,29 +557,57 @@ export class KnowledgeQueue {
     const job = this.require(jobId);
     if (job.status !== 'failed') throw new Error(`Cannot retry job ${jobId} from ${job.status} state`);
     if (job.retryCount > job.maxRetries) throw new Error(`Knowledge job retry limit reached: ${jobId}`);
-    this.db
+    const retried = this.db
       .prepare(
         `UPDATE knowledge_jobs
          SET status = 'queued', completed_at = NULL, failure_code = NULL, failure_message = NULL
-         WHERE id = @id`,
+         WHERE id = @id
+           AND status = 'failed'
+           AND retry_count = @retryCount
+           AND max_retries = @maxRetries
+           AND worker_id IS NULL
+           AND lease_expires_at IS NULL
+           AND result_json IS NULL
+           AND completed_at = @completedAt
+           AND failure_code IS @failureCode
+           AND failure_message IS @failureMessage`,
       )
-      .run({ id: jobId });
+      .run({
+        id: jobId,
+        retryCount: job.retryCount,
+        maxRetries: job.maxRetries,
+        completedAt: job.completedAt,
+        failureCode: job.failureCode,
+        failureMessage: job.failureMessage,
+      });
+    if (retried.changes !== 1) {
+      throw new KnowledgeQueueTransitionError(`Knowledge job ${jobId} changed before retry could be applied`);
+    }
     return this.require(jobId);
   }
 
   public renewLease(jobId: string, workerId: string): KnowledgeJobRecord {
     if (!workerId.trim()) throw new Error('Knowledge queue worker ID must not be empty');
-    const job = this.require(jobId);
-    this.assertRunning(job, workerId);
     const now = this.now();
     const leaseExpiresAt = new Date(Date.parse(now) + this.leaseDurationMs).toISOString();
-    this.db
+    const renewal = this.db
       .prepare(
         `UPDATE knowledge_jobs
          SET lease_expires_at = @leaseExpiresAt
-         WHERE id = @id AND status = 'running' AND worker_id = @workerId`,
+         WHERE id = @id
+           AND status = 'running'
+           AND worker_id = @workerId
+           AND lease_expires_at IS NOT NULL
+           AND lease_expires_at > @now
+           AND completed_at IS NULL
+           AND failure_code IS NULL
+           AND failure_message IS NULL
+           AND result_json IS NULL`,
       )
-      .run({ id: jobId, workerId, leaseExpiresAt });
+      .run({ id: jobId, workerId, leaseExpiresAt, now });
+    if (renewal.changes !== 1) {
+      throw leaseLostTransitionError(jobId, workerId);
+    }
     return this.require(jobId);
   }
 
@@ -724,12 +804,6 @@ export class KnowledgeQueue {
     return this.progressFromEvent(event);
   }
 
-  private assertRunning(job: KnowledgeJobRecord, workerId?: string): void {
-    if (job.status !== 'running') throw new Error(`Knowledge job ${job.id} is not running`);
-    if (workerId !== undefined && job.workerId !== workerId) {
-      throw new Error(`Knowledge job ${job.id} is owned by another worker`);
-    }
-  }
 }
 
 export function enqueueKnowledgeJob(

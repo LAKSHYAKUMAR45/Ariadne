@@ -109,6 +109,11 @@ interface KnowledgeEnrichmentScope {
   contentPaths: Set<string>;
 }
 
+interface NormalizedEnrichmentItems<T> {
+  items: T[];
+  warnings: KnowledgeJobResultWarning[];
+}
+
 export interface KnowledgeEnrichmentInput {
   projectId: string;
   jobId: string;
@@ -253,6 +258,17 @@ function uniqueWarnings(warnings: readonly KnowledgeJobResultWarning[]): Knowled
     }
   }
   return [...deduped.values()].slice(0, MAX_WARNING_COUNT);
+}
+
+function enrichmentItemWarning(
+  code: 'enrichment_invalid_review' | 'enrichment_invalid_insight' | 'enrichment_review_failed' | 'enrichment_insight_failed',
+  index: number,
+  reason: string,
+): KnowledgeJobResultWarning {
+  return {
+    code,
+    message: boundRedactedMessage(`Skipped enrichment item ${index + 1}: ${reason}`, MAX_WARNING_MESSAGE_LENGTH),
+  };
 }
 
 function isAbortError(error: unknown): boolean {
@@ -448,7 +464,9 @@ export class KnowledgeWorker {
       if (failed) {
         return failed;
       }
-      throw error;
+      throw new KnowledgeWorkerLeaseLostError(
+        `Knowledge job ${job.id} is no longer owned by worker ${this.workerId}`,
+      );
     } finally {
       leaseMonitor.stop();
     }
@@ -599,7 +617,7 @@ export class KnowledgeWorker {
     const warnings = [...outcome.warnings];
     const reviews: KnowledgeEnrichmentReviewInput[] = [];
     for (const review of outcome.reviews) {
-      if (review.pageVersionId === null || review.pageVersionId === undefined || !scope.pageVersionIds.has(review.pageVersionId)) {
+      if (review.pageVersionId != null && !scope.pageVersionIds.has(review.pageVersionId)) {
         warnings.push({
           code: 'enrichment_ungrounded',
           message: 'Skipped enrichment output outside the current run scope.',
@@ -740,11 +758,17 @@ export class KnowledgeWorker {
       if (!result) {
         return { enriched: true, warnings: [], reviews: [], insights: [] };
       }
+      const normalizedReviews = this.normalizeEnrichmentReviews(result.reviews ?? []);
+      const normalizedInsights = this.normalizeEnrichmentInsights(result.insights ?? []);
       return {
         enriched: true,
-        warnings: uniqueWarnings(result.warnings ?? []),
-        reviews: this.normalizeEnrichmentReviews(result.reviews ?? []),
-        insights: this.normalizeEnrichmentInsights(result.insights ?? []),
+        warnings: uniqueWarnings([
+          ...(result.warnings ?? []),
+          ...normalizedReviews.warnings,
+          ...normalizedInsights.warnings,
+        ]),
+        reviews: normalizedReviews.items,
+        insights: normalizedInsights.items,
       };
     } catch (error) {
       if (isAbortError(error) || this.signal?.aborted) {
@@ -769,18 +793,19 @@ export class KnowledgeWorker {
     outcome: KnowledgeEnrichmentOutcome,
   ): KnowledgeJobResultWarning[] {
     const warnings = [...outcome.warnings];
-    try {
-      for (const review of outcome.reviews) {
+    for (const [index, review] of outcome.reviews.entries()) {
+      try {
         this.ensureReview(projectId, review.pageVersionId ?? null, review.summary);
+      } catch (error) {
+        warnings.push(enrichmentItemWarning('enrichment_review_failed', index, asErrorMessage(error)));
       }
-      for (const insight of outcome.insights) {
+    }
+    for (const [index, insight] of outcome.insights.entries()) {
+      try {
         this.ensureInsight(projectId, insight);
+      } catch (error) {
+        warnings.push(enrichmentItemWarning('enrichment_insight_failed', index, asErrorMessage(error)));
       }
-    } catch (error) {
-      warnings.push({
-        code: 'enrichment_failed',
-        message: boundRedactedMessage(asErrorMessage(error), MAX_WARNING_MESSAGE_LENGTH),
-      });
     }
     return uniqueWarnings(warnings);
   }
@@ -811,36 +836,72 @@ export class KnowledgeWorker {
 
   private normalizeEnrichmentReviews(
     reviews: readonly KnowledgeEnrichmentReviewInput[],
-  ): KnowledgeEnrichmentReviewInput[] {
+  ): NormalizedEnrichmentItems<KnowledgeEnrichmentReviewInput> {
     const deduped = new Map<string, KnowledgeEnrichmentReviewInput>();
-    for (const review of reviews.slice(0, MAX_ENRICHMENT_ITEMS)) {
-      const summary = boundRedactedMessage(review.summary, MAX_WARNING_MESSAGE_LENGTH);
-      const pageVersionId = review.pageVersionId ?? null;
+    const warnings: KnowledgeJobResultWarning[] = [];
+    for (const [index, review] of reviews.slice(0, MAX_ENRICHMENT_ITEMS).entries()) {
+      let summary: string;
+      try {
+        summary = boundRedactedMessage(requireNonEmptyString(review.summary, 'review summary'), MAX_WARNING_MESSAGE_LENGTH);
+      } catch (error) {
+        warnings.push(enrichmentItemWarning('enrichment_invalid_review', index, asErrorMessage(error)));
+        continue;
+      }
+      let pageVersionId: string | null = null;
+      try {
+        pageVersionId = review.pageVersionId == null
+          ? null
+          : boundRedactedMessage(requireNonEmptyString(review.pageVersionId, 'review pageVersionId'), MAX_WARNING_MESSAGE_LENGTH);
+      } catch (error) {
+        warnings.push(enrichmentItemWarning('enrichment_invalid_review', index, asErrorMessage(error)));
+        continue;
+      }
       const key = `${pageVersionId ?? 'project'}\0${summary}`;
       if (!deduped.has(key)) {
         deduped.set(key, { pageVersionId, summary });
       }
     }
-    return [...deduped.values()];
+    return {
+      items: [...deduped.values()],
+      warnings: uniqueWarnings(warnings),
+    };
   }
 
   private normalizeEnrichmentInsights(
     insights: readonly KnowledgeEnrichmentInsightInput[],
-  ): KnowledgeEnrichmentInsightInput[] {
+  ): NormalizedEnrichmentItems<KnowledgeEnrichmentInsightInput> {
     const deduped = new Map<string, KnowledgeEnrichmentInsightInput>();
-    for (const insight of insights.slice(0, MAX_ENRICHMENT_ITEMS)) {
-      const type = boundRedactedMessage(
-        requireNonEmptyString(insight.type, 'insight type'),
-        MAX_ENRICHMENT_TYPE_LENGTH,
-      );
-      const contentPath = boundRedactedMessage(insight.contentPath, MAX_WARNING_MESSAGE_LENGTH);
+    const warnings: KnowledgeJobResultWarning[] = [];
+    for (const [index, insight] of insights.slice(0, MAX_ENRICHMENT_ITEMS).entries()) {
+      let type: string;
+      let contentPath: string;
+      try {
+        type = boundRedactedMessage(
+          requireNonEmptyString(insight.type, 'insight type'),
+          MAX_ENRICHMENT_TYPE_LENGTH,
+        );
+        contentPath = boundRedactedMessage(
+          requireNonEmptyString(insight.contentPath, 'insight contentPath'),
+          MAX_WARNING_MESSAGE_LENGTH,
+        );
+      } catch (error) {
+        warnings.push(enrichmentItemWarning('enrichment_invalid_insight', index, asErrorMessage(error)));
+        continue;
+      }
+      if (!Number.isFinite(insight.confidence)) {
+        warnings.push(enrichmentItemWarning('enrichment_invalid_insight', index, 'Knowledge worker insight confidence must be finite'));
+        continue;
+      }
       const confidence = Math.max(0, Math.min(1, insight.confidence));
       const key = `${type}\0${contentPath}`;
       if (!deduped.has(key)) {
         deduped.set(key, { type, contentPath, confidence });
       }
     }
-    return [...deduped.values()];
+    return {
+      items: [...deduped.values()],
+      warnings: uniqueWarnings(warnings),
+    };
   }
 
   private startLeaseMonitor(jobId: string): LeaseMonitor {
