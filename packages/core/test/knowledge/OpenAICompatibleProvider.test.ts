@@ -13,8 +13,11 @@ import {
   OpenAICompatibleEnrichmentService,
   OpenAICompatibleProvider,
   type OpenAICompatibleHostPolicy,
+  type OpenAICompatiblePinnedTransportRequest,
   type OpenAICompatibleResolvedAddress,
   type OpenAICompatibleTransport,
+  type OpenAICompatibleTransportRequest,
+  type OpenAICompatibleValidatedPinnedTransportRequest,
 } from '../../src/knowledge/providers/OpenAICompatibleProvider.js';
 import type { DeterministicExtraction, ExtractedSection, ExtractedSymbol } from '../../src/knowledge/KnowledgeExtraction.js';
 
@@ -234,15 +237,57 @@ describe('OpenAICompatibleProvider', () => {
     });
   }
 
-  function staticTransport(
+  function requestInitFromTransport(input: OpenAICompatibleTransportRequest): RequestInit {
+    return {
+      method: input.method,
+      redirect: input.redirect,
+      signal: input.signal,
+      headers: input.headers,
+      body: input.body,
+    };
+  }
+
+  function pinnedUrl(request: OpenAICompatibleValidatedPinnedTransportRequest): string {
+    const host = request.connectionTarget.address.family === 6
+      ? `[${request.connectionTarget.address.address}]`
+      : request.connectionTarget.address.address;
+    return `${request.connectionTarget.protocol}//${host}:${request.connectionTarget.port}${request.payload.path}`;
+  }
+
+  function staticTransport(fetchImplementation: typeof fetch): OpenAICompatibleTransport {
+    return {
+      async request(input) {
+        return fetchImplementation(input.url, requestInitFromTransport(input));
+      },
+    };
+  }
+
+  function pinnedTransport(
     fetchImplementation: typeof fetch,
     addresses: readonly OpenAICompatibleResolvedAddress[],
+    hooks: {
+      onPinnedRequest?: (input: OpenAICompatiblePinnedTransportRequest) => void;
+      onValidatedRequest?: (request: OpenAICompatibleValidatedPinnedTransportRequest) => void;
+      onConnect?: (usedAddresses: readonly OpenAICompatibleResolvedAddress[]) => void;
+    } = {},
   ): OpenAICompatibleTransport {
     return {
-      fetch: fetchImplementation,
-      pinsResolvedHostnames: true,
-      async resolveHostname() {
-        return addresses;
+      ...staticTransport(fetchImplementation),
+      async requestPinned(input) {
+        hooks.onPinnedRequest?.(input);
+        const selectedAddress = addresses[0];
+        if (!selectedAddress) {
+          throw new Error('Expected at least one pinned address in test transport');
+        }
+        const validated = await input.buildValidatedRequest({ resolvedAddresses: addresses, selectedAddress });
+        hooks.onValidatedRequest?.(validated);
+        hooks.onConnect?.(validated.approvedAddresses);
+        return fetchImplementation(pinnedUrl(validated), {
+          method: validated.payload.method,
+          signal: validated.payload.signal,
+          headers: validated.payload.headers,
+          body: validated.payload.body,
+        });
       },
     };
   }
@@ -297,6 +342,73 @@ describe('OpenAICompatibleProvider', () => {
     });
   });
 
+  it('never resolves unsafe legacy env names or sends Authorization for them, while exact allowlisted legacy names may still work', async () => {
+    const resolverCalls: string[] = [];
+    const authorizationHeaders: Array<string | undefined> = [];
+    const publicAddresses = [{ address: '93.184.216.34', family: 4 }] as const;
+    const provider = new OpenAICompatibleProvider({
+      credentialPolicy: {
+        allowedLegacyEnvironmentVariables: new Set(['OPENAI_API_KEY']),
+        resolveApiKey({ envName, environment }) {
+          resolverCalls.push(envName);
+          return environment[envName] ?? null;
+        },
+      },
+      hostPolicy: { allowedOrigins: new Set(['https://api.example.com']) },
+      transport: pinnedTransport(
+        async () =>
+          new Response(
+            JSON.stringify({
+              choices: [
+                {
+                  message: {
+                    content: JSON.stringify(analysisPayload('source-1')),
+                  },
+                },
+              ],
+            }),
+            { status: 200, headers: { 'content-type': 'application/json' } },
+          ),
+        publicAddresses,
+        {
+          onValidatedRequest(request) {
+            authorizationHeaders.push(request.payload.headers.authorization);
+          },
+        },
+      ),
+    });
+
+    const unsafeResult = await provider.analyze({
+      profile: createProfile('https://api.example.com/v1', { apiKeyEnv: 'DATABASE_URL' }),
+      environment: {
+        DATABASE_URL: 'postgres://secret',
+        OPENAI_API_KEY: 'sk-live-legacy-value',
+      },
+      prompt: 'prompt',
+      sourceId: 'source-1',
+      sourceVersionId: 'source-version-1',
+      sourceSpans: [groundedSpan()],
+    });
+    expect(unsafeResult.value.summary).toBe('Grounded summary');
+    expect(resolverCalls).toEqual([]);
+    expect(authorizationHeaders).toEqual([undefined]);
+
+    const allowlistedResult = await provider.analyze({
+      profile: createProfile('https://api.example.com/v1', { apiKeyEnv: 'OPENAI_API_KEY' }),
+      environment: {
+        DATABASE_URL: 'postgres://secret',
+        OPENAI_API_KEY: 'sk-live-legacy-value',
+      },
+      prompt: 'prompt',
+      sourceId: 'source-1',
+      sourceVersionId: 'source-version-1',
+      sourceSpans: [groundedSpan()],
+    });
+    expect(allowlistedResult.value.summary).toBe('Grounded summary');
+    expect(resolverCalls).toEqual(['OPENAI_API_KEY']);
+    expect(authorizationHeaders[1]).toBe('Bearer sk-live-legacy-value');
+  });
+
   it('rejects timeouts with redacted bounded diagnostics', async () => {
     const { endpoint } = await startServer(async (_request, response) => {
       await new Promise((resolve) => setTimeout(resolve, 150));
@@ -334,14 +446,13 @@ describe('OpenAICompatibleProvider', () => {
       credentialPolicy: { allowedEnvironmentVariables: new Set([DEFAULT_API_KEY_ENV]) },
       hostPolicy: { allowedOrigins: new Set(['https://api.example.com']) },
       transport: {
-        fetch: async () => {
+        async request() {
           fetchCalls += 1;
           throw new Error('fetch should not run');
         },
-        pinsResolvedHostnames: true,
-        async resolveHostname() {
+        async requestPinned() {
           await new Promise(() => {});
-          return [];
+          throw new Error('unreachable');
         },
       },
     });
@@ -364,7 +475,7 @@ describe('OpenAICompatibleProvider', () => {
     const provider = new OpenAICompatibleProvider({
       credentialPolicy: { allowedEnvironmentVariables: new Set([DEFAULT_API_KEY_ENV]) },
       hostPolicy: { allowedOrigins: new Set(['https://api.example.com']) },
-      transport: staticTransport(async () => {
+      transport: pinnedTransport(async () => {
         fetchCalls += 1;
         throw new Error('fetch should not run');
       }, [{ address: '93.184.216.34', family: 4 }]),
@@ -470,7 +581,7 @@ describe('OpenAICompatibleProvider', () => {
     const provider = new OpenAICompatibleProvider({
       credentialPolicy: { allowedEnvironmentVariables: new Set([DEFAULT_API_KEY_ENV]) },
       hostPolicy: { allowedOrigins: new Set(['https://api.example.com']) },
-      transport: staticTransport(
+      transport: pinnedTransport(
         async () => {
           fetchCalls += 1;
           throw new Error('fetch should not run');
@@ -493,7 +604,7 @@ describe('OpenAICompatibleProvider', () => {
     expect(fetchCalls).toBe(0);
   });
 
-  it('requires host approval for credential-bearing public origins and rejects resolved private or mapped-loopback addresses', async () => {
+  it('requires host approval for credential-bearing public origins and rejects unpinned or private named-host transports', async () => {
     let fetchCalls = 0;
     const publicResponse = async () =>
       new Response(
@@ -512,7 +623,7 @@ describe('OpenAICompatibleProvider', () => {
 
     const deniedProvider = new OpenAICompatibleProvider({
       credentialPolicy: { allowedEnvironmentVariables: new Set([DEFAULT_API_KEY_ENV]) },
-      transport: staticTransport(async (...args) => {
+      transport: pinnedTransport(async (...args) => {
         fetchCalls += 1;
         return publicResponse(...args);
       }, [{ address: '93.184.216.34', family: 4 }]),
@@ -531,7 +642,7 @@ describe('OpenAICompatibleProvider', () => {
 
     await expect(() =>
       new OpenAICompatibleProvider({
-        transport: staticTransport(async () => publicResponse(), [{ address: '93.184.216.34', family: 4 }]),
+        transport: pinnedTransport(async () => publicResponse(), [{ address: '93.184.216.34', family: 4 }]),
       }).analyze({
         profile: createProfile('https://anonymous.example/v1', { apiKeyEnv: null }),
         environment: {},
@@ -545,7 +656,7 @@ describe('OpenAICompatibleProvider', () => {
     const approvedProvider = new OpenAICompatibleProvider({
       credentialPolicy: { allowedEnvironmentVariables: new Set([DEFAULT_API_KEY_ENV]) },
       hostPolicy: { allowedOrigins: new Set(['https://api.example.com']) },
-      transport: staticTransport(async (...args) => {
+      transport: pinnedTransport(async (...args) => {
         fetchCalls += 1;
         return publicResponse(...args);
       }, [{ address: '93.184.216.34', family: 4 }]),
@@ -560,9 +671,32 @@ describe('OpenAICompatibleProvider', () => {
     });
     expect(approved.value.summary).toBe('Grounded summary');
 
+    let naiveRequestCalls = 0;
+    const naiveProvider = new OpenAICompatibleProvider({
+      credentialPolicy: { allowedEnvironmentVariables: new Set([DEFAULT_API_KEY_ENV]) },
+      hostPolicy: { allowedOrigins: new Set(['https://api.example.com']) },
+      transport: {
+        async request() {
+          naiveRequestCalls += 1;
+          return publicResponse();
+        },
+      },
+    });
+    await expect(() =>
+      naiveProvider.analyze({
+        profile,
+        environment: { [DEFAULT_API_KEY_ENV]: 'sk-live-provider-key' },
+        prompt: 'prompt',
+        sourceId: 'source-1',
+        sourceVersionId: 'source-version-1',
+        sourceSpans: [groundedSpan()],
+      }),
+    ).rejects.toThrow(/requestPinned|named host/i);
+    expect(naiveRequestCalls).toBe(0);
+
     const mappedLoopbackProvider = new OpenAICompatibleProvider({
       hostPolicy: { allowedOrigins: new Set(['https://public.example']) },
-      transport: staticTransport(async () => publicResponse(), [{ address: '::ffff:127.0.0.1', family: 6 }]),
+      transport: pinnedTransport(async () => publicResponse(), [{ address: '::ffff:127.0.0.1', family: 6 }]),
     });
     await expect(() =>
       mappedLoopbackProvider.analyze({
@@ -577,7 +711,7 @@ describe('OpenAICompatibleProvider', () => {
 
     const embeddedLoopbackProvider = new OpenAICompatibleProvider({
       hostPolicy: { allowedOrigins: new Set(['https://metadata.example']) },
-      transport: staticTransport(async () => publicResponse(), [{ address: '::a9fe:a9fe', family: 6 }]),
+      transport: pinnedTransport(async () => publicResponse(), [{ address: '::a9fe:a9fe', family: 6 }]),
     });
     await expect(() =>
       embeddedLoopbackProvider.analyze({
@@ -592,7 +726,7 @@ describe('OpenAICompatibleProvider', () => {
 
     const nat64MetadataProvider = new OpenAICompatibleProvider({
       hostPolicy: { allowedOrigins: new Set(['https://nat64.example']) },
-      transport: staticTransport(async () => publicResponse(), [{ address: '64:ff9b::a9fe:a9fe', family: 6 }]),
+      transport: pinnedTransport(async () => publicResponse(), [{ address: '64:ff9b::a9fe:a9fe', family: 6 }]),
     });
     await expect(() =>
       nat64MetadataProvider.analyze({
@@ -607,7 +741,7 @@ describe('OpenAICompatibleProvider', () => {
 
     const nat64LocalPrefixProvider = new OpenAICompatibleProvider({
       hostPolicy: { allowedOrigins: new Set(['https://nat64-local.example']) },
-      transport: staticTransport(async () => publicResponse(), [{ address: '64:ff9b:1::a9fe:a9fe', family: 6 }]),
+      transport: pinnedTransport(async () => publicResponse(), [{ address: '64:ff9b:1::a9fe:a9fe', family: 6 }]),
     });
     await expect(() =>
       nat64LocalPrefixProvider.analyze({
@@ -638,7 +772,6 @@ describe('OpenAICompatibleProvider', () => {
             }),
             { status: 200, headers: { 'content-type': 'application/json' } },
           ),
-        [{ address: '::1', family: 6 }],
       ),
     });
 
@@ -654,6 +787,143 @@ describe('OpenAICompatibleProvider', () => {
     expect(result.value.summary).toBe('Grounded summary');
   });
 
+  it('keeps literal loopback fixtures on the plain request path and preserves original TLS hostname metadata for named hosts', async () => {
+    const plainRequestUrls: string[] = [];
+    const namedHostInputs: OpenAICompatiblePinnedTransportRequest[] = [];
+    const connectedAddressSets: Array<readonly OpenAICompatibleResolvedAddress[]> = [];
+    const publicAddresses = [{ address: '93.184.216.34', family: 4 }] as const;
+    const loopback = new OpenAICompatibleProvider({
+      hostPolicy: { allowedOrigins: new Set(['http://127.0.0.1:11434']) },
+      transport: {
+        async request(input) {
+          plainRequestUrls.push(input.url);
+          return new Response(
+            JSON.stringify({
+              choices: [
+                {
+                  message: {
+                    content: JSON.stringify(analysisPayload('source-1')),
+                  },
+                },
+              ],
+            }),
+            { status: 200, headers: { 'content-type': 'application/json' } },
+          );
+        },
+      },
+    });
+
+    const loopbackResult = await loopback.analyze({
+      profile: createProfile('http://127.0.0.1:11434/v1', { apiKeyEnv: null }),
+      environment: {},
+      prompt: 'prompt',
+      sourceId: 'source-1',
+      sourceVersionId: 'source-version-1',
+      sourceSpans: [groundedSpan()],
+    });
+    expect(loopbackResult.value.summary).toBe('Grounded summary');
+    expect(plainRequestUrls).toEqual(['http://127.0.0.1:11434/v1/chat/completions']);
+
+    const namedHostProvider = new OpenAICompatibleProvider({
+      credentialPolicy: { allowedEnvironmentVariables: new Set([DEFAULT_API_KEY_ENV]) },
+      hostPolicy: { allowedOrigins: new Set(['https://api.example.com']) },
+      transport: pinnedTransport(
+        async () =>
+          new Response(
+            JSON.stringify({
+              choices: [
+                {
+                  message: {
+                    content: JSON.stringify(analysisPayload('source-1')),
+                  },
+                },
+              ],
+            }),
+            { status: 200, headers: { 'content-type': 'application/json' } },
+          ),
+        publicAddresses,
+        {
+          onPinnedRequest(input) {
+            namedHostInputs.push(input);
+          },
+          onConnect(addresses) {
+            connectedAddressSets.push(addresses);
+          },
+        },
+      ),
+    });
+
+    const namedHostResult = await namedHostProvider.analyze({
+      profile: createProfile('https://api.example.com/v1'),
+      environment: { [DEFAULT_API_KEY_ENV]: 'sk-live-provider-key' },
+      prompt: 'prompt',
+      sourceId: 'source-1',
+      sourceVersionId: 'source-version-1',
+      sourceSpans: [groundedSpan()],
+    });
+
+    expect(namedHostResult.value.summary).toBe('Grounded summary');
+    expect(namedHostInputs).toHaveLength(1);
+    expect(namedHostInputs[0]).toMatchObject({
+      origin: 'https://api.example.com',
+      originalHostname: 'api.example.com',
+      tlsServername: 'api.example.com',
+    });
+    expect(connectedAddressSets).toEqual([publicAddresses]);
+  });
+
+  it('hands named hosts to a single pinned transport operation so validation and connection share the same address set', async () => {
+    const validatedAddressSets: Array<readonly OpenAICompatibleResolvedAddress[]> = [];
+    const connectedAddressSets: Array<readonly OpenAICompatibleResolvedAddress[]> = [];
+    const addresses = [
+      { address: '93.184.216.34', family: 4 as const },
+      { address: '2606:2800:220:1:248:1893:25c8:1946', family: 6 as const },
+    ] as const;
+    const provider = new OpenAICompatibleProvider({
+      credentialPolicy: { allowedEnvironmentVariables: new Set([DEFAULT_API_KEY_ENV]) },
+      hostPolicy: { allowedOrigins: new Set(['https://api.example.com']) },
+      transport: pinnedTransport(
+        async () =>
+          new Response(
+            JSON.stringify({
+              choices: [
+                {
+                  message: {
+                    content: JSON.stringify(analysisPayload('source-1')),
+                  },
+                },
+              ],
+            }),
+            { status: 200, headers: { 'content-type': 'application/json' } },
+          ),
+        addresses,
+        {
+          onValidatedRequest(request) {
+            validatedAddressSets.push(request.approvedAddresses);
+          },
+          onConnect(resolvedAddresses) {
+            connectedAddressSets.push(resolvedAddresses);
+          },
+        },
+      ),
+    });
+
+    const result = await provider.analyze({
+      profile: createProfile('https://api.example.com/v1'),
+      environment: { [DEFAULT_API_KEY_ENV]: 'sk-live-provider-key' },
+      prompt: 'prompt',
+      sourceId: 'source-1',
+      sourceVersionId: 'source-version-1',
+      sourceSpans: [groundedSpan()],
+    });
+
+    expect(result.value.summary).toBe('Grounded summary');
+    expect(validatedAddressSets).toHaveLength(1);
+    expect(connectedAddressSets).toHaveLength(1);
+    expect(validatedAddressSets[0]).toBe(connectedAddressSets[0]);
+    expect(validatedAddressSets[0]).toEqual(addresses);
+  });
+
   it('enforces response byte limits while streaming and cancels oversized bodies even when Content-Length lies', async () => {
     let cancelled = false;
     const oversizedMessage = JSON.stringify({
@@ -667,7 +937,7 @@ describe('OpenAICompatibleProvider', () => {
     });
     const provider = new OpenAICompatibleProvider({
       hostPolicy: { allowedOrigins: new Set(['https://api.example.com']) },
-      transport: staticTransport(
+      transport: pinnedTransport(
         async () =>
           new Response(
             new ReadableStream<Uint8Array>({

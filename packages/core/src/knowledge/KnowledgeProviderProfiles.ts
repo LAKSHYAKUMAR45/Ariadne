@@ -76,6 +76,7 @@ export interface ResolveKnowledgeProviderApiKeyResult {
 
 export interface KnowledgeProviderCredentialPolicy {
   allowedEnvironmentVariables?: ReadonlySet<string>;
+  allowedLegacyEnvironmentVariables?: ReadonlySet<string>;
   resolveApiKey?: (input: {
     profile: KnowledgeProviderProfile;
     environment: NodeJS.ProcessEnv;
@@ -436,10 +437,27 @@ export function resolveKnowledgeProviderApiKey(
   if (profile.apiKeyEnv === null) {
     return { apiKey: null, warnings: [] };
   }
+  const usesDedicatedProviderPrefix = profile.apiKeyEnv.startsWith(KNOWLEDGE_PROVIDER_ENVIRONMENT_PREFIX);
+  const legacyEnvAllowlisted = policy.allowedLegacyEnvironmentVariables?.has(profile.apiKeyEnv) === true;
+  if (!usesDedicatedProviderPrefix && !legacyEnvAllowlisted) {
+    return {
+      apiKey: null,
+      warnings: [
+        {
+          code: 'provider_api_key_not_allowed',
+          message: sanitizeDiagnostic(
+            `Provider profile "${profile.profileName}" references legacy environment variable "${profile.apiKeyEnv}", but the host did not explicitly allowlist it. Resolution was skipped.`,
+          ),
+        },
+      ],
+    };
+  }
   if (policy.resolveApiKey) {
+    const candidate = environment[profile.apiKeyEnv];
+    const resolverEnvironment: NodeJS.ProcessEnv = typeof candidate === 'string' ? { [profile.apiKeyEnv]: candidate } : {};
     const resolved = policy.resolveApiKey({
       profile,
-      environment,
+      environment: resolverEnvironment,
       envName: profile.apiKeyEnv,
     });
     if (typeof resolved !== 'string' || resolved.trim().length === 0) {
@@ -457,7 +475,7 @@ export function resolveKnowledgeProviderApiKey(
     }
     return { apiKey: resolved, warnings: [] };
   }
-  if (!policy.allowedEnvironmentVariables?.has(profile.apiKeyEnv)) {
+  if (!policy.allowedEnvironmentVariables?.has(profile.apiKeyEnv) && !legacyEnvAllowlisted) {
     return {
       apiKey: null,
       warnings: [

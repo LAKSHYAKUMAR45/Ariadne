@@ -225,6 +225,122 @@ describe('KnowledgeProviderProfileStore', () => {
     });
   });
 
+  it('quarantines unsafe legacy env names before resolver callbacks and requires exact legacy allowlisting', async () => {
+    const db = database();
+    const projectId = createProject(db);
+    const resolverCalls: string[] = [];
+    const adapterEnvironmentKeys: string[][] = [];
+    const seenApiKeys: Array<string | null> = [];
+    const accessed: string[] = [];
+    const env = new Proxy(
+      {
+        DATABASE_URL: 'postgres://secret',
+        OPENAI_API_KEY: 'sk-live-legacy-value',
+      },
+      {
+        get(target, property, receiver) {
+          if (typeof property === 'string') {
+            accessed.push(property);
+          }
+          return Reflect.get(target, property, receiver);
+        },
+      },
+    ) as NodeJS.ProcessEnv;
+    const store = createStore(db, {
+      adapter: {
+        async testProfile({ apiKey, environment }) {
+          seenApiKeys.push(apiKey);
+          adapterEnvironmentKeys.push(Object.keys(environment).sort());
+          return { success: true };
+        },
+      },
+      credentialPolicy: {
+        allowedEnvironmentVariables: new Set(['DATABASE_URL', 'OPENAI_API_KEY']),
+        allowedLegacyEnvironmentVariables: new Set(['OPENAI_API_KEY']),
+        resolveApiKey({ envName, environment }) {
+          resolverCalls.push(envName);
+          return environment[envName] ?? null;
+        },
+      },
+    });
+    db.prepare(
+      `INSERT INTO knowledge_provider_profiles
+       (id, project_id, provider_kind, profile_name, configuration_json, created_at, updated_at)
+       VALUES (?, ?, 'openai-compatible', ?, ?, ?, ?)`,
+    ).run(
+      'provider_legacy_unsafe',
+      projectId,
+      'legacy-unsafe',
+      JSON.stringify({
+        endpoint: 'https://api.example.com/v1',
+        model: 'gpt-4.1-mini',
+        capabilities: ['analysis'],
+        timeoutMs: 10_000,
+        apiKeyEnv: 'DATABASE_URL',
+        enabled: true,
+      }),
+      CREATED_AT,
+      CREATED_AT,
+    );
+    db.prepare(
+      `INSERT INTO knowledge_provider_profiles
+       (id, project_id, provider_kind, profile_name, configuration_json, created_at, updated_at)
+       VALUES (?, ?, 'openai-compatible', ?, ?, ?, ?)`,
+    ).run(
+      'provider_legacy_allowlisted',
+      projectId,
+      'legacy-allowlisted',
+      JSON.stringify({
+        endpoint: 'https://api.example.com/v1',
+        model: 'gpt-4.1-mini',
+        capabilities: ['analysis'],
+        timeoutMs: 10_000,
+        apiKeyEnv: 'OPENAI_API_KEY',
+        enabled: true,
+      }),
+      CREATED_AT,
+      CREATED_AT,
+    );
+
+    const unsafe = await store.test(projectId, 'legacy-unsafe', env);
+    expect(resolverCalls).toEqual([]);
+    expect(seenApiKeys).toEqual([null]);
+    expect(adapterEnvironmentKeys).toEqual([[]]);
+    expect(unsafe.warnings).toEqual([
+      expect.objectContaining({
+        code: 'provider_api_key_not_allowed',
+        message: expect.stringContaining('DATABASE_URL'),
+      }),
+    ]);
+    expect(accessed).not.toContain('DATABASE_URL');
+
+    resolverCalls.length = 0;
+    accessed.length = 0;
+    const allowlisted = await store.test(projectId, 'legacy-allowlisted', env);
+    expect(resolverCalls).toEqual(['OPENAI_API_KEY']);
+    expect(seenApiKeys).toEqual([null, 'sk-live-legacy-value']);
+    expect(adapterEnvironmentKeys).toEqual([[], ['OPENAI_API_KEY']]);
+    expect(allowlisted.warnings).toEqual([]);
+    expect(accessed).toContain('OPENAI_API_KEY');
+    expect(accessed).not.toContain('DATABASE_URL');
+
+    const directReadApiKeys: Array<string | null> = [];
+    const directReadStore = createStore(db, {
+      adapter: {
+        async testProfile({ apiKey }) {
+          directReadApiKeys.push(apiKey);
+          return { success: true };
+        },
+      },
+      credentialPolicy: {
+        allowedLegacyEnvironmentVariables: new Set(['OPENAI_API_KEY']),
+      },
+    });
+    const directRead = await directReadStore.test(projectId, 'legacy-allowlisted', env);
+    expect(directReadApiKeys).toEqual(['sk-live-legacy-value']);
+    expect(directRead.warnings).toEqual([]);
+  });
+
   it('omits provider configuration from archives and never resolves environment values during export', () => {
     const db = database();
     const projectId = createProject(db);

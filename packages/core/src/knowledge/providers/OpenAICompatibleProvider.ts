@@ -1,4 +1,3 @@
-import { lookup } from 'node:dns/promises';
 import net from 'node:net';
 import type Database from 'better-sqlite3';
 import {
@@ -109,10 +108,91 @@ export interface OpenAICompatibleResolvedAddress {
   family: 4 | 6;
 }
 
+export interface OpenAICompatibleTransportRequest {
+  url: string;
+  method: string;
+  redirect: RequestRedirect;
+  signal: AbortSignal;
+  headers: Readonly<Record<string, string>>;
+  body: string;
+}
+
+export interface OpenAICompatiblePinnedTransportRequest {
+  origin: string;
+  originalHostname: string;
+  protocol: 'http:' | 'https:';
+  port: number;
+  path: string;
+  signal: AbortSignal;
+  tlsServername: string | null;
+  buildValidatedRequest(input: {
+    resolvedAddresses: readonly OpenAICompatibleResolvedAddress[];
+    selectedAddress: OpenAICompatibleResolvedAddress;
+  }): Promise<OpenAICompatibleValidatedPinnedTransportRequest>;
+}
+
+export interface OpenAICompatiblePinnedConnectionTarget {
+  address: OpenAICompatibleResolvedAddress;
+  protocol: 'http:' | 'https:';
+  port: number;
+  hostHeader: string;
+  tlsServername: string | null;
+}
+
+export interface OpenAICompatiblePinnedRequestPayload {
+  method: string;
+  headers: Readonly<Record<string, string>>;
+  body: string;
+  signal: AbortSignal;
+  path: string;
+}
+
+export interface OpenAICompatibleValidatedPinnedTransportRequest {
+  approvedAddresses: readonly OpenAICompatibleResolvedAddress[];
+  connectionTarget: OpenAICompatiblePinnedConnectionTarget;
+  payload: OpenAICompatiblePinnedRequestPayload;
+}
+
+function hasMatchingResolvedAddress(
+  selectedAddress: OpenAICompatibleResolvedAddress,
+  resolvedAddresses: readonly OpenAICompatibleResolvedAddress[],
+): boolean {
+  return resolvedAddresses.some(
+    (candidate) => candidate.address === selectedAddress.address && candidate.family === selectedAddress.family,
+  );
+}
+
+function hostHeaderForUrl(url: URL): string {
+  if (url.port === '') {
+    return url.hostname;
+  }
+  return `${url.hostname}:${url.port}`;
+}
+
+function requestPathForUrl(url: URL): string {
+  const path = `${url.pathname}${url.search}`;
+  return path === '' ? '/' : path;
+}
+
+function toPinnedConnectionTarget(
+  url: URL,
+  protocol: 'http:' | 'https:',
+  port: number,
+  tlsServername: string | null,
+  selectedAddress: OpenAICompatibleResolvedAddress,
+): OpenAICompatiblePinnedConnectionTarget {
+  return {
+    address: selectedAddress,
+    protocol,
+    port,
+    hostHeader: hostHeaderForUrl(url),
+    tlsServername,
+  };
+}
+
 export interface OpenAICompatibleTransport {
-  fetch: typeof fetch;
-  pinsResolvedHostnames?: boolean;
-  resolveHostname(hostname: string): Promise<readonly OpenAICompatibleResolvedAddress[]>;
+  request(input: OpenAICompatibleTransportRequest): Promise<Response>;
+  requestPinned?(input: OpenAICompatiblePinnedTransportRequest): Promise<Response>;
 }
 
 export interface OpenAICompatibleHostPolicy {
@@ -528,20 +608,21 @@ function renderGenerationPrompt(
   return prompt;
 }
 
-function createDefaultTransport(fetchImplementation?: typeof fetch): OpenAICompatibleTransport {
+function requestInitFromTransport(input: OpenAICompatibleTransportRequest): RequestInit {
   return {
-    fetch: fetchImplementation ?? fetch,
-    pinsResolvedHostnames: false,
-    async resolveHostname(hostname: string): Promise<readonly OpenAICompatibleResolvedAddress[]> {
-      const normalizedHostname = hostname.replace(/^\[/, '').replace(/\]$/, '');
-      const literalFamily = net.isIP(normalizedHostname);
-      if (literalFamily === 4 || literalFamily === 6) {
-        return [{ address: normalizedHostname, family: literalFamily }];
-      }
-      const results = await lookup(normalizedHostname, { all: true, verbatim: true });
-      return results
-        .filter((result): result is { address: string; family: 4 | 6 } => result.family === 4 || result.family === 6)
-        .map((result) => ({ address: result.address, family: result.family }));
+    method: input.method,
+    redirect: input.redirect,
+    signal: input.signal,
+    headers: input.headers,
+    body: input.body,
+  };
+}
+
+export function createOpenAICompatibleFetchTransport(fetchImplementation?: typeof fetch): OpenAICompatibleTransport {
+  const implementation = fetchImplementation ?? fetch;
+  return {
+    async request(input: OpenAICompatibleTransportRequest): Promise<Response> {
+      return implementation(input.url, requestInitFromTransport(input));
     },
   };
 }
@@ -611,7 +692,7 @@ export class OpenAICompatibleProvider implements KnowledgeProviderTestAdapter {
   private readonly hostPolicy: OpenAICompatibleHostPolicy;
 
   public constructor(options: OpenAICompatibleProviderOptions = {}) {
-    this.transport = options.transport ?? createDefaultTransport(options.fetchImplementation);
+    this.transport = options.transport ?? createOpenAICompatibleFetchTransport(options.fetchImplementation);
     this.credentialPolicy = options.credentialPolicy ?? {};
     this.hostPolicy = options.hostPolicy ?? {};
   }
@@ -696,33 +777,40 @@ export class OpenAICompatibleProvider implements KnowledgeProviderTestAdapter {
     const url = new URL('chat/completions', `${endpoint}/`).toString();
     const resolvedKey = input.resolvedKey ?? resolveKnowledgeProviderApiKey(input.profile, input.environment, this.credentialPolicy);
     const requestSignal = composeSignals(input.signal, input.profile.timeoutMs);
+    const transportRequest: OpenAICompatibleTransportRequest = {
+      url,
+      method: 'POST',
+      redirect: 'manual',
+      signal: requestSignal.signal,
+      headers: {
+        accept: 'application/json',
+        'content-type': 'application/json',
+        ...(resolvedKey.apiKey ? { authorization: `Bearer ${resolvedKey.apiKey}` } : {}),
+      },
+      body: JSON.stringify({
+        model: input.profile.model,
+        response_format: { type: 'json_object' },
+        temperature: 0,
+        messages: [
+          {
+            role: 'system',
+            content: boundedText(input.systemPrompt, MAX_REQUEST_SYSTEM_PROMPT_LENGTH),
+          } satisfies ChatMessage,
+          {
+            role: 'user',
+            content: input.prompt,
+          } satisfies ChatMessage,
+        ],
+      }),
+    };
     try {
-      await this.validateRequestDestination(endpoint, input.profile, resolvedKey.apiKey !== null, requestSignal.signal);
-      const response = await this.transport.fetch(url, {
-        method: 'POST',
-        redirect: 'manual',
-        signal: requestSignal.signal,
-        headers: {
-          accept: 'application/json',
-          'content-type': 'application/json',
-          ...(resolvedKey.apiKey ? { authorization: `Bearer ${resolvedKey.apiKey}` } : {}),
-        },
-        body: JSON.stringify({
-          model: input.profile.model,
-          response_format: { type: 'json_object' },
-          temperature: 0,
-          messages: [
-            {
-              role: 'system',
-              content: boundedText(input.systemPrompt, MAX_REQUEST_SYSTEM_PROMPT_LENGTH),
-            } satisfies ChatMessage,
-            {
-              role: 'user',
-              content: input.prompt,
-            } satisfies ChatMessage,
-          ],
-        }),
-      });
+      const response = await this.sendRequest(
+        endpoint,
+        input.profile,
+        resolvedKey.apiKey !== null,
+        requestSignal.signal,
+        transportRequest,
+      );
       if (response.status >= 300 && response.status < 400) {
         throw new Error(`Provider redirects are not allowed for ${endpoint}`);
       }
@@ -752,12 +840,13 @@ export class OpenAICompatibleProvider implements KnowledgeProviderTestAdapter {
     }
   }
 
-  private async validateRequestDestination(
+  private async sendRequest(
     endpoint: string,
     profile: KnowledgeProviderProfile,
     hasCredentials: boolean,
     signal: AbortSignal,
-  ): Promise<void> {
+    request: OpenAICompatibleTransportRequest,
+  ): Promise<Response> {
     const url = new URL(endpoint);
     const hostname = url.hostname.replace(/^\[/, '').replace(/\]$/, '');
     const originAllowed =
@@ -770,20 +859,67 @@ export class OpenAICompatibleProvider implements KnowledgeProviderTestAdapter {
           : `Host policy rejected provider origin ${url.origin}`,
       );
     }
-    const usesNamedHost = net.isIP(hostname) === 0;
-    if (usesNamedHost && this.transport.pinsResolvedHostnames !== true) {
-      throw new Error(`Provider transport must pin resolved hostnames for ${url.origin}`);
+
+    if (net.isIP(hostname) === 0) {
+      if (!this.transport.requestPinned) {
+        throw new Error(`Provider transport must implement requestPinned for named host ${hostname}`);
+      }
+      const protocol = url.protocol === 'https:' ? 'https:' : 'http:';
+      const port = url.port === '' ? (url.protocol === 'https:' ? 443 : 80) : Number(url.port);
+      const tlsServername = url.protocol === 'https:' ? hostname : null;
+      return await awaitWithAbort(
+        this.transport.requestPinned({
+          origin: url.origin,
+          originalHostname: hostname,
+          protocol,
+          port,
+          path: requestPathForUrl(url),
+          signal,
+          tlsServername,
+          buildValidatedRequest: async ({ resolvedAddresses, selectedAddress }) => {
+            throwIfAborted(signal);
+            await this.validateNamedHostResolvedAddresses(url, resolvedAddresses);
+            if (!hasMatchingResolvedAddress(selectedAddress, resolvedAddresses)) {
+              throw new Error(`Provider transport selected an address that was not part of the validated set for ${url.origin}`);
+            }
+            return {
+              approvedAddresses: resolvedAddresses,
+              connectionTarget: toPinnedConnectionTarget(url, protocol, port, tlsServername, selectedAddress),
+              payload: {
+                method: request.method,
+                headers: request.headers,
+                body: request.body,
+                signal: request.signal,
+                path: requestPathForUrl(url),
+              },
+            };
+          },
+        }),
+        signal,
+      );
     }
-    const addresses = await awaitWithAbort(this.transport.resolveHostname(hostname), signal);
+
+    this.validateLiteralIpDestination(url, hostname);
+    return await awaitWithAbort(this.transport.request(request), signal);
+  }
+
+  private validateLiteralIpDestination(url: URL, hostname: string): void {
+    const privateOrReserved = isPrivateOrReservedAddress(hostname);
+    const approvedLoopback = isLoopbackAddress(hostname);
+    if (privateOrReserved && !approvedLoopback) {
+      throw new Error(`Provider endpoint ${url.origin} resolves to a private or reserved address`);
+    }
+  }
+
+  private async validateNamedHostResolvedAddresses(
+    url: URL,
+    addresses: readonly OpenAICompatibleResolvedAddress[],
+  ): Promise<void> {
     if (addresses.length === 0) {
       throw new Error(`Provider endpoint ${url.origin} did not resolve to any addresses`);
     }
     const privateOrReserved = addresses.some((address) => isPrivateOrReservedAddress(address.address));
-    const approvedLoopback =
-      originAllowed &&
-      isLoopbackHostnameLiteral(hostname) &&
-      addresses.every((address) => isLoopbackAddress(address.address));
-    if (privateOrReserved && !approvedLoopback) {
+    if (privateOrReserved) {
       throw new Error(`Provider endpoint ${url.origin} resolves to a private or reserved address`);
     }
   }

@@ -553,6 +553,7 @@ export type {
   ProviderRequiredKnowledgeGeneration,
 } from './knowledge/KnowledgeAnalysis.js';
 export {
+  createOpenAICompatibleFetchTransport,
   OpenAICompatibleEnrichmentService,
   OpenAICompatibleProvider,
 } from './knowledge/providers/OpenAICompatibleProvider.js';
@@ -562,10 +563,13 @@ export type {
   OpenAICompatibleGenerateInput,
   OpenAICompatibleGroundingInput,
   OpenAICompatibleHostPolicy,
+  OpenAICompatiblePinnedTransportRequest,
   OpenAICompatibleProviderOptions,
   OpenAICompatibleProviderResult,
   OpenAICompatibleResolvedAddress,
+  OpenAICompatibleTransportRequest,
   OpenAICompatibleTransport,
+  OpenAICompatibleValidatedPinnedTransportRequest,
 } from './knowledge/providers/OpenAICompatibleProvider.js';
 export {
   KnowledgeChatService,
