@@ -2,7 +2,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
-import { closeRegistry, openDatabase } from '@ariadne-dev/core';
+import * as http from 'node:http';
+import { closeRegistry, openDatabase, KnowledgeQueue } from '@ariadne-dev/core';
 import { program } from '../src/index.js';
 
 // Functional coverage for `ariadne knowledge ...`: parses argv through the
@@ -16,6 +17,7 @@ describe('ariadne knowledge commands', () => {
   let errorSpy: ReturnType<typeof vi.spyOn>;
   let originalCwd: string;
   let previousRegistryPath: string | undefined;
+  const servers = new Set<http.Server>();
 
   function resetCommanderOptionState(cmd: import('commander').Command): void {
     (cmd as unknown as { _optionValues: Record<string, unknown> })._optionValues = {};
@@ -25,6 +27,7 @@ describe('ariadne knowledge commands', () => {
 
   beforeEach(() => {
     resetCommanderOptionState(program);
+    program.exitOverride();
     root = fs.mkdtempSync(path.join(os.tmpdir(), 'ariadne-cli-knowledge-test-'));
     fs.mkdirSync(path.join(root, '.git'));
     previousRegistryPath = process.env.ARIADNE_REGISTRY_PATH;
@@ -38,6 +41,10 @@ describe('ariadne knowledge commands', () => {
   });
 
   afterEach(() => {
+    for (const server of servers) {
+      server.close();
+    }
+    servers.clear();
     process.chdir(originalCwd);
     logSpy.mockRestore();
     errorSpy.mockRestore();
@@ -49,6 +56,20 @@ describe('ariadne knowledge commands', () => {
 
   function loggedLines(): string[] {
     return logSpy.mock.calls.map((args) => String(args[0]));
+  }
+
+  function errorLines(): string[] {
+    return errorSpy.mock.calls.map((args) => String(args[0]));
+  }
+
+  function allConsoleText(): string {
+    return [...loggedLines(), ...errorLines()].join('\n');
+  }
+
+  function clearConsole(): void {
+    logSpy.mockClear();
+    errorSpy.mockClear();
+    process.exitCode = undefined;
   }
 
   function lastJson(): { ok: boolean; data?: unknown; error?: { message: string; capability?: string } } {
@@ -63,6 +84,46 @@ describe('ariadne knowledge commands', () => {
     await run('project', 'create', name, '--json');
     const created = lastJson();
     return (created.data as { id: string }).id;
+  }
+
+  async function startLoopbackProvider(): Promise<{ endpoint: string }> {
+    const server = http.createServer((request, response) => {
+      if (request.url !== '/v1/chat/completions' || request.method !== 'POST') {
+        response.writeHead(404, { 'content-type': 'application/json' });
+        response.end(JSON.stringify({ error: 'not found' }));
+        return;
+      }
+
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(
+        JSON.stringify({
+          choices: [
+            {
+              message: {
+                content: JSON.stringify({
+                  summary: 'Loopback profile is reachable.',
+                  entities: [],
+                  claims: [],
+                  relationships: [],
+                  contradictions: [],
+                  researchGaps: [],
+                }),
+              },
+            },
+          ],
+        }),
+      );
+    });
+    servers.add(server);
+    await new Promise<void>((resolve, reject) => {
+      server.listen(0, '127.0.0.1', () => resolve());
+      server.once('error', reject);
+    });
+    const address = server.address();
+    if (address === null || typeof address === 'string') {
+      throw new Error('Expected loopback server address');
+    }
+    return { endpoint: `http://127.0.0.1:${address.port}/v1` };
   }
 
   function insertProject(id: string, workspaceRoot: string, name: string): void {
@@ -142,6 +203,28 @@ describe('ariadne knowledge commands', () => {
       expect(result.ok).toBe(true);
       expect((result.data as unknown[]).length).toBe(2);
     });
+
+    it('rejects immutable source storage when the knowledge directory traverses a symlink', async () => {
+      fs.writeFileSync(path.join(root, 'notes.md'), '# Title\n');
+      const projectId = await createProject();
+      const knowledgeRoot = path.join(root, '.ariadne', 'knowledge');
+      const externalTarget = fs.mkdtempSync(path.join(os.tmpdir(), 'ariadne-cli-knowledge-external-'));
+      fs.rmSync(knowledgeRoot, { recursive: true, force: true });
+      fs.symlinkSync(externalTarget, knowledgeRoot, 'dir');
+
+      try {
+        await run('ingest', 'file', projectId, 'notes.md', '--json');
+      } finally {
+        fs.rmSync(knowledgeRoot, { force: true });
+        fs.mkdirSync(knowledgeRoot, { recursive: true });
+        fs.rmSync(externalTarget, { recursive: true, force: true });
+      }
+
+      const result = lastJson();
+      expect(result.ok).toBe(false);
+      expect(result.error?.message).toMatch(/symbolic links/i);
+      expect(process.exitCode).toBe(1);
+    });
   });
 
   describe('queue', () => {
@@ -194,6 +277,418 @@ describe('ariadne knowledge commands', () => {
       await run('search', projectId, 'notes', '--json');
       const results = lastJson().data as Array<{ kind: string }>;
       expect(results.length).toBeGreaterThan(0);
+    });
+
+    describe('worker', () => {
+      it('runs queued jobs once, makes content searchable with exact spans, reports status, and drains nothing on rerun', async () => {
+        fs.mkdirSync(path.join(root, 'src'));
+        fs.writeFileSync(
+          path.join(root, 'src', 'example.py'),
+          ['class Greeter:', '    def greet(self, name):', "        return f'hello {name}'", ''].join('\n'),
+        );
+        const projectId = await createProject();
+
+        await run('ingest', 'file', projectId, 'src/example.py', '--json');
+        clearConsole();
+
+        await run('worker', 'run', projectId, '--once', '--json');
+        const firstRun = lastJson();
+        expect(firstRun.ok).toBe(true);
+        expect(firstRun.data).toMatchObject({
+          projectId,
+          claimed: 1,
+          completed: 1,
+          failed: 0,
+          cancelled: 0,
+        });
+
+        clearConsole();
+        await run('search', projectId, 'greet', '--mode', 'sources', '--json');
+        const results = lastJson().data as Array<{
+          snippet: string;
+          citations: Array<{ span?: { startLine: number; endLine: number } }>;
+        }>;
+        expect(results.length).toBeGreaterThan(0);
+        expect(results[0]?.snippet).toContain('greet');
+        expect(results[0]?.citations[0]?.span).toMatchObject({
+          startLine: 2,
+          endLine: 2,
+        });
+
+        clearConsole();
+        await run('worker', 'status', projectId, '--json');
+        const status = lastJson();
+        expect(status.ok).toBe(true);
+        expect(status.data).toMatchObject({
+          projectId,
+          queue: {
+            queuedCount: 0,
+            runningCount: 0,
+            completedCount: 1,
+            failedCount: 0,
+            cancelledCount: 0,
+          },
+          completions: {
+            deterministic: 1,
+            enriched: 0,
+          },
+        });
+        expect(status.data).toMatchObject({
+          activeWorkers: {
+            workerCount: 0,
+          },
+          analyzerVersions: [
+            expect.objectContaining({
+              analyzerId: expect.any(String),
+              analyzerVersion: expect.any(String),
+            }),
+          ],
+        });
+
+        clearConsole();
+        await run('worker', 'run', projectId, '--once', '--json');
+        expect(lastJson().data).toMatchObject({
+          projectId,
+          claimed: 0,
+          completed: 0,
+          failed: 0,
+          cancelled: 0,
+        });
+      });
+
+      it('rejects --watch with --json to preserve the single JSON envelope contract', async () => {
+        const projectId = await createProject();
+
+        clearConsole();
+        await run('worker', 'run', projectId, '--watch', '--json');
+
+        const result = lastJson();
+        expect(result.ok).toBe(false);
+        expect(result.error?.message).toMatch(/--watch|watch mode/i);
+        expect(process.exitCode).toBe(1);
+      });
+
+      it('aborts watch mode on SIGINT and removes scoped signal handlers', async () => {
+        const projectId = await createProject();
+        const sigintListenersBefore = process.listenerCount('SIGINT');
+        const sigtermListenersBefore = process.listenerCount('SIGTERM');
+
+        clearConsole();
+        const emitSignal = setTimeout(() => {
+          process.emit('SIGINT');
+        }, 25);
+        try {
+          await run('worker', 'run', projectId, '--watch', '--poll-ms', '5');
+        } finally {
+          clearTimeout(emitSignal);
+        }
+
+        expect(process.listenerCount('SIGINT')).toBe(sigintListenersBefore);
+        expect(process.listenerCount('SIGTERM')).toBe(sigtermListenersBefore);
+        expect(process.exitCode).toBeUndefined();
+      });
+
+      it('reports the full active worker count even when the bounded lease list is truncated', async () => {
+        const projectId = await createProject();
+        const db = openDatabase(path.join(root, '.ariadne', 'state.db'));
+        try {
+          const queue = new KnowledgeQueue(db);
+          for (let index = 0; index < 10; index += 1) {
+            queue.enqueue({
+              projectId,
+              jobKind: 'analyze',
+              payload: { index },
+            });
+            queue.claim(projectId, `worker-${index}`);
+          }
+        } finally {
+          db.close();
+        }
+
+        clearConsole();
+        await run('worker', 'status', projectId, '--json');
+        const status = lastJson();
+        expect(status.ok).toBe(true);
+        expect(status.data).toMatchObject({
+          activeWorkers: {
+            workerCount: 10,
+          },
+          queue: {
+            runningCount: 10,
+          },
+        });
+        expect(((status.data as { activeWorkers: { leases: unknown[] } }).activeWorkers.leases).length).toBeLessThanOrEqual(8);
+      });
+
+      it('bounds provider diagnostics in worker status output', async () => {
+        const projectId = await createProject();
+        const db = openDatabase(path.join(root, '.ariadne', 'state.db'));
+        try {
+          const createdAt = new Date().toISOString();
+          for (let index = 0; index < 12; index += 1) {
+            db.prepare(
+              `INSERT INTO knowledge_provider_profiles
+               (id, project_id, provider_kind, profile_name, configuration_json, created_at, updated_at)
+               VALUES (?, ?, 'remote', ?, ?, ?, ?)`,
+            ).run(
+              `provider_invalid_${index}`,
+              projectId,
+              `invalid-${index}`,
+              '{"endpoint":"https://example.com/v1","apiKey":"sk-live-secret-value"}',
+              createdAt,
+              createdAt,
+            );
+          }
+        } finally {
+          db.close();
+        }
+
+        clearConsole();
+        await run('worker', 'status', projectId, '--json');
+        const status = lastJson();
+        expect(status.ok).toBe(true);
+        const warnings = (status.data as { warnings: Array<{ code: string; message: string }> }).warnings;
+        expect(warnings.length).toBeLessThanOrEqual(8);
+        expect(JSON.stringify(warnings)).not.toContain('sk-live-secret-value');
+      });
+
+      it('degrades gracefully when a completed job result row is malformed', async () => {
+        const projectId = await createProject();
+        const db = openDatabase(path.join(root, '.ariadne', 'state.db'));
+        try {
+          const createdAt = new Date().toISOString();
+          db.prepare(
+            `INSERT INTO knowledge_jobs
+             (id, project_id, job_kind, source_version_id, status, payload_json, requested_at, started_at, completed_at, retry_count, max_retries, result_json)
+             VALUES (?, ?, 'analyze', NULL, 'completed', '{}', ?, ?, ?, 0, 3, ?)`,
+          ).run('job_malformed_result', projectId, createdAt, createdAt, createdAt, '{not-json');
+        } finally {
+          db.close();
+        }
+
+        clearConsole();
+        await run('worker', 'status', projectId, '--json');
+        const status = lastJson();
+        expect(status.ok).toBe(true);
+        expect(status.data).toMatchObject({
+          completions: {
+            deterministic: 0,
+            enriched: 0,
+          },
+        });
+        expect((status.data as { warnings: Array<{ code: string }> }).warnings).toEqual(
+          expect.arrayContaining([expect.objectContaining({ code: 'job_result_invalid' })]),
+        );
+      });
+    });
+
+    describe('provider', () => {
+      it('adds, lists, tests, enables, disables, and removes profiles without exposing secrets', async () => {
+        const { endpoint } = await startLoopbackProvider();
+        const projectId = await createProject();
+        const secret = 'sk-live-cli-provider-secret';
+        const envName = 'ARIADNE_KNOWLEDGE_PROVIDER_TEST_KEY';
+        const previousValue = process.env[envName];
+        delete process.env[envName];
+
+        try {
+          clearConsole();
+          await run(
+            'provider',
+            'add',
+            projectId,
+            'loopback',
+            '--kind',
+            'openai-compatible',
+            '--endpoint',
+            endpoint,
+            '--model',
+            'gpt-4.1-mini',
+            '--capabilities',
+            'analysis,generation',
+            '--timeout-ms',
+            '5000',
+            '--api-key-env',
+            envName,
+            '--json',
+          );
+          const added = lastJson();
+          expect(added.ok).toBe(true);
+          expect(added.data).toMatchObject({
+            profileName: 'loopback',
+            endpoint,
+            apiKeyEnv: envName,
+            enabled: false,
+          });
+
+          clearConsole();
+          await run('provider', 'list', projectId, '--json');
+          const listed = lastJson();
+          expect(listed.ok).toBe(true);
+          expect(listed.data).toMatchObject({
+            profiles: [expect.objectContaining({ profileName: 'loopback', apiKeyEnv: envName })],
+            warnings: [],
+          });
+
+          clearConsole();
+          await run('provider', 'test', projectId, 'loopback', '--json');
+          const missingEnv = lastJson();
+          expect(missingEnv.ok).toBe(true);
+          expect(missingEnv.data).toMatchObject({
+            success: true,
+            warnings: [expect.objectContaining({ code: 'provider_missing_api_key' })],
+          });
+          expect(JSON.stringify(missingEnv)).toContain(envName);
+          expect(JSON.stringify(missingEnv)).not.toContain(secret);
+
+          process.env[envName] = secret;
+          clearConsole();
+          await run('provider', 'test', projectId, 'loopback', '--json');
+          const tested = lastJson();
+          expect(tested.ok).toBe(true);
+          expect(tested.data).toMatchObject({
+            success: true,
+            profile: expect.objectContaining({ profileName: 'loopback' }),
+          });
+          expect(allConsoleText()).not.toContain(secret);
+
+          clearConsole();
+          await run('provider', 'enable', projectId, 'loopback', '--json');
+          expect(lastJson().data).toMatchObject({ profileName: 'loopback', enabled: true });
+
+          clearConsole();
+          await run('provider', 'disable', projectId, 'loopback', '--json');
+          expect(lastJson().data).toMatchObject({ profileName: 'loopback', enabled: false });
+
+          clearConsole();
+          await run('provider', 'remove', projectId, 'loopback', '--json');
+          expect(lastJson().data).toMatchObject({ removed: true, profileName: 'loopback' });
+
+          clearConsole();
+          await run('provider', 'list', projectId, '--json');
+          expect(lastJson().data).toMatchObject({ profiles: [], warnings: [] });
+        } finally {
+          if (previousValue === undefined) {
+            delete process.env[envName];
+          } else {
+            process.env[envName] = previousValue;
+          }
+        }
+      });
+
+      it('fails closed for public named hosts and rejects literal --api-key values as an unknown option', async () => {
+        const projectId = await createProject();
+        const envName = 'ARIADNE_KNOWLEDGE_PROVIDER_PUBLIC_KEY';
+        const approvalName = 'ARIADNE_KNOWLEDGE_PROVIDER_ALLOWED_ORIGIN';
+        const previousKey = process.env[envName];
+        const previousOrigin = process.env[approvalName];
+        process.env[envName] = 'sk-live-public-secret';
+        process.env[approvalName] = 'https://api.example.com';
+
+        try {
+          clearConsole();
+          await run(
+            'provider',
+            'add',
+            projectId,
+            'public',
+            '--kind',
+            'openai-compatible',
+            '--endpoint',
+            'https://api.example.com/v1',
+            '--model',
+            'gpt-4.1-mini',
+            '--capabilities',
+            'analysis',
+            '--api-key-env',
+            envName,
+            '--json',
+          );
+          expect(lastJson().ok).toBe(true);
+
+          clearConsole();
+          await run('provider', 'test', projectId, 'public', '--json');
+          const failed = lastJson();
+          expect(failed.ok).toBe(true);
+          expect(failed.data).toMatchObject({
+            success: false,
+            diagnostics: [expect.stringMatching(/requestPinned|named host/i)],
+          });
+          expect(allConsoleText()).not.toContain('sk-live-public-secret');
+
+          clearConsole();
+          await expect(
+            run(
+              'provider',
+              'add',
+              projectId,
+              'bad-secret',
+              '--kind',
+              'openai-compatible',
+              '--endpoint',
+              'http://127.0.0.1:11434/v1',
+              '--model',
+              'gpt-4.1-mini',
+              '--capabilities',
+              'analysis',
+              '--api-key',
+              'sk-live-inline-secret',
+            ),
+          ).rejects.toThrow(/process\.exit unexpectedly called with "1"/);
+        } finally {
+          if (previousKey === undefined) {
+            delete process.env[envName];
+          } else {
+            process.env[envName] = previousKey;
+          }
+          if (previousOrigin === undefined) {
+            delete process.env[approvalName];
+          } else {
+            process.env[approvalName] = previousOrigin;
+          }
+        }
+      });
+
+      it('requires existing projects and profiles for provider mutations', async () => {
+        const projectId = await createProject();
+
+        clearConsole();
+        await run(
+          'provider',
+          'add',
+          'project_missing',
+          'missing-project',
+          '--kind',
+          'openai-compatible',
+          '--endpoint',
+          'http://127.0.0.1:11434/v1',
+          '--model',
+          'gpt-4.1-mini',
+          '--capabilities',
+          'analysis',
+          '--json',
+        );
+        expect(lastJson()).toMatchObject({
+          ok: false,
+          error: { message: expect.stringMatching(/project.*not found/i) },
+        });
+
+        clearConsole();
+        await run('provider', 'enable', projectId, 'missing-profile', '--json');
+        expect(lastJson()).toMatchObject({
+          ok: false,
+          error: { message: expect.stringMatching(/profile not found/i) },
+        });
+        expect(process.exitCode).toBe(1);
+
+        clearConsole();
+        await run('provider', 'remove', projectId, 'missing-profile', '--json');
+        expect(lastJson()).toMatchObject({
+          ok: false,
+          error: { message: expect.stringMatching(/profile not found/i) },
+        });
+        expect(process.exitCode).toBe(1);
+      });
     });
   });
 

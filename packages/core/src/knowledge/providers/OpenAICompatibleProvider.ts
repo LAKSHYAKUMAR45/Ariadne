@@ -773,7 +773,7 @@ export class OpenAICompatibleProvider implements KnowledgeProviderTestAdapter {
       const responseText = await readResponseText(response, requestSignal.controller);
       if (!response.ok) {
         throw new Error(
-          `Provider request failed with status ${response.status}. Response excerpt: ${sanitizeExcerpt(responseText)}`,
+          `Provider request failed with status ${response.status}. Response body was redacted.`,
         );
       }
       const parsed = safeParseJson(responseText, 'Provider response');
@@ -784,7 +784,7 @@ export class OpenAICompatibleProvider implements KnowledgeProviderTestAdapter {
     } catch (error) {
       if (requestSignal.timeoutReached()) {
         throw new Error(
-          `Provider request to ${endpoint} timed out after ${input.profile.timeoutMs}ms. Prompt excerpt: ${sanitizeExcerpt(input.prompt)}`,
+          `Provider request to ${endpoint} timed out after ${input.profile.timeoutMs}ms.`,
         );
       }
       if (error instanceof Error) {
@@ -902,10 +902,10 @@ export class OpenAICompatibleEnrichmentService implements KnowledgeEnrichmentSer
     this.pageStore = new KnowledgePageStore(db);
   }
 
-  public async enrich(input: KnowledgeEnrichmentInput): Promise<KnowledgeEnrichmentResult> {
+  public async enrich(input: KnowledgeEnrichmentInput): Promise<KnowledgeEnrichmentResult | void> {
     const profile = this.options.profileStore.selectEnabledProfile(input.projectId, 'analysis');
     if (!profile) {
-      return { warnings: [], reviews: [], insights: [] };
+      return;
     }
     const sourceSpans = spansFromExtraction(input.sourceId, input.sourceVersionId, input.extraction);
     const warnings: KnowledgeProviderDiagnostic[] = [];

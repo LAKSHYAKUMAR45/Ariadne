@@ -756,17 +756,22 @@ export class KnowledgeWorker {
         throw new KnowledgeWorkerCancelledError();
       }
       if (!result) {
-        return { enriched: true, warnings: [], reviews: [], insights: [] };
+        return { enriched: false, warnings: [], reviews: [], insights: [] };
       }
       const normalizedReviews = this.normalizeEnrichmentReviews(result.reviews ?? []);
       const normalizedInsights = this.normalizeEnrichmentInsights(result.insights ?? []);
+      const combinedWarnings = uniqueWarnings([
+        ...(result.warnings ?? []),
+        ...normalizedReviews.warnings,
+        ...normalizedInsights.warnings,
+      ]);
+      const producedDurableEnrichment =
+        normalizedReviews.items.length > 0 ||
+        normalizedInsights.items.length > 0 ||
+        combinedWarnings.length === 0;
       return {
-        enriched: true,
-        warnings: uniqueWarnings([
-          ...(result.warnings ?? []),
-          ...normalizedReviews.warnings,
-          ...normalizedInsights.warnings,
-        ]),
+        enriched: producedDurableEnrichment,
+        warnings: combinedWarnings,
         reviews: normalizedReviews.items,
         insights: normalizedInsights.items,
       };

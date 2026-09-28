@@ -542,7 +542,7 @@ describe('OpenAICompatibleProvider', () => {
         sourceVersionId: 'source-version-1',
         sourceSpans: [],
       }),
-    ).rejects.toThrow(/\*\*\*/i);
+    ).rejects.toThrow(/status 500|redacted/i);
   });
 
   it('rejects ungrounded source identifiers and exact-span mismatches', async () => {
@@ -1603,5 +1603,109 @@ describe('OpenAICompatibleProvider', () => {
       ]),
     );
     expect(requests).toHaveLength(0);
+  });
+
+  it('redacts provider failure warnings so they do not leak prompts, source paths, or response bodies', async () => {
+    const db = database();
+    const project = new KnowledgeProjectStore(db).create({
+      id: 'project-openai' as never,
+      workspaceRoot: '/workspace/openai',
+      name: 'OpenAI',
+      roots: ['docs'],
+      createdAt: CREATED_AT,
+    });
+    const { endpoint } = await startServer((_request, response) => {
+      response.writeHead(502, { 'content-type': 'application/json' });
+      response.end(
+        JSON.stringify({
+          error: 'provider-body-secret',
+          detail: "return f'hello {name}' from src/example.py",
+        }),
+      );
+    });
+    const profileStore = new KnowledgeProviderProfileStore(db, { now: () => CREATED_AT });
+    profileStore.setEnabled(
+      project.id,
+      profileStore.create({
+        projectId: project.id,
+        profileName: 'analysis',
+        endpoint,
+        model: 'gpt-4.1-mini',
+        capabilities: ['analysis'],
+        timeoutMs: 10_000,
+        apiKeyEnv: null,
+        enabled: false,
+      }).profileName,
+      true,
+    );
+    const service = new OpenAICompatibleEnrichmentService(db, {
+      profileStore,
+      environment: {},
+      hostPolicy: { allowedOrigins: new Set([new URL(endpoint).origin]) },
+    });
+
+    const result = await service.enrich({
+      projectId: project.id,
+      jobId: 'job-redacted-warning',
+      sourceId: 'source-1',
+      sourceVersionId: 'source-version-1',
+      sourcePath: 'src/example.py',
+      extraction: createExtraction(),
+      pageVersionIds: [],
+    });
+
+    expect(result).toEqual(
+      expect.objectContaining({
+        warnings: [
+          expect.objectContaining({
+            code: 'provider_invalid_response',
+            message: expect.stringContaining('status 502'),
+          }),
+        ],
+      }),
+    );
+    const serialized = JSON.stringify(result);
+    expect(serialized).not.toContain('provider-body-secret');
+    expect(serialized).not.toContain(`return f'hello {name}'`);
+    expect(serialized).not.toContain('src/example.py');
+  });
+
+  it('returns no enrichment result when no enabled profile can safely run', async () => {
+    const db = database();
+    const project = new KnowledgeProjectStore(db).create({
+      id: 'project-openai' as never,
+      workspaceRoot: '/workspace/openai',
+      name: 'OpenAI',
+      roots: ['docs'],
+      createdAt: CREATED_AT,
+    });
+    const profileStore = new KnowledgeProviderProfileStore(db, { now: () => CREATED_AT });
+    profileStore.create({
+      projectId: project.id,
+      profileName: 'disabled-analysis',
+      endpoint: 'http://127.0.0.1:11434/v1',
+      model: 'gpt-4.1-mini',
+      capabilities: ['analysis'],
+      timeoutMs: 10_000,
+      apiKeyEnv: null,
+      enabled: false,
+    });
+    const service = new OpenAICompatibleEnrichmentService(db, {
+      profileStore,
+      environment: {},
+      hostPolicy: { allowedOrigins: new Set(['http://127.0.0.1:11434']) },
+    });
+
+    const result = await service.enrich({
+      projectId: project.id,
+      jobId: 'job-no-profile',
+      sourceId: 'source-1',
+      sourceVersionId: 'source-version-1',
+      sourcePath: 'src/example.py',
+      extraction: createExtraction(),
+      pageVersionIds: [],
+    });
+
+    expect(result).toBeUndefined();
   });
 });

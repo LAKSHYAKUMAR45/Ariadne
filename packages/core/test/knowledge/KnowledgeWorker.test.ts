@@ -444,6 +444,90 @@ describe('KnowledgeWorker', () => {
     expect(warnings[0]?.message.length).toBeLessThanOrEqual(280);
   });
 
+  it('keeps processingMode deterministic when an enrichment service returns no result', async () => {
+    const python = registerSource(PROJECT_A, 'src/no-enrich.py', 'print("no enrich")\n');
+    const job = queue.enqueue({
+      projectId: PROJECT_A,
+      jobKind: 'analyze',
+      sourceVersionId: python.sourceVersionId,
+      payload: { sourceVersionId: python.sourceVersionId },
+    });
+    const enrich: KnowledgeEnrichmentService = {
+      async enrich() {
+        return;
+      },
+    };
+    const worker = new KnowledgeWorker(db, { workerId: 'worker-no-enrich', now: () => CREATED_AT, enrich });
+
+    const result = await worker.runOnce(PROJECT_A);
+
+    expect(result).toMatchObject({ claimed: 1, completed: 1, failed: 0, cancelled: 0, warnings: [] });
+    expect(queue.get(job.id)?.result).toMatchObject({
+      processingMode: 'deterministic',
+    });
+  });
+
+  it('keeps processingMode deterministic when enrichment only returns warnings', async () => {
+    const python = registerSource(PROJECT_A, 'src/warn-only.py', 'print("warn only")\n');
+    const job = queue.enqueue({
+      projectId: PROJECT_A,
+      jobKind: 'analyze',
+      sourceVersionId: python.sourceVersionId,
+      payload: { sourceVersionId: python.sourceVersionId },
+    });
+    const enrich: KnowledgeEnrichmentService = {
+      async enrich() {
+        return {
+          warnings: [
+            {
+              code: 'provider_http_error',
+              message: 'Provider request failed with status 502. Response body was redacted.',
+            },
+          ],
+        };
+      },
+    };
+    const worker = new KnowledgeWorker(db, { workerId: 'worker-warn-only', now: () => CREATED_AT, enrich });
+
+    const result = await worker.runOnce(PROJECT_A);
+
+    expect(result).toMatchObject({ claimed: 1, completed: 1, failed: 0, cancelled: 0 });
+    expect(queue.get(job.id)?.result).toMatchObject({
+      processingMode: 'deterministic',
+      warnings: [expect.objectContaining({ code: 'provider_http_error' })],
+    });
+  });
+
+  it('keeps processingMode deterministic when enrichment outputs are only invalid items', async () => {
+    const python = registerSource(PROJECT_A, 'src/invalid-items.py', 'print("invalid items")\n');
+    const job = queue.enqueue({
+      projectId: PROJECT_A,
+      jobKind: 'analyze',
+      sourceVersionId: python.sourceVersionId,
+      payload: { sourceVersionId: python.sourceVersionId },
+    });
+    const enrich: KnowledgeEnrichmentService = {
+      async enrich() {
+        return {
+          reviews: [{ pageVersionId: '', summary: '   ' }],
+          insights: [{ type: '', contentPath: '', confidence: Number.NaN }],
+        };
+      },
+    };
+    const worker = new KnowledgeWorker(db, { workerId: 'worker-invalid-items', now: () => CREATED_AT, enrich });
+
+    const result = await worker.runOnce(PROJECT_A);
+
+    expect(result).toMatchObject({ claimed: 1, completed: 1, failed: 0, cancelled: 0 });
+    expect(queue.get(job.id)?.result).toMatchObject({
+      processingMode: 'deterministic',
+      warnings: expect.arrayContaining([
+        expect.objectContaining({ code: 'enrichment_invalid_review' }),
+        expect.objectContaining({ code: 'enrichment_invalid_insight' }),
+      ]),
+    });
+  });
+
   it('creates bounded idempotent contradiction reviews and research-gap insights from enrichment', async () => {
     const python = registerSource(PROJECT_A, 'src/reviewable.py', 'print("review me")\n');
     const enrich: KnowledgeEnrichmentService = {

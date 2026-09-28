@@ -69,14 +69,21 @@ citable, graphable, and portable after the task ends.
 6. For knowledge work:
    - list projects before creating one;
    - preview with `ariadne knowledge source scan` before folder ingestion;
-   - use `knowledge ingest file|folder`, then inspect `knowledge queue list`
-     and `knowledge page list`;
+   - use `knowledge ingest file|folder`, then prefer
+     `knowledge worker run <project-id> --once` to drain queued work locally;
+   - use attached `knowledge worker run <project-id> --watch` only when you
+     need a local loop that you will interrupt cleanly;
+   - inspect `knowledge worker status`, `knowledge queue list`, and
+     `knowledge page list` instead of assuming generation succeeded;
    - use `knowledge search` for cited retrieval and graph commands for
      relationship/path questions;
    - list pending reviews before resolving or reopening them, and include the
      required `--actor` and `--source` audit fields;
-   - treat `knowledge queue claim` as workspace-global and verify the returned
-     job belongs to the intended project;
+   - treat `knowledge queue claim` as a project-scoped debug surface, not the
+     normal ingestion workflow;
+   - use `knowledge provider add|list|test|enable|disable|remove` for optional
+     local enrichment configuration; profiles store only non-secret metadata
+     plus env-var names, never secret values;
    - use `knowledge project-task` only for an explicit, idempotent projection;
    - use `knowledge task-from-insight` only when the user wants actionable
      work created from an insight;
@@ -113,11 +120,18 @@ network: research; chat create|list|history|send
 archive: export [--obsidian]; import [--replace]
 ```
 
-Research execution and chat send are currently unavailable through the CLI:
-there is no provider configuration path, so they deterministically return a
-provider-required error. Provider-backed execution requires an integrating
-core consumer. The optional loopback HTTP knowledge API and live two-way
-Obsidian synchronization are not enabled.
+Research execution and chat send still deterministically return
+provider-required errors through the CLI; provider profiles are currently for
+worker enrichment and explicit local validation only. The worker is
+offline-first: deterministic extraction, graph/page generation, exact-span
+search, status, retry, export, and import do not require a provider or
+nodem2. Public named-host provider tests fail closed because the CLI does not
+ship a reviewed production `requestPinned(...)` transport; only literal
+loopback HTTP profiles or an explicitly approved exact origin may run locally.
+If no safely usable enabled profile exists, deterministic processing still
+completes with bounded warnings instead of failing the job. The optional
+loopback HTTP knowledge API and live two-way Obsidian synchronization are not
+enabled.
 
 ## Output Format
 
