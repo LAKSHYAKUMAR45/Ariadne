@@ -87,6 +87,50 @@ export function applyKnowledgeGraphMetadataMigration(db: Database.Database): voi
   }
 }
 
+export function applyKnowledgeReviewDeduplicationMigration(db: Database.Database): void {
+  const duplicates = db.prepare(
+    `SELECT project_id, page_version_id, summary
+     FROM knowledge_reviews
+     WHERE status = 'pending' AND summary IS NOT NULL
+     GROUP BY project_id, IFNULL(page_version_id, ''), summary
+     HAVING COUNT(*) > 1`,
+  ).all() as Array<{ project_id: string; page_version_id: string | null; summary: string }>;
+
+  for (const duplicate of duplicates) {
+    const ids = (duplicate.page_version_id === null
+      ? db
+          .prepare(
+            `SELECT id
+             FROM knowledge_reviews
+             WHERE project_id = ? AND page_version_id IS NULL AND status = 'pending' AND summary = ?
+             ORDER BY requested_at, id`,
+          )
+          .all(duplicate.project_id, duplicate.summary)
+      : db
+          .prepare(
+            `SELECT id
+             FROM knowledge_reviews
+             WHERE project_id = ? AND page_version_id = ? AND status = 'pending' AND summary = ?
+             ORDER BY requested_at, id`,
+          )
+          .all(duplicate.project_id, duplicate.page_version_id, duplicate.summary)) as Array<{ id: string }>;
+    for (const extra of ids.slice(1)) {
+      db.prepare('DELETE FROM knowledge_reviews WHERE id = ?').run(extra.id);
+    }
+  }
+
+  db.exec(
+    `CREATE UNIQUE INDEX IF NOT EXISTS idx_knowledge_reviews_pending_page_identity
+     ON knowledge_reviews(project_id, page_version_id, summary)
+     WHERE status = 'pending' AND page_version_id IS NOT NULL AND summary IS NOT NULL`,
+  );
+  db.exec(
+    `CREATE UNIQUE INDEX IF NOT EXISTS idx_knowledge_reviews_pending_project_identity
+     ON knowledge_reviews(project_id, summary)
+     WHERE status = 'pending' AND page_version_id IS NULL AND summary IS NOT NULL`,
+  );
+}
+
 /**
  * Creates the additive knowledge schema atomically. It is idempotent so it
  * can be called safely by the shared migration runner on every database open.
@@ -97,5 +141,6 @@ export function applyKnowledgeMigrations(db: Database.Database): void {
     applyKnowledgeSchemaV2Migration(db);
     applyKnowledgeQueueMigration(db);
     applyKnowledgeGraphMetadataMigration(db);
+    applyKnowledgeReviewDeduplicationMigration(db);
   })();
 }

@@ -216,4 +216,37 @@ describe('KnowledgeQueue', () => {
       failureCode: 'lease_expired',
     });
   });
+
+  it('rejects worker terminal transitions once the running lease has expired', () => {
+    const completionJob = queue.enqueue({ projectId: 'project_1', jobKind: 'build', payload: {} });
+    const failureJob = queue.enqueue({ projectId: 'project_1', jobKind: 'build', payload: {} });
+    const cancellationJob = queue.enqueue({ projectId: 'project_1', jobKind: 'build', payload: {} });
+    const claimedIds = new Set([
+      queue.claim('project_1', 'worker-a')?.id,
+      queue.claim('project_1', 'worker-a')?.id,
+      queue.claim('project_1', 'worker-a')?.id,
+    ]);
+    expect(claimedIds).toEqual(new Set([completionJob.id, failureJob.id, cancellationJob.id]));
+
+    queue.setNow(() => '2026-01-01T00:00:02.000Z');
+
+    expect(() =>
+      queue.complete(completionJob.id, 'worker-a', {
+        processingMode: 'deterministic',
+        analyzerId: 'python-detector',
+        analyzerVersion: '1.0.0',
+        extractionId: 'extraction_1',
+        pageVersionIds: ['page-version_1'],
+        graphNodeCount: 1,
+        graphEdgeCount: 0,
+        warnings: [],
+      }),
+    ).toThrow(/lease/i);
+    expect(() => queue.fail(failureJob.id, 'provider_error', 'temporary failure', 'worker-a')).toThrow(/lease/i);
+    expect(() => queue.cancelOwned(cancellationJob.id, 'worker-a')).toThrow(/lease/i);
+
+    expect(queue.get(completionJob.id)?.status).toBe('running');
+    expect(queue.get(failureJob.id)?.status).toBe('running');
+    expect(queue.get(cancellationJob.id)?.status).toBe('running');
+  });
 });

@@ -1,4 +1,4 @@
-export const KNOWLEDGE_SCHEMA_VERSION = 3;
+export const KNOWLEDGE_SCHEMA_VERSION = 4;
 
 export const KNOWLEDGE_SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS knowledge_projects (

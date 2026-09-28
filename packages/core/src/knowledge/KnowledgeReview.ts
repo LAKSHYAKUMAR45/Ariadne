@@ -39,6 +39,13 @@ export interface CreateKnowledgeReviewInput {
   requestedAt?: string;
 }
 
+export interface EnsurePendingKnowledgeReviewInput {
+  projectId: string;
+  pageVersionId?: string;
+  summary: string;
+  requestedAt?: string;
+}
+
 export interface ListKnowledgeReviewsOptions {
   status?: KnowledgeReviewStatus;
   limit?: number;
@@ -141,6 +148,32 @@ function requireReview(db: Database.Database, reviewId: string): KnowledgeReview
   return rowToKnowledgeReview(row);
 }
 
+function findPendingReview(
+  db: Database.Database,
+  projectId: string,
+  pageVersionId: string | null,
+  summary: string,
+): KnowledgeReviewRecord | null {
+  const row = pageVersionId === null
+    ? (db
+        .prepare(
+          `SELECT * FROM knowledge_reviews
+           WHERE project_id = ? AND page_version_id IS NULL AND status = 'pending' AND summary = ?
+           ORDER BY requested_at, id
+           LIMIT 1`,
+        )
+        .get(projectId, summary) as KnowledgeReviewRow | undefined)
+    : (db
+        .prepare(
+          `SELECT * FROM knowledge_reviews
+           WHERE project_id = ? AND page_version_id = ? AND status = 'pending' AND summary = ?
+           ORDER BY requested_at, id
+           LIMIT 1`,
+        )
+        .get(projectId, pageVersionId, summary) as KnowledgeReviewRow | undefined);
+  return row ? rowToKnowledgeReview(row) : null;
+}
+
 function recordReviewAction(
   db: Database.Database,
   input: {
@@ -239,6 +272,43 @@ export function createKnowledgeReview(
      VALUES (@id, @projectId, @pageVersionId, 'pending', @requestedAt, @summary)`,
   ).run(review);
   return requireReview(db, review.id);
+}
+
+export function ensurePendingKnowledgeReview(
+  db: Database.Database,
+  input: EnsurePendingKnowledgeReviewInput,
+): KnowledgeReviewRecord {
+  requireNonEmpty(input.projectId, 'project ID');
+  if (input.pageVersionId !== undefined) {
+    requireNonEmpty(input.pageVersionId, 'page version ID');
+  }
+  requireNonEmpty(input.summary, 'summary');
+
+  const review = {
+    id: createKnowledgeId('review'),
+    projectId: input.projectId,
+    pageVersionId: input.pageVersionId ?? null,
+    summary: input.summary,
+    requestedAt: input.requestedAt ?? new Date().toISOString(),
+  };
+  const existing = findPendingReview(db, review.projectId, review.pageVersionId, review.summary);
+  if (existing) {
+    return existing;
+  }
+  db.prepare(
+    `INSERT OR IGNORE INTO knowledge_reviews
+     (id, project_id, page_version_id, status, requested_at, summary)
+     VALUES (@id, @projectId, @pageVersionId, 'pending', @requestedAt, @summary)`,
+  ).run(review);
+  const created = db.prepare('SELECT * FROM knowledge_reviews WHERE id = ?').get(review.id) as KnowledgeReviewRow | undefined;
+  if (created) {
+    return rowToKnowledgeReview(created);
+  }
+  const reused = findPendingReview(db, review.projectId, review.pageVersionId, review.summary);
+  if (reused) {
+    return reused;
+  }
+  throw new Error(`Knowledge review could not be created or reused: ${review.projectId}`);
 }
 
 export function listKnowledgeReviews(

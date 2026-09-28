@@ -212,7 +212,7 @@ describe('KnowledgeWorker', () => {
     });
     const worker = new KnowledgeWorker(db, { workerId: 'worker-unsupported', now: () => CREATED_AT });
 
-    await expect(worker.processJob(job.id)).rejects.toThrow(/owned by worker-unsupported/i);
+    await expect(worker.processJob(PROJECT_A, job.id)).rejects.toThrow(/owned by worker-unsupported/i);
 
     const result = await worker.runOnce(PROJECT_A);
     expect(result).toMatchObject({ claimed: 1, completed: 0, failed: 1, cancelled: 0 });
@@ -331,9 +331,28 @@ describe('KnowledgeWorker', () => {
       },
     );
 
-    await expect(worker.processJob(job.id)).rejects.toThrow(/lease|ownership/i);
+    await expect(worker.processJob(PROJECT_A, job.id)).rejects.toThrow(/lease|ownership/i);
     expect(db.prepare('SELECT COUNT(*) AS count FROM knowledge_extractions WHERE project_id = ?').get(PROJECT_A)).toEqual({ count: 0 });
     expect(pageStore.listPages(PROJECT_A)).toHaveLength(0);
+  });
+
+  it('requires explicit matching project context for direct job processing', async () => {
+    const python = registerSource(PROJECT_A, 'src/direct.py', 'print("direct")\n');
+    const job = queue.enqueue({
+      projectId: PROJECT_A,
+      jobKind: 'analyze',
+      sourceVersionId: python.sourceVersionId,
+      payload: { sourceVersionId: python.sourceVersionId },
+    });
+    expect(queue.claim(PROJECT_A, 'worker-direct')?.id).toBe(job.id);
+    const worker = new KnowledgeWorker(db, { workerId: 'worker-direct', now: () => CREATED_AT });
+
+    await expect(worker.processJob(PROJECT_B, job.id)).rejects.toThrow(/project/i);
+    await expect(worker.processJob(PROJECT_A, job.id)).resolves.toMatchObject({
+      id: job.id,
+      status: 'completed',
+      projectId: PROJECT_A,
+    });
   });
 
   it('reruns unchanged source versions idempotently without duplicating deterministic artifacts', async () => {
@@ -405,7 +424,7 @@ describe('KnowledgeWorker', () => {
           insights: [
             {
               type: 'research_gap',
-              contentPath: 'worker/research-gap/api-contract.json',
+              contentPath: 'src/reviewable.py',
               confidence: 0.72,
             },
           ],
@@ -450,6 +469,67 @@ describe('KnowledgeWorker', () => {
          ORDER BY id`,
       ).all(PROJECT_A),
     ).toEqual(firstInsights);
+  });
+
+  it('skips ungrounded enrichment identifiers instead of attaching them to unrelated project pages', async () => {
+    const existingPage = pageStore.createPageVersion({
+      projectId: PROJECT_A,
+      pageId: 'page_existing' as never,
+      type: 'source',
+      title: 'src/existing.py',
+      slug: 'source-src-existing-py',
+      content: '# Existing\n',
+      contentPath: 'pages/source/source-src-existing-py.md',
+      createdAt: CREATED_AT,
+    });
+    const python = registerSource(PROJECT_A, 'src/grounded.py', 'print("grounded")\n');
+    const enrich: KnowledgeEnrichmentService = {
+      async enrich() {
+        return {
+          reviews: [
+            {
+              pageVersionId: existingPage.id,
+              summary: 'Contradiction: unrelated existing page should not be targeted',
+            },
+          ],
+          insights: [
+            {
+              type: 'research_gap',
+              contentPath: 'pages/source/source-src-existing-py.md',
+              confidence: 0.6,
+            },
+          ],
+        };
+      },
+    };
+    queue.enqueue({
+      projectId: PROJECT_A,
+      jobKind: 'analyze',
+      sourceVersionId: python.sourceVersionId,
+      payload: { sourceVersionId: python.sourceVersionId },
+    });
+    const worker = new KnowledgeWorker(db, { workerId: 'worker-grounding', now: () => CREATED_AT, enrich });
+
+    const result = await worker.runOnce(PROJECT_A);
+
+    expect(result).toMatchObject({ claimed: 1, completed: 1, failed: 0, cancelled: 0 });
+    expect(result.warnings).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ code: 'enrichment_ungrounded' }),
+      ]),
+    );
+    expect(
+      listKnowledgeReviews(db, PROJECT_A).filter(
+        (review) => review.summary === 'Contradiction: unrelated existing page should not be targeted',
+      ),
+    ).toEqual([]);
+    expect(
+      db.prepare(
+        `SELECT COUNT(*) AS count
+         FROM knowledge_insights
+         WHERE project_id = ? AND content_path = ?`,
+      ).get(PROJECT_A, 'pages/source/source-src-existing-py.md'),
+    ).toEqual({ count: 0 });
   });
 
   it('keeps projects isolated while draining only the requested project queue', async () => {
@@ -520,6 +600,66 @@ describe('KnowledgeWorker', () => {
     expect(failedJob).toMatchObject({ status: 'failed', failureCode: 'generation_failed' });
     expect(failedJob?.failureMessage).toContain('***');
     expect(failedJob?.failureMessage?.length ?? 0).toBeLessThanOrEqual(500);
+  });
+
+  it('counts expired-lease recovery failures in runOnce results without claiming a new job', async () => {
+    const python = registerSource(PROJECT_A, 'src/recovery.py', 'print("recover")\n');
+    const job = queue.enqueue({
+      projectId: PROJECT_A,
+      jobKind: 'analyze',
+      sourceVersionId: python.sourceVersionId,
+      payload: { sourceVersionId: python.sourceVersionId },
+      maxRetries: 0,
+    });
+    expect(queue.claim(PROJECT_A, 'worker-recovery')?.id).toBe(job.id);
+    queue.setNow(() => '2026-09-25T00:00:01.000Z');
+    const worker = new KnowledgeWorker(db, { workerId: 'worker-recovery', now: () => '2026-09-25T00:00:01.000Z' });
+
+    const result = await worker.runOnce(PROJECT_A);
+
+    expect(result).toMatchObject({
+      projectId: PROJECT_A,
+      claimed: 0,
+      completed: 0,
+      failed: 1,
+      cancelled: 0,
+    });
+    expect(queue.get(job.id)).toMatchObject({
+      status: 'failed',
+      failureCode: 'lease_expired',
+    });
+  });
+
+  it('does not leave completed progress behind when durable completion fails', async () => {
+    const python = registerSource(PROJECT_A, 'src/terminal-failure.py', 'print("terminal failure")\n');
+    const job = queue.enqueue({
+      projectId: PROJECT_A,
+      jobKind: 'analyze',
+      sourceVersionId: python.sourceVersionId,
+      payload: { sourceVersionId: python.sourceVersionId },
+    });
+    const throwingQueue = new (class extends KnowledgeQueue {
+      public override complete(): never {
+        throw new Error('simulated terminal completion failure');
+      }
+    })(db, { leaseDurationMs: 90, now: () => CREATED_AT });
+    const worker = new KnowledgeWorker(
+      db,
+      { workerId: 'worker-terminal-failure', now: () => CREATED_AT },
+      { queue: throwingQueue },
+    );
+
+    const result = await worker.runOnce(PROJECT_A);
+
+    expect(result).toMatchObject({ claimed: 1, completed: 0, failed: 1, cancelled: 0 });
+    expect(throwingQueue.get(job.id)?.status).toBe('failed');
+    expect(throwingQueue.listProgressEvents(job.id).map((event) => event.stage)).toEqual([
+      'loading',
+      'analyzing',
+      'persisting',
+      'graph',
+      'generating',
+    ]);
   });
 
   function createWorkspaceRoot(projectId: string): string {

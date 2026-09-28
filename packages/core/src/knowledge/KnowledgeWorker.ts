@@ -1,7 +1,7 @@
 import type Database from 'better-sqlite3';
 import { redact } from '../Redactor.js';
 import { createKnowledgeId } from './KnowledgeIds.js';
-import { createKnowledgeReview } from './KnowledgeReview.js';
+import { ensurePendingKnowledgeReview } from './KnowledgeReview.js';
 import {
   KnowledgeGeneratorService,
   type KnowledgeGenerationPayload,
@@ -12,6 +12,8 @@ import {
   type KnowledgeJobRecord,
   type KnowledgeJobResult,
   type KnowledgeJobResultWarning,
+  type KnowledgeTerminalProgressInput,
+  KnowledgeQueueTransitionError,
 } from './KnowledgeQueue.js';
 import {
   KnowledgeSourceVersionLoadError,
@@ -100,6 +102,11 @@ interface KnowledgeEnrichmentOutcome {
   warnings: KnowledgeJobResultWarning[];
   reviews: KnowledgeEnrichmentReviewInput[];
   insights: KnowledgeEnrichmentInsightInput[];
+}
+
+interface KnowledgeEnrichmentScope {
+  pageVersionIds: Set<string>;
+  contentPaths: Set<string>;
 }
 
 export interface KnowledgeEnrichmentInput {
@@ -321,7 +328,6 @@ export class KnowledgeWorker {
   private readonly workerId: string;
   private readonly signal?: AbortSignal;
   private readonly enrich?: KnowledgeEnrichmentService;
-  private activeProjectId: string | null = null;
 
   public constructor(
     private readonly db: Database.Database,
@@ -361,40 +367,36 @@ export class KnowledgeWorker {
     let failed = 0;
     let cancelled = 0;
 
-    this.activeProjectId = scopedProjectId;
-    try {
-      while (!this.signal?.aborted) {
-        this.queue.recoverExpiredKnowledgeJobs(scopedProjectId);
-        const claimedJob = this.queue.claim(scopedProjectId, this.workerId);
-        if (!claimedJob) {
-          break;
-        }
-        claimed += 1;
-        try {
-          const result = await this.processOwnedJob(claimedJob, scopedProjectId);
-          warnings.push(...this.runWarnings(result));
-          if (result.status === 'completed') {
-            completed += 1;
-          } else if (result.status === 'failed') {
-            failed += 1;
-          } else if (result.status === 'cancelled') {
-            cancelled += 1;
-          }
-        } catch (error) {
-          const current = this.queue.get(claimedJob.id);
-          if (current?.status === 'failed') {
-            failed += 1;
-          } else if (current?.status === 'cancelled') {
-            cancelled += 1;
-          }
-          if (isLeaseLost(error)) {
-            continue;
-          }
-          throw error;
-        }
+    while (!this.signal?.aborted) {
+      const recovered = this.queue.recoverExpiredKnowledgeJobsSummary(scopedProjectId);
+      failed += recovered.failedIds.length;
+      const claimedJob = this.queue.claim(scopedProjectId, this.workerId);
+      if (!claimedJob) {
+        break;
       }
-    } finally {
-      this.activeProjectId = null;
+      claimed += 1;
+      try {
+        const result = await this.processOwnedJob(claimedJob, scopedProjectId);
+        warnings.push(...this.runWarnings(result));
+        if (result.status === 'completed') {
+          completed += 1;
+        } else if (result.status === 'failed') {
+          failed += 1;
+        } else if (result.status === 'cancelled') {
+          cancelled += 1;
+        }
+      } catch (error) {
+        const current = this.queue.get(claimedJob.id);
+        if (current?.status === 'failed') {
+          failed += 1;
+        } else if (current?.status === 'cancelled') {
+          cancelled += 1;
+        }
+        if (isLeaseLost(error)) {
+          continue;
+        }
+        throw error;
+      }
     }
 
     return {
@@ -419,9 +421,10 @@ export class KnowledgeWorker {
     }
   }
 
-  public async processJob(jobId: string): Promise<KnowledgeJobRecord> {
-    const job = this.requireOwnedRunningJob(jobId);
-    return this.processOwnedJob(job, this.activeProjectId ?? job.projectId);
+  public async processJob(projectId: string, jobId: string): Promise<KnowledgeJobRecord> {
+    const scopedProjectId = requireNonEmptyString(projectId, 'project ID');
+    const job = this.requireOwnedRunningJob(scopedProjectId, jobId);
+    return this.processOwnedJob(job, scopedProjectId);
   }
 
   private async processOwnedJob(job: KnowledgeJobRecord, projectId: string): Promise<KnowledgeJobRecord> {
@@ -529,7 +532,13 @@ export class KnowledgeWorker {
       pageVersionIds: generation.pages.map((page) => page.id),
     });
     this.guardDurableStage(job.id, projectId, leaseMonitor);
-    const enrichmentWarnings = this.applyOptionalEnrichment(projectId, enrichment);
+    const groundedEnrichment = this.groundEnrichment(
+      projectId,
+      loaded.sourcePath,
+      generation.pages.map((page) => page.id),
+      enrichment,
+    );
+    const enrichmentWarnings = this.applyOptionalEnrichment(projectId, groundedEnrichment);
     this.guardDurableStage(job.id, projectId, leaseMonitor);
     const warnings = uniqueWarnings([
       ...summarizeDiagnostics(extraction),
@@ -549,14 +558,103 @@ export class KnowledgeWorker {
       graphEdgeCount: graphResult.edgeIds.length,
       warnings,
     };
-    this.guardDurableStage(job.id, projectId, leaseMonitor);
-    this.queue.recordProgress(job.id, 'completed', 6, 6, {
-      pageCount: generation.pages.length,
-      warningCount: warnings.length,
-      processingMode,
-    });
-    this.guardDurableStage(job.id, projectId, leaseMonitor);
-    return this.queue.complete(job.id, this.workerId, result);
+    const completionProgress: KnowledgeTerminalProgressInput = {
+      stage: 'completed',
+      completedUnits: 6,
+      totalUnits: 6,
+      detail: {
+        pageCount: generation.pages.length,
+        warningCount: warnings.length,
+        processingMode,
+      },
+    };
+    return this.completeOwnedJob(job.id, projectId, leaseMonitor, result, completionProgress);
+  }
+
+  private completeOwnedJob(
+    jobId: string,
+    projectId: string,
+    leaseMonitor: LeaseMonitor,
+    result: KnowledgeJobResult,
+    progress: KnowledgeTerminalProgressInput,
+  ): KnowledgeJobRecord {
+    this.guardDurableStage(jobId, projectId, leaseMonitor);
+    try {
+      return this.queue.complete(jobId, this.workerId, result, { progress });
+    } catch (error) {
+      if (error instanceof KnowledgeQueueTransitionError) {
+        throw new KnowledgeWorkerLeaseLostError(error.message);
+      }
+      throw error;
+    }
+  }
+
+  private groundEnrichment(
+    projectId: string,
+    sourcePath: string | null,
+    pageVersionIds: readonly string[],
+    outcome: KnowledgeEnrichmentOutcome,
+  ): KnowledgeEnrichmentOutcome {
+    const scope = this.loadEnrichmentScope(projectId, sourcePath, pageVersionIds);
+    const warnings = [...outcome.warnings];
+    const reviews: KnowledgeEnrichmentReviewInput[] = [];
+    for (const review of outcome.reviews) {
+      if (review.pageVersionId === null || review.pageVersionId === undefined || !scope.pageVersionIds.has(review.pageVersionId)) {
+        warnings.push({
+          code: 'enrichment_ungrounded',
+          message: 'Skipped enrichment output outside the current run scope.',
+        });
+        continue;
+      }
+      reviews.push(review);
+    }
+
+    const insights: KnowledgeEnrichmentInsightInput[] = [];
+    for (const insight of outcome.insights) {
+      if (!scope.contentPaths.has(insight.contentPath.trim())) {
+        warnings.push({
+          code: 'enrichment_ungrounded',
+          message: 'Skipped enrichment output outside the current run scope.',
+        });
+        continue;
+      }
+      insights.push(insight);
+    }
+
+    return {
+      ...outcome,
+      warnings: uniqueWarnings(warnings),
+      reviews,
+      insights,
+    };
+  }
+
+  private loadEnrichmentScope(
+    projectId: string,
+    sourcePath: string | null,
+    pageVersionIds: readonly string[],
+  ): KnowledgeEnrichmentScope {
+    const contentPaths = new Set<string>();
+    if (sourcePath !== null && sourcePath.trim().length > 0) {
+      contentPaths.add(sourcePath.trim());
+    }
+    const scopedPageVersionIds = new Set<string>();
+    if (pageVersionIds.length > 0) {
+      const placeholders = pageVersionIds.map(() => '?').join(', ');
+      const rows = this.db.prepare(
+        `SELECT id, content_path
+         FROM knowledge_page_versions
+         WHERE project_id = ? AND id IN (${placeholders})`,
+      ).all(projectId, ...pageVersionIds) as Array<{ id: string; content_path: string }>;
+      for (const row of rows) {
+        scopedPageVersionIds.add(row.id);
+        contentPaths.add(row.content_path);
+      }
+    }
+    return {
+      pageVersionIds: scopedPageVersionIds,
+      contentPaths,
+    };
   }
 
   private resolveSourceVersionId(job: KnowledgeJobRecord): string {
@@ -688,29 +786,10 @@ export class KnowledgeWorker {
   }
 
   private ensureReview(projectId: string, pageVersionId: string | null, summary: string): string {
-    const boundedSummary = boundRedactedMessage(summary, MAX_WARNING_MESSAGE_LENGTH);
-    const existing = pageVersionId === null
-      ? (this.db
-          .prepare(
-            `SELECT id FROM knowledge_reviews
-             WHERE project_id = ? AND page_version_id IS NULL AND status = 'pending' AND summary = ?
-             LIMIT 1`,
-          )
-          .get(projectId, boundedSummary) as { id: string } | undefined)
-      : (this.db
-          .prepare(
-            `SELECT id FROM knowledge_reviews
-             WHERE project_id = ? AND page_version_id = ? AND status = 'pending' AND summary = ?
-             LIMIT 1`,
-          )
-          .get(projectId, pageVersionId, boundedSummary) as { id: string } | undefined);
-    if (existing) {
-      return existing.id;
-    }
-    return createKnowledgeReview(this.db, {
+    return ensurePendingKnowledgeReview(this.db, {
       projectId,
       ...(pageVersionId === null ? {} : { pageVersionId }),
-      summary: boundedSummary,
+      summary: boundRedactedMessage(summary, MAX_WARNING_MESSAGE_LENGTH),
       requestedAt: this.now(),
     }).id;
   }
@@ -719,20 +798,10 @@ export class KnowledgeWorker {
     const type = boundRedactedMessage(requireNonEmptyString(insight.type, 'insight type'), MAX_ENRICHMENT_TYPE_LENGTH);
     const contentPath = boundRedactedMessage(insight.contentPath, MAX_WARNING_MESSAGE_LENGTH);
     const confidence = Math.max(0, Math.min(1, insight.confidence));
-    const existing = this.db
-      .prepare(
-        `SELECT id FROM knowledge_insights
-         WHERE project_id = ? AND graph_snapshot_id IS NULL AND insight_type = ? AND content_path = ?
-         LIMIT 1`,
-      )
-      .get(projectId, type, contentPath) as { id: string } | undefined;
-    if (existing) {
-      return existing.id;
-    }
     const id = createKnowledgeId('insight', `${projectId}:${type}:${contentPath}`);
     this.db
       .prepare(
-        `INSERT INTO knowledge_insights
+        `INSERT OR IGNORE INTO knowledge_insights
          (id, project_id, graph_snapshot_id, insight_type, content_path, confidence, created_at)
          VALUES (?, ?, NULL, ?, ?, ?, ?)`,
       )
@@ -830,14 +899,14 @@ export class KnowledgeWorker {
     return current;
   }
 
-  private requireOwnedRunningJob(jobId: string): KnowledgeJobRecord {
+  private requireOwnedRunningJob(projectId: string, jobId: string): KnowledgeJobRecord {
     const scopedJobId = requireNonEmptyString(jobId, 'job ID');
     const job = this.queue.get(scopedJobId);
     if (!job) {
       throw new Error(`Knowledge job not found: ${scopedJobId}`);
     }
-    if (this.activeProjectId !== null && job.projectId !== this.activeProjectId) {
-      throw new Error(`Knowledge job ${scopedJobId} does not belong to active project ${this.activeProjectId}`);
+    if (job.projectId !== projectId) {
+      throw new Error(`Knowledge job ${scopedJobId} does not belong to project ${projectId}`);
     }
     if (job.status !== 'running' || job.workerId !== this.workerId) {
       throw new Error(`Knowledge job ${scopedJobId} is not owned by ${this.workerId}`);
@@ -852,18 +921,46 @@ export class KnowledgeWorker {
     message: string,
   ): KnowledgeJobRecord | null {
     const current = this.queue.get(jobId);
-    if (!current || current.projectId !== projectId || current.status !== 'running' || current.workerId !== this.workerId) {
+    if (
+      !current ||
+      current.projectId !== projectId ||
+      current.status !== 'running' ||
+      current.workerId !== this.workerId ||
+      current.leaseExpiresAt === null ||
+      Date.parse(current.leaseExpiresAt) <= Date.parse(this.now())
+    ) {
       return null;
     }
-    return this.queue.fail(jobId, code, message, this.workerId);
+    try {
+      return this.queue.fail(jobId, code, message, this.workerId);
+    } catch (error) {
+      if (error instanceof KnowledgeQueueTransitionError) {
+        return null;
+      }
+      throw error;
+    }
   }
 
   private cancelIfOwned(jobId: string, projectId: string): KnowledgeJobRecord | null {
     const current = this.queue.get(jobId);
-    if (!current || current.projectId !== projectId || current.status !== 'running' || current.workerId !== this.workerId) {
+    if (
+      !current ||
+      current.projectId !== projectId ||
+      current.status !== 'running' ||
+      current.workerId !== this.workerId ||
+      current.leaseExpiresAt === null ||
+      Date.parse(current.leaseExpiresAt) <= Date.parse(this.now())
+    ) {
       return null;
     }
-    return this.queue.cancel(jobId);
+    try {
+      return this.queue.cancelOwned(jobId, this.workerId);
+    } catch (error) {
+      if (error instanceof KnowledgeQueueTransitionError) {
+        return null;
+      }
+      throw error;
+    }
   }
 
   private runWarnings(job: KnowledgeJobRecord): KnowledgeWorkerWarning[] {

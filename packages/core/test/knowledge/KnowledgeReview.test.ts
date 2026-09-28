@@ -4,11 +4,15 @@ import { applyKnowledgeMigrations } from '../../src/knowledge/knowledgeMigration
 import {
   bulkResolveKnowledgeReviews,
   createKnowledgeReview,
+  ensurePendingKnowledgeReview,
   listKnowledgeReviews,
   reopenKnowledgeReview,
   resolveKnowledgeReview,
 } from '../../src/knowledge/KnowledgeReview.js';
 import { SCHEMA_SQL } from '../../src/schema.js';
+import { join } from 'node:path';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { openDatabase } from '../../src/db.js';
 
 const CREATED_AT = '2026-09-24T00:00:00.000Z';
 
@@ -171,5 +175,53 @@ describe('KnowledgeReview', () => {
         }),
       },
     ]);
+  });
+
+  it('atomically deduplicates concurrent pending enrichment reviews across SQLite connections', () => {
+    const workspaceRoot = mkdtempSync(join(process.cwd(), '.knowledge-review-test-'));
+    const databasePath = join(workspaceRoot, '.ariadne', 'reviews.db');
+
+    try {
+      const first = openDatabase(databasePath);
+      const second = openDatabase(databasePath);
+      databases.push(first, second);
+      first.prepare(
+        `INSERT INTO knowledge_projects (id, workspace_root, name, created_at, updated_at)
+         VALUES ('project-1', ?, 'Workspace', ?, ?)`,
+      ).run(workspaceRoot, CREATED_AT, CREATED_AT);
+
+      first.prepare(
+        `INSERT INTO knowledge_pages (id, project_id, page_type, title, slug, status, created_at, updated_at)
+         VALUES ('page-1', 'project-1', 'source', 'src/app.py', 'source-src-app-py', 'active', ?, ?)`,
+      ).run(CREATED_AT, CREATED_AT);
+      first.prepare(
+        `INSERT INTO knowledge_page_versions
+         (id, project_id, page_id, version_number, content_hash, content_path, created_at)
+         VALUES ('page-version-1', 'project-1', 'page-1', 1, 'hash', 'pages/source/source-src-app-py.md', ?)`,
+      ).run(CREATED_AT);
+
+      first.exec('BEGIN IMMEDIATE');
+      const created = ensurePendingKnowledgeReview(first, {
+        projectId: 'project-1',
+        pageVersionId: 'page-version-1',
+        summary: 'Review the generated contradiction',
+        requestedAt: '2026-09-24T04:00:00.000Z',
+      });
+      first.exec('COMMIT');
+
+      second.exec('BEGIN IMMEDIATE');
+      const reused = ensurePendingKnowledgeReview(second, {
+        projectId: 'project-1',
+        pageVersionId: 'page-version-1',
+        summary: 'Review the generated contradiction',
+        requestedAt: '2026-09-24T04:00:01.000Z',
+      });
+      second.exec('COMMIT');
+
+      expect(reused.id).toBe(created.id);
+      expect(listKnowledgeReviews(first, 'project-1')).toHaveLength(1);
+    } finally {
+      rmSync(workspaceRoot, { recursive: true, force: true });
+    }
   });
 });

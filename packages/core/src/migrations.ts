@@ -1,6 +1,11 @@
 import type Database from 'better-sqlite3';
 import { KNOWLEDGE_SCHEMA_SQL } from './knowledge/knowledgeSchema.js';
-import { applyKnowledgeQueueMigration } from './knowledge/knowledgeMigrations.js';
+import {
+  applyKnowledgeGraphMetadataMigration,
+  applyKnowledgeQueueMigration,
+  applyKnowledgeReviewDeduplicationMigration,
+  applyKnowledgeSchemaV2Migration,
+} from './knowledge/knowledgeMigrations.js';
 
 /**
  * Schema migration runner, closing the "no schema migrations" gap flagged
@@ -170,6 +175,15 @@ export const MIGRATIONS: Migration[] = [
     version: 8,
     description: 'Add leases, retries, and source-version deduplication to knowledge jobs',
     up: (db) => applyKnowledgeQueueMigration(db),
+  },
+  {
+    version: 9,
+    description: 'Apply additive knowledge schema follow-up migrations for extractions, graph metadata, and review dedupe',
+    up: (db) => {
+      applyKnowledgeSchemaV2Migration(db);
+      applyKnowledgeGraphMetadataMigration(db);
+      applyKnowledgeReviewDeduplicationMigration(db);
+    },
   },
 ];
 

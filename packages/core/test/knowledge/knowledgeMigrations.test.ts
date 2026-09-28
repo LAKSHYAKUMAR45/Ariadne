@@ -1,7 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import Database from 'better-sqlite3';
 import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openDatabase } from '../../src/db.js';
 import { applyKnowledgeMigrations, KNOWLEDGE_SCHEMA_VERSION } from '../../src/knowledge/knowledgeMigrations.js';
@@ -46,6 +45,8 @@ const REQUIRED_INDEXES = [
   'idx_knowledge_pages_project_type',
   'idx_knowledge_jobs_project_status',
   'idx_knowledge_reviews_project_status',
+  'idx_knowledge_reviews_pending_page_identity',
+  'idx_knowledge_reviews_pending_project_identity',
   'idx_knowledge_graph_edges_project_source_target',
 ] as const;
 
@@ -83,7 +84,7 @@ describe('knowledge schema migrations', () => {
 
     expect(tableNames(db)).toEqual(expect.arrayContaining(KNOWLEDGE_TABLES));
     expect(indexNames(db)).toEqual(expect.arrayContaining(REQUIRED_INDEXES));
-    expect(KNOWLEDGE_SCHEMA_VERSION).toBe(3);
+    expect(KNOWLEDGE_SCHEMA_VERSION).toBe(4);
     expect(columns(db, 'knowledge_extractions')).toEqual(
       expect.arrayContaining([
         'analyzer_id',
@@ -121,7 +122,7 @@ describe('knowledge schema migrations', () => {
   });
 
   it('registers knowledge migrations with the shared database initializer and is safe to reopen', () => {
-    const directory = mkdtempSync(join(tmpdir(), 'ariadne-knowledge-migrations-'));
+    const directory = mkdtempSync(join(process.cwd(), '.knowledge-migrations-'));
     temporaryDirectories.push(directory);
     const databasePath = join(directory, 'state.db');
 

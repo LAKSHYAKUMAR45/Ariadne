@@ -9,39 +9,44 @@
 - Aligned generator lease renewal with the worker queue lease duration to avoid generation extending leases past the queue policy.
 - Fixed `KnowledgePageStore.resolveSourceSpanId()` to select `span.id`, which unblocked deterministic source-page provenance and exact-span search citations during worker generation.
 - Expanded OpenAI key redaction to catch hyphenated and underscore-containing keys (including `sk-proj-..._...`) and added a regression test.
+- Hardened worker-owned terminal transitions so `complete`, `fail`, and owner cancellation each perform a single guarded SQL update that requires the job id, `running` status, expected worker, and an unexpired lease at update time.
+- Moved final `completed` progress persistence into the guarded completion transaction so success-shaped progress only appears when durable completion commits.
+- Added enrichment grounding for reviews and insights so provider output can only target current-run page versions or current source/page paths, with bounded `enrichment_ungrounded` warnings for skipped items.
+- Added atomic pending-review deduplication with migration-backed uniqueness plus `INSERT OR IGNORE`/reuse logic, including separate-connection regression coverage.
+- Required explicit project context for direct processing via `processJob(projectId, jobId)` and counted expired-lease terminal failures in `runOnce()` results.
 
 ## RED evidence
 
-Initial RED run:
+Regression RED run before the fixes:
 
 ```bash
-pnpm --filter @ariadne-dev/core test -- KnowledgeWorker.test.ts
+pnpm exec vitest run test/knowledge/KnowledgeWorker.test.ts test/knowledge/KnowledgeQueue.test.ts test/knowledge/KnowledgeReview.test.ts test/knowledge/knowledgeMigrations.test.ts test/knowledge/KnowledgeGeneratorService.test.ts test/knowledge/KnowledgeSearch.test.ts
 ```
 
-Result: **failed** because `packages/core/src/knowledge/KnowledgeWorker.ts` did not exist yet:
+Result: **failed** with the expected Task 8 review regressions:
 
-- `Cannot find module '../../src/knowledge/KnowledgeWorker.js'`
+- missing atomic pending-review helper (`ensurePendingKnowledgeReview is not a function`)
+- stale direct processing API (`Knowledge job not found: project_a` when calling `processJob(projectId, jobId)`)
+- missing ungrounded enrichment warning / skip behavior
+- missing expired-lease recovery failure counts in `runOnce()`
+- leaked `completed` progress on completion failure
+- missing pending-review uniqueness index / migration assertion
 
 ## GREEN evidence
 
 Focused required validation:
 
 ```bash
-pnpm --filter @ariadne-dev/core test -- KnowledgeWorker.test.ts KnowledgeQueue.test.ts KnowledgeGeneratorService.test.ts KnowledgeSearch.test.ts
+pnpm exec vitest run test/knowledge/KnowledgeWorker.test.ts test/knowledge/KnowledgeQueue.test.ts test/knowledge/KnowledgeReview.test.ts test/knowledge/knowledgeMigrations.test.ts test/knowledge/KnowledgeGeneratorService.test.ts test/knowledge/KnowledgeSearch.test.ts
+pnpm --filter @ariadne-dev/core test
 pnpm --filter @ariadne-dev/core build
 ```
 
 Final result: **pass**
 
-- Focused suite: `63 passed`, `514 passed` tests total in the invoked run.
+- Focused suite: `62 passed`.
+- Full core suite: `520 passed`.
 - Build: `tsc -p tsconfig.json` passed.
-
-Additional targeted checks run during implementation:
-
-```bash
-pnpm exec vitest run test/knowledge/KnowledgeWorker.test.ts
-pnpm exec vitest run test/Redactor.test.ts test/knowledge/KnowledgeWorker.test.ts test/knowledge/KnowledgeQueue.test.ts test/knowledge/KnowledgeGeneratorService.test.ts test/knowledge/KnowledgeSearch.test.ts
-```
 
 ## Failure codes implemented
 
@@ -70,7 +75,7 @@ Notes:
 ## Lease, ownership, and cancellation behavior
 
 - `runOnce(projectId)` recovers expired leases before each claim and drains only the requested project queue.
-- `processJob(jobId)` rejects jobs that are not currently `running` and owned by the worker.
+- `processJob(projectId, jobId)` rejects jobs that are not currently `running`, owned by the worker, and scoped to the requested project.
 - Lease renewal runs on an interval of `min(queue lease / 3, leaseRenewIntervalMs)` and is always cleared in `finally`.
 - The worker checks abort/ownership/lease expiry before progress writes and before every durable stage transition.
 - Cancellation between stages records `cancelled` when the worker still owns the running job.
@@ -90,27 +95,16 @@ Notes:
 
 ## Post-implementation review status
 
-Task 8 is **implemented but blocked pending remediation**. Do not mark it
-complete or begin Task 9 until these reviewed findings are fixed and
-re-reviewed:
+Task 8 review remediation is **resolved**. The six reviewed blockers are now
+covered by regression tests and fixed in code:
 
-1. Make `complete`, `fail`, and owner cancellation single guarded queue updates
-   that atomically require the expected running status, worker ownership, and
-   an unexpired lease. A stale worker must never finalize a recovered or
-   reclaimed job.
-2. Persist the `completed` progress stage only after durable queue completion
-   succeeds, so failed or requeued jobs cannot retain success-shaped progress.
-3. Ground enrichment reviews to page versions generated by the current job.
-   Validate or derive insight scope from the current source/page set instead of
-   trusting provider-supplied identifiers.
-4. Make pending enrichment-review deduplication atomic with a deterministic
-   identity or database uniqueness plus conflict handling.
-5. Include terminal failures caused by expired-lease recovery in
-   `runOnce()` result counts.
-6. Require explicit project context when processing a job directly so
-   `processJob()` cannot accept an owned job from an unintended project.
+1. worker-owned terminal transitions are single guarded SQL updates
+2. final `completed` progress persists only with durable completion
+3. enrichment output is grounded to the current run scope
+4. pending enrichment reviews are atomically deduplicated
+5. expired-lease terminal recoveries count in `runOnce().failed`
+6. direct processing requires explicit project context
 
-Required regression coverage includes lease loss between the last ownership
-check and terminal update, completion-update failure after generation,
-cross-page enrichment output, concurrent duplicate reviews, exhausted retry
-recovery counts, and direct cross-project job processing.
+Task 8 can be considered complete from the core worker perspective. Do not
+start Task 9 from this report update alone; follow the plan sequencing
+outside this file.

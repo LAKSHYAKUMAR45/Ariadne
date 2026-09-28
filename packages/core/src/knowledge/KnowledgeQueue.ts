@@ -67,6 +67,18 @@ export interface KnowledgeProgressEvent {
   createdAt: string;
 }
 
+export interface KnowledgeTerminalProgressInput {
+  stage: string;
+  completedUnits: number;
+  totalUnits: number;
+  detail?: Record<string, unknown>;
+}
+
+export interface KnowledgeRecoverySummary {
+  requeuedIds: string[];
+  failedIds: string[];
+}
+
 export interface KnowledgeQueueOptions {
   leaseDurationMs?: number;
   now?: () => string;
@@ -271,6 +283,13 @@ function getErrorMessage(code: string, id: string): Error {
   return new Error(`${code}: ${id}`);
 }
 
+export class KnowledgeQueueTransitionError extends Error {
+  public constructor(message: string) {
+    super(message);
+    this.name = 'KnowledgeQueueTransitionError';
+  }
+}
+
 export class KnowledgeQueue {
   private readonly leaseDurationMs: number;
   private now: () => string;
@@ -369,46 +388,80 @@ export class KnowledgeQueue {
     })();
   }
 
-  public complete(jobId: string, workerId?: string, result?: KnowledgeJobResult): KnowledgeJobRecord {
+  public complete(
+    jobId: string,
+    workerId: string,
+    result?: KnowledgeJobResult,
+    options: { progress?: KnowledgeTerminalProgressInput } = {},
+  ): KnowledgeJobRecord {
     const job = this.require(jobId);
-    this.assertRunning(job, workerId);
     const persistedResult = result === undefined ? null : sanitizePersistedResult(result);
-    this.db
-      .prepare(
-        `UPDATE knowledge_jobs
-         SET status = 'completed', completed_at = @now, worker_id = NULL, lease_expires_at = NULL,
-             result_json = @resultJson
-         WHERE id = @id`,
-      )
-      .run({ id: jobId, now: this.now(), resultJson: persistedResult === null ? null : JSON.stringify(persistedResult) });
-    return this.require(jobId);
+    return this.db.transaction(() => {
+      const now = this.now();
+      const completion = this.db
+        .prepare(
+          `UPDATE knowledge_jobs
+           SET status = 'completed', completed_at = @now, worker_id = NULL, lease_expires_at = NULL,
+               result_json = @resultJson
+           WHERE id = @id
+             AND status = 'running'
+             AND worker_id = @workerId
+             AND lease_expires_at IS NOT NULL
+             AND lease_expires_at > @now`,
+        )
+        .run({
+          id: jobId,
+          workerId,
+          now,
+          resultJson: persistedResult === null ? null : JSON.stringify(persistedResult),
+        });
+      if (completion.changes !== 1) {
+        throw new KnowledgeQueueTransitionError(
+          `Knowledge job ${jobId} is not running with an active lease for worker ${workerId}`,
+        );
+      }
+      if (options.progress) {
+        this.insertProgressEvent(job.projectId, jobId, options.progress, now);
+      }
+      return this.require(jobId);
+    })();
   }
 
   public fail(
     jobId: string,
     failureCode: string,
     failureMessage: string,
-    workerId?: string,
+    workerId: string,
   ): KnowledgeJobRecord {
     const job = this.require(jobId);
-    this.assertRunning(job, workerId);
-    const retryCount = job.retryCount + 1;
-    this.db
-      .prepare(
-        `UPDATE knowledge_jobs
-         SET status = 'failed', completed_at = @now, failure_code = @failureCode,
-             failure_message = @failureMessage, retry_count = @retryCount,
-             worker_id = NULL, lease_expires_at = NULL
-         WHERE id = @id`,
-      )
-      .run({
-        id: jobId,
-        now: this.now(),
-        failureCode,
-        failureMessage: boundedRedactedLine(failureMessage, MAX_FAILURE_MESSAGE_LENGTH),
-        retryCount,
-      });
-    return this.require(jobId);
+    return this.db.transaction(() => {
+      const now = this.now();
+      const failure = this.db
+        .prepare(
+          `UPDATE knowledge_jobs
+           SET status = 'failed', completed_at = @now, failure_code = @failureCode,
+               failure_message = @failureMessage, retry_count = retry_count + 1,
+               worker_id = NULL, lease_expires_at = NULL
+           WHERE id = @id
+             AND status = 'running'
+             AND worker_id = @workerId
+             AND lease_expires_at IS NOT NULL
+             AND lease_expires_at > @now`,
+        )
+        .run({
+          id: jobId,
+          workerId,
+          now,
+          failureCode,
+          failureMessage: boundedRedactedLine(failureMessage, MAX_FAILURE_MESSAGE_LENGTH),
+        });
+      if (failure.changes !== 1) {
+        throw new KnowledgeQueueTransitionError(
+          `Knowledge job ${jobId} is not running with an active lease for worker ${workerId}`,
+        );
+      }
+      return this.require(jobId);
+    })();
   }
 
   public cancel(jobId: string): KnowledgeJobRecord {
@@ -423,6 +476,28 @@ export class KnowledgeQueue {
          WHERE id = @id`,
       )
       .run({ id: jobId, now: this.now() });
+    return this.require(jobId);
+  }
+
+  public cancelOwned(jobId: string, workerId: string): KnowledgeJobRecord {
+    this.require(jobId);
+    const now = this.now();
+    const cancellation = this.db
+      .prepare(
+        `UPDATE knowledge_jobs
+         SET status = 'cancelled', completed_at = @now, worker_id = NULL, lease_expires_at = NULL
+         WHERE id = @id
+           AND status = 'running'
+           AND worker_id = @workerId
+           AND lease_expires_at IS NOT NULL
+           AND lease_expires_at > @now`,
+      )
+      .run({ id: jobId, workerId, now });
+    if (cancellation.changes !== 1) {
+      throw new KnowledgeQueueTransitionError(
+        `Knowledge job ${jobId} is not running with an active lease for worker ${workerId}`,
+      );
+    }
     return this.require(jobId);
   }
 
@@ -457,6 +532,10 @@ export class KnowledgeQueue {
   }
 
   public recoverExpiredKnowledgeJobs(projectId?: string): string[] {
+    return this.recoverExpiredKnowledgeJobsSummary(projectId).requeuedIds;
+  }
+
+  public recoverExpiredKnowledgeJobsSummary(projectId?: string): KnowledgeRecoverySummary {
     return this.db.transaction(() => {
       const now = this.now();
       const expired = this.db
@@ -469,7 +548,10 @@ export class KnowledgeQueue {
            ORDER BY requested_at, id`,
         )
         .all({ now, projectId: projectId ?? null }) as JobRow[];
-      const recovered: string[] = [];
+      const recovered: KnowledgeRecoverySummary = {
+        requeuedIds: [],
+        failedIds: [],
+      };
       for (const job of expired) {
         this.onRecoverExpiredCandidate?.(rowToJob(job));
         const retryCount = job.retry_count + 1;
@@ -488,7 +570,13 @@ export class KnowledgeQueue {
                AND lease_expires_at <= @now`,
           )
           .run({ id: job.id, projectId: job.project_id, status, now, retryCount });
-        if (result.changes === 1 && status === 'queued') recovered.push(job.id);
+        if (result.changes === 1) {
+          if (status === 'queued') {
+            recovered.requeuedIds.push(job.id);
+          } else {
+            recovered.failedIds.push(job.id);
+          }
+        }
       }
       return recovered;
     })();
@@ -542,23 +630,7 @@ export class KnowledgeQueue {
     if (!Number.isInteger(completedUnits) || completedUnits < 0 || !Number.isInteger(totalUnits) || totalUnits < 0) {
       throw new Error('Knowledge progress units must be non-negative integers');
     }
-    const safeDetail = sanitizeProgressDetail(detail);
-    const event = {
-      id: createKnowledgeId('job-event'),
-      projectId: job.projectId,
-      jobId,
-      eventKind: 'progress',
-      detailJson: JSON.stringify({ stage: boundedRedactedStage(stage), completedUnits, totalUnits, detail: safeDetail }),
-      createdAt: this.now(),
-    };
-    this.db
-      .prepare(
-        `INSERT INTO knowledge_job_events
-         (id, project_id, job_id, event_kind, detail_json, created_at)
-         VALUES (@id, @projectId, @jobId, @eventKind, @detailJson, @createdAt)`,
-      )
-      .run(event);
-    return this.progressFromEvent(event);
+    return this.insertProgressEvent(job.projectId, jobId, { stage, completedUnits, totalUnits, detail }, this.now());
   }
 
   public listProgress(jobId: string): KnowledgeProgressEvent[] {
@@ -620,6 +692,36 @@ export class KnowledgeQueue {
     const job = this.get(jobId);
     if (!job) throw getErrorMessage('Knowledge job not found', jobId);
     return job;
+  }
+
+  private insertProgressEvent(
+    projectId: string,
+    jobId: string,
+    input: KnowledgeTerminalProgressInput,
+    createdAt: string,
+  ): KnowledgeProgressEvent {
+    const safeDetail = sanitizeProgressDetail(input.detail ?? {});
+    const event = {
+      id: createKnowledgeId('job-event'),
+      projectId,
+      jobId,
+      eventKind: 'progress',
+      detailJson: JSON.stringify({
+        stage: boundedRedactedStage(input.stage),
+        completedUnits: input.completedUnits,
+        totalUnits: input.totalUnits,
+        detail: safeDetail,
+      }),
+      createdAt,
+    };
+    this.db
+      .prepare(
+        `INSERT INTO knowledge_job_events
+         (id, project_id, job_id, event_kind, detail_json, created_at)
+         VALUES (@id, @projectId, @jobId, @eventKind, @detailJson, @createdAt)`,
+      )
+      .run(event);
+    return this.progressFromEvent(event);
   }
 
   private assertRunning(job: KnowledgeJobRecord, workerId?: string): void {
