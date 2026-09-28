@@ -486,7 +486,9 @@ export {
 export type {
   CreateKnowledgeProviderProfileInput,
   KnowledgeProviderDiagnostic,
+  KnowledgeProviderCredentialPolicy,
   KnowledgeProviderProfile,
+  KnowledgeProviderProfileListResult,
   KnowledgeProviderProfileTestAdapter,
   KnowledgeProviderProfileStoreOptions,
   KnowledgeProviderTestAdapter,
@@ -559,8 +561,11 @@ export type {
   OpenAICompatibleEnrichmentServiceOptions,
   OpenAICompatibleGenerateInput,
   OpenAICompatibleGroundingInput,
+  OpenAICompatibleHostPolicy,
   OpenAICompatibleProviderOptions,
   OpenAICompatibleProviderResult,
+  OpenAICompatibleResolvedAddress,
+  OpenAICompatibleTransport,
 } from './knowledge/providers/OpenAICompatibleProvider.js';
 export {
   KnowledgeChatService,

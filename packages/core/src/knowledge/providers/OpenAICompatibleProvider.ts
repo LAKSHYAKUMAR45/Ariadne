@@ -1,3 +1,5 @@
+import { lookup } from 'node:dns/promises';
+import net from 'node:net';
 import type Database from 'better-sqlite3';
 import {
   type KnowledgeAnalysis,
@@ -9,11 +11,12 @@ import {
 import type { DeterministicExtraction, KnowledgeSourceSpan } from '../KnowledgeExtraction.js';
 import type {
   KnowledgeProviderDiagnostic,
+  KnowledgeProviderCredentialPolicy,
   KnowledgeProviderProfile,
+  ResolveKnowledgeProviderApiKeyResult,
   KnowledgeProviderTestAdapter,
   KnowledgeProviderTestAdapterInput,
   KnowledgeProviderTestAdapterResult,
-  KnowledgeProviderTestResult,
 } from '../KnowledgeProviderProfiles.js';
 import {
   KnowledgeProviderProfileStore,
@@ -30,10 +33,10 @@ import type {
 } from '../KnowledgeWorker.js';
 import { redact } from '../../Redactor.js';
 
-const MAX_REQUEST_PROMPT_LENGTH = 6_000;
 const MAX_REQUEST_SYSTEM_PROMPT_LENGTH = 2_000;
-const MAX_RESPONSE_TEXT_LENGTH = 80_000;
-const MAX_RESPONSE_CONTENT_LENGTH = 20_000;
+const MAX_REQUEST_PROMPT_BYTES = 12_000;
+const MAX_RESPONSE_BODY_BYTES = 80_000;
+const MAX_RESPONSE_CONTENT_BYTES = 20_000;
 const MAX_RESPONSE_DEPTH = 12;
 const MAX_RESPONSE_ENTRIES = 512;
 const MAX_RESPONSE_ARRAY_ITEMS = 256;
@@ -44,6 +47,7 @@ const MAX_SYMBOL_COUNT = 12;
 const MAX_RELATIONSHIP_COUNT = 12;
 const MAX_PAGE_COUNT = 4;
 const MAX_PAGE_CONTENT_LENGTH = 480;
+const MAX_ALLOWED_SOURCE_SPANS = 256;
 const TRUNCATION_SUFFIX = ' …[truncated]';
 
 export interface OpenAICompatibleGroundingInput {
@@ -81,17 +85,43 @@ export interface OpenAICompatibleProviderResult<T> {
 
 export interface OpenAICompatibleProviderOptions {
   fetchImplementation?: typeof fetch;
+  transport?: OpenAICompatibleTransport;
+  credentialPolicy?: KnowledgeProviderCredentialPolicy;
+  hostPolicy?: OpenAICompatibleHostPolicy;
 }
 
 export interface OpenAICompatibleEnrichmentServiceOptions {
   profileStore: KnowledgeProviderProfileStore;
   provider?: OpenAICompatibleProvider;
   environment?: NodeJS.ProcessEnv;
+  credentialPolicy?: KnowledgeProviderCredentialPolicy;
+  hostPolicy?: OpenAICompatibleHostPolicy;
+  transport?: OpenAICompatibleTransport;
 }
 
 interface ChatMessage {
   role: 'system' | 'user';
   content: string;
+}
+
+export interface OpenAICompatibleResolvedAddress {
+  address: string;
+  family: 4 | 6;
+}
+
+export interface OpenAICompatibleTransport {
+  fetch: typeof fetch;
+  pinsResolvedHostnames?: boolean;
+  resolveHostname(hostname: string): Promise<readonly OpenAICompatibleResolvedAddress[]>;
+}
+
+export interface OpenAICompatibleHostPolicy {
+  allowedOrigins?: ReadonlySet<string>;
+  isOriginAllowed?: (input: {
+    origin: string;
+    profile: KnowledgeProviderProfile;
+    hasCredentials: boolean;
+  }) => boolean;
 }
 
 function sanitizeExcerpt(value: string, maxLength = MAX_EXCERPT_LENGTH): string {
@@ -115,13 +145,60 @@ function boundedText(value: string, maxLength: number): string {
   return `${trimmed.slice(0, maxLength - TRUNCATION_SUFFIX.length)}${TRUNCATION_SUFFIX}`;
 }
 
+function utf8ByteLength(value: string): number {
+  return Buffer.byteLength(value, 'utf8');
+}
+
+function boundPromptField(value: string, maxLength: number): { value: string; truncated: boolean } {
+  const bounded = boundedText(value, maxLength);
+  return { value: bounded, truncated: bounded !== value.trim() };
+}
+
+function throwIfAborted(signal: AbortSignal | undefined): void {
+  if (!signal?.aborted) {
+    return;
+  }
+  throw signal.reason instanceof Error ? signal.reason : new Error(String(signal.reason ?? 'Request aborted'));
+}
+
+async function awaitWithAbort<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+  throwIfAborted(signal);
+  return await new Promise<T>((resolve, reject) => {
+    const onAbort = (): void => {
+      signal.removeEventListener('abort', onAbort);
+      reject(signal.reason instanceof Error ? signal.reason : new Error(String(signal.reason ?? 'Request aborted')));
+    };
+    signal.addEventListener('abort', onAbort, { once: true });
+    promise.then(
+      (value) => {
+        signal.removeEventListener('abort', onAbort);
+        resolve(value);
+      },
+      (error) => {
+        signal.removeEventListener('abort', onAbort);
+        reject(error);
+      },
+    );
+  });
+}
+
 function composeSignals(parent: AbortSignal | undefined, timeoutMs: number): {
   signal: AbortSignal;
+  controller: AbortController;
   release(): void;
   timeoutReached(): boolean;
 } {
   const controller = new AbortController();
   let didTimeout = false;
+  if (parent?.aborted) {
+    controller.abort(parent.reason);
+    return {
+      signal: controller.signal,
+      controller,
+      release: () => {},
+      timeoutReached: () => didTimeout,
+    };
+  }
   const onAbort = (): void => controller.abort(parent?.reason);
   const timeout = setTimeout(() => {
     didTimeout = true;
@@ -130,6 +207,7 @@ function composeSignals(parent: AbortSignal | undefined, timeoutMs: number): {
   parent?.addEventListener('abort', onAbort, { once: true });
   return {
     signal: controller.signal,
+    controller,
     release: () => {
       clearTimeout(timeout);
       parent?.removeEventListener('abort', onAbort);
@@ -139,9 +217,6 @@ function composeSignals(parent: AbortSignal | undefined, timeoutMs: number): {
 }
 
 function safeParseJson(text: string, label: string): unknown {
-  if (text.length > MAX_RESPONSE_TEXT_LENGTH) {
-    throw new Error(`${label} exceeds the maximum supported size`);
-  }
   let parsed: unknown;
   try {
     parsed = JSON.parse(text);
@@ -201,10 +276,74 @@ function extractResponseContent(parsed: unknown): string {
   if (typeof content !== 'string' || content.trim().length === 0) {
     throw new Error('Provider response message content must be a non-empty string');
   }
-  if (content.length > MAX_RESPONSE_CONTENT_LENGTH) {
+  if (utf8ByteLength(content) > MAX_RESPONSE_CONTENT_BYTES) {
     throw new Error('Provider response content exceeds the maximum supported size');
   }
   return content;
+}
+
+function canonicalizeIpLiteral(address: string): string {
+  const normalized = address.replace(/^\[/, '').replace(/\]$/, '').toLowerCase();
+  if (normalized.startsWith('::ffff:')) {
+    const mapped = normalized.slice('::ffff:'.length);
+    if (mapped.split('.').length === 4) {
+      return mapped;
+    }
+  }
+  const embeddedMatch = normalized.match(/^(?:::ffff:|::|64:ff9b::|64:ff9b:1::)([0-9a-f]{1,4}):([0-9a-f]{1,4})$/);
+  if (embeddedMatch) {
+    const values = embeddedMatch.slice(1).map((part) => Number.parseInt(part, 16));
+    return [
+      (values[0]! >> 8) & 0xff,
+      values[0]! & 0xff,
+      (values[1]! >> 8) & 0xff,
+      values[1]! & 0xff,
+    ].join('.');
+  }
+  return normalized;
+}
+
+function isPrivateOrReservedAddress(address: string): boolean {
+  const normalized = canonicalizeIpLiteral(address);
+  const ipv4Parts = normalized.split('.');
+  if (ipv4Parts.length === 4 && ipv4Parts.every((part) => /^\d+$/.test(part))) {
+    const [first = 0, second = 0, third = 0] = ipv4Parts.map((part) => Number(part));
+    if (first === 0 || first === 10 || first === 127) return true;
+    if (first === 169 && second === 254) return true;
+    if (first === 172 && second >= 16 && second <= 31) return true;
+    if (first === 192 && second === 168) return true;
+    if (first === 100 && second >= 64 && second <= 127) return true;
+    if (first === 192 && second === 0 && third <= 2) return true;
+    if (first === 198 && (second === 18 || second === 19)) return true;
+    if (first === 198 && second === 51 && third === 100) return true;
+    if (first === 203 && second === 0 && third === 113) return true;
+    return first >= 224;
+  }
+  return (
+    normalized === '::' ||
+    normalized === '::1' ||
+    normalized.startsWith('fc') ||
+    normalized.startsWith('fd') ||
+    normalized.startsWith('fe8') ||
+    normalized.startsWith('fe9') ||
+    normalized.startsWith('fea') ||
+    normalized.startsWith('feb') ||
+    normalized.startsWith('2001:db8')
+  );
+}
+
+function isLoopbackAddress(address: string): boolean {
+  const normalized = canonicalizeIpLiteral(address);
+  const ipv4Parts = normalized.split('.');
+  if (ipv4Parts.length === 4 && ipv4Parts.every((part) => /^\d+$/.test(part))) {
+    return normalized === '127.0.0.1' || normalized.startsWith('127.');
+  }
+  return normalized === '::1';
+}
+
+function isLoopbackHostnameLiteral(hostname: string): boolean {
+  const normalized = hostname.replace(/^\[/, '').replace(/\]$/, '').toLowerCase();
+  return normalized === 'localhost' || normalized.endsWith('.localhost') || isLoopbackAddress(normalized);
 }
 
 function sourceSpanFingerprint(span: KnowledgeAnalysisSourceSpan): string {
@@ -295,12 +434,22 @@ function spansFromExtraction(sourceId: string, sourceVersionId: string, extracti
 }
 
 function renderAnalysisPrompt(input: KnowledgeEnrichmentInput, sourceSpans: readonly KnowledgeAnalysisSourceSpan[]): string {
-  const sections = input.extraction.sections.slice(0, MAX_SECTION_COUNT).map((section) => ({
-    id: section.id,
-    title: section.title ?? section.kind,
-    text: boundedText(section.text, MAX_SECTION_TEXT_LENGTH),
-    span: sourceSpans.find((span) => span.startOffset === section.span.startOffset && span.endOffset === section.span.endOffset),
-  }));
+  if (sourceSpans.length > MAX_ALLOWED_SOURCE_SPANS) {
+    throw new Error(`Provider grounding exceeds the maximum supported source span count (${MAX_ALLOWED_SOURCE_SPANS})`);
+  }
+  let truncatedSectionTexts = 0;
+  const sections = input.extraction.sections.slice(0, MAX_SECTION_COUNT).map((section) => {
+    const bounded = boundPromptField(section.text, MAX_SECTION_TEXT_LENGTH);
+    if (bounded.truncated) {
+      truncatedSectionTexts += 1;
+    }
+    return {
+      id: section.id,
+      title: section.title ?? section.kind,
+      text: bounded.value,
+      span: sourceSpans.find((span) => span.startOffset === section.span.startOffset && span.endOffset === section.span.endOffset),
+    };
+  });
   const symbols = input.extraction.symbols.slice(0, MAX_SYMBOL_COUNT).map((symbol) => ({
     id: symbol.id,
     kind: symbol.kind,
@@ -313,7 +462,7 @@ function renderAnalysisPrompt(input: KnowledgeEnrichmentInput, sourceSpans: read
     fromId: relationship.fromId ?? relationship.sourceSymbolId ?? null,
     toId: relationship.toId ?? relationship.targetSymbolId ?? relationship.targetReference ?? null,
   }));
-  return JSON.stringify(
+  const prompt = JSON.stringify(
     {
       task: 'Return JSON matching the KnowledgeAnalysis contract. Do not invent facts. Use only the supplied sourceId and exact sourceSpans. Focus on contradictions and research gaps that should be reviewed by a human.',
       source: {
@@ -328,11 +477,23 @@ function renderAnalysisPrompt(input: KnowledgeEnrichmentInput, sourceSpans: read
         symbols,
         relationships,
       },
+      truncation: {
+        sectionsOmitted: Math.max(0, input.extraction.sections.length - sections.length),
+        sectionTextsTruncated: truncatedSectionTexts,
+        symbolsOmitted: Math.max(0, input.extraction.symbols.length - symbols.length),
+        relationshipsOmitted: Math.max(0, input.extraction.relationships.length - relationships.length),
+        diagnosticsOmitted: input.extraction.diagnostics.length,
+        linksOmitted: input.extraction.links.length,
+      },
       allowedSourceSpans: sourceSpans,
     },
     null,
     2,
   );
+  if (utf8ByteLength(prompt) > MAX_REQUEST_PROMPT_BYTES) {
+    throw new Error(`Provider analysis prompt exceeds the ${MAX_REQUEST_PROMPT_BYTES}-byte limit`);
+  }
+  return prompt;
 }
 
 function renderGenerationPrompt(
@@ -340,7 +501,7 @@ function renderGenerationPrompt(
   pages: readonly KnowledgePageVersion[],
   providerAnalysis: KnowledgeAnalysis,
 ): string {
-  return JSON.stringify(
+  const prompt = JSON.stringify(
     {
       task: 'Return JSON matching the KnowledgeGeneration contract. Do not remove deterministic facts or add ungrounded facts.',
       source: {
@@ -353,11 +514,78 @@ function renderGenerationPrompt(
         title: page.content.split('\n', 2)[0] ?? '',
         contentExcerpt: boundedText(page.content, MAX_PAGE_CONTENT_LENGTH),
       })),
+      truncation: {
+        pagesOmitted: Math.max(0, input.pageVersionIds.length - Math.min(input.pageVersionIds.length, MAX_PAGE_COUNT)),
+      },
       analysis: providerAnalysis,
     },
     null,
     2,
   );
+  if (utf8ByteLength(prompt) > MAX_REQUEST_PROMPT_BYTES) {
+    throw new Error(`Provider generation prompt exceeds the ${MAX_REQUEST_PROMPT_BYTES}-byte limit`);
+  }
+  return prompt;
+}
+
+function createDefaultTransport(fetchImplementation?: typeof fetch): OpenAICompatibleTransport {
+  return {
+    fetch: fetchImplementation ?? fetch,
+    pinsResolvedHostnames: false,
+    async resolveHostname(hostname: string): Promise<readonly OpenAICompatibleResolvedAddress[]> {
+      const normalizedHostname = hostname.replace(/^\[/, '').replace(/\]$/, '');
+      const literalFamily = net.isIP(normalizedHostname);
+      if (literalFamily === 4 || literalFamily === 6) {
+        return [{ address: normalizedHostname, family: literalFamily }];
+      }
+      const results = await lookup(normalizedHostname, { all: true, verbatim: true });
+      return results
+        .filter((result): result is { address: string; family: 4 | 6 } => result.family === 4 || result.family === 6)
+        .map((result) => ({ address: result.address, family: result.family }));
+    },
+  };
+}
+
+async function readResponseText(response: Response, controller: AbortController): Promise<string> {
+  const contentLengthHeader = response.headers.get('content-length');
+  if (contentLengthHeader) {
+    const contentLength = Number.parseInt(contentLengthHeader, 10);
+    if (Number.isFinite(contentLength) && contentLength > MAX_RESPONSE_BODY_BYTES) {
+      controller.abort(new Error('response_too_large'));
+      try {
+        await response.body?.cancel('response_too_large');
+      } catch {
+        // ignore best-effort cleanup
+      }
+      throw new Error(`Provider response exceeds the ${MAX_RESPONSE_BODY_BYTES}-byte limit`);
+    }
+  }
+  if (!response.body) {
+    return '';
+  }
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let totalBytes = 0;
+  let text = '';
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) {
+        break;
+      }
+      totalBytes += value.byteLength;
+      if (totalBytes > MAX_RESPONSE_BODY_BYTES) {
+        controller.abort(new Error('response_too_large'));
+        await reader.cancel('response_too_large');
+        throw new Error(`Provider response exceeds the ${MAX_RESPONSE_BODY_BYTES}-byte limit`);
+      }
+      text += decoder.decode(value, { stream: true });
+    }
+    text += decoder.decode();
+    return text;
+  } finally {
+    reader.releaseLock();
+  }
 }
 
 function warningFromError(error: unknown, fallbackCode: string): KnowledgeProviderDiagnostic {
@@ -378,10 +606,14 @@ function warningFromError(error: unknown, fallbackCode: string): KnowledgeProvid
 }
 
 export class OpenAICompatibleProvider implements KnowledgeProviderTestAdapter {
-  private readonly fetchImplementation: typeof fetch;
+  private readonly transport: OpenAICompatibleTransport;
+  private readonly credentialPolicy: KnowledgeProviderCredentialPolicy;
+  private readonly hostPolicy: OpenAICompatibleHostPolicy;
 
   public constructor(options: OpenAICompatibleProviderOptions = {}) {
-    this.fetchImplementation = options.fetchImplementation ?? fetch;
+    this.transport = options.transport ?? createDefaultTransport(options.fetchImplementation);
+    this.credentialPolicy = options.credentialPolicy ?? {};
+    this.hostPolicy = options.hostPolicy ?? {};
   }
 
   public async analyze(input: OpenAICompatibleAnalyzeInput): Promise<OpenAICompatibleProviderResult<KnowledgeAnalysis>> {
@@ -425,7 +657,7 @@ export class OpenAICompatibleProvider implements KnowledgeProviderTestAdapter {
   }
 
   public async testProfile(input: KnowledgeProviderTestAdapterInput): Promise<KnowledgeProviderTestAdapterResult> {
-    const result = await this.analyze({
+    const result = await this.executeRequest({
       profile: input.profile,
       environment: input.environment,
       prompt: JSON.stringify({
@@ -434,12 +666,12 @@ export class OpenAICompatibleProvider implements KnowledgeProviderTestAdapter {
         sourceVersionId: 'provider-test-version',
         allowedSourceSpans: [],
       }),
-      sourceId: 'provider-test-source',
-      sourceVersionId: 'provider-test-version',
-      sourceSpans: [],
+      systemPrompt: 'You are a strict JSON-only assistant. Return only valid JSON.',
+      resolvedKey: { apiKey: input.apiKey, warnings: [] },
     });
+    const analysis = validateKnowledgeAnalysis(safeParseJson(result.content, 'Provider message content'));
     return {
-      success: result.value.summary.trim().length > 0,
+      success: analysis.summary.trim().length > 0,
       warnings: result.warnings,
       diagnostics: [`Validated ${input.profile.endpoint}/chat/completions`],
     };
@@ -451,13 +683,22 @@ export class OpenAICompatibleProvider implements KnowledgeProviderTestAdapter {
     prompt: string;
     systemPrompt: string;
     signal?: AbortSignal;
+    resolvedKey?: ResolveKnowledgeProviderApiKeyResult;
   }): Promise<{ content: string; warnings: KnowledgeProviderDiagnostic[] }> {
+    throwIfAborted(input.signal);
+    if (utf8ByteLength(input.prompt) > MAX_REQUEST_PROMPT_BYTES) {
+      throw new Error(`Provider prompt exceeds the ${MAX_REQUEST_PROMPT_BYTES}-byte limit`);
+    }
+    if (utf8ByteLength(input.systemPrompt) > MAX_REQUEST_SYSTEM_PROMPT_LENGTH) {
+      throw new Error(`Provider system prompt exceeds the ${MAX_REQUEST_SYSTEM_PROMPT_LENGTH}-byte limit`);
+    }
     const endpoint = normalizeOpenAICompatibleEndpoint(input.profile.endpoint);
     const url = new URL('chat/completions', `${endpoint}/`).toString();
-    const resolvedKey = resolveKnowledgeProviderApiKey(input.profile, input.environment);
+    const resolvedKey = input.resolvedKey ?? resolveKnowledgeProviderApiKey(input.profile, input.environment, this.credentialPolicy);
     const requestSignal = composeSignals(input.signal, input.profile.timeoutMs);
     try {
-      const response = await this.fetchImplementation(url, {
+      await this.validateRequestDestination(endpoint, input.profile, resolvedKey.apiKey !== null, requestSignal.signal);
+      const response = await this.transport.fetch(url, {
         method: 'POST',
         redirect: 'manual',
         signal: requestSignal.signal,
@@ -477,7 +718,7 @@ export class OpenAICompatibleProvider implements KnowledgeProviderTestAdapter {
             } satisfies ChatMessage,
             {
               role: 'user',
-              content: boundedText(input.prompt, MAX_REQUEST_PROMPT_LENGTH),
+              content: input.prompt,
             } satisfies ChatMessage,
           ],
         }),
@@ -485,7 +726,7 @@ export class OpenAICompatibleProvider implements KnowledgeProviderTestAdapter {
       if (response.status >= 300 && response.status < 400) {
         throw new Error(`Provider redirects are not allowed for ${endpoint}`);
       }
-      const responseText = await response.text();
+      const responseText = await readResponseText(response, requestSignal.controller);
       if (!response.ok) {
         throw new Error(
           `Provider request failed with status ${response.status}. Response excerpt: ${sanitizeExcerpt(responseText)}`,
@@ -510,6 +751,42 @@ export class OpenAICompatibleProvider implements KnowledgeProviderTestAdapter {
       requestSignal.release();
     }
   }
+
+  private async validateRequestDestination(
+    endpoint: string,
+    profile: KnowledgeProviderProfile,
+    hasCredentials: boolean,
+    signal: AbortSignal,
+  ): Promise<void> {
+    const url = new URL(endpoint);
+    const hostname = url.hostname.replace(/^\[/, '').replace(/\]$/, '');
+    const originAllowed =
+      this.hostPolicy.allowedOrigins?.has(url.origin) === true ||
+      this.hostPolicy.isOriginAllowed?.({ origin: url.origin, profile, hasCredentials }) === true;
+    if (!originAllowed) {
+      throw new Error(
+        hasCredentials
+          ? `Host policy rejected credential-bearing provider origin ${url.origin}`
+          : `Host policy rejected provider origin ${url.origin}`,
+      );
+    }
+    const usesNamedHost = net.isIP(hostname) === 0;
+    if (usesNamedHost && this.transport.pinsResolvedHostnames !== true) {
+      throw new Error(`Provider transport must pin resolved hostnames for ${url.origin}`);
+    }
+    const addresses = await awaitWithAbort(this.transport.resolveHostname(hostname), signal);
+    if (addresses.length === 0) {
+      throw new Error(`Provider endpoint ${url.origin} did not resolve to any addresses`);
+    }
+    const privateOrReserved = addresses.some((address) => isPrivateOrReservedAddress(address.address));
+    const approvedLoopback =
+      originAllowed &&
+      isLoopbackHostnameLiteral(hostname) &&
+      addresses.every((address) => isLoopbackAddress(address.address));
+    if (privateOrReserved && !approvedLoopback) {
+      throw new Error(`Provider endpoint ${url.origin} resolves to a private or reserved address`);
+    }
+  }
 }
 
 export class OpenAICompatibleEnrichmentService implements KnowledgeEnrichmentService {
@@ -521,7 +798,11 @@ export class OpenAICompatibleEnrichmentService implements KnowledgeEnrichmentSer
     private readonly db: Database.Database,
     private readonly options: OpenAICompatibleEnrichmentServiceOptions,
   ) {
-    this.provider = options.provider ?? new OpenAICompatibleProvider();
+    this.provider = options.provider ?? new OpenAICompatibleProvider({
+      credentialPolicy: options.credentialPolicy,
+      hostPolicy: options.hostPolicy,
+      transport: options.transport,
+    });
     this.environment = options.environment ?? process.env;
     this.pageStore = new KnowledgePageStore(db);
   }

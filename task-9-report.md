@@ -1,133 +1,125 @@
-# Task 9 Report — Optional Provider Profiles and OpenAI-Compatible Enrichment
+# Task 9 Report — Provider Security/Correctness Follow-up
 
 ## Scope
-Implemented Task 9 in `packages/core` only:
-
-- added strict project-scoped `KnowledgeProviderProfileStore` for `openai-compatible` profiles
-- added OpenAI-compatible `/chat/completions` adapter and optional enrichment service
-- extended `KnowledgeAnalysis` grounding with exact source spans
-- exported the new provider/profile APIs
-- added focused provider/profile/analysis tests
+Fixed all Task 9 follow-up security and correctness findings in `packages/core` only.
 
 The unrelated unstaged plan file `docs/superpowers/plans/2026-09-24-ariadne-knowledge-wiki-plan.md` was left untouched.
 
+## Host policy contract
+
+### Credential policy
+- `apiKeyEnv` is persisted as a variable name only and must use the `ARIADNE_KNOWLEDGE_PROVIDER_` prefix.
+- Secret resolution is now **host-controlled**.
+- Hosts must inject either:
+  - `allowedEnvironmentVariables: Set<string>`, or
+  - `resolveApiKey({ profile, envName, environment })`.
+- Default behavior denies secret resolution and does **not** read unapproved `process.env[...]` keys.
+- Diagnostics mention only the env-var name, never the secret value.
+
+### Endpoint / origin policy
+- Provider requests are now **host-controlled** too.
+- Hosts must inject an exact-origin allowlist/policy into `OpenAICompatibleProvider`.
+- Default behavior denies sending requests to unapproved origins.
+- Named hosts additionally require a transport that can authoritatively pin resolved addresses.
+- Plain-HTTP loopback endpoints must use explicit IP literals (`127.0.0.1` / `[::1]`), not hostname aliases.
+- Loopback fixture tests inject explicit host policy.
+
+### Request-time network safety
+- Every provider request resolves the target hostname at request time.
+- Resolved private/reserved/loopback addresses are rejected unless the host explicitly approved the exact origin.
+- IPv4-mapped IPv6 loopback/private targets are canonicalized and rejected.
+- Redirects remain disabled.
+
 ## RED
-Initial RED command:
+Regression RED command:
 
 ```bash
-pnpm --filter @ariadne-dev/core exec vitest run test/knowledge/KnowledgeProviderProfiles.test.ts test/knowledge/OpenAICompatibleProvider.test.ts test/knowledge/KnowledgeAnalysis.test.ts
+pnpm --filter @ariadne-dev/core exec vitest run test/knowledge/KnowledgeProviderProfiles.test.ts test/knowledge/OpenAICompatibleProvider.test.ts test/knowledge/KnowledgeAnalysis.test.ts test/knowledge/KnowledgeWorker.test.ts test/knowledge/KnowledgeArchive.test.ts test/knowledge/knowledgeMigrations.test.ts
 ```
 
-Initial failures recorded before implementation:
-
-- `KnowledgeProviderProfiles.test.ts` and `OpenAICompatibleProvider.test.ts` failed to load because the new provider/profile modules did not exist yet.
-- `KnowledgeAnalysis > accepts structured entities, claims, relationships, contradictions, research gaps, and confidence values`
-  - failed with `Knowledge entity has an unexpected field: sourceSpans` because exact source-span grounding was not yet supported.
-- `KnowledgeAnalysis > rejects malformed result structures...`
-  - failed before the intended assertion because `sourceSpans` were rejected outright.
-- `KnowledgeGeneration > accepts generated content with validated analysis`
-  - failed for the same unsupported `sourceSpans` reason.
+Initial RED findings reproduced by the new tests included:
+- mapped IPv4-in-IPv6 loopback endpoint not rejected;
+- legacy/unsupported provider rows could still surface incorrectly;
+- provider requests lacked universal host-controlled origin approval;
+- prompt bounding could fail before preserving valid structured payloads / diagnostics.
 
 ## GREEN
 Focused validation:
 
 ```bash
 pnpm --filter @ariadne-dev/core exec vitest run test/knowledge/KnowledgeProviderProfiles.test.ts test/knowledge/OpenAICompatibleProvider.test.ts test/knowledge/KnowledgeAnalysis.test.ts test/knowledge/KnowledgeWorker.test.ts test/knowledge/KnowledgeArchive.test.ts test/knowledge/knowledgeMigrations.test.ts
-pnpm --filter @ariadne-dev/core build
 ```
 
-Results:
-
-- focused knowledge/provider/archive/migration/worker suites: pass (`6` files / `42` tests)
-- core build: pass (`tsc -p tsconfig.json`)
+Result: pass (`6` files / `52` tests).
 
 Full validation:
 
 ```bash
 pnpm --filter @ariadne-dev/core test
+pnpm --filter @ariadne-dev/core build
 ```
 
 Results:
-
-- full core tests: pass (`65` files / `540` tests)
+- full core tests: pass (`65` files / `550` tests)
+- core build: pass (`tsc -p tsconfig.json`)
 
 ## Fix summary
 
-### 1. Strict non-secret provider profile store
+### 1. Secret boundary locked down
+- Added `KnowledgeProviderCredentialPolicy`.
+- Default secret resolution now denies all env-name dereferences.
+- Approved names resolve only through host-injected allowlist/resolver.
+- Unapproved names are never read and return bounded warning diagnostics.
+- Provider profile test adapters now receive only the sanitized approved credential subset, not the caller's raw `process.env`.
+- `apiKeyEnv` validation now requires the `ARIADNE_KNOWLEDGE_PROVIDER_` prefix.
+- Previously persisted safe env-var names remain readable for compatibility, but new writes enforce the dedicated prefix.
 
-- Added `KnowledgeProviderProfileStore` with project-scoped, case-insensitive profile-name uniqueness.
-- Persisted only non-secret configuration in `configuration_json`:
-  - endpoint
-  - model
-  - capabilities
-  - timeout
-  - environment-variable name
-  - enabled flag
-- Rejected non-HTTP(S) endpoints, credentials, query strings, fragments, malformed hostnames, loopback/plain HTTP beyond localhost, and localhost/private/reserved HTTPS literals.
-- Enforced bounded model length, bounded timeout, bounded capabilities, and environment-variable-name validation only.
-- Disabled profiles are excluded from selection.
+### 2. Endpoint policy made host-controlled
+- Added exact-origin host policy support to `OpenAICompatibleProvider`.
+- All provider requests are rejected unless the host explicitly approves the origin.
+- Loopback/private fixture origins are allowed only through injected test policy.
 
-### 2. Redacted provider testing and secret handling
+### 3. SSRF hardening
+- Added request-time hostname resolution via injected/default transport.
+- Rejected private/reserved/loopback destinations, including IPv4-mapped and embedded IPv6-to-IPv4 forms.
+- Default transport now fails closed for named hosts unless the host injects a transport that pins resolved hostnames.
+- Kept redirects disabled.
+- Public requests now require both an approved origin and a safe resolved destination.
 
-- Added provider test support with injected environment and adapter.
-- Secret values are never persisted, listed, exported, or returned from profile APIs.
-- Missing API-key environment variables surface warning-only diagnostics instead of leaking values.
-- Diagnostics and warnings redact API keys, `Authorization` headers, and oversized excerpts.
+### 4. Streaming response limits and cancellation
+- Replaced `response.text()` buffering with streaming reads.
+- Direct provider callers now also get explicit request-prompt byte limits without JSON-slicing.
+- Enforced byte limits using UTF-8 byte accounting.
+- Checked `Content-Length` early but still enforced the real streamed-byte cap.
+- Cancelled oversized streams immediately.
+- Already-aborted parent signals now fail synchronously before fetch starts and preserve the abort reason; destination validation is covered by the same timeout/abort path.
 
-### 3. OpenAI-compatible adapter hardening
+### 5. Legacy/malformed row compatibility
+- Added compatibility handling so `list/get/select` skip unsupported legacy provider rows instead of bricking.
+- Added bounded redacted diagnostics via `listWithDiagnostics(...)`.
+- Legacy secrets stay hidden.
+- Persisted config parsing is now strict and typed; malformed rows are rejected without `String(...)`/`Number(...)` coercion or raw `TypeError` leakage.
 
-- Added `/chat/completions` POST adapter for OpenAI-compatible servers.
-- Added loopback fixture coverage for:
-  - request shape
-  - conditional `Authorization` header emission
-  - timeout handling
-  - redirect rejection
-  - status / JSON / structured-response validation
-  - bounded prompt and response excerpts
-- Added JSON hardening for oversized, deeply nested, or unsafe-key payloads.
-
-### 4. Exact-span grounding for provider output
-
-- Extended `KnowledgeAnalysis` entities, claims, relationships, contradictions, and research gaps with optional `sourceSpans`.
-- Added structural validation for exact spans and consistency between `sourceIds` and `sourceSpans`.
-- The provider adapter now rejects outputs that:
-  - cite unknown source IDs
-  - cite spans outside the deterministic input
-  - mismatch the current source version
-  - provide contradiction/gap output without exact source spans
-
-### 5. Warning-only optional enrichment
-
-- Added `OpenAICompatibleEnrichmentService` that builds bounded prompts from deterministic extraction data and bounded deterministic page content.
-- Provider failures stay warning-only and compatible with existing `KnowledgeWorker` fallback behavior.
-- Enrichment converts grounded contradictions into pending reviews and grounded research gaps into insights.
-- Provider-generated content is validated but not allowed to replace deterministic persisted facts.
-
-## Migration ruling
-
-No additive schema migration was required.
-
-Ruling: the existing `knowledge_provider_profiles` table safely supports the Task 9 contract because strict validation and redaction are enforced in the application layer while archive export already omits `configuration_json`.
+### 6. Structured prompt bounding
+- Bounded sections/symbols/relationships/pages before JSON serialization.
+- Added explicit truncation metadata to prompts.
+- Kept exact grounding spans intact; if grounding is too large, enrichment now returns a warning instead of silently dropping spans.
+- Preserved warning-only worker integration and deterministic-fact safety.
 
 ## Security / audit notes
-
 - No provider secret values are written to SQLite, archives, exports, logs, job results, or diagnostics.
-- Endpoint validation rejects unsupported schemes, credentials, query strings, fragments, malformed hosts, and local/private HTTPS literals.
-- Redirects are not followed (`3xx` is rejected).
-- Provider outputs must match structured contracts and exact deterministic grounding before enrichment is accepted.
-- Warning-only enrichment preserves deterministic completion when providers fail.
+- `knowledge_provider_profiles.configuration_json` remains omitted from archives.
+- Authorization data and response excerpts are redacted and bounded.
+- Provider output must still match the strict schema and exact deterministic grounding before enrichment is accepted.
+- Optional enrichment remains warning-only; deterministic generation/reconciliation behavior is unchanged.
 
 ## Files changed
-
+- `packages/core/src/index.ts`
 - `packages/core/src/knowledge/KnowledgeProviderProfiles.ts`
 - `packages/core/src/knowledge/providers/OpenAICompatibleProvider.ts`
-- `packages/core/src/knowledge/KnowledgeAnalysis.ts`
-- `packages/core/src/index.ts`
 - `packages/core/test/knowledge/KnowledgeProviderProfiles.test.ts`
 - `packages/core/test/knowledge/OpenAICompatibleProvider.test.ts`
-- `packages/core/test/knowledge/KnowledgeAnalysis.test.ts`
 - `task-9-report.md`
 
 ## Remaining concerns
-
-- Hostname-to-IP DNS rebinding protection is still hostname-policy-based; literal localhost/private/reserved targets are blocked, but fully pinning resolved public hostnames to validated addresses would require a lower-level transport change beyond this Task 9 scope.
+- None beyond the explicit host contract: named hosts require a host-supplied pinned transport, and plain-HTTP loopback endpoints must use literal loopback IPs.

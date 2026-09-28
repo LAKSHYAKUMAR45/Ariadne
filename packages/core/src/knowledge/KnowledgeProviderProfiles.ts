@@ -12,6 +12,7 @@ const MAX_MODEL_LENGTH = 256;
 const MIN_TIMEOUT_MS = 100;
 const MAX_TIMEOUT_MS = 120_000;
 const MAX_DIAGNOSTIC_LENGTH = 280;
+const KNOWLEDGE_PROVIDER_ENVIRONMENT_PREFIX = 'ARIADNE_KNOWLEDGE_PROVIDER_';
 const TRUNCATION_SUFFIX = ' …[truncated]';
 
 export interface KnowledgeProviderProfile {
@@ -73,9 +74,24 @@ export interface ResolveKnowledgeProviderApiKeyResult {
   warnings: KnowledgeProviderDiagnostic[];
 }
 
+export interface KnowledgeProviderCredentialPolicy {
+  allowedEnvironmentVariables?: ReadonlySet<string>;
+  resolveApiKey?: (input: {
+    profile: KnowledgeProviderProfile;
+    environment: NodeJS.ProcessEnv;
+    envName: string;
+  }) => string | null;
+}
+
+export interface KnowledgeProviderProfileListResult {
+  profiles: KnowledgeProviderProfile[];
+  warnings: KnowledgeProviderDiagnostic[];
+}
+
 export interface KnowledgeProviderProfileStoreOptions {
   now?: () => string;
   adapter?: KnowledgeProviderTestAdapter;
+  credentialPolicy?: KnowledgeProviderCredentialPolicy;
 }
 
 interface ProviderProfileConfiguration {
@@ -93,6 +109,11 @@ interface ProviderProfileRow {
   provider_kind: string;
   profile_name: string;
   configuration_json: string;
+}
+
+interface ProfileCompatibilityResult {
+  profile: KnowledgeProviderProfile | null;
+  warning: KnowledgeProviderDiagnostic | null;
 }
 
 function requireNonEmptyString(value: string, label: string): string {
@@ -120,6 +141,29 @@ function canonicalizeHostname(hostname: string): string {
   return hostname.startsWith('[') && hostname.endsWith(']') ? hostname.slice(1, -1) : hostname;
 }
 
+function canonicalizeIpLiteral(hostname: string): string | null {
+  const normalized = canonicalizeHostname(hostname).toLowerCase();
+  if (net.isIP(normalized) === 6) {
+    if (normalized.startsWith('::ffff:')) {
+      const mapped = normalized.slice('::ffff:'.length);
+      if (net.isIP(mapped) === 4) {
+        return mapped;
+      }
+    }
+    const embeddedMatch = normalized.match(/^(?:::ffff:|::|64:ff9b::|64:ff9b:1::)([0-9a-f]{1,4}):([0-9a-f]{1,4})$/);
+    if (embeddedMatch) {
+      const values = embeddedMatch.slice(1).map((part) => Number.parseInt(part, 16));
+      return [
+        (values[0]! >> 8) & 0xff,
+        values[0]! & 0xff,
+        (values[1]! >> 8) & 0xff,
+        values[1]! & 0xff,
+      ].join('.');
+    }
+  }
+  return net.isIP(normalized) > 0 ? normalized : null;
+}
+
 function validateProfileName(profileName: string): string {
   const trimmed = requireNonEmptyString(profileName, 'profile name');
   if (!PROFILE_NAME_PATTERN.test(trimmed)) {
@@ -144,19 +188,30 @@ function validateTimeout(timeoutMs: number): number {
 }
 
 function isLoopbackHostname(hostname: string): boolean {
-  const normalized = canonicalizeHostname(hostname);
-  return normalized === 'localhost' || normalized.endsWith('.localhost') || net.isIP(normalized) > 0 && (
-    normalized === '127.0.0.1' ||
-    normalized === '::1' ||
-    normalized.startsWith('127.')
+  const normalized = canonicalizeHostname(hostname).toLowerCase();
+  const canonicalIp = canonicalizeIpLiteral(normalized);
+  if (normalized === 'localhost' || normalized.endsWith('.localhost')) {
+    return true;
+  }
+  if (canonicalIp === null) {
+    return false;
+  }
+  return (
+    canonicalIp === '127.0.0.1' ||
+    canonicalIp === '::1' ||
+    canonicalIp.startsWith('127.')
   );
 }
 
 function isPrivateOrReservedIp(hostname: string): boolean {
-  const normalized = canonicalizeHostname(hostname);
-  const ipVersion = net.isIP(normalized);
+  const normalized = canonicalizeHostname(hostname).toLowerCase();
+  const canonicalIp = canonicalizeIpLiteral(normalized);
+  if (canonicalIp === null) {
+    return false;
+  }
+  const ipVersion = net.isIP(canonicalIp);
   if (ipVersion === 4) {
-    const octets = normalized.split('.').map((segment) => Number(segment));
+    const octets = canonicalIp.split('.').map((segment) => Number(segment));
     const [first = 0, second = 0] = octets;
     const [third = 0] = octets.slice(2);
     if (first === 0 || first === 10 || first === 127) {
@@ -192,7 +247,7 @@ function isPrivateOrReservedIp(hostname: string): boolean {
     return first >= 224;
   }
   if (ipVersion === 6) {
-    const lowered = normalized.toLowerCase();
+    const lowered = canonicalIp;
     return (
       lowered === '::' ||
       lowered === '::1' ||
@@ -255,8 +310,11 @@ export function normalizeOpenAICompatibleEndpoint(endpoint: string): string {
       throw new Error('Knowledge provider endpoint port must be between 1 and 65535');
     }
   }
+  if (parsed.protocol === 'http:' && net.isIP(canonicalizeHostname(parsed.hostname)) === 0) {
+    throw new Error('Knowledge provider http endpoints must use explicit loopback IP literals');
+  }
   if (parsed.protocol === 'http:' && !isLoopbackHostname(parsed.hostname)) {
-    throw new Error('Knowledge provider http endpoints are limited to loopback or localhost addresses');
+    throw new Error('Knowledge provider http endpoints are limited to loopback IP addresses');
   }
   const normalizedHostname = canonicalizeHostname(parsed.hostname);
   if (
@@ -296,6 +354,22 @@ function validateEnvironmentVariableName(value: string | null | undefined): stri
   if (!ENVIRONMENT_VARIABLE_PATTERN.test(trimmed)) {
     throw new Error('Knowledge provider API key must be stored as an environment-variable name only');
   }
+  if (!trimmed.startsWith(KNOWLEDGE_PROVIDER_ENVIRONMENT_PREFIX)) {
+    throw new Error(
+      `Knowledge provider API key environment variables must use the ${KNOWLEDGE_PROVIDER_ENVIRONMENT_PREFIX} prefix`,
+    );
+  }
+  return trimmed;
+}
+
+function validatePersistedEnvironmentVariableName(value: string | null | undefined): string | null {
+  if (value == null) {
+    return null;
+  }
+  const trimmed = requireNonEmptyString(value, 'API key environment variable');
+  if (!ENVIRONMENT_VARIABLE_PATTERN.test(trimmed)) {
+    throw new Error('Knowledge provider API key must be stored as an environment-variable name only');
+  }
   return trimmed;
 }
 
@@ -321,12 +395,24 @@ function parseConfiguration(configurationJson: string): ProviderProfileConfigura
   if (typeof candidate.enabled !== 'boolean') {
     throw new Error('Knowledge provider enabled flag must be a boolean');
   }
+  if (typeof candidate.endpoint !== 'string') {
+    throw new Error('Knowledge provider endpoint must be a string');
+  }
+  if (typeof candidate.model !== 'string') {
+    throw new Error('Knowledge provider model must be a string');
+  }
+  if (typeof candidate.timeoutMs !== 'number') {
+    throw new Error('Knowledge provider timeout must be a number');
+  }
+  if (candidate.apiKeyEnv !== null && candidate.apiKeyEnv !== undefined && typeof candidate.apiKeyEnv !== 'string') {
+    throw new Error('Knowledge provider API key environment variable must be a string or null');
+  }
   return {
-    endpoint: normalizeOpenAICompatibleEndpoint(String(candidate.endpoint)),
-    model: validateModel(String(candidate.model)),
+    endpoint: normalizeOpenAICompatibleEndpoint(candidate.endpoint),
+    model: validateModel(candidate.model),
     capabilities: validateCapabilities(candidate.capabilities as KnowledgeProviderCapability[]),
-    timeoutMs: validateTimeout(Number(candidate.timeoutMs)),
-    apiKeyEnv: validateEnvironmentVariableName(candidate.apiKeyEnv as string | null | undefined),
+    timeoutMs: validateTimeout(candidate.timeoutMs),
+    apiKeyEnv: validatePersistedEnvironmentVariableName(candidate.apiKeyEnv),
     enabled: candidate.enabled,
   };
 }
@@ -345,9 +431,44 @@ function configurationJson(profile: ProviderProfileConfiguration): string {
 export function resolveKnowledgeProviderApiKey(
   profile: KnowledgeProviderProfile,
   environment: NodeJS.ProcessEnv,
+  policy: KnowledgeProviderCredentialPolicy = {},
 ): ResolveKnowledgeProviderApiKeyResult {
   if (profile.apiKeyEnv === null) {
     return { apiKey: null, warnings: [] };
+  }
+  if (policy.resolveApiKey) {
+    const resolved = policy.resolveApiKey({
+      profile,
+      environment,
+      envName: profile.apiKeyEnv,
+    });
+    if (typeof resolved !== 'string' || resolved.trim().length === 0) {
+      return {
+        apiKey: null,
+        warnings: [
+          {
+            code: 'provider_missing_api_key',
+            message: sanitizeDiagnostic(
+              `Provider profile "${profile.profileName}" expects environment variable "${profile.apiKeyEnv}" but it is not set.`,
+            ),
+          },
+        ],
+      };
+    }
+    return { apiKey: resolved, warnings: [] };
+  }
+  if (!policy.allowedEnvironmentVariables?.has(profile.apiKeyEnv)) {
+    return {
+      apiKey: null,
+      warnings: [
+        {
+          code: 'provider_api_key_not_allowed',
+          message: sanitizeDiagnostic(
+            `Provider profile "${profile.profileName}" references environment variable "${profile.apiKeyEnv}", but the host did not approve it.`,
+          ),
+        },
+      ],
+    };
   }
   const candidate = environment[profile.apiKeyEnv];
   if (typeof candidate !== 'string' || candidate.trim().length === 0) {
@@ -369,6 +490,7 @@ export function resolveKnowledgeProviderApiKey(
 export class KnowledgeProviderProfileStore {
   private readonly now: () => string;
   private readonly adapter?: KnowledgeProviderTestAdapter;
+  private readonly credentialPolicy: KnowledgeProviderCredentialPolicy;
 
   public constructor(
     private readonly db: Database.Database,
@@ -376,6 +498,7 @@ export class KnowledgeProviderProfileStore {
   ) {
     this.now = options.now ?? (() => new Date().toISOString());
     this.adapter = options.adapter;
+    this.credentialPolicy = options.credentialPolicy ?? {};
   }
 
   public create(input: CreateKnowledgeProviderProfileInput): KnowledgeProviderProfile {
@@ -411,7 +534,11 @@ export class KnowledgeProviderProfileStore {
   }
 
   public list(projectId: string): KnowledgeProviderProfile[] {
-    return (
+    return this.listWithDiagnostics(projectId).profiles;
+  }
+
+  public listWithDiagnostics(projectId: string): KnowledgeProviderProfileListResult {
+    const rows = (
       this.db
         .prepare(
           `SELECT id, project_id, provider_kind, profile_name, configuration_json
@@ -420,7 +547,19 @@ export class KnowledgeProviderProfileStore {
            ORDER BY lower(profile_name) ASC, profile_name ASC`,
         )
         .all(requireNonEmptyString(projectId, 'project ID')) as ProviderProfileRow[]
-    ).map((row) => this.rowToProfile(row));
+    );
+    const profiles: KnowledgeProviderProfile[] = [];
+    const warnings: KnowledgeProviderDiagnostic[] = [];
+    for (const row of rows) {
+      const result = this.rowToProfileSafely(row);
+      if (result.profile) {
+        profiles.push(result.profile);
+      }
+      if (result.warning) {
+        warnings.push(result.warning);
+      }
+    }
+    return { profiles, warnings };
   }
 
   public get(projectId: string, profileName: string): KnowledgeProviderProfile | null {
@@ -432,7 +571,7 @@ export class KnowledgeProviderProfileStore {
          LIMIT 1`,
       )
       .get(requireNonEmptyString(projectId, 'project ID'), validateProfileName(profileName)) as ProviderProfileRow | undefined;
-    return row ? this.rowToProfile(row) : null;
+    return row ? this.rowToProfileSafely(row).profile : null;
   }
 
   public selectEnabledProfile(projectId: string, capability: KnowledgeProviderCapability): KnowledgeProviderProfile | null {
@@ -474,11 +613,15 @@ export class KnowledgeProviderProfileStore {
       throw new Error('Knowledge provider test adapter is not configured');
     }
     const profile = this.requireProfile(projectId, profileName);
-    const resolved = resolveKnowledgeProviderApiKey(profile, environment);
+    const resolved = resolveKnowledgeProviderApiKey(profile, environment, this.credentialPolicy);
+    const adapterEnvironment: NodeJS.ProcessEnv =
+      profile.apiKeyEnv !== null && resolved.apiKey !== null
+        ? { [profile.apiKeyEnv]: resolved.apiKey }
+        : {};
     try {
       const result = await this.adapter.testProfile({
         profile,
-        environment,
+        environment: adapterEnvironment,
         apiKey: resolved.apiKey,
       });
       return {
@@ -546,5 +689,26 @@ export class KnowledgeProviderProfileStore {
       apiKeyEnv: configuration.apiKeyEnv,
       enabled: configuration.enabled,
     };
+  }
+
+  private rowToProfileSafely(row: ProviderProfileRow): ProfileCompatibilityResult {
+    try {
+      return {
+        profile: this.rowToProfile(row),
+        warning: null,
+      };
+    } catch (error) {
+      return {
+        profile: null,
+        warning: {
+          code: row.provider_kind === 'openai-compatible' ? 'provider_profile_invalid' : 'provider_profile_legacy_unsupported',
+          message: sanitizeDiagnostic(
+            `Skipped knowledge provider profile "${row.profile_name}" (${row.provider_kind}): ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          ),
+        },
+      };
+    }
   }
 }
