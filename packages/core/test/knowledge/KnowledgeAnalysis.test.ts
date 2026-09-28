@@ -13,6 +13,19 @@ const validAnalysis = {
       name: 'Authentication API',
       type: 'service',
       sourceIds: ['source-1'],
+      sourceSpans: [
+        {
+          sourceId: 'source-1',
+          sourceVersionId: 'source-version-1',
+          startOffset: 0,
+          endOffset: 24,
+          startLine: 1,
+          startColumn: 1,
+          endLine: 1,
+          endColumn: 25,
+          label: 'entity',
+        },
+      ],
       confidence: 0.9,
     },
   ],
@@ -21,6 +34,19 @@ const validAnalysis = {
       id: 'claim-auth',
       statement: 'The API uses bearer tokens.',
       sourceIds: ['source-1'],
+      sourceSpans: [
+        {
+          sourceId: 'source-1',
+          sourceVersionId: 'source-version-1',
+          startOffset: 0,
+          endOffset: 24,
+          startLine: 1,
+          startColumn: 1,
+          endLine: 1,
+          endColumn: 25,
+          label: 'claim',
+        },
+      ],
       confidence: 0.9,
     },
   ],
@@ -30,6 +56,19 @@ const validAnalysis = {
       targetEntityId: 'entity-auth',
       type: 'documents',
       sourceIds: ['source-1'],
+      sourceSpans: [
+        {
+          sourceId: 'source-1',
+          sourceVersionId: 'source-version-1',
+          startOffset: 0,
+          endOffset: 24,
+          startLine: 1,
+          startColumn: 1,
+          endLine: 1,
+          endColumn: 25,
+          label: 'relationship',
+        },
+      ],
       confidence: 0.8,
     },
   ],
@@ -38,6 +77,19 @@ const validAnalysis = {
       summary: 'The token lifetime is inconsistent.',
       claimIds: ['claim-auth'],
       sourceIds: ['source-1'],
+      sourceSpans: [
+        {
+          sourceId: 'source-1',
+          sourceVersionId: 'source-version-1',
+          startOffset: 0,
+          endOffset: 24,
+          startLine: 1,
+          startColumn: 1,
+          endLine: 1,
+          endColumn: 25,
+          label: 'contradiction',
+        },
+      ],
       confidence: 0.5,
     },
   ],
@@ -45,6 +97,19 @@ const validAnalysis = {
     {
       question: 'What is the token expiry?',
       sourceIds: ['source-1'],
+      sourceSpans: [
+        {
+          sourceId: 'source-1',
+          sourceVersionId: 'source-version-1',
+          startOffset: 0,
+          endOffset: 24,
+          startLine: 1,
+          startColumn: 1,
+          endLine: 1,
+          endColumn: 25,
+          label: 'gap',
+        },
+      ],
       confidence: 0.4,
     },
   ],
@@ -74,6 +139,51 @@ describe('validateKnowledgeAnalysis', () => {
         relationships: [{ ...validAnalysis.relationships[0], targetEntityId: 'missing' }],
       }),
     ).toThrow(/unknown entity/i);
+    expect(() =>
+      validateKnowledgeAnalysis({
+        ...validAnalysis,
+        claims: [
+          {
+            ...validAnalysis.claims[0],
+            sourceSpans: [
+              {
+                sourceId: 'source-1',
+                sourceVersionId: 'source-version-1',
+                startOffset: 4,
+                endOffset: 3,
+                startLine: 1,
+                startColumn: 5,
+                endLine: 1,
+                endColumn: 4,
+              },
+            ],
+          },
+        ],
+      }),
+    ).toThrow(/span/i);
+    expect(() =>
+      validateKnowledgeAnalysis({
+        ...validAnalysis,
+        claims: [
+          {
+            ...validAnalysis.claims[0],
+            sourceIds: ['source-1'],
+            sourceSpans: [
+              {
+                sourceId: 'source-2',
+                sourceVersionId: 'source-version-1',
+                startOffset: 0,
+                endOffset: 24,
+                startLine: 1,
+                startColumn: 1,
+                endLine: 1,
+                endColumn: 25,
+              },
+            ],
+          },
+        ],
+      }),
+    ).toThrow(/declared sourceIds/i);
     expect(() => validateKnowledgeAnalysis({ ...validAnalysis, unexpected: true })).toThrow(/unexpected/i);
   });
 });

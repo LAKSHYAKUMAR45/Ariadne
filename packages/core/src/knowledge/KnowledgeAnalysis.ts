@@ -11,11 +11,24 @@ export interface KnowledgeAnalysisInput {
   prompt?: string;
 }
 
+export interface KnowledgeAnalysisSourceSpan {
+  sourceId: string;
+  sourceVersionId?: string | null;
+  startOffset: number;
+  endOffset: number;
+  startLine: number;
+  startColumn: number;
+  endLine: number;
+  endColumn: number;
+  label?: string | null;
+}
+
 export interface KnowledgeEntity {
   id: string;
   name: string;
   type: string;
   sourceIds: string[];
+  sourceSpans?: KnowledgeAnalysisSourceSpan[];
   confidence: number;
 }
 
@@ -23,6 +36,7 @@ export interface KnowledgeClaim {
   id: string;
   statement: string;
   sourceIds: string[];
+  sourceSpans?: KnowledgeAnalysisSourceSpan[];
   confidence: number;
 }
 
@@ -31,6 +45,7 @@ export interface KnowledgeRelationship {
   targetEntityId: string;
   type: string;
   sourceIds: string[];
+  sourceSpans?: KnowledgeAnalysisSourceSpan[];
   confidence: number;
 }
 
@@ -38,12 +53,14 @@ export interface KnowledgeContradiction {
   summary: string;
   claimIds: string[];
   sourceIds: string[];
+  sourceSpans?: KnowledgeAnalysisSourceSpan[];
   confidence: number;
 }
 
 export interface KnowledgeResearchGap {
   question: string;
   sourceIds: string[];
+  sourceSpans?: KnowledgeAnalysisSourceSpan[];
   confidence: number;
 }
 
@@ -99,14 +116,19 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
-function requireExactKeys(value: Record<string, unknown>, keys: readonly string[], label: string): void {
-  const allowed = new Set(keys);
+function requireExactKeys(
+  value: Record<string, unknown>,
+  requiredKeys: readonly string[],
+  label: string,
+  optionalKeys: readonly string[] = [],
+): void {
+  const allowed = new Set([...requiredKeys, ...optionalKeys]);
   for (const key of Object.keys(value)) {
     if (!allowed.has(key)) {
       throw new Error(`Knowledge ${label} has an unexpected field: ${key}`);
     }
   }
-  for (const key of keys) {
+  for (const key of requiredKeys) {
     if (!(key in value)) {
       throw new Error(`Knowledge ${label} is missing required field: ${key}`);
     }
@@ -147,6 +169,13 @@ function requireSourceIds(value: unknown, label: string): string[] {
   return sourceIds;
 }
 
+function requireInteger(value: unknown, label: string): number {
+  if (typeof value !== 'number' || !Number.isInteger(value)) {
+    throw new Error(`Knowledge ${label} must be an integer`);
+  }
+  return value;
+}
+
 function requireStringArray(value: unknown, label: string): string[] {
   if (!Array.isArray(value) || value.length === 0) {
     throw new Error(`Knowledge ${label} must be a non-empty array`);
@@ -165,25 +194,114 @@ function requireRecord(value: unknown, label: string): Record<string, unknown> {
   return value;
 }
 
+function validateSourceSpan(value: unknown, label: string): KnowledgeAnalysisSourceSpan {
+  const span = requireRecord(value, label);
+  requireExactKeys(
+    span,
+    ['sourceId', 'startOffset', 'endOffset', 'startLine', 'startColumn', 'endLine', 'endColumn'],
+    label,
+    ['sourceVersionId', 'label'],
+  );
+  const startOffset = requireInteger(span.startOffset, `${label} startOffset`);
+  const endOffset = requireInteger(span.endOffset, `${label} endOffset`);
+  const startLine = requireInteger(span.startLine, `${label} startLine`);
+  const startColumn = requireInteger(span.startColumn, `${label} startColumn`);
+  const endLine = requireInteger(span.endLine, `${label} endLine`);
+  const endColumn = requireInteger(span.endColumn, `${label} endColumn`);
+  if (startOffset < 0 || endOffset < startOffset) {
+    throw new Error(`Knowledge ${label} span has invalid offsets`);
+  }
+  if (startLine <= 0 || startColumn <= 0 || endLine <= 0 || endColumn <= 0) {
+    throw new Error(`Knowledge ${label} span has invalid positions`);
+  }
+  if (endLine < startLine || (endLine === startLine && endColumn < startColumn)) {
+    throw new Error(`Knowledge ${label} span has invalid positions`);
+  }
+  const sourceVersionId =
+    span.sourceVersionId === undefined || span.sourceVersionId === null
+      ? span.sourceVersionId
+      : requireNonEmptyString(span.sourceVersionId, `${label} sourceVersionId`);
+  const labelValue =
+    span.label === undefined || span.label === null
+      ? span.label
+      : requireNonEmptyString(span.label, `${label} label`);
+  return {
+    sourceId: requireNonEmptyString(span.sourceId, `${label} sourceId`),
+    ...(sourceVersionId !== undefined ? { sourceVersionId } : {}),
+    startOffset,
+    endOffset,
+    startLine,
+    startColumn,
+    endLine,
+    endColumn,
+    ...(labelValue !== undefined ? { label: labelValue } : {}),
+  };
+}
+
+function requireOptionalSourceSpans(value: unknown, label: string): KnowledgeAnalysisSourceSpan[] | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (!Array.isArray(value) || value.length === 0) {
+    throw new Error(`Knowledge ${label} sourceSpans must be a non-empty array when provided`);
+  }
+  const spans = value.map((entry, index) => validateSourceSpan(entry, `${label} sourceSpans[${index}]`));
+  const fingerprints = spans.map((span) =>
+    [
+      span.sourceId,
+      span.sourceVersionId ?? '',
+      span.startOffset,
+      span.endOffset,
+      span.startLine,
+      span.startColumn,
+      span.endLine,
+      span.endColumn,
+      span.label ?? '',
+    ].join('\0'),
+  );
+  requireUniqueIds(fingerprints, `${label} source span`);
+  return spans;
+}
+
+function ensureSpanSourceIdsMatch(sourceIds: readonly string[], sourceSpans: readonly KnowledgeAnalysisSourceSpan[] | undefined, label: string): void {
+  if (!sourceSpans) {
+    return;
+  }
+  const allowed = new Set(sourceIds);
+  for (const span of sourceSpans) {
+    if (!allowed.has(span.sourceId)) {
+      throw new Error(`Knowledge ${label} sourceSpans must reference one of the declared sourceIds`);
+    }
+  }
+}
+
 function validateEntity(value: unknown): KnowledgeEntity {
   const entity = requireRecord(value, 'entity');
-  requireExactKeys(entity, ['id', 'name', 'type', 'sourceIds', 'confidence'], 'entity');
+  requireExactKeys(entity, ['id', 'name', 'type', 'sourceIds', 'confidence'], 'entity', ['sourceSpans']);
+  const sourceIds = requireSourceIds(entity.sourceIds, 'entity');
+  const sourceSpans = requireOptionalSourceSpans(entity.sourceSpans, 'entity');
+  ensureSpanSourceIdsMatch(sourceIds, sourceSpans, 'entity');
   return {
     id: requireNonEmptyString(entity.id, 'entity ID'),
     name: requireNonEmptyString(entity.name, 'entity name'),
     type: requireNonEmptyString(entity.type, 'entity type'),
-    sourceIds: requireSourceIds(entity.sourceIds, 'entity'),
+    sourceIds,
+    ...(sourceSpans ? { sourceSpans } : {}),
     confidence: requireConfidence(entity.confidence, 'entity'),
   };
 }
 
 function validateClaim(value: unknown): KnowledgeClaim {
   const claim = requireRecord(value, 'claim');
-  requireExactKeys(claim, ['id', 'statement', 'sourceIds', 'confidence'], 'claim');
+  requireExactKeys(claim, ['id', 'statement', 'sourceIds', 'confidence'], 'claim', ['sourceSpans']);
+  const sourceIds = requireSourceIds(claim.sourceIds, 'claim');
+  const sourceSpans = requireOptionalSourceSpans(claim.sourceSpans, 'claim');
+  ensureSpanSourceIdsMatch(sourceIds, sourceSpans, 'claim');
   return {
     id: requireNonEmptyString(claim.id, 'claim ID'),
     statement: requireNonEmptyString(claim.statement, 'claim statement'),
-    sourceIds: requireSourceIds(claim.sourceIds, 'claim'),
+    sourceIds,
+    ...(sourceSpans ? { sourceSpans } : {}),
     confidence: requireConfidence(claim.confidence, 'claim'),
   };
 }
@@ -194,42 +312,55 @@ function validateRelationship(value: unknown, entityIds: ReadonlySet<string>): K
     relationship,
     ['sourceEntityId', 'targetEntityId', 'type', 'sourceIds', 'confidence'],
     'relationship',
+    ['sourceSpans'],
   );
   const sourceEntityId = requireNonEmptyString(relationship.sourceEntityId, 'relationship source entity ID');
   const targetEntityId = requireNonEmptyString(relationship.targetEntityId, 'relationship target entity ID');
   if (!entityIds.has(sourceEntityId) || !entityIds.has(targetEntityId)) {
     throw new Error('Knowledge relationship references an unknown entity');
   }
+  const sourceIds = requireSourceIds(relationship.sourceIds, 'relationship');
+  const sourceSpans = requireOptionalSourceSpans(relationship.sourceSpans, 'relationship');
+  ensureSpanSourceIdsMatch(sourceIds, sourceSpans, 'relationship');
   return {
     sourceEntityId,
     targetEntityId,
     type: requireNonEmptyString(relationship.type, 'relationship type'),
-    sourceIds: requireSourceIds(relationship.sourceIds, 'relationship'),
+    sourceIds,
+    ...(sourceSpans ? { sourceSpans } : {}),
     confidence: requireConfidence(relationship.confidence, 'relationship'),
   };
 }
 
 function validateContradiction(value: unknown, claimIds: ReadonlySet<string>): KnowledgeContradiction {
   const contradiction = requireRecord(value, 'contradiction');
-  requireExactKeys(contradiction, ['summary', 'claimIds', 'sourceIds', 'confidence'], 'contradiction');
+  requireExactKeys(contradiction, ['summary', 'claimIds', 'sourceIds', 'confidence'], 'contradiction', ['sourceSpans']);
   const referencedClaimIds = requireStringArray(contradiction.claimIds, 'contradiction claim IDs');
   if (referencedClaimIds.some((claimId) => !claimIds.has(claimId))) {
     throw new Error('Knowledge contradiction references an unknown claim');
   }
+  const sourceIds = requireSourceIds(contradiction.sourceIds, 'contradiction');
+  const sourceSpans = requireOptionalSourceSpans(contradiction.sourceSpans, 'contradiction');
+  ensureSpanSourceIdsMatch(sourceIds, sourceSpans, 'contradiction');
   return {
     summary: requireNonEmptyString(contradiction.summary, 'contradiction summary'),
     claimIds: referencedClaimIds,
-    sourceIds: requireSourceIds(contradiction.sourceIds, 'contradiction'),
+    sourceIds,
+    ...(sourceSpans ? { sourceSpans } : {}),
     confidence: requireConfidence(contradiction.confidence, 'contradiction'),
   };
 }
 
 function validateResearchGap(value: unknown): KnowledgeResearchGap {
   const gap = requireRecord(value, 'research gap');
-  requireExactKeys(gap, ['question', 'sourceIds', 'confidence'], 'research gap');
+  requireExactKeys(gap, ['question', 'sourceIds', 'confidence'], 'research gap', ['sourceSpans']);
+  const sourceIds = requireSourceIds(gap.sourceIds, 'research gap');
+  const sourceSpans = requireOptionalSourceSpans(gap.sourceSpans, 'research gap');
+  ensureSpanSourceIdsMatch(sourceIds, sourceSpans, 'research gap');
   return {
     question: requireNonEmptyString(gap.question, 'research gap question'),
-    sourceIds: requireSourceIds(gap.sourceIds, 'research gap'),
+    sourceIds,
+    ...(sourceSpans ? { sourceSpans } : {}),
     confidence: requireConfidence(gap.confidence, 'research gap'),
   };
 }

@@ -479,6 +479,23 @@ export type {
   KnowledgeRedactionHook,
 } from './knowledge/KnowledgeProviders.js';
 export {
+  KnowledgeProviderProfileStore,
+  normalizeOpenAICompatibleEndpoint,
+  resolveKnowledgeProviderApiKey,
+} from './knowledge/KnowledgeProviderProfiles.js';
+export type {
+  CreateKnowledgeProviderProfileInput,
+  KnowledgeProviderDiagnostic,
+  KnowledgeProviderProfile,
+  KnowledgeProviderProfileTestAdapter,
+  KnowledgeProviderProfileStoreOptions,
+  KnowledgeProviderTestAdapter,
+  KnowledgeProviderTestAdapterInput,
+  KnowledgeProviderTestAdapterResult,
+  KnowledgeProviderTestResult,
+  ResolveKnowledgeProviderApiKeyResult,
+} from './knowledge/KnowledgeProviderProfiles.js';
+export {
   rankByEmbedding,
 } from './knowledge/KnowledgeEmbeddings.js';
 export type {
@@ -521,6 +538,7 @@ export type {
   KnowledgeAnalysisInput,
   KnowledgeAnalysisPayloadKind,
   KnowledgeAnalysisRedactionHooks,
+  KnowledgeAnalysisSourceSpan,
   KnowledgeAnalyzer,
   KnowledgeClaim,
   KnowledgeContradiction,
@@ -532,6 +550,18 @@ export type {
   KnowledgeResearchGap,
   ProviderRequiredKnowledgeGeneration,
 } from './knowledge/KnowledgeAnalysis.js';
+export {
+  OpenAICompatibleEnrichmentService,
+  OpenAICompatibleProvider,
+} from './knowledge/providers/OpenAICompatibleProvider.js';
+export type {
+  OpenAICompatibleAnalyzeInput,
+  OpenAICompatibleEnrichmentServiceOptions,
+  OpenAICompatibleGenerateInput,
+  OpenAICompatibleGroundingInput,
+  OpenAICompatibleProviderOptions,
+  OpenAICompatibleProviderResult,
+} from './knowledge/providers/OpenAICompatibleProvider.js';
 export {
   KnowledgeChatService,
 } from './knowledge/KnowledgeChat.js';
