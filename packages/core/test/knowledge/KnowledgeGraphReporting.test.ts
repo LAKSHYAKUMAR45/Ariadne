@@ -195,8 +195,9 @@ describe('KnowledgeGraphReporter', () => {
     const { versionId } = seedSupportedGraph('project_a', 'one');
     const other = addSource('project_a', 'other')[0];
     coverageStore.upsert({ projectId: 'project_a', sourceVersionId: other, coverage: coverage() });
-    addNode('project_a', 'node_dup_1', 'shared.handler', other);
-    addNode('project_a', 'node_dup_2', 'shared.handler', versionId);
+    addNode('project_a', 'node_other', 'shared.handler', other);
+    addNode('project_a', 'node_dup_1', 'shared.handler', versionId, 'sym_dup_1');
+    addNode('project_a', 'node_dup_2', 'shared.handler', versionId, 'sym_dup_2');
     coverageStore.replaceDeferredRelationships({
       projectId: 'project_a',
       sourceVersionId: versionId,
@@ -233,6 +234,76 @@ describe('KnowledgeGraphReporter', () => {
     expect(noCandidates?.severity).toBe('warning');
     expect(db.prepare('SELECT COUNT(*) AS count FROM knowledge_graph_nodes').get()).toEqual(nodesBefore);
     expect(db.prepare('SELECT COUNT(*) AS count FROM knowledge_graph_edges').get()).toEqual(edgesBefore);
+  });
+
+  it('derives ambiguity candidates from the originating source version only', () => {
+    const [versionOne] = addSource('project_a', 'one');
+    const [versionTwo] = addSource('project_a', 'two');
+    const [staleV1, staleV2] = addSource('project_a', 'stale', { versions: 2 });
+    for (const version of [versionOne, versionTwo, staleV2]) {
+      coverageStore.upsert({ projectId: 'project_a', sourceVersionId: version, coverage: coverage() });
+    }
+    addNode('project_a', 'node_one_a', 'shared.handler', versionOne, 'sym_a');
+    addNode('project_a', 'node_one_b', 'shared.handler', versionOne, 'sym_b');
+    addNode('project_a', 'node_two_a', 'shared.handler', versionTwo, 'sym_a');
+    addNode('project_a', 'node_two_b', 'shared.handler', versionTwo, 'sym_b');
+    addNode('project_a', 'node_stale_old', 'shared.handler', staleV1, 'sym_a');
+    addNode('project_a', 'node_stale_new', 'shared.handler', staleV2, 'sym_a');
+    addNode('project_a', 'node_stale_new_b', 'shared.handler', staleV2, 'sym_b');
+    const [foreignVersion] = addSource('project_b', 'foreign');
+    addNode('project_b', 'node_foreign', 'shared.handler', foreignVersion, 'sym_f');
+    for (const versionId of [versionOne, versionTwo, staleV2]) {
+      coverageStore.replaceDeferredRelationships({
+        projectId: 'project_a',
+        sourceVersionId: versionId,
+        candidates: [deferred('d_alias', { resolutionKind: 'ambiguous_alias', targetReference: 'shared.handler' })],
+      });
+    }
+
+    reporter.buildCompletenessReport({ projectId: 'project_a' });
+
+    const byVersion = new Map(
+      reporter
+        .listAmbiguities('project_a')
+        .filter((entry) => entry.ambiguityKind === 'multiple_candidate_targets')
+        .map((entry) => [entry.sourceVersionId, entry]),
+    );
+    expect(byVersion.get(versionOne)?.candidateNodeIds).toEqual(['node_one_a', 'node_one_b']);
+    expect(byVersion.get(versionTwo)?.candidateNodeIds).toEqual(['node_two_a', 'node_two_b']);
+    expect(byVersion.get(staleV2)?.candidateNodeIds).toEqual(['node_stale_new', 'node_stale_new_b']);
+    expect(byVersion.get(versionOne)?.severity).toBe('review');
+    const stored = db.prepare('SELECT detail_json FROM knowledge_graph_ambiguities').all() as Array<{ detail_json: string }>;
+    expect(stored.map((row) => row.detail_json).join('')).not.toMatch(/node_foreign|node_stale_old/);
+  });
+
+  it('resolves path#Name references against the originating version aliases like the materializer', () => {
+    const [versionOne] = addSource('project_a', 'one');
+    const [versionTwo] = addSource('project_a', 'two');
+    for (const version of [versionOne, versionTwo]) {
+      coverageStore.upsert({ projectId: 'project_a', sourceVersionId: version, coverage: coverage() });
+    }
+    addNode('project_a', 'node_one_full_a', 'lib/util.py#helper', versionOne, 'sym_a');
+    addNode('project_a', 'node_one_full_b', 'lib/util.py#helper', versionOne, 'sym_b');
+    addNode('project_a', 'node_one_prefix_a', 'lib/util.py', versionOne, 'sym_c');
+    addNode('project_a', 'node_two_full', 'lib/util.py#helper', versionTwo, 'sym_a');
+    addNode('project_a', 'node_two_prefix_a', 'lib/other.py', versionTwo, 'sym_c');
+    addNode('project_a', 'node_two_prefix_b', 'lib/other.py', versionTwo, 'sym_d');
+    coverageStore.replaceDeferredRelationships({
+      projectId: 'project_a',
+      sourceVersionId: versionOne,
+      candidates: [deferred('d_full', { resolutionKind: 'ambiguous_alias', targetReference: ' lib/util.py#helper ' })],
+    });
+    coverageStore.replaceDeferredRelationships({
+      projectId: 'project_a',
+      sourceVersionId: versionTwo,
+      candidates: [deferred('d_prefix', { resolutionKind: 'ambiguous_alias', targetReference: 'lib/other.py#missing' })],
+    });
+
+    reporter.buildCompletenessReport({ projectId: 'project_a' });
+
+    const byVersion = new Map(reporter.listAmbiguities('project_a').map((entry) => [entry.sourceVersionId, entry]));
+    expect(byVersion.get(versionOne)?.candidateNodeIds).toEqual(['node_one_full_a', 'node_one_full_b']);
+    expect(byVersion.get(versionTwo)?.candidateNodeIds).toEqual(['node_two_prefix_a', 'node_two_prefix_b']);
   });
 
   it('links deferred candidates to existing symbol nodes only', () => {

@@ -326,7 +326,7 @@ export class KnowledgeGraphReporter implements KnowledgeGraphReportingService {
     };
     const id = (kind: KnowledgeGraphAmbiguityKind) => this.ambiguityId(projectId, snapshotId, kind, row.id);
     if (row.resolution_kind === 'ambiguous_alias') {
-      const candidateNodeIds = this.aliasCandidates(projectId, row.target_reference);
+      const candidateNodeIds = this.aliasCandidates(projectId, row.source_version_id, row.target_reference);
       return {
         ...base,
         id: id('multiple_candidate_targets'),
@@ -369,27 +369,27 @@ export class KnowledgeGraphReporter implements KnowledgeGraphReportingService {
     return row?.id ?? null;
   }
 
-  /** Existing symbol nodes only; the reference text is used for lookup and is never stored. */
-  private aliasCandidates(projectId: string, reference: string | null): string[] {
+  /**
+   * Existing symbol nodes of the originating source version only, mirroring the materializer's
+   * alias lookup: the full reference first, then the part before `#`. Reference text is never stored.
+   */
+  private aliasCandidates(projectId: string, sourceVersionId: string, reference: string | null): string[] {
     const text = reference?.trim();
     if (!text) return [];
-    const rows = this.db
-      .prepare(
-        `SELECT nodes.id
-         FROM knowledge_graph_nodes nodes
-         JOIN knowledge_source_versions versions
-           ON versions.project_id = nodes.project_id AND versions.id = nodes.source_version_id
-         WHERE nodes.project_id = ? AND nodes.source_kind = 'deterministic_symbol'
-           AND (nodes.qualified_name = ? OR nodes.label = ?)
-           AND versions.version_number = (
-             SELECT MAX(latest.version_number) FROM knowledge_source_versions latest
-             WHERE latest.project_id = versions.project_id AND latest.source_id = versions.source_id
-           )
-         ORDER BY nodes.id
-         LIMIT ?`,
-      )
-      .all(projectId, text, text, MAX_AMBIGUITY_CANDIDATES) as Array<{ id: string }>;
-    return rows.map((row) => row.id);
+    const hashIndex = text.indexOf('#');
+    const aliases = hashIndex > 0 ? [text, text.slice(0, hashIndex)] : [text];
+    const statement = this.db.prepare(
+      `SELECT id FROM knowledge_graph_nodes
+       WHERE project_id = ? AND source_kind = 'deterministic_symbol' AND source_version_id = ?
+         AND (qualified_name = ? OR label = ?)
+       ORDER BY id
+       LIMIT ?`,
+    );
+    for (const alias of aliases) {
+      const rows = statement.all(projectId, sourceVersionId, alias, alias, MAX_AMBIGUITY_CANDIDATES) as Array<{ id: string }>;
+      if (rows.length > 0) return rows.map((row) => row.id);
+    }
+    return [];
   }
 
   private collectEdgeAmbiguities(

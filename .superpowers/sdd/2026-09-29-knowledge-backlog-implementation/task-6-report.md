@@ -30,3 +30,9 @@ RED confirmed for: reporter (module missing), archive (6 failures with src stash
 - New archives always include report table files, so older readers that reject unknown tables may refuse them.
 - Existing (pre-Task-6) sources show as legacyUnknown until re-analyzed, as intended.
 - Pre-existing uncommitted `knowledge-search-evaluation/progress.md` was not committed.
+
+## Review fix: ambiguity candidates scoped to originating source version
+- Finding: `aliasCandidates` matched same-named symbols across the whole project, so candidate lists could include nodes from other sources.
+- Fix: candidates now come only from `deterministic_symbol` nodes of the deferred relationship's own `source_version_id` (already restricted to the active source's latest version). Lookup mirrors the materializer: full trimmed reference first, then the part before `#` for `path#Name` references; the first alias with nodes wins. Bound (10), redaction (reference text never stored), project scoping and warning/review severity (`review` for ≥2 candidates, else `warning`) are unchanged.
+- Tests (RED first: 3 failures, then GREEN): updated the mixed-source ambiguity test to keep candidates in the originating version; added a two-source (plus stale-version and foreign-project) same-name regression proving only originating-version candidates are stored; added a `path#Name` full/prefix alias test.
+- Results: `KnowledgeGraphReporting.test.ts` 13/13; `packages/core` `tsc --noEmit` clean; full `vitest run` 72 files / 874 tests pass; `npm run test:knowledge:evaluation` run.
