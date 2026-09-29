@@ -230,6 +230,13 @@ Follow-on security hardening now also covers the knowledge archive import path:
   `conversations/`, and replacement remains transactional so rejected archives
   do not delete the target project or touch unrelated projects
 
+Follow-up compatibility hardening in `dee0c78` keeps
+`ImportKnowledgeProjectOptions.workspaceRoot` optional for existing callers.
+Imports now select an explicit destination first, then a trusted existing
+target root or legacy archive metadata, and reject redacted archives that
+provide no safe destination. Project-scoped chat CLI history/send arguments
+are documented and covered by the existing command tests.
+
 ## Files changed
 
 - `.github/agents/ariadne.agent.md`
