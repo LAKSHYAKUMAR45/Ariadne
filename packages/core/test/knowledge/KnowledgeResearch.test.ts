@@ -91,6 +91,66 @@ describe('KnowledgeResearchService', () => {
     expect(result.childTask).toMatchObject({ parentTaskId: parent.id, title: 'Research: OAuth 2.1 guidance' });
   });
 
+  it('binds research ingestion to the reused current version after an A→B→A content revert', async () => {
+    const snippets = ['snippet A', 'snippet B', 'snippet A'];
+    const search = vi.fn().mockImplementation(async () => [
+      { url: 'https://example.com/flip', title: 'Flip', snippet: snippets.shift() ?? 'snippet A' },
+    ]);
+    const service = new KnowledgeResearchService({
+      provider: createGenericResearchProvider({ id: 'generic', search }),
+      sourceStore,
+      pageStore,
+      queue,
+    });
+    let runNumber = 0;
+    const run = async (projectId: string) => {
+      const request = service.createResearchRequest({ projectId, query: `flip ${(runNumber += 1)}` });
+      service.confirmResearchRequest(request.id);
+      return service.runResearchRequest(request.id);
+    };
+
+    const first = await run(PROJECT_ID);
+    const versionA = sourceStore.listVersions(PROJECT_ID, first.sources[0]!.id)[0]!;
+    await run(PROJECT_ID);
+    const third = await run(PROJECT_ID);
+
+    const versions = sourceStore.listVersions(PROJECT_ID, third.sources[0]!.id);
+    expect(versions).toHaveLength(2);
+    expect(sourceStore.currentVersion(PROJECT_ID, third.sources[0]!.id)?.id).toBe(versionA.id);
+    expect(third.synthesisPage.sourceVersionIds).toEqual([versionA.id]);
+    const jobVersionIds = queue.list(PROJECT_ID).map((job) => job.sourceVersionId).sort();
+    expect(jobVersionIds).toEqual(versions.map((version) => version.id).sort());
+  });
+
+  it('binds research ingestion to the newest version and keeps projects isolated', async () => {
+    db.prepare(
+      `INSERT INTO knowledge_projects (id, workspace_root, name, status, created_at, updated_at)
+       VALUES ('project_2', '/other', 'Other', 'active', ?, ?)`,
+    ).run(CREATED_AT, CREATED_AT);
+    const snippets = ['old', 'new'];
+    const service = new KnowledgeResearchService({
+      provider: createGenericResearchProvider({
+        id: 'generic',
+        search: async () => [{ url: 'https://example.com/n', title: 'N', snippet: snippets.shift() ?? 'new' }],
+      }),
+      sourceStore,
+      pageStore,
+      queue,
+    });
+    const run = async (projectId: string) => {
+      const request = service.createResearchRequest({ projectId, query: 'n' });
+      service.confirmResearchRequest(request.id);
+      return service.runResearchRequest(request.id);
+    };
+
+    await run(PROJECT_ID);
+    const newest = await run(PROJECT_ID);
+    const versions = sourceStore.listVersions(PROJECT_ID, newest.sources[0]!.id);
+
+    expect(newest.synthesisPage.sourceVersionIds).toEqual([versions[1]!.id]);
+    expect(queue.list('project_2')).toEqual([]);
+  });
+
   it('cancels confirmed requests and translates aborted provider work into a typed cancellation error', async () => {
     const service = new KnowledgeResearchService({
       provider: createGenericResearchProvider({

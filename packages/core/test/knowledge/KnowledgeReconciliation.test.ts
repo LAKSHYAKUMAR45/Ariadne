@@ -337,4 +337,47 @@ describe('KnowledgeReconciliation', () => {
     ]);
     expect(context.db.prepare('SELECT id FROM knowledge_graph_edges').all()).toEqual([{ id: 'bad-edge' }]);
   });
+  it('treats the reused older version as current after an A→B→A revert and preserves newest-content behavior', () => {
+    const context = createContext();
+    databases.push(context.db);
+    const register = (content: string) =>
+      context.sources.register({ projectId: 'project-1', kind: 'file', path: 'docs/revert.md', content });
+    const source = register('A');
+    register('B');
+    register('A');
+    const [versionA, versionB] = context.sources.listVersions('project-1', source.id);
+    expect(context.sources.currentVersion('project-1', source.id)?.id).toBe(versionA!.id);
+    const pageOnA = context.pages.createPageVersion({
+      projectId: 'project-1',
+      type: 'source',
+      title: 'Page on A',
+      slug: 'page-on-a',
+      content: 'A content',
+      sourceVersionIds: [versionA!.id],
+      provenance: [{ kind: 'source', id: source.id, confidence: 1 }],
+    });
+    const pageOnB = context.pages.createPageVersion({
+      projectId: 'project-1',
+      type: 'source',
+      title: 'Page on B',
+      slug: 'page-on-b',
+      content: 'B content',
+      sourceVersionIds: [versionB!.id],
+      provenance: [{ kind: 'source', id: source.id, confidence: 1 }],
+    });
+
+    const result = context.reconciliation.reconcileChangedSource(source.id);
+
+    expect(result.stalePageIds).toEqual([pageOnB.pageId]);
+    expect(context.pages.getCurrentPage('project-1', pageOnA.pageId)?.status).toBe('active');
+    expect(context.pages.getCurrentPage('project-1', pageOnB.pageId)?.status).toBe('stale');
+    expect(result.reviewIds).toHaveLength(1);
+    expect(result.insightIds).toHaveLength(1);
+
+    register('C');
+    const versionC = context.sources.currentVersion('project-1', source.id)!;
+    expect(versionC.versionNumber).toBe(3);
+    const afterNewest = context.reconciliation.reconcileChangedSource(source.id);
+    expect(afterNewest.stalePageIds).toEqual([pageOnA.pageId]);
+  });
 });

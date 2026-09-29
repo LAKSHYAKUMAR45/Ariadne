@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import { createKnowledgeId } from './KnowledgeIds.js';
 import { KnowledgePageStore } from './KnowledgePageStore.js';
 import { KnowledgeSearchIndex } from './KnowledgeSearchIndex.js';
+import { KnowledgeSourceStore } from './KnowledgeSourceStore.js';
 import type {
   KnowledgePageId,
   KnowledgePageType,
@@ -131,8 +132,9 @@ export class KnowledgeReconciliation {
 
     this.db.transaction(() => {
       const versions = this.listSourceVersions(source.project_id, sourceId);
-      const currentVersion = versions.at(-1);
-      if (currentVersion === undefined) throw new Error(`Knowledge source has no versions: ${sourceId}`);
+      if (versions.length === 0) throw new Error(`Knowledge source has no versions: ${sourceId}`);
+      const currentVersion = new KnowledgeSourceStore(this.db).currentVersion(source.project_id, sourceId);
+      if (currentVersion === null) throw new Error(`Knowledge source has no current version: ${sourceId}`);
       const staleVersionIds = new Set(versions.filter((version) => version.id !== currentVersion.id).map((version) => version.id));
       if (staleVersionIds.size === 0) {
         options.beforeCommit?.();

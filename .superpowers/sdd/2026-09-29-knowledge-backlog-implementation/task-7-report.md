@@ -53,3 +53,24 @@ Previously a source that returned to an older known hash was recorded as a perma
 ### Concerns
 - Requeue on revert also applies to a `failed` job (an explicit content change, bounded by the number of flips), which departs from "never requeue failed on watch events" only for this trigger.
 - Pre-existing uncommitted `progress.md` change in the worktree was left untouched.
+
+## Re-review fix: current-version selection in reconciliation and research (Important)
+
+After A→B→A, the source's `current_hash` points at reused version A, but two callers still took the highest-numbered version (B).
+
+### Fix
+- `KnowledgeReconciliation.reconcileChangedSource` now uses `KnowledgeSourceStore.currentVersion(projectId, sourceId)` instead of `versions.at(-1)`. Stale versions are all others, so a page on A stays active and a page on B goes stale. It throws if the source has no current version rather than guessing.
+- `KnowledgeResearch.ingestResults` (queue job binding) and `createSynthesisPage` (`sourceVersionIds`) now use `currentVersion(...)` instead of `listVersions(...).at(-1)` / `.slice(-1)`.
+- Project isolation is preserved because `currentVersion` filters by `project_id`.
+
+### Tests (RED first: both new regressions failed before the fix)
+- `KnowledgeReconciliation.test.ts`: A→B→A leaves the page on A active and stales the page on B, with one review/insight. A later new version C makes the page on A stale (normal newest-content behavior).
+- `KnowledgeResearch.test.ts`: research ingest of A→B→A binds the synthesis page and queue jobs to A's reused version, with no new version row and one job per version. A separate test covers the newest-version binding and project isolation.
+
+### Output
+- `packages/core`: `tsc --noEmit` clean; vitest 75 files / 929 tests passed.
+- `packages/cli`: `tsc --noEmit` clean; vitest 12 files / 133 tests passed.
+
+### Concerns
+- `KnowledgePageStore.createPageVersion` returns an older duplicate-content version without making it current, so a synthesis page whose content reverts (same query) still resolves to the newer page version. This is a separate page-store behavior and was left unchanged; the research test uses distinct queries.
+- Pre-existing uncommitted `progress.md` change was left untouched.

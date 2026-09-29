@@ -272,8 +272,8 @@ export class KnowledgeResearchService {
         format: 'markdown',
         mimeType: 'text/markdown',
       });
-      const version = this.options.sourceStore.listVersions(request.projectId, source.id).at(-1);
-      if (version === undefined) throw new Error(`Research source version was not created: ${source.id}`);
+      const version = this.options.sourceStore.currentVersion(request.projectId, source.id);
+      if (version === null) throw new Error(`Research source version was not created: ${source.id}`);
       this.options.queue.enqueue({
         projectId: request.projectId,
         jobKind: 'research-source',
@@ -290,9 +290,10 @@ export class KnowledgeResearchService {
     results: readonly ResearchResult[],
     sources: readonly KnowledgeSourceRecord[],
   ): ResearchSynthesisPage {
-    const sourceVersionIds = sources.flatMap((source) =>
-      this.options.sourceStore.listVersions(request.projectId, source.id).slice(-1).map((version) => version.id),
-    );
+    const sourceVersionIds = sources.flatMap((source) => {
+      const version = this.options.sourceStore.currentVersion(request.projectId, source.id);
+      return version === null ? [] : [version.id];
+    });
     const content = synthesisContent(request.query, results);
     const version = this.options.pageStore.createPageVersion({
       projectId: request.projectId,
