@@ -594,6 +594,20 @@ export class KnowledgeWorker {
           unsupportedCoverage('binary_or_non_text', this.loadSourceSelection(projectId, sourceVersionId)),
         );
       }
+      if (error instanceof KnowledgeSourceVersionLoadError && error.code === 'source_too_large') {
+        // Only sources that have no analyzer anyway are downgraded; oversized supported sources still fail.
+        const selection = this.loadSourceSelection(projectId, sourceVersionId);
+        const resolution = this.resolveAnalyzer(selection);
+        if (resolution.kind === 'unsupported') {
+          return this.completeUnsupportedSource(
+            job,
+            projectId,
+            leaseMonitor,
+            sourceVersionId,
+            unsupportedCoverage('size_limit_exceeded', selection),
+          );
+        }
+      }
       throw error;
     }
     this.guardDurableStage(job.id, projectId, leaseMonitor);
@@ -796,7 +810,9 @@ export class KnowledgeWorker {
     throw new KnowledgeSourceVersionLoadError('source_version_missing', `Knowledge source version missing for job ${job.id}`);
   }
 
-  private resolveAnalyzer(loaded: LoadedKnowledgeSourceVersion): AnalyzerResolution {
+  private resolveAnalyzer(
+    loaded: Pick<LoadedKnowledgeSourceVersion, 'sourceKind' | 'sourcePath' | 'mimeType'>,
+  ): AnalyzerResolution {
     const selection = { sourceKind: loaded.sourceKind, sourcePath: loaded.sourcePath, mimeType: loaded.mimeType };
     if (this.analyzers.resolve) {
       return this.analyzers.resolve(selection);
@@ -812,16 +828,21 @@ export class KnowledgeWorker {
   private loadSourceSelection(
     projectId: string,
     sourceVersionId: string,
-  ): { sourcePath: string | null; mimeType: string | null } {
+  ): Pick<LoadedKnowledgeSourceVersion, 'sourceKind' | 'sourcePath' | 'mimeType'> {
     const row = this.db
       .prepare(
-        `SELECT s.source_path AS sourcePath, v.mime_type AS mimeType
+        `SELECT s.source_kind AS sourceKind, s.source_path AS sourcePath, v.mime_type AS mimeType
          FROM knowledge_source_versions v
          JOIN knowledge_sources s ON s.project_id = v.project_id AND s.id = v.source_id
          WHERE v.project_id = ? AND v.id = ?`,
       )
-      .get(projectId, sourceVersionId) as { sourcePath: string | null; mimeType: string | null } | undefined;
-    return row ?? { sourcePath: null, mimeType: null };
+      .get(projectId, sourceVersionId) as
+      | Pick<LoadedKnowledgeSourceVersion, 'sourceKind' | 'sourcePath' | 'mimeType'>
+      | undefined;
+    if (!row) {
+      throw new KnowledgeSourceVersionLoadError('source_version_missing', `Knowledge source version not found: ${sourceVersionId}`);
+    }
+    return row;
   }
 
   private completeUnsupportedSource(

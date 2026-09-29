@@ -1070,6 +1070,45 @@ describe('KnowledgeWorker', () => {
       });
     });
 
+    it('completes oversized unsupported sources as size_limit_exceeded coverage instead of failing', async () => {
+      const ruby = registerSource(PROJECT_A, 'scripts/huge.rb', `puts "${'x'.repeat(200)}"\n`, 'application/x-ruby');
+      const job = enqueueAnalyze(ruby.sourceVersionId);
+      const result = await new KnowledgeWorker(
+        db,
+        { workerId: 'worker-oversized', now: () => CREATED_AT, maxSourceBytes: 64 },
+      ).runOnce(PROJECT_A);
+
+      expect(result).toMatchObject({ completed: 1, failed: 0, unsupportedCoverageCount: 1 });
+      expect(result.warnings).toEqual([expect.objectContaining({ jobId: job.id, code: 'coverage_size_limit_exceeded' })]);
+      expect(queue.get(job.id)).toMatchObject({
+        status: 'completed',
+        failureCode: null,
+        result: {
+          resultKind: 'coverage_only',
+          coverageStatus: 'unsupported',
+          unsupportedReason: 'size_limit_exceeded',
+          warnings: [expect.objectContaining({ code: 'coverage_size_limit_exceeded' })],
+        },
+      });
+      expect(coverageRow(ruby.sourceVersionId)).toMatchObject({ status: 'unsupported', unsupported_reason: 'size_limit_exceeded' });
+      expect(db.prepare('SELECT coverage FROM knowledge_search_indexes WHERE source_version_id = ?').get(ruby.sourceVersionId)).toEqual({
+        coverage: 'metadata_only',
+      });
+    });
+
+    it('still fails oversized sources that have a supported analyzer with source_too_large', async () => {
+      const python = registerSource(PROJECT_A, 'src/huge.py', `x = "${'y'.repeat(200)}"\n`);
+      const job = enqueueAnalyze(python.sourceVersionId);
+      const result = await new KnowledgeWorker(
+        db,
+        { workerId: 'worker-oversized-supported', now: () => CREATED_AT, maxSourceBytes: 64 },
+      ).runOnce(PROJECT_A);
+
+      expect(result).toMatchObject({ completed: 0, failed: 1, unsupportedCoverageCount: 0 });
+      expect(queue.get(job.id)).toMatchObject({ status: 'failed', failureCode: 'source_too_large' });
+      expect(coverageRow(python.sourceVersionId)).toBeUndefined();
+    });
+
     it('does not put source content or the private path in coverage rows or job results', async () => {
       const ruby = registerSource(PROJECT_A, 'scripts/secret-deploy.rb', 'API_TOKEN = "sk-abcdefghijklmnopqrstuvwxyz0123456789"\n', 'application/x-ruby');
       const job = enqueueAnalyze(ruby.sourceVersionId);
