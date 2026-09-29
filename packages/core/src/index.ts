@@ -128,7 +128,9 @@ export type {
   SaveKnowledgeExtractionInput,
 } from './knowledge/KnowledgeExtractionStore.js';
 export type {
+  KnowledgeAmbiguityReason,
   KnowledgeSearchCitation,
+  KnowledgeSearchConfidence,
   KnowledgeSearchContext,
   KnowledgeSearchContextOptions,
   KnowledgeSearchGraphExpansion,

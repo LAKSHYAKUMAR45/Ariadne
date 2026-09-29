@@ -347,6 +347,9 @@ export interface KnowledgeSearchResult {
   snippet: string;
   score: number;
   citations: KnowledgeCitation[];
+  searchConfidence?: 'clear' | 'ambiguous';
+  ambiguityReason?: 'near_tie' | 'shared_role' | 'insufficient_intent';
+  ambiguityAlternatives?: number;
 }
 
 export interface KnowledgeSearchResponse {

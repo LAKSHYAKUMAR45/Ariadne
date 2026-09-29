@@ -48,6 +48,9 @@ export interface KnowledgeSearchGraphExpansion {
   tokens?: number;
 }
 
+export type KnowledgeSearchConfidence = 'clear' | 'ambiguous';
+export type KnowledgeAmbiguityReason = 'near_tie' | 'shared_role' | 'insufficient_intent';
+
 export interface KnowledgeSearchResult {
   mode: KnowledgeSearchMode;
   kind: KnowledgeSearchResultKind;
@@ -60,6 +63,11 @@ export interface KnowledgeSearchResult {
   graphExpansions: KnowledgeSearchGraphExpansion[];
   taskResult?: WorkspaceSearchResult;
   metadata: Record<string, string | number | null>;
+  /** Deterministic top-one confidence; set only on the first source result, before any semantic reorder. */
+  searchConfidence?: KnowledgeSearchConfidence;
+  ambiguityReason?: KnowledgeAmbiguityReason;
+  /** Count of immediately competing source results in the first near-equal cluster. */
+  ambiguityAlternatives?: number;
 }
 
 export interface KnowledgeSearchDiagnostic {
@@ -161,6 +169,21 @@ const SEARCH_STOP_WORDS = new Set([
 
 type RankedKnowledgeSearchResult = KnowledgeSearchResult & { rankClass?: number };
 
+// A competitor is a near tie when its score is within this fraction of the leader's score.
+const AMBIGUITY_SCORE_BAND = 0.05;
+const MAX_AMBIGUITY_ALTERNATIVES = 10;
+
+interface AmbiguityFeatures {
+  rankClass: number;
+  score: number;
+  distinctTermCoverage: number;
+  exactSymbolHits: number;
+  structuralRoles: string;
+}
+
+// Kept out of the returned results so the public shape only gains the documented optional keys.
+const ambiguityFeatures = new WeakMap<KnowledgeSearchResult, AmbiguityFeatures>();
+
 function normalize(value: string): string {
   return value.trim().toLocaleLowerCase();
 }
@@ -207,7 +230,15 @@ function queryHasConcept(query: string, concept: string): boolean {
   );
 }
 
-function structuralScore(query: string, row: SourceSearchRow, extractionData: ExtractionSearchData | null): number {
+interface StructuralEvidence {
+  score: number;
+  exactSymbolHits: number;
+  roles: string[];
+}
+
+const NO_STRUCTURAL_EVIDENCE: StructuralEvidence = { score: 0, exactSymbolHits: 0, roles: [] };
+
+function structuralEvidence(query: string, row: SourceSearchRow, extractionData: ExtractionSearchData | null): StructuralEvidence {
   const pathTokens = searchTokens(row.source_path ?? row.content_path ?? '');
   const hasTaskManagerPath = pathTokens.includes('task') && pathTokens.some((token) => token === 'manager' || token === 'managers');
   const hasWorkflowPath = pathTokens.includes('workflow') || pathTokens.includes('workflows');
@@ -225,14 +256,19 @@ function structuralScore(query: string, row: SourceSearchRow, extractionData: Ex
   const symbolKinds = new Set(extractionData?.symbolKinds ?? []);
   const symbolTokens = new Set((extractionData?.symbolNames ?? []).flatMap((name) => searchTokens(name)));
   let score = 0;
-  if (hasTaskManagerPath && hasClassIntent && symbolKinds.has('class')) score += 24;
-  if (hasTaskManagerPath && hasFunctionIntent && (symbolKinds.has('function') || symbolKinds.has('method'))) score += 12;
-  if (hasInterfaceIntent && symbolKinds.has('interface')) score += 12;
-  if (hasWorkflowPath && hasClassIntent && symbolKinds.has('class')) score += 4;
-  if (hasUseCasePath && hasUseCaseIntent) score += 16;
-  if (hasLoaderPath && hasLoaderIntent) score += 36;
-  if (hasGlobalVariablesPath && hasDefaultsIntent) score += 24;
-  if (hasConftestPath && hasPytestIntent) score += 24;
+  const roles: string[] = [];
+  const addRole = (role: string, bonus: number): void => {
+    score += bonus;
+    roles.push(role);
+  };
+  if (hasTaskManagerPath && hasClassIntent && symbolKinds.has('class')) addRole('task-manager-class', 24);
+  if (hasTaskManagerPath && hasFunctionIntent && (symbolKinds.has('function') || symbolKinds.has('method'))) addRole('task-manager-function', 12);
+  if (hasInterfaceIntent && symbolKinds.has('interface')) addRole('interface', 12);
+  if (hasWorkflowPath && hasClassIntent && symbolKinds.has('class')) addRole('workflow-class', 4);
+  if (hasUseCasePath && hasUseCaseIntent) addRole('use-case', 16);
+  if (hasLoaderPath && hasLoaderIntent) addRole('loader', 36);
+  if (hasGlobalVariablesPath && hasDefaultsIntent) addRole('defaults', 24);
+  if (hasConftestPath && hasPytestIntent) addRole('pytest', 24);
   const exactSymbolTerms = terms(query).filter((term) => {
     if (term.length < 6 || !symbolTokens.has(term)) return false;
     if (hasLoaderPath) return term === 'loader';
@@ -242,7 +278,7 @@ function structuralScore(query: string, row: SourceSearchRow, extractionData: Ex
     return false;
   }).length;
   score += exactSymbolTerms * 120;
-  return score;
+  return { score, exactSymbolHits: exactSymbolTerms, roles };
 }
 
 export function lexicalScore(query: string, weightedFields: Array<{ text: string | null; weight: number }>): number {
@@ -605,7 +641,8 @@ function scoreSourceDocument(
   const hasSpanBackedExtractionMatch = rankedFieldMatches.some(
     (match) => match.field.rankClass === EXTRACTION_MATCH_RANK_CLASS && match.field.span !== null,
   );
-  const structuralBonus = hasSpanBackedExtractionMatch ? structuralScore(query, row, extractionData) : 0;
+  const structural = hasSpanBackedExtractionMatch ? structuralEvidence(query, row, extractionData) : NO_STRUCTURAL_EVIDENCE;
+  const structuralBonus = structural.score;
   const rankClass = bestMatch ? bestMatch.field.rankClass : metadataScore > 0 ? METADATA_MATCH_RANK_CLASS : DEFAULT_MATCH_RANK_CLASS;
   const score = bestMatch
     ? extractionScore + Math.min(metadataScore * 4, extractionScore) + structuralBonus
@@ -637,7 +674,55 @@ function scoreSourceDocument(
     options,
   ) as RankedKnowledgeSearchResult;
   result.rankClass = rankClass;
+  ambiguityFeatures.set(result, {
+    rankClass,
+    score,
+    distinctTermCoverage: distinctTermCoverage(
+      query,
+      [...fieldMatches.map((match) => match.field.text), row.source_path, row.source_url, row.content_path],
+    ),
+    exactSymbolHits: structural.exactSymbolHits,
+    structuralRoles: structural.roles.join(','),
+  });
   return result;
+}
+
+function distinctTermCoverage(query: string, texts: ReadonlyArray<string | null>): number {
+  const matchedTokens = new Set(texts.flatMap((text) => (text ? searchTokens(text) : [])));
+  return [...new Set(terms(query))].filter((term) => termVariants(term).some((variant) => matchedTokens.has(variant))).length;
+}
+
+function annotateTopOneConfidence(query: string, results: RankedKnowledgeSearchResult[]): void {
+  const top = results[0];
+  const topFeatures = top ? ambiguityFeatures.get(top) : undefined;
+  if (!top || !topFeatures) return;
+  let alternatives = 0;
+  let sharedRole = false;
+  for (const candidate of results.slice(1)) {
+    const features = ambiguityFeatures.get(candidate);
+    const inCluster =
+      features !== undefined &&
+      features.rankClass === topFeatures.rankClass &&
+      features.exactSymbolHits >= topFeatures.exactSymbolHits &&
+      features.distinctTermCoverage >= topFeatures.distinctTermCoverage &&
+      topFeatures.score - features.score <= topFeatures.score * AMBIGUITY_SCORE_BAND;
+    if (!inCluster) break;
+    alternatives += 1;
+    sharedRole ||= topFeatures.structuralRoles !== '' && features.structuralRoles === topFeatures.structuralRoles;
+    if (alternatives === MAX_AMBIGUITY_ALTERNATIVES) break;
+  }
+  if (alternatives === 0) {
+    top.searchConfidence = 'clear';
+    return;
+  }
+  const queryTermCount = new Set(terms(query)).size;
+  top.searchConfidence = 'ambiguous';
+  top.ambiguityReason = sharedRole
+    ? 'shared_role'
+    : queryTermCount < 2 || topFeatures.distinctTermCoverage < queryTermCount
+      ? 'insufficient_intent'
+      : 'near_tie';
+  top.ambiguityAlternatives = alternatives;
 }
 
 interface ScoringDocument {
@@ -818,6 +903,8 @@ function searchSources(query: string, options: KnowledgeSearchOptions): Knowledg
     const result = scoreSourceDocument(query, document, termWeights, mode, options);
     if (result) results.push(result);
   }
+  results.sort(sortResults);
+  annotateTopOneConfidence(query, results);
   return results;
 }
 

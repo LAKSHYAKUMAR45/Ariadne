@@ -1525,3 +1525,224 @@ describe('searchKnowledge with the materialized search index', () => {
     expect(results[0]).toMatchObject({ id: late, title: 'src/late_loader.ts' });
   });
 });
+
+describe('searchKnowledge top-one confidence and ambiguity', () => {
+  let db: Database.Database;
+
+  function span(end: number) {
+    return { startOffset: 0, endOffset: end, startLine: 1, startColumn: 1, endLine: 1, endColumn: end + 1 };
+  }
+
+  interface FixtureOptions {
+    text: string;
+    symbol?: { name: string; kind: 'class' | 'function' };
+    spanBacked?: boolean;
+    database?: Database.Database;
+    projectId?: string;
+  }
+
+  function addSource(path: string, options: FixtureOptions): string {
+    const target = options.database ?? db;
+    const projectId = options.projectId ?? PROJECT_ID;
+    const source = new KnowledgeSourceStore(target).register({
+      projectId,
+      kind: 'file',
+      path,
+      content: `content of ${path}`,
+      format: 'python',
+      mimeType: 'text/x-python',
+    });
+    const versions = new KnowledgeSourceStore(target).listVersions(projectId, source.id);
+    if (options.spanBacked === false) return source.id;
+    new KnowledgeExtractionStore(target).save({
+      projectId,
+      extraction: {
+        analyzerId: 'python-lezer',
+        analyzerVersion: '1',
+        sourceVersionId: versions[versions.length - 1].id,
+        title: path,
+        summary: 'fixture',
+        sections: [{ id: 'section:1', kind: 'code', title: 'section', text: options.text, span: span(options.text.length), confidence: 1 }],
+        symbols: options.symbol
+          ? [{ id: 'symbol:1', kind: options.symbol.kind, name: options.symbol.name, qualifiedName: options.symbol.name, span: span(10), confidence: 1 }]
+          : [],
+        relationships: [],
+        links: [],
+        diagnostics: [],
+      },
+    });
+    return source.id;
+  }
+
+  function search(query: string, database = db, projectId = PROJECT_ID, mode: 'sources' | 'hybrid' = 'sources') {
+    return searchKnowledge(query, { db: database, projectId, mode, limit: 50 });
+  }
+
+  beforeEach(() => {
+    db = createKnowledgeDatabase();
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  it('marks equal-quality candidates with no shared role as a near tie with a stable winner', () => {
+    addSource('src/beta_ledger.py', { text: 'reconcile ledger entries nightly' });
+    addSource('src/alpha_ledger.py', { text: 'reconcile ledger entries nightly' });
+
+    const results = search('reconcile ledger entries');
+
+    expect(results.map((result) => result.title)).toEqual(['src/alpha_ledger.py', 'src/beta_ledger.py']);
+    expect(results[0]).toMatchObject({ searchConfidence: 'ambiguous', ambiguityReason: 'near_tie', ambiguityAlternatives: 1 });
+  });
+
+  it('marks near-equal candidates that share a structural role as shared_role', () => {
+    addSource('src/usecases/alpha_deploy.py', { text: 'deployment readiness checks' });
+    addSource('src/usecases/beta_deploy.py', { text: 'deployment readiness checks' });
+
+    const results = search('use case deployment readiness');
+
+    expect(results[0]).toMatchObject({
+      title: 'src/usecases/alpha_deploy.py',
+      searchConfidence: 'ambiguous',
+      ambiguityReason: 'shared_role',
+      ambiguityAlternatives: 1,
+    });
+  });
+
+  it('reports insufficient_intent when a single-term query cannot separate close candidates', () => {
+    addSource('src/one.py', { text: 'reconcile the ledger' });
+    addSource('src/two.py', { text: 'reconcile the ledger' });
+
+    const results = search('reconcile');
+
+    expect(results[0]).toMatchObject({ searchConfidence: 'ambiguous', ambiguityReason: 'insufficient_intent', ambiguityAlternatives: 1 });
+  });
+
+  it('reports insufficient_intent when the top result covers only part of the query', () => {
+    addSource('src/one.py', { text: 'reconcile ledger' });
+    addSource('src/two.py', { text: 'reconcile ledger' });
+
+    const results = search('reconcile ledger settlement');
+
+    expect(results[0]).toMatchObject({ searchConfidence: 'ambiguous', ambiguityReason: 'insufficient_intent' });
+  });
+
+  it('keeps winner, reason, and alternatives stable across insertion order and repeated runs', () => {
+    const paths = ['src/c_ledger.py', 'src/a_ledger.py', 'src/b_ledger.py'];
+    const other = createKnowledgeDatabase();
+    try {
+      for (const path of paths) addSource(path, { text: 'reconcile ledger entries' });
+      for (const path of [...paths].reverse()) addSource(path, { text: 'reconcile ledger entries', database: other });
+
+      const first = search('reconcile ledger entries');
+      const reversed = search('reconcile ledger entries', other);
+
+      expect(first[0]).toMatchObject({ title: 'src/a_ledger.py', ambiguityReason: 'near_tie', ambiguityAlternatives: 2 });
+      expect(reversed.map((result) => [result.title, result.searchConfidence, result.ambiguityReason, result.ambiguityAlternatives])).toEqual(
+        first.map((result) => [result.title, result.searchConfidence, result.ambiguityReason, result.ambiguityAlternatives]),
+      );
+      expect(search('reconcile ledger entries')).toEqual(first);
+    } finally {
+      other.close();
+    }
+  });
+
+  it('bounds the reported alternative count and only annotates the first source result', () => {
+    for (let i = 0; i < 25; i += 1) addSource(`src/tie_${String(i).padStart(2, '0')}.py`, { text: 'reconcile ledger entries' });
+
+    const results = search('reconcile ledger entries');
+
+    expect(results).toHaveLength(25);
+    expect(results[0].searchConfidence).toBe('ambiguous');
+    expect(results[0].ambiguityAlternatives).toBe(10);
+    for (const result of results.slice(1)) {
+      expect(result).not.toHaveProperty('searchConfidence');
+      expect(result).not.toHaveProperty('ambiguityReason');
+      expect(result).not.toHaveProperty('ambiguityAlternatives');
+    }
+  });
+
+  it('reports clear without ambiguity keys for a single result or a clearly stronger top result', () => {
+    addSource('src/only.py', { text: 'reconcile ledger entries' });
+    const single = search('reconcile ledger entries');
+    expect(single[0].searchConfidence).toBe('clear');
+    expect(single[0]).not.toHaveProperty('ambiguityReason');
+    expect(single[0]).not.toHaveProperty('ambiguityAlternatives');
+
+    addSource('src/weak.py', { text: 'ledger' });
+    const results = search('reconcile ledger entries');
+    expect(results.map((result) => result.title)).toEqual(['src/only.py', 'src/weak.py']);
+    expect(results[0]).toMatchObject({ searchConfidence: 'clear' });
+    expect(results[0]).not.toHaveProperty('ambiguityReason');
+  });
+
+  it('does not flag ambiguity when an exact symbol match separates otherwise close candidates', () => {
+    addSource('src/other_loader.py', { text: 'loader for defaults' });
+    addSource('src/loader.py', { text: 'loader for defaults', symbol: { name: 'Loader', kind: 'class' } });
+
+    const results = search('loader defaults');
+
+    expect(results[0]).toMatchObject({ title: 'src/loader.py', searchConfidence: 'clear' });
+  });
+
+  it('does not let a metadata-only tie or structural-only path make a span-backed winner ambiguous', () => {
+    addSource('src/reconcile_ledger_entries.py', { text: 'unused', spanBacked: false });
+    addSource('src/span_backed.py', { text: 'reconcile ledger entries' });
+
+    const results = search('reconcile ledger entries');
+
+    expect(results[0]).toMatchObject({ title: 'src/span_backed.py', searchConfidence: 'clear' });
+  });
+
+  it('does not report ambiguity when no source matches and never surfaces a synthetic result', () => {
+    addSource('src/one.py', { text: 'reconcile ledger entries' });
+
+    expect(search('zzzz nothing')).toEqual([]);
+  });
+
+  it('computes confidence from the project-scoped candidates only', () => {
+    addSource('src/one.py', { text: 'reconcile ledger entries' });
+    db.prepare(
+      `INSERT INTO knowledge_projects (id, workspace_root, name, status, created_at, updated_at)
+       VALUES ('project_2', '/other', 'Other', 'active', ?, ?)`,
+    ).run(CREATED_AT, CREATED_AT);
+    addSource('src/one.py', { text: 'reconcile ledger entries', projectId: 'project_2' });
+
+    expect(search('reconcile ledger entries')[0].searchConfidence).toBe('clear');
+  });
+
+  it('attaches identical metadata through the materialized index and the legacy scan', () => {
+    addSource('src/beta_ledger.py', { text: 'reconcile ledger entries' });
+    addSource('src/alpha_ledger.py', { text: 'reconcile ledger entries' });
+    addSource('src/other.py', { text: 'unrelated words' });
+    const legacy = search('reconcile ledger entries');
+
+    new KnowledgeSearchIndex(db).rebuildProject(PROJECT_ID);
+    const indexed = search('reconcile ledger entries');
+
+    expect(indexed).toEqual(legacy);
+    expect(indexed[0]).toMatchObject({ searchConfidence: 'ambiguous', ambiguityReason: 'near_tie' });
+  });
+
+  it('annotates the first source result in hybrid mode without touching page or task results', () => {
+    addSource('src/beta_ledger.py', { text: 'reconcile ledger entries' });
+    addSource('src/alpha_ledger.py', { text: 'reconcile ledger entries' });
+
+    const results = search('reconcile ledger entries', db, PROJECT_ID, 'hybrid');
+
+    expect(results.filter((result) => result.searchConfidence !== undefined)).toHaveLength(1);
+    expect(results[0]).toMatchObject({ kind: 'source', searchConfidence: 'ambiguous' });
+  });
+
+  it('exposes only enumerated values and counts, never source text', () => {
+    addSource('src/one.py', { text: 'password = "hunter2-secret-value" reconcile ledger' });
+    addSource('src/two.py', { text: 'password = "hunter2-secret-value" reconcile ledger' });
+
+    const [top] = search('reconcile ledger');
+    const confidenceKeys = Object.keys(top).filter((key) => key === 'searchConfidence' || key.startsWith('ambiguity'));
+
+    expect(confidenceKeys.sort()).toEqual(['ambiguityAlternatives', 'ambiguityReason', 'searchConfidence']);
+    expect(JSON.stringify([top.searchConfidence, top.ambiguityReason, top.ambiguityAlternatives])).not.toContain('hunter2');
+  });
+});
