@@ -10,6 +10,7 @@ import { KnowledgePageStore } from '../../src/knowledge/KnowledgePageStore.js';
 import { KnowledgeSourceStore } from '../../src/knowledge/KnowledgeSourceStore.js';
 import {
   buildKnowledgeSearchContext,
+  lexicalScore,
   searchKnowledge,
   type KnowledgeSearchGraphExpansion,
 } from '../../src/knowledge/KnowledgeSearch.js';
@@ -231,6 +232,18 @@ describe('searchKnowledge', () => {
     expect(results[0].title).toBe('Refresh token refresh token');
     const ids = results.map((result) => result.id);
     expect(new Set(ids).size).toBe(ids.length);
+  });
+
+  it('matches inflected query terms against identifier-style source text without stopword inflation', () => {
+    const relevant = lexicalScore('What is deleting configlets?', [
+      { text: 'delete_configlet cleanup', weight: 8 },
+    ]);
+    const noisy = lexicalScore('What is deleting configlets?', [
+      { text: 'what is the behavior when a test run is complete', weight: 8 },
+    ]);
+
+    expect(relevant).toBeGreaterThan(noisy);
+    expect(lexicalScore('design', [{ text: 'descriptive metadata', weight: 1 }])).toBe(0);
   });
 
   it('ignores stale pages, handles empty and Unicode queries, and tolerates missing source rows', () => {
@@ -853,14 +866,14 @@ describe('searchKnowledge', () => {
           id: 'section:oversized',
           kind: 'paragraph',
           title: 'oversized knowledge',
-          text: 'x'.repeat(400_000),
+          text: 'x'.repeat(1_500_000),
           span: {
             startOffset: 0,
-            endOffset: 400000,
+            endOffset: 1_500_000,
             startLine: 1,
             startColumn: 1,
             endLine: 1,
-            endColumn: 400001,
+            endColumn: 1_500_001,
           },
           confidence: 1,
         },

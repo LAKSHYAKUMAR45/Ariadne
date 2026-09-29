@@ -149,7 +149,7 @@ const SOURCE_SNIPPET_LIMIT = 180;
 const MAX_QUERY_LENGTH = 256;
 const MAX_QUERY_BYTES = 256;
 const MAX_QUERY_TERMS = 16;
-const MAX_EXTRACTION_JSON_BYTES = 262_144;
+const MAX_EXTRACTION_JSON_BYTES = 1_048_576;
 const MAX_EXTRACTION_SECTIONS = 200;
 const MAX_EXTRACTION_SYMBOLS = 200;
 const MAX_SEARCH_FIELDS = 800;
@@ -158,6 +158,22 @@ const MAX_RESULT_CANDIDATES = 500;
 const EXTRACTION_MATCH_RANK_CLASS = 2;
 const METADATA_MATCH_RANK_CLASS = 1;
 const DEFAULT_MATCH_RANK_CLASS = 0;
+const SEARCH_STOP_WORDS = new Set([
+  'a',
+  'an',
+  'and',
+  'are',
+  'does',
+  'do',
+  'how',
+  'is',
+  'of',
+  'the',
+  'to',
+  'what',
+  'when',
+  'which',
+]);
 
 type RankedKnowledgeSearchResult = KnowledgeSearchResult & { rankClass?: number };
 
@@ -166,7 +182,19 @@ function normalize(value: string): string {
 }
 
 function terms(query: string): string[] {
-  return normalize(query).split(/[^\p{L}\p{N}_-]+/u).filter(Boolean).slice(0, MAX_QUERY_TERMS);
+  return normalize(query)
+    .split(/[^\p{L}\p{N}_-]+/u)
+    .filter((term) => term && !SEARCH_STOP_WORDS.has(term))
+    .slice(0, MAX_QUERY_TERMS);
+}
+
+function termVariants(term: string): string[] {
+  const variants = [term];
+  if (term.length > 4 && term.endsWith('ies') && term.length - 3 >= 4) variants.push(`${term.slice(0, -3)}y`);
+  if (term.length > 4 && term.endsWith('ing') && term.length - 3 >= 4) variants.push(term.slice(0, -3));
+  if (term.length > 4 && term.endsWith('ed') && term.length - 2 >= 4) variants.push(term.slice(0, -2));
+  if (term.length > 4 && term.endsWith('s') && term.length - 1 >= 4) variants.push(term.slice(0, -1));
+  return [...new Set(variants)];
 }
 
 function countOccurrences(haystack: string, needle: string): number {
@@ -181,6 +209,14 @@ function countOccurrences(haystack: string, needle: string): number {
 }
 
 export function lexicalScore(query: string, weightedFields: Array<{ text: string | null; weight: number }>): number {
+  return lexicalScoreWithTermWeights(query, weightedFields, new Map());
+}
+
+function lexicalScoreWithTermWeights(
+  query: string,
+  weightedFields: Array<{ text: string | null; weight: number }>,
+  termWeights: ReadonlyMap<string, number>,
+): number {
   const phrase = normalize(query);
   const queryTerms = terms(query);
   if (!phrase || queryTerms.length === 0) return 0;
@@ -191,7 +227,10 @@ export function lexicalScore(query: string, weightedFields: Array<{ text: string
     if (!text) continue;
     if (text.includes(phrase)) score += field.weight * 4;
     for (const term of queryTerms) {
-      score += countOccurrences(text, term) * field.weight;
+      const variantScore = Math.max(
+        ...termVariants(term).map((variant) => Math.min(countOccurrences(text, variant), 3)),
+      );
+      score += variantScore * field.weight * (termWeights.get(term) ?? 1);
     }
   }
   return score;
@@ -583,26 +622,61 @@ function searchPages(query: string, options: KnowledgeSearchOptions): KnowledgeS
 function searchSources(query: string, options: KnowledgeSearchOptions): KnowledgeSearchResult[] {
   const mode = options.mode ?? 'sources';
   const extractionCache = new Map<string, ExtractionSearchData | null>();
-  const results: RankedKnowledgeSearchResult[] = [];
-  for (const row of sourceRows(options.db, options.projectId)) {
-    const title = redactLines(row.source_path ?? row.source_url ?? row.content_path ?? row.id);
+  const rows = sourceRows(options.db, options.projectId);
+  const queryTerms = terms(query);
+  const documentFrequency = new Map<string, number>();
+  const searchableDocuments = rows.map((row) => {
     const extractionData =
       extractionCache.get(row.extraction_id ?? row.id) ??
       parseExtractionSearchData(options.db, row);
     extractionCache.set(row.extraction_id ?? row.id, extractionData);
+    const fields = [
+      ...(extractionData?.fields.map((field) => field.text) ?? []),
+      row.source_path,
+      row.source_url,
+      row.content_path,
+      row.source_kind,
+      row.mime_type,
+      row.current_hash,
+    ]
+      .filter((text): text is string => Boolean(text));
+    const presentTerms = new Set(
+      queryTerms.filter((term) =>
+        termVariants(term).some((variant) =>
+          fields.some((field) => normalize(field).includes(variant)),
+        ),
+      ),
+    );
+    return { row, extractionData, presentTerms };
+  });
+  for (const term of queryTerms) {
+    const count = searchableDocuments.filter(({ presentTerms }) => presentTerms.has(term)).length;
+    documentFrequency.set(term, count);
+  }
+  const termWeights = new Map(
+    queryTerms.map((term) => [
+      term,
+      Math.log((searchableDocuments.length + 1) / ((documentFrequency.get(term) ?? 0) + 1)) + 1,
+    ]),
+  );
+  const results: RankedKnowledgeSearchResult[] = [];
+  for (const { row, extractionData } of searchableDocuments) {
+    const title = redactLines(row.source_path ?? row.source_url ?? row.content_path ?? row.id);
     const fieldMatches =
       extractionData?.fields
         .map((field) => ({
           field,
-          score: lexicalScore(query, [{ text: field.text, weight: field.weight }]),
+          score: lexicalScoreWithTermWeights(query, [{ text: field.text, weight: field.weight }], termWeights),
         }))
         .filter((match) => match.score > 0) ?? [];
-    const bestMatch =
-      fieldMatches.sort(
+    const rankedFieldMatches = fieldMatches.sort(
         (left, right) =>
           right.field.rankClass - left.field.rankClass || right.score - left.score || right.field.weight - left.field.weight,
-      )[0] ?? null;
-    const extractionScore = fieldMatches.reduce((sum, match) => sum + match.score, 0);
+      );
+    const bestMatch = rankedFieldMatches[0] ?? null;
+    const extractionScore = rankedFieldMatches
+      .slice(0, 5)
+      .reduce((sum, match) => sum + match.score, 0);
     const metadataScore = lexicalScore(query, [
       { text: row.source_path, weight: 2 },
       { text: row.source_url, weight: 2 },

@@ -269,3 +269,28 @@ all manifest checksums verified.
 - Full CLI runs still print an unrelated pre-existing noisy line
   (`AssertionError: expected 1 to be 2`) during the broader suite, but the
   suites complete green and this task did not change that behavior.
+
+## Task 12 real-search follow-up
+
+The recovered authoritative NAAS question set was scored against the drained
+project after the generic search improvements in
+`packages/core/src/knowledge/KnowledgeSearch.ts`:
+
+- 5/10 expected paths ranked first
+- 6/10 expected paths ranked in the top three
+- 6/10 expected paths returned with exact persisted source spans
+- 10/10 questions had typed graph evidence
+
+The retrieval and citation thresholds in the implementation plan therefore
+remain unmet. The evidence and per-question top-five output are stored outside
+the repository in
+`/home/lkumar/.copilot/session-state/71dc4b71-e9cb-45d1-b1cc-75ad4a4699d3/evidence/task-12/real-search-ranking-v2-summary.json`
+and `real-search-ranking-v2.jsonl`.
+
+The search changes were deliberately generic: the bounded extraction payload
+limit is now 1 MiB, repeated term matches are capped, common question
+stopwords are ignored, simple inflections match identifier-style text, the
+top five extraction fields determine source relevance, and project-local
+inverse-document-frequency weighting reduces long-file/common-term dominance.
+No question-specific terms, source-path exceptions, or fabricated citations
+were added.
