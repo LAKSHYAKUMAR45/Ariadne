@@ -95,6 +95,11 @@ Evidence output is limited to paths, scores, citation-presence flags, and
 stable identifiers. It must not include source contents, secrets, or provider
 responses.
 
+The local regression wrapper may persist only the evaluation counts plus safe
+fixture question IDs. It deliberately drops this evaluator's prompts, expected
+paths, returned paths, and per-question evidence before writing its host-local
+summary; it does not change this evaluator's return shape or acceptance gates.
+
 ## Validation
 
 Implementation will follow RED → GREEN → IMPROVE:

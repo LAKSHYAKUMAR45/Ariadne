@@ -190,6 +190,22 @@ export {
   setKnowledgeSearchIndexChangedHook,
 } from './knowledge/KnowledgeSearchIndex.js';
 export {
+  KnowledgeSearchAnalyticsService,
+} from './knowledge/KnowledgeSearchAnalytics.js';
+export type {
+  DetectRankingRegressionInput,
+  DetectRankingRegressionResult,
+  KnowledgeFeedbackKind,
+  KnowledgeSearchAnalyticsOptions,
+  KnowledgeSearchRegressionRunKind,
+  PrunedAnalyticsRows,
+  RankingRegressionWarning,
+  RankingRegressionWarningCode,
+  RecordAnalyticsResult,
+  RecordSearchExposureInput,
+  RecordSearchFeedbackInput,
+} from './knowledge/KnowledgeSearchAnalytics.js';
+export {
   KNOWLEDGE_SEMANTIC_MODEL_VERSION,
   KnowledgeLocalSemanticIndex,
   MAX_EXPANSION_CANDIDATES,
@@ -428,6 +444,7 @@ export {
   KNOWLEDGE_WORKER_CONCURRENCY_MAX,
   KNOWLEDGE_WORKER_CONCURRENCY_MIN,
   KnowledgeHostSettingsStore,
+  KnowledgeAnalyticsSettingsStore,
   KnowledgeSearchSettingsStore,
   KnowledgeWorkerSettingsStore,
   resolveKnowledgeSemanticRetrieval,
@@ -435,6 +452,7 @@ export {
   validateKnowledgeWorkerConcurrency,
 } from './knowledge/KnowledgeHostSettingsStore.js';
 export type {
+  KnowledgeAnalyticsSettingsStoreOptions,
   KnowledgeHostSettingKey,
   KnowledgeSearchSettingsStoreLike,
   KnowledgeSemanticRetrievalOption,

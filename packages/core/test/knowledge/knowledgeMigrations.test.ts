@@ -11,6 +11,7 @@ import {
   applyKnowledgeFreshnessMigration,
   applyKnowledgeSemanticMigration,
   applyKnowledgeSemanticSummaryMigration,
+  applyKnowledgeSearchAnalyticsMigration,
   applyKnowledgeSearchIndexMigration,
   applyKnowledgeReviewDeduplicationMigration,
   KNOWLEDGE_SCHEMA_VERSION,
@@ -50,6 +51,9 @@ const KNOWLEDGE_TABLES = [
   'knowledge_messages',
   'knowledge_outputs',
   'knowledge_operation_log',
+  'knowledge_search_feedback',
+  'knowledge_query_analytics_daily',
+  'knowledge_search_regression_runs',
 ] as const;
 
 const REQUIRED_INDEXES = [
@@ -101,7 +105,7 @@ describe('knowledge schema migrations', () => {
 
     expect(tableNames(db)).toEqual(expect.arrayContaining(KNOWLEDGE_TABLES));
     expect(indexNames(db)).toEqual(expect.arrayContaining(REQUIRED_INDEXES));
-    expect(KNOWLEDGE_SCHEMA_VERSION).toBe(13);
+    expect(KNOWLEDGE_SCHEMA_VERSION).toBe(14);
     expect(columns(db, 'knowledge_jobs')).toContain('result_schema_version');
     expect(columns(db, 'knowledge_extractions')).toEqual(
       expect.arrayContaining([
@@ -745,7 +749,7 @@ describe('knowledge job result schema migration (global version 12, knowledge re
   it('registers version 12 after the search index migration', () => {
     const migration = MIGRATIONS.find((entry) => entry.version === 12);
     expect(migration?.description).toMatch(/result schema version/i);
-    expect(MIGRATIONS.map((entry) => entry.version).filter((version) => version >= 11)).toEqual([11, 12, 13, 14, 15, 16, 17]);
+    expect(MIGRATIONS.map((entry) => entry.version).filter((version) => version >= 11)).toEqual([11, 12, 13, 14, 15, 16, 17, 18]);
   });
 
   it('adds a nullable integer column on a fresh database without touching other jobs columns', () => {
@@ -791,7 +795,7 @@ describe('knowledge job result schema migration (global version 12, knowledge re
       result_schema_version: null,
     });
     expect(upgraded.prepare(`SELECT sql FROM sqlite_master WHERE name = 'idx_knowledge_jobs_project_completed_mode'`).get()).toEqual(before);
-    expect(Number((upgraded.prepare(`SELECT value FROM schema_meta WHERE key = 'schema_version'`).get() as { value: string }).value)).toBe(17);
+    expect(Number((upgraded.prepare(`SELECT value FROM schema_meta WHERE key = 'schema_version'`).get() as { value: string }).value)).toBe(18);
     upgraded.close();
 
     const reopened = openDatabase(databasePath);
@@ -832,7 +836,7 @@ describe('knowledge analysis coverage migration (global version 13, knowledge re
   it('registers version 13 after the job result migration', () => {
     const migration = MIGRATIONS.find((entry) => entry.version === 13);
     expect(migration?.description).toMatch(/analysis coverage/i);
-    expect(MIGRATIONS.map((entry) => entry.version).filter((version) => version >= 11)).toEqual([11, 12, 13, 14, 15, 16, 17]);
+    expect(MIGRATIONS.map((entry) => entry.version).filter((version) => version >= 11)).toEqual([11, 12, 13, 14, 15, 16, 17, 18]);
   });
 
   it('creates both tables with the specified columns and constraints on a fresh database', () => {
@@ -904,7 +908,7 @@ describe('knowledge analysis coverage migration (global version 13, knowledge re
     );
     expect(upgraded.prepare('SELECT COUNT(*) AS count FROM knowledge_analysis_coverage').get()).toEqual({ count: 0 });
     expect(upgraded.prepare(`SELECT COUNT(*) AS count FROM knowledge_source_versions`).get()).toEqual({ count: 1 });
-    expect(Number((upgraded.prepare(`SELECT value FROM schema_meta WHERE key = 'schema_version'`).get() as { value: string }).value)).toBe(17);
+    expect(Number((upgraded.prepare(`SELECT value FROM schema_meta WHERE key = 'schema_version'`).get() as { value: string }).value)).toBe(18);
     upgraded.close();
 
     const reopened = openDatabase(databasePath);
@@ -930,7 +934,7 @@ describe('knowledge graph report migration (global version 14, knowledge revisio
   it('registers version 14 after the analysis coverage migration', () => {
     const migration = MIGRATIONS.find((entry) => entry.version === 14);
     expect(migration?.description).toMatch(/graph (completeness|report)/i);
-    expect(MIGRATIONS.map((entry) => entry.version).filter((version) => version >= 13)).toEqual([13, 14, 15, 16, 17]);
+    expect(MIGRATIONS.map((entry) => entry.version).filter((version) => version >= 13)).toEqual([13, 14, 15, 16, 17, 18]);
   });
 
   it('creates both tables with the specified columns and constraints on a fresh database', () => {
@@ -989,7 +993,7 @@ describe('knowledge graph report migration (global version 14, knowledge revisio
     expect(tableNames(upgraded)).toEqual(expect.arrayContaining(['knowledge_graph_reports', 'knowledge_graph_ambiguities']));
     expect(upgraded.prepare('SELECT COUNT(*) AS count FROM knowledge_graph_reports').get()).toEqual({ count: 0 });
     expect(upgraded.prepare('SELECT COUNT(*) AS count FROM knowledge_graph_snapshots').get()).toEqual({ count: 1 });
-    expect(Number((upgraded.prepare(`SELECT value FROM schema_meta WHERE key = 'schema_version'`).get() as { value: string }).value)).toBe(17);
+    expect(Number((upgraded.prepare(`SELECT value FROM schema_meta WHERE key = 'schema_version'`).get() as { value: string }).value)).toBe(18);
     upgraded.close();
 
     const reopened = openDatabase(databasePath);
@@ -1020,8 +1024,8 @@ describe('knowledge freshness migration (global version 15, knowledge revision 1
   it('registers version 15 after the graph report migration', () => {
     const migration = MIGRATIONS.find((entry) => entry.version === 15);
     expect(migration?.description).toMatch(/freshness/i);
-    expect(MIGRATIONS.map((entry) => entry.version).filter((version) => version >= 14)).toEqual([14, 15, 16, 17]);
-    expect(KNOWLEDGE_SCHEMA_VERSION).toBe(13);
+    expect(MIGRATIONS.map((entry) => entry.version).filter((version) => version >= 14)).toEqual([14, 15, 16, 17, 18]);
+    expect(KNOWLEDGE_SCHEMA_VERSION).toBe(14);
   });
 
   it('creates both host-local tables with the specified columns and cascades', () => {
@@ -1079,7 +1083,7 @@ describe('knowledge freshness migration (global version 15, knowledge revision 1
       expect.arrayContaining(['knowledge_source_freshness', 'knowledge_project_watchers']),
     );
     expect(upgraded.prepare('SELECT COUNT(*) AS count FROM knowledge_sources').get()).toEqual({ count: 1 });
-    expect(Number((upgraded.prepare(`SELECT value FROM schema_meta WHERE key = 'schema_version'`).get() as { value: string }).value)).toBe(17);
+    expect(Number((upgraded.prepare(`SELECT value FROM schema_meta WHERE key = 'schema_version'`).get() as { value: string }).value)).toBe(18);
     upgraded.close();
 
     const reopened = openDatabase(databasePath);
@@ -1120,8 +1124,8 @@ describe('knowledge local semantic migration (global version 16, knowledge revis
   it('registers version 16 after the freshness migration and bumps the knowledge revision', () => {
     const migration = MIGRATIONS.find((entry) => entry.version === 16);
     expect(migration?.description).toMatch(/semantic/i);
-    expect(MIGRATIONS.map((entry) => entry.version).filter((version) => version >= 15)).toEqual([15, 16, 17]);
-    expect(KNOWLEDGE_SCHEMA_VERSION).toBe(13);
+    expect(MIGRATIONS.map((entry) => entry.version).filter((version) => version >= 15)).toEqual([15, 16, 17, 18]);
+    expect(KNOWLEDGE_SCHEMA_VERSION).toBe(14);
   });
 
   it('creates the three derived tables with the specified columns, checks, and partial unique indexes', () => {
@@ -1215,7 +1219,7 @@ describe('knowledge local semantic migration (global version 16, knowledge revis
       ]),
     );
     expect(upgraded.prepare('SELECT COUNT(*) AS count FROM knowledge_sources').get()).toEqual({ count: 1 });
-    expect(Number((upgraded.prepare(`SELECT value FROM schema_meta WHERE key = 'schema_version'`).get() as { value: string }).value)).toBe(17);
+    expect(Number((upgraded.prepare(`SELECT value FROM schema_meta WHERE key = 'schema_version'`).get() as { value: string }).value)).toBe(18);
     upgraded.close();
 
     const reopened = openDatabase(databasePath);
@@ -1258,8 +1262,8 @@ describe('knowledge semantic summary migration (global version 17, knowledge rev
   it('registers version 17 after the hybrid migration and bumps the knowledge revision', () => {
     const migration = MIGRATIONS.find((entry) => entry.version === 17);
     expect(migration?.description).toMatch(/summar/i);
-    expect(MIGRATIONS.map((entry) => entry.version).filter((version) => version >= 16)).toEqual([16, 17]);
-    expect(KNOWLEDGE_SCHEMA_VERSION).toBe(13);
+    expect(MIGRATIONS.map((entry) => entry.version).filter((version) => version >= 16)).toEqual([16, 17, 18]);
+    expect(KNOWLEDGE_SCHEMA_VERSION).toBe(14);
   });
 
   it('creates only the summary table with the specified columns, checks, and uniqueness', () => {
@@ -1294,7 +1298,7 @@ describe('knowledge semantic summary migration (global version 17, knowledge rev
     const upgraded = openDatabase(databasePath);
     expect(tableNames(upgraded)).toContain('knowledge_semantic_summaries');
     expect(upgraded.prepare('SELECT COUNT(*) AS count FROM knowledge_projects').get()).toEqual({ count: 1 });
-    expect(Number((upgraded.prepare(`SELECT value FROM schema_meta WHERE key = 'schema_version'`).get() as { value: string }).value)).toBe(17);
+    expect(Number((upgraded.prepare(`SELECT value FROM schema_meta WHERE key = 'schema_version'`).get() as { value: string }).value)).toBe(18);
     upgraded.close();
 
     const reopened = openDatabase(databasePath);
@@ -1302,5 +1306,40 @@ describe('knowledge semantic summary migration (global version 17, knowledge rev
     applyKnowledgeMigrations(reopened);
     expect(tableNames(reopened).filter((name) => name === 'knowledge_semantic_summaries')).toHaveLength(1);
     reopened.close();
+  });
+
+  it('registers global migration 18, creates analytics tables, and reruns idempotently', () => {
+    const migration = MIGRATIONS.find((entry) => entry.version === 18);
+    expect(migration?.description).toMatch(/analytics/i);
+    expect(MIGRATIONS.map((entry) => entry.version).filter((version) => version >= 15)).toEqual([15, 16, 17, 18]);
+    expect(KNOWLEDGE_SCHEMA_VERSION).toBe(14);
+
+    const db = openDatabase(':memory:');
+    expect(columns(db, 'knowledge_search_feedback')).toEqual([
+      'id', 'project_id', 'query_fingerprint', 'search_mode', 'result_kind', 'result_ref', 'feedback_kind',
+      'rank_position', 'ambiguity_state', 'citation_present', 'feedback_count', 'first_day', 'last_day',
+    ]);
+    expect(columns(db, 'knowledge_query_analytics_daily')).toEqual([
+      'id', 'project_id', 'day', 'search_mode', 'total_queries', 'zero_result_queries', 'ambiguous_top_results',
+      'citationless_top_results', 'accepted_result_count', 'rejected_result_count', 'total_result_count',
+      'created_at', 'updated_at',
+    ]);
+    expect(columns(db, 'knowledge_search_regression_runs')).toEqual([
+      'id', 'project_id', 'corpus_version', 'run_kind', 'strategy_label', 'summary_json', 'baseline_run_id',
+      'regressed', 'created_at',
+    ]);
+    expect(columns(db, 'knowledge_search_feedback')).not.toEqual(
+      expect.arrayContaining(['query', 'result_id', 'path', 'snippet', 'citation', 'source_contents']),
+    );
+    applyKnowledgeSearchAnalyticsMigration(db);
+    applyKnowledgeMigrations(db);
+    expect(tableNames(db).filter((name) => name.startsWith('knowledge_search_') || name === 'knowledge_query_analytics_daily')).toEqual(
+      expect.arrayContaining(['knowledge_search_feedback', 'knowledge_query_analytics_daily', 'knowledge_search_regression_runs']),
+    );
+    expect(indexNames(db)).toEqual(
+      expect.arrayContaining(['idx_knowledge_search_feedback_project_day', 'idx_knowledge_query_analytics_daily_project_day']),
+    );
+    expect(Number((db.prepare(`SELECT value FROM schema_meta WHERE key = 'schema_version'`).get() as { value: string }).value)).toBe(18);
+    db.close();
   });
 });

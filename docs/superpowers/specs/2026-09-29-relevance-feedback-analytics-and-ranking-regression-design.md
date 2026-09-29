@@ -216,8 +216,20 @@ Behavior:
 - when enabled, exposure recording updates only daily aggregates;
 - when enabled, explicit feedback writes a fingerprinted feedback row plus
   aggregate counters;
+- `accepted` and `ambiguous_but_useful` increment `accepted_result_count`;
+  `rejected` and `not_relevant` increment `rejected_result_count`;
 - regression detection compares current metrics to a baseline run and records a
   warning/report row when thresholds are crossed.
+- `searchKnowledge` records one exposure after ranking only when the
+  per-project opt-in is enabled. Feedback remains an explicit core API; this
+  slice does not add a feedback UI or change ranking.
+- `KnowledgeAnalyticsSettingsStore.enable` creates a cryptographically random
+  per-project 256-bit salt. `disable` stops writes but retains existing rows
+  and salt; `clear` removes feedback, daily analytics, project regression runs,
+  and both analytics settings.
+- Synthetic fixture runs are always persistable without opt-in. Approved local
+  benchmark and manual diagnostic runs require analytics enabled for their
+  project.
 
 ## Privacy-preserving rules
 
@@ -239,11 +251,17 @@ Regression detection builds on the evaluation spec.
 
 Recommended warning thresholds:
 
-- any drop in exact-span citation hit rate on a gated corpus;
-- more than 1-point drop in top-three hit count on a gated corpus;
-- increase in ambiguous-top-result rate above the recorded baseline by a fixed,
-  documented threshold;
-- increase in zero-result rate on an approved local benchmark set.
+- any decrease in exact-span citation hit rate versus the selected baseline;
+- a decrease of more than one question in top-three path hits;
+- an increase of more than 10 percentage points in ambiguous-top-result rate;
+- an increase of more than 10 percentage points in zero-result rate on an
+  approved local benchmark (not a synthetic fixture or manual diagnostic).
+
+The first run for a corpus/strategy has no comparison warning. Without an
+explicit `baselineRunId`, the service uses the latest prior run with the same
+project, corpus version, strategy label, and run kind. The persisted summary
+contains only the seven evaluation counts and safe failing fixture question
+IDs; evaluator prompts and path evidence are intentionally discarded.
 
 Detected regressions should surface as warnings in explicit evaluator commands
 and optional status surfaces, not as hidden database-only facts.

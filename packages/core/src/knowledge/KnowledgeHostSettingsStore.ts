@@ -1,4 +1,5 @@
 import type Database from 'better-sqlite3';
+import { randomBytes } from 'node:crypto';
 import { createKnowledgeId } from './KnowledgeIds.js';
 import { KNOWLEDGE_HOST_SETTING_PREFIX } from './knowledgeSchema.js';
 
@@ -152,6 +153,57 @@ export class KnowledgeSearchSettingsStore implements KnowledgeSearchSettingsStor
 
   public clearHybridEnabled(projectId: string): boolean {
     return this.settings.delete(projectId, KNOWLEDGE_HOST_SETTING_KEYS.hybridSearchEnabled);
+  }
+}
+
+export interface KnowledgeAnalyticsSettingsStoreOptions {
+  now?: () => string;
+}
+
+export class KnowledgeAnalyticsSettingsStore {
+  private readonly hostSettings: KnowledgeHostSettingsStore;
+
+  public constructor(
+    private readonly db: Database.Database,
+    options: KnowledgeAnalyticsSettingsStoreOptions = {},
+  ) {
+    this.hostSettings = new KnowledgeHostSettingsStore(db, { now: options.now });
+  }
+
+  public isEnabled(projectId: string): boolean {
+    const enabled = this.hostSettings.get(projectId, KNOWLEDGE_HOST_SETTING_KEYS.analyticsEnabled) === 'true';
+    if (enabled && this.getSalt(projectId) === null) {
+      throw new Error('Knowledge analytics is enabled without its required project salt');
+    }
+    return enabled;
+  }
+
+  public getSalt(projectId: string): string | null {
+    return this.hostSettings.get(projectId, KNOWLEDGE_HOST_SETTING_KEYS.analyticsSalt);
+  }
+
+  public enable(projectId: string): void {
+    this.db.transaction(() => {
+      if (this.getSalt(projectId) === null) {
+        this.hostSettings.set(projectId, KNOWLEDGE_HOST_SETTING_KEYS.analyticsSalt, randomBytes(32).toString('hex'));
+      }
+      this.hostSettings.set(projectId, KNOWLEDGE_HOST_SETTING_KEYS.analyticsEnabled, 'true');
+    })();
+  }
+
+  public disable(projectId: string): void {
+    this.hostSettings.set(projectId, KNOWLEDGE_HOST_SETTING_KEYS.analyticsEnabled, 'false');
+  }
+
+  public clear(projectId: string): void {
+    const scopedProjectId = requireProjectId(projectId);
+    this.db.transaction(() => {
+      this.db.prepare('DELETE FROM knowledge_search_feedback WHERE project_id = ?').run(scopedProjectId);
+      this.db.prepare('DELETE FROM knowledge_query_analytics_daily WHERE project_id = ?').run(scopedProjectId);
+      this.db.prepare('DELETE FROM knowledge_search_regression_runs WHERE project_id = ?').run(scopedProjectId);
+      this.hostSettings.delete(scopedProjectId, KNOWLEDGE_HOST_SETTING_KEYS.analyticsEnabled);
+      this.hostSettings.delete(scopedProjectId, KNOWLEDGE_HOST_SETTING_KEYS.analyticsSalt);
+    })();
   }
 }
 

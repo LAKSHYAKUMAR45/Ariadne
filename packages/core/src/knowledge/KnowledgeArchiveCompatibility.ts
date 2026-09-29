@@ -206,6 +206,17 @@ export const KNOWLEDGE_ARCHIVE_PRESERVED_TABLE_COLUMNS: Readonly<Record<string, 
     'created_at',
     'updated_at',
   ]),
+  knowledge_search_regression_runs: Object.freeze([
+    'id',
+    'project_id',
+    'corpus_version',
+    'run_kind',
+    'strategy_label',
+    'summary_json',
+    'baseline_run_id',
+    'regressed',
+    'created_at',
+  ]),
 });
 
 export function preservedTableColumns(table: string): readonly string[] {

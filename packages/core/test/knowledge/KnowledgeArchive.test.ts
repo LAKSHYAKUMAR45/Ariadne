@@ -1191,8 +1191,27 @@ See [[graph|the graph]].
     it('exports a version 2 manifest with classification-driven omissions and table fingerprints', () => {
       const db = database();
       const { projectId } = seed(db);
+      db.prepare(
+        `INSERT INTO knowledge_search_feedback
+         (id, project_id, query_fingerprint, search_mode, result_kind, result_ref, feedback_kind, rank_position,
+          ambiguity_state, citation_present, feedback_count, first_day, last_day)
+         VALUES ('privacy_feedback', ?, 'opaque-query-fingerprint', 'sources', 'source', 'opaque-result-reference',
+          'accepted', 1, 'clear', 1, 1, '2026-01-01', '2026-01-01')`,
+      ).run(projectId);
+      db.prepare(
+        `INSERT INTO knowledge_query_analytics_daily
+         (id, project_id, day, search_mode, total_queries, zero_result_queries, ambiguous_top_results,
+          citationless_top_results, accepted_result_count, rejected_result_count, total_result_count, created_at, updated_at)
+         VALUES ('privacy_analytics', ?, '2026-01-01', 'sources', 1, 0, 0, 0, 1, 0, 1, '2026-01-01', '2026-01-01')`,
+      ).run(projectId);
+      db.prepare(
+        `INSERT INTO knowledge_search_regression_runs
+         (id, project_id, corpus_version, run_kind, strategy_label, summary_json, baseline_run_id, regressed, created_at)
+         VALUES ('host_regression', ?, 'fixture-v1', 'synthetic_fixture', 'lexical-v1', '{}', NULL, 0, '2026-01-01')`,
+      ).run(projectId);
       const archive = exportV2(db, projectId);
       const compatibility = compatibilityOf(archive);
+      const archiveText = Object.values(archive.files).map(String).join('\n');
 
       expect(archive.manifest.archiveVersion).toBe(2);
       expect(compatibility.minimumReaderArchiveVersion).toBe(2);
@@ -1205,11 +1224,19 @@ See [[graph|the graph]].
           { table: 'knowledge_search_semantic_vectors', reason: 'derived_rebuild' },
           { table: 'knowledge_source_freshness', reason: 'host_local_only' },
           { table: 'knowledge_project_watchers', reason: 'host_local_only' },
+          { table: 'knowledge_search_regression_runs', reason: 'host_local_only' },
+          { table: 'knowledge_search_feedback', reason: 'privacy_omitted' },
           { table: 'knowledge_query_analytics_daily', reason: 'privacy_omitted' },
           { table: 'knowledge_provider_profiles', reason: 'secret_omitted' },
           { table: 'knowledge_settings', reason: 'host_local_only', rowFilter: { column: 'setting_key', prefix: 'host.' } },
         ]),
       );
+      expect(archive.files['data/knowledge_search_feedback.json']).toBeUndefined();
+      expect(archive.files['data/knowledge_query_analytics_daily.json']).toBeUndefined();
+      expect(archive.files['data/knowledge_search_regression_runs.json']).toBeUndefined();
+      expect(archiveText).not.toContain('opaque-query-fingerprint');
+      expect(archiveText).not.toContain('opaque-result-reference');
+      expect(archiveText).not.toContain('host_regression');
       expect(archive.files['data/knowledge_provider_profiles.json']).toBeUndefined();
       expect(compatibility.tableFingerprints.map((fingerprint) => fingerprint.table)).toEqual([...KNOWLEDGE_ARCHIVE_TABLES]);
       for (const fingerprint of compatibility.tableFingerprints) {
@@ -1232,6 +1259,9 @@ See [[graph|the graph]].
         );
         expect(result.authenticity).toEqual({ state: 'absent' });
         expect(target.prepare('SELECT name FROM knowledge_projects WHERE id = ?').get(projectId)).toEqual({ name: 'Archive Wiki' });
+        expect(target.prepare('SELECT COUNT(*) AS count FROM knowledge_search_feedback').get()).toEqual({ count: 0 });
+        expect(target.prepare('SELECT COUNT(*) AS count FROM knowledge_query_analytics_daily').get()).toEqual({ count: 0 });
+        expect(target.prepare('SELECT COUNT(*) AS count FROM knowledge_search_regression_runs').get()).toEqual({ count: 0 });
       }
     });
 
@@ -1288,7 +1318,9 @@ See [[graph|the graph]].
 
     it.each([
       ['knowledge_source_freshness', /host-local/i],
+      ['knowledge_search_regression_runs', /host-local/i],
       ['knowledge_search_indexes', /derived/i],
+      ['knowledge_search_feedback', /privacy/i],
       ['knowledge_query_analytics_daily', /privacy/i],
       ['knowledge_unclassified_table', /no archive classification/i],
     ])('rejects archives that contain a data file for %s', (table, pattern) => {
@@ -1302,7 +1334,12 @@ See [[graph|the graph]].
 
     it('keeps an explicit column allowlist for every preserved table', () => {
       const preserved = Object.entries(KNOWLEDGE_ARCHIVE_TABLE_REGISTRY)
-        .filter(([table, registration]) => registration.class === 'privacy-omitted' || table === 'knowledge_settings')
+        .filter(
+          ([table, registration]) =>
+            registration.class === 'privacy-omitted' ||
+            table === 'knowledge_settings' ||
+            table === 'knowledge_search_regression_runs',
+        )
         .map(([table]) => table)
         .sort();
       expect(Object.keys(KNOWLEDGE_ARCHIVE_PRESERVED_TABLE_COLUMNS).sort()).toEqual(preserved);
@@ -2022,43 +2059,6 @@ See [[graph|the graph]].
         ).run(id, projectId, sourceId);
       }
 
-      function createHostTables(db: ReturnType<typeof openDatabase>) {
-        db.exec(
-          `CREATE TABLE knowledge_query_analytics_daily (
-             id TEXT PRIMARY KEY,
-             project_id TEXT NOT NULL REFERENCES knowledge_projects(id) ON DELETE CASCADE,
-             day TEXT NOT NULL,
-             search_mode TEXT NOT NULL,
-             total_queries INTEGER NOT NULL,
-             zero_result_queries INTEGER NOT NULL,
-             ambiguous_top_results INTEGER NOT NULL,
-             citationless_top_results INTEGER NOT NULL,
-             accepted_result_count INTEGER NOT NULL,
-             rejected_result_count INTEGER NOT NULL,
-             total_result_count INTEGER NOT NULL,
-             created_at TEXT NOT NULL,
-             updated_at TEXT NOT NULL
-           )`,
-        );
-        db.exec(
-          `CREATE TABLE knowledge_search_feedback (
-             id TEXT PRIMARY KEY,
-             project_id TEXT NOT NULL REFERENCES knowledge_projects(id) ON DELETE CASCADE,
-             query_fingerprint TEXT NOT NULL,
-             search_mode TEXT NOT NULL,
-             result_kind TEXT NOT NULL,
-             result_ref TEXT NOT NULL,
-             feedback_kind TEXT NOT NULL,
-             rank_position INTEGER NOT NULL,
-             ambiguity_state TEXT,
-             citation_present INTEGER NOT NULL,
-             feedback_count INTEGER NOT NULL DEFAULT 1,
-             first_day TEXT NOT NULL,
-             last_day TEXT NOT NULL
-           )`,
-        );
-      }
-
       it('preserves host.* settings, replaces portable settings, and clears derived and freshness rows', () => {
         const source = database();
         const { projectId } = seed(source);
@@ -2071,7 +2071,6 @@ See [[graph|the graph]].
         insertSetting(target, projectId, 'host.worker.concurrency', '3');
         insertSetting(target, projectId, 'portable.theme', 'stale-local');
         insertSetting(target, projectId, 'portable.local_only', 'stale-local');
-        createHostTables(target);
         insertDerivedIndexRow(target, projectId);
         insertFreshnessRow(target, 'fresh_1', projectId, 'old_source');
         new KnowledgeProjectStore(target).create({ id: 'project_unrelated' as never, workspaceRoot: `${imported.workspaceRoot}-unrelated`, name: 'Unrelated' });
@@ -2085,10 +2084,17 @@ See [[graph|the graph]].
         insertFreshnessRow(target, 'fresh_other', 'project_unrelated', 'other_source');
         target
           .prepare('INSERT INTO knowledge_query_analytics_daily VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
-          .run('analytics_1', projectId, '2026-01-01', 'lexical', 5, 1, 0, 2, 3, 1, 9, '2026-01-01', '2026-01-02');
+          .run('analytics_1', projectId, '2026-01-01', 'sources', 5, 1, 0, 2, 3, 1, 9, '2026-01-01', '2026-01-02');
         target
           .prepare('INSERT INTO knowledge_search_feedback VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
-          .run('feedback_1', projectId, 'fp_1', 'lexical', 'page', 'ref_1', 'accepted', 2, null, 1, 4, '2026-01-01', '2026-01-02');
+          .run('feedback_1', projectId, 'fp_1', 'sources', 'page', 'ref_1', 'accepted', 2, null, 1, 4, '2026-01-01', '2026-01-02');
+        target
+          .prepare(
+            `INSERT INTO knowledge_search_regression_runs
+             (id, project_id, corpus_version, run_kind, strategy_label, summary_json, baseline_run_id, regressed, created_at)
+             VALUES ('regression_1', ?, 'fixture-v1', 'synthetic_fixture', 'lexical-v1', '{}', NULL, 0, '2026-01-01')`,
+          )
+          .run(projectId);
 
         importKnowledgeProject(target, archive, imported);
 
@@ -2109,6 +2115,7 @@ See [[graph|the graph]].
         expect(target.prepare('SELECT id, result_ref, feedback_count, ambiguity_state FROM knowledge_search_feedback').all()).toEqual([
           { id: 'feedback_1', result_ref: 'ref_1', feedback_count: 4, ambiguity_state: null },
         ]);
+        expect(target.prepare('SELECT id FROM knowledge_search_regression_runs').all()).toEqual([{ id: 'regression_1' }]);
       });
 
       it('omits local semantic rows from exports, clears them on replace, keeps the host hybrid setting, and reports a rebuild', () => {
@@ -2225,7 +2232,6 @@ See [[graph|the graph]].
         const imported = importOptions({ replaceExisting: true });
         new KnowledgeProjectStore(target).create({ id: projectId as never, workspaceRoot: imported.workspaceRoot, name: 'Old target' });
         insertSetting(target, projectId, 'host.worker.concurrency', '3');
-        createHostTables(target);
         insertDerivedIndexRow(target, projectId);
 
         expect(() => importKnowledgeProject(target, tampered, imported)).toThrow(/required feature/i);

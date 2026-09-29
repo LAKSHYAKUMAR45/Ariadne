@@ -1947,6 +1947,7 @@ function existingRegisteredTables(db: Database.Database, ...classes: Parameters<
 interface PreservedHostState {
   settings: Record<string, unknown>[];
   privateRows: Array<{ table: string; rows: Record<string, unknown>[] }>;
+  regressionRuns: Record<string, unknown>[];
 }
 
 function captureHostState(db: Database.Database, projectId: string): PreservedHostState {
@@ -1960,7 +1961,10 @@ function captureHostState(db: Database.Database, projectId: string): PreservedHo
     .filter((table) => table !== KNOWLEDGE_ARCHIVE_SETTINGS_TABLE)
     .map((table) => ({ table, rows: preservedRowsFor(db, table, projectId) }))
     .filter((entry) => entry.rows.length > 0);
-  return { settings, privateRows };
+  const regressionRuns = registeredTableExists(db, 'knowledge_search_regression_runs')
+    ? preservedRowsFor(db, 'knowledge_search_regression_runs', projectId)
+    : [];
+  return { settings, privateRows, regressionRuns };
 }
 
 function preservedRowsFor(db: Database.Database, table: string, projectId: string): Record<string, unknown>[] {
@@ -1996,6 +2000,9 @@ function restoreHostState(db: Database.Database, preserved: PreservedHostState, 
       insertPreservedRow(db, table, row);
     }
   }
+  for (const row of preserved.regressionRuns) {
+    insertPreservedRow(db, 'knowledge_search_regression_runs', row);
+  }
 }
 
 export function importKnowledgeProject(
@@ -2011,7 +2018,7 @@ export function importKnowledgeProject(
     db.exec('BEGIN IMMEDIATE');
     transactionOpen = true;
     const existing = db.prepare('SELECT id FROM knowledge_projects WHERE id = ?').get(plan.projectId);
-    let preserved: PreservedHostState = { settings: [], privateRows: [] };
+    let preserved: PreservedHostState = { settings: [], privateRows: [], regressionRuns: [] };
     if (existing) {
       preserved = captureHostState(db, plan.projectId);
       clearRebuildableProjectState(db, plan.projectId);

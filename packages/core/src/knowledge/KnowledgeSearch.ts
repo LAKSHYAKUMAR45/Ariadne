@@ -25,6 +25,7 @@ import { orderHybridCandidates, type HybridLexicalEntry } from './KnowledgeHybri
 import { KnowledgeLocalSemanticIndex, MAX_EXPANSION_CANDIDATES } from './KnowledgeLocalSemanticIndex.js';
 import { currentSourceVersionNumberSql } from './KnowledgeSourceVersionSql.js';
 import { deriveCitationContext, type KnowledgeCitationContext, type KnowledgeCitationFieldKind } from './KnowledgeCitationContext.js';
+import { KnowledgeSearchAnalyticsService } from './KnowledgeSearchAnalytics.js';
 import type {
   KnowledgePageId,
   KnowledgePageType,
@@ -93,7 +94,7 @@ export interface KnowledgeSearchResult {
 }
 
 export interface KnowledgeSearchDiagnostic {
-  code: 'search_index_unavailable' | 'semantic_retrieval_unavailable';
+  code: 'search_index_unavailable' | 'semantic_retrieval_unavailable' | 'analytics_write_failed';
   message: string;
 }
 
@@ -1185,9 +1186,31 @@ export function searchKnowledge(query: string, options: KnowledgeSearchOptions):
   const merged = dedupeResults(resultSets.flat());
   // Source modes arrive already ordered (including any semantic reorder), so re-sorting would undo it.
   const sourceOrdered = mode === 'sources' || mode === 'read-sources-only';
-  return (sourceOrdered ? merged : merged.sort(sortResults))
+  const results = (sourceOrdered ? merged : merged.sort(sortResults))
     .slice(0, Math.min(MAX_RESULT_CANDIDATES, options.limit ?? DEFAULT_LIMIT))
     .map((result) => withCitationContext(result, options));
+  try {
+    new KnowledgeSearchAnalyticsService(options.db).recordSearchExposure({
+      projectId: options.projectId,
+      query: normalizedQuery,
+      mode,
+      resultCount: results.length,
+      topResultAmbiguity:
+        results.length === 0 ? 'none' : results[0].searchConfidence === 'ambiguous' ? 'ambiguous' : 'clear',
+      topResultHasCitation: (results[0]?.citations.length ?? 0) > 0,
+    });
+  } catch {
+    const diagnostic: KnowledgeSearchDiagnostic = {
+      code: 'analytics_write_failed',
+      message: 'Knowledge search analytics could not be recorded; search results are unchanged.',
+    };
+    if (options.onDiagnostic) {
+      options.onDiagnostic(diagnostic);
+    } else {
+      process.emitWarning(diagnostic.message, { code: 'ARIADNE_SEARCH_ANALYTICS_WRITE_FAILED' });
+    }
+  }
+  return results;
 }
 
 function withCitationContext(result: KnowledgeSearchResult, options: KnowledgeSearchOptions): KnowledgeSearchResult {

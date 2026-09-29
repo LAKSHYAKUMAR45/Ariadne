@@ -8,6 +8,7 @@ import {
   applyKnowledgeFreshnessMigration,
   applyKnowledgeSemanticMigration,
   applyKnowledgeSemanticSummaryMigration,
+  applyKnowledgeSearchAnalyticsMigration,
   applyKnowledgeGraphReportMigration,
   applyKnowledgeJobResultSchemaMigration,
   applyKnowledgeSearchIndexMigration,
@@ -231,6 +232,11 @@ export const MIGRATIONS: Migration[] = [
     version: 17,
     description: 'Add grounded semantic summary records with reference-only evidence',
     up: (db) => applyKnowledgeSemanticSummaryMigration(db),
+  },
+  {
+    version: 18,
+    description: 'Add privacy-preserving search analytics and ranking regression tables',
+    up: (db) => applyKnowledgeSearchAnalyticsMigration(db),
   },
 ];
 

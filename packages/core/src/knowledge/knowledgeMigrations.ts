@@ -783,6 +783,62 @@ export function applyKnowledgeSemanticSummaryMigration(db: Database.Database): v
   `);
 }
 
+export function applyKnowledgeSearchAnalyticsMigration(db: Database.Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS knowledge_search_feedback (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL REFERENCES knowledge_projects(id) ON DELETE CASCADE,
+      query_fingerprint TEXT NOT NULL,
+      search_mode TEXT NOT NULL CHECK (search_mode IN ('knowledge', 'sources', 'tasks', 'hybrid', 'read-sources-only')),
+      result_kind TEXT NOT NULL CHECK (result_kind IN ('page', 'source', 'task')),
+      result_ref TEXT NOT NULL,
+      feedback_kind TEXT NOT NULL CHECK (feedback_kind IN ('accepted', 'rejected', 'not_relevant', 'ambiguous_but_useful')),
+      rank_position INTEGER NOT NULL CHECK (rank_position BETWEEN 1 AND 100),
+      ambiguity_state TEXT CHECK (ambiguity_state IN ('clear', 'ambiguous', 'none') OR ambiguity_state IS NULL),
+      citation_present INTEGER NOT NULL CHECK (citation_present IN (0, 1)),
+      feedback_count INTEGER NOT NULL DEFAULT 1 CHECK (feedback_count > 0),
+      first_day TEXT NOT NULL,
+      last_day TEXT NOT NULL,
+      UNIQUE (project_id, query_fingerprint, search_mode, result_ref, feedback_kind)
+    );
+    CREATE INDEX IF NOT EXISTS idx_knowledge_search_feedback_project_day
+      ON knowledge_search_feedback(project_id, last_day);
+
+    CREATE TABLE IF NOT EXISTS knowledge_query_analytics_daily (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL REFERENCES knowledge_projects(id) ON DELETE CASCADE,
+      day TEXT NOT NULL,
+      search_mode TEXT NOT NULL CHECK (search_mode IN ('knowledge', 'sources', 'tasks', 'hybrid', 'read-sources-only')),
+      total_queries INTEGER NOT NULL DEFAULT 0 CHECK (total_queries >= 0),
+      zero_result_queries INTEGER NOT NULL DEFAULT 0 CHECK (zero_result_queries >= 0),
+      ambiguous_top_results INTEGER NOT NULL DEFAULT 0 CHECK (ambiguous_top_results >= 0),
+      citationless_top_results INTEGER NOT NULL DEFAULT 0 CHECK (citationless_top_results >= 0),
+      accepted_result_count INTEGER NOT NULL DEFAULT 0 CHECK (accepted_result_count >= 0),
+      rejected_result_count INTEGER NOT NULL DEFAULT 0 CHECK (rejected_result_count >= 0),
+      total_result_count INTEGER NOT NULL DEFAULT 0 CHECK (total_result_count >= 0),
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE (project_id, day, search_mode)
+    );
+    CREATE INDEX IF NOT EXISTS idx_knowledge_query_analytics_daily_project_day
+      ON knowledge_query_analytics_daily(project_id, day);
+
+    CREATE TABLE IF NOT EXISTS knowledge_search_regression_runs (
+      id TEXT PRIMARY KEY,
+      project_id TEXT REFERENCES knowledge_projects(id) ON DELETE CASCADE,
+      corpus_version TEXT NOT NULL,
+      run_kind TEXT NOT NULL CHECK (run_kind IN ('synthetic_fixture', 'approved_local_benchmark', 'manual_diagnostic')),
+      strategy_label TEXT NOT NULL,
+      summary_json TEXT NOT NULL CHECK (json_valid(summary_json)),
+      baseline_run_id TEXT REFERENCES knowledge_search_regression_runs(id) ON DELETE SET NULL DEFERRABLE INITIALLY DEFERRED,
+      regressed INTEGER NOT NULL CHECK (regressed IN (0, 1)),
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_knowledge_search_regression_runs_project_created
+      ON knowledge_search_regression_runs(project_id, created_at);
+  `);
+}
+
 /**
  * Creates the additive knowledge schema atomically. It is idempotent so it
  * can be called safely by the shared migration runner on every database open.
@@ -801,5 +857,6 @@ export function applyKnowledgeMigrations(db: Database.Database): void {
     applyKnowledgeFreshnessMigration(db);
     applyKnowledgeSemanticMigration(db);
     applyKnowledgeSemanticSummaryMigration(db);
+    applyKnowledgeSearchAnalyticsMigration(db);
   })();
 }
