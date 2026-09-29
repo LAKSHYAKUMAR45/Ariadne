@@ -1,5 +1,6 @@
 import type Database from 'better-sqlite3';
 import { createKnowledgeId, normalizeKnowledgePath } from './KnowledgeIds.js';
+import { KnowledgeSearchIndex } from './KnowledgeSearchIndex.js';
 import type { KnowledgeSourceId, KnowledgeSourceKind, KnowledgeSourceRecord } from './KnowledgeTypes.js';
 import { computeSourceVersion, sourceIdentitySeed } from './SourceIdentity.js';
 import type { SourceContent, SourceVersion } from './SourceIdentity.js';
@@ -171,13 +172,16 @@ export class KnowledgeSourceStore {
   }
 
   public markDeleted(projectId: string, sourceId: KnowledgeSourceId): KnowledgeSourceRecord {
-    const result = this.db
-      .prepare(
-        `UPDATE knowledge_sources SET status = 'stale', updated_at = @now
-         WHERE project_id = @projectId AND id = @id`,
-      )
-      .run({ now: now(), projectId, id: sourceId });
-    if (result.changes === 0) throw new Error(`Knowledge source not found: ${sourceId}`);
+    this.db.transaction(() => {
+      const result = this.db
+        .prepare(
+          `UPDATE knowledge_sources SET status = 'stale', updated_at = @now
+           WHERE project_id = @projectId AND id = @id`,
+        )
+        .run({ now: now(), projectId, id: sourceId });
+      if (result.changes === 0) throw new Error(`Knowledge source not found: ${sourceId}`);
+      new KnowledgeSearchIndex(this.db).markSourceStale(projectId, sourceId);
+    })();
     return this.get(projectId, sourceId) as KnowledgeSourceRecord;
   }
 

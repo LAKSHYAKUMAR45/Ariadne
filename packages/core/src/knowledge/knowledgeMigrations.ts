@@ -379,6 +379,66 @@ export function applyKnowledgeReviewDeduplicationMigration(db: Database.Database
 }
 
 /**
+ * Creates the derived search-index tables (global migration 11, knowledge revision 7). The rows are rebuildable
+ * from extractions, so they are never exported in archives.
+ */
+export function applyKnowledgeSearchIndexMigration(db: Database.Database): void {
+  if (!hasTable(db, 'knowledge_search_indexes')) {
+    db.exec(`
+      CREATE TABLE knowledge_search_indexes (
+        id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL,
+        source_version_id TEXT NOT NULL,
+        index_version INTEGER NOT NULL,
+        status TEXT NOT NULL,
+        coverage TEXT NOT NULL,
+        extraction_id TEXT,
+        field_count INTEGER NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        CHECK (status IN ('active', 'stale', 'failed')),
+        CHECK (coverage IN ('extraction', 'metadata_only')),
+        CHECK ((coverage = 'extraction') = (extraction_id IS NOT NULL)),
+        UNIQUE (project_id, id),
+        UNIQUE (project_id, source_version_id),
+        FOREIGN KEY (project_id, source_version_id)
+          REFERENCES knowledge_source_versions(project_id, id)
+          ON DELETE CASCADE
+      )
+    `);
+  }
+  if (!hasTable(db, 'knowledge_search_index_fields')) {
+    db.exec(`
+      CREATE TABLE knowledge_search_index_fields (
+        id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL,
+        index_id TEXT NOT NULL,
+        field_order INTEGER NOT NULL,
+        field_kind TEXT NOT NULL,
+        field_text TEXT NOT NULL,
+        field_weight REAL NOT NULL,
+        rank_class INTEGER NOT NULL,
+        span_id TEXT,
+        symbol_kind TEXT,
+        symbol_name TEXT,
+        created_at TEXT NOT NULL,
+        UNIQUE (project_id, index_id, field_order),
+        FOREIGN KEY (project_id, index_id)
+          REFERENCES knowledge_search_indexes(project_id, id)
+          ON DELETE CASCADE,
+        FOREIGN KEY (project_id, span_id)
+          REFERENCES knowledge_source_spans(project_id, id)
+          ON DELETE RESTRICT
+      )
+    `);
+  }
+  db.exec(
+    `CREATE INDEX IF NOT EXISTS idx_knowledge_search_indexes_project_status
+     ON knowledge_search_indexes(project_id, status)`,
+  );
+}
+
+/**
  * Creates the additive knowledge schema atomically. It is idempotent so it
  * can be called safely by the shared migration runner on every database open.
  */
@@ -389,5 +449,6 @@ export function applyKnowledgeMigrations(db: Database.Database): void {
     applyKnowledgeQueueMigration(db);
     applyKnowledgeGraphMetadataMigration(db);
     applyKnowledgeReviewDeduplicationMigration(db);
+    applyKnowledgeSearchIndexMigration(db);
   })();
 }

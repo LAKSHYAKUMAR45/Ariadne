@@ -4,6 +4,7 @@ import {
   applyKnowledgeGraphMetadataMigration,
   applyKnowledgeQueueMigration,
   applyKnowledgeReviewDeduplicationMigration,
+  applyKnowledgeSearchIndexMigration,
   applyKnowledgeSchemaV2Migration,
 } from './knowledge/knowledgeMigrations.js';
 
@@ -189,6 +190,11 @@ export const MIGRATIONS: Migration[] = [
     version: 10,
     description: 'Backfill knowledge job completion modes once and widen unknown-mode compatibility',
     up: (db) => applyKnowledgeQueueMigration(db),
+  },
+  {
+    version: 11,
+    description: 'Add derived deterministic search index tables for knowledge sources',
+    up: (db) => applyKnowledgeSearchIndexMigration(db),
   },
 ];
 

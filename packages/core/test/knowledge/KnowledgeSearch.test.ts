@@ -8,6 +8,7 @@ import { searchWorkspace } from '../../src/Search.js';
 import { applyKnowledgeMigrations } from '../../src/knowledge/knowledgeMigrations.js';
 import { KnowledgePageStore } from '../../src/knowledge/KnowledgePageStore.js';
 import { KnowledgeSourceStore } from '../../src/knowledge/KnowledgeSourceStore.js';
+import { KnowledgeSearchIndex } from '../../src/knowledge/KnowledgeSearchIndex.js';
 import {
   buildKnowledgeSearchContext,
   lexicalScore,
@@ -1302,5 +1303,225 @@ describe('searchKnowledge', () => {
     });
 
     expect(searchKnowledge('🙂'.repeat(100), { db, projectId: PROJECT_ID, mode: 'sources' })).toEqual([]);
+  });
+});
+
+
+describe('searchKnowledge with the materialized search index', () => {
+  let db: Database.Database;
+  let sourceStore: KnowledgeSourceStore;
+  let extractionStore: KnowledgeExtractionStore;
+  let index: KnowledgeSearchIndex;
+  const versions = new Map<string, string>();
+  const extractionIds = new Map<string, string>();
+
+  function fixtureSpan(start: number, end: number) {
+    return { startOffset: start, endOffset: end, startLine: 1, startColumn: start + 1, endLine: 1, endColumn: end + 1 };
+  }
+
+  function addSource(path: string, name: string | null, options: { pending?: boolean } = {}): string {
+    const source = sourceStore.register({
+      projectId: PROJECT_ID,
+      kind: 'file',
+      path,
+      content: `content of ${path}`,
+      format: 'typescript',
+      mimeType: 'text/typescript',
+    });
+    const list = sourceStore.listVersions(PROJECT_ID, source.id);
+    const versionId = list[list.length - 1].id;
+    versions.set(path, versionId);
+    if (name !== null && !options.pending) {
+      const saved = extractionStore.save({
+        projectId: PROJECT_ID,
+        extraction: {
+          analyzerId: 'typescript-lezer',
+          analyzerVersion: '1',
+          sourceVersionId: versionId,
+          title: path,
+          summary: `Handles ${name} behavior.`,
+          sections: [
+            {
+              id: 'section:1',
+              kind: 'code',
+              title: `${name} section`,
+              text: `export function ${name}() { return '${name}'; }`,
+              span: fixtureSpan(0, 40),
+              confidence: 1,
+            },
+          ],
+          symbols: [
+            { id: 'symbol:1', kind: 'function', name, qualifiedName: `lib.${name}`, span: fixtureSpan(16, 30), confidence: 1 },
+          ],
+          relationships: [],
+          links: [],
+          diagnostics: [],
+        },
+      });
+      extractionIds.set(path, saved.id);
+    }
+    return source.id;
+  }
+
+  function run(query: string, projectId = PROJECT_ID, extra: Record<string, unknown> = {}) {
+    return searchKnowledge(query, { db, projectId, mode: 'sources', limit: 50, ...extra });
+  }
+
+  const QUERIES = ['allocate index', 'loader', 'widget handler', 'docs notes', 'export function', 'no such thing'];
+
+  function snapshot() {
+    return QUERIES.map((query) => run(query));
+  }
+
+  beforeEach(() => {
+    db = createKnowledgeDatabase();
+    sourceStore = new KnowledgeSourceStore(db);
+    extractionStore = new KnowledgeExtractionStore(db);
+    index = new KnowledgeSearchIndex(db);
+    versions.clear();
+    extractionIds.clear();
+    addSource('src/allocate_index.ts', 'allocateIndex');
+    addSource('src/loader.ts', 'loadWidget');
+    addSource('src/widget_handler.ts', 'handleWidget');
+    addSource('src/other_loader.ts', 'otherLoader');
+    addSource('docs/notes.md', null);
+    addSource('docs/index-notes.md', null);
+    addSource('src/unrelated.ts', 'zzz');
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  it('returns identical results before and after a full index rebuild (ranking and citation parity)', () => {
+    const legacy = snapshot();
+    expect(legacy.some((results) => results.length > 0)).toBe(true);
+
+    const report = index.rebuildProject(PROJECT_ID);
+    expect(report.failed).toBe(0);
+    expect(index.getStatus(PROJECT_ID).unindexedCount).toBe(0);
+
+    expect(snapshot()).toEqual(legacy);
+  });
+
+  it('serves results from the index rather than re-parsing persisted extraction JSON', () => {
+    index.rebuildProject(PROJECT_ID);
+    const legacy = index.getStatus(PROJECT_ID);
+    expect(legacy.indexedCount).toBe(7);
+    db.prepare('UPDATE knowledge_extractions SET result_json = ?').run('{not-json}');
+
+    const results = run('loadWidget');
+
+    expect(results[0]).toMatchObject({ title: 'src/loader.ts', snippet: expect.stringContaining('loadWidget') });
+    expect(results[0].citations[0].span).not.toBeNull();
+  });
+
+  it('matches the legacy scan for a partial index of indexed, stale, failed, unindexed, and pending sources', () => {
+    const pendingSourceId = addSource('src/pending_loader.ts', 'pendingLoader');
+    sourceStore.register({
+      projectId: PROJECT_ID,
+      kind: 'file',
+      path: 'src/pending_loader.ts',
+      content: 'a newer unanalyzed version with loader',
+      format: 'typescript',
+    });
+    const legacy = snapshot();
+
+    index.replaceForSourceVersion({ projectId: PROJECT_ID, sourceVersionId: versions.get('src/allocate_index.ts')!, coverage: 'extraction', extractionId: extractionIds.get('src/allocate_index.ts')! });
+    index.replaceForSourceVersion({ projectId: PROJECT_ID, sourceVersionId: versions.get('src/loader.ts')!, coverage: 'extraction', extractionId: extractionIds.get('src/loader.ts')! });
+    index.replaceForSourceVersion({ projectId: PROJECT_ID, sourceVersionId: versions.get('src/widget_handler.ts')!, coverage: 'extraction', extractionId: extractionIds.get('src/widget_handler.ts')! });
+    index.replaceForSourceVersion({ projectId: PROJECT_ID, sourceVersionId: versions.get('docs/notes.md')!, coverage: 'metadata_only' });
+    index.replaceForSourceVersion({ projectId: PROJECT_ID, sourceVersionId: versions.get('src/other_loader.ts')!, coverage: 'extraction', extractionId: extractionIds.get('src/other_loader.ts')! });
+    const staleSource = sourceStore.list(PROJECT_ID).find((source) => source.canonicalPath === 'src/other_loader.ts')!;
+    index.markSourceStale(PROJECT_ID, staleSource.id);
+    db.prepare(`UPDATE knowledge_search_indexes SET status = 'failed' WHERE source_version_id = ?`).run(versions.get('src/widget_handler.ts')!);
+    expect(index.getStatus(PROJECT_ID)).toMatchObject({ indexedCount: 3, failedCount: 1, staleCount: 1 });
+    expect(pendingSourceId).toBeTruthy();
+
+    const partial = snapshot();
+
+    expect(partial).toEqual(legacy);
+    for (const results of partial) {
+      const ids = results.map((result) => result.id);
+      expect(new Set(ids).size).toBe(ids.length);
+    }
+  });
+
+  it('serves a pending newer source version by fallback and never by the older version index', () => {
+    index.rebuildProject(PROJECT_ID);
+    const older = run('loadWidget');
+    expect(older[0]).toMatchObject({ title: 'src/loader.ts' });
+
+    sourceStore.register({
+      projectId: PROJECT_ID,
+      kind: 'file',
+      path: 'src/loader.ts',
+      content: 'brand new content without extraction',
+      format: 'typescript',
+      mimeType: 'text/typescript',
+    });
+
+    const results = run('loadWidget');
+    expect(results.find((result) => result.title === 'src/loader.ts')).toBeUndefined();
+    const byPath = run('loader');
+    const loader = byPath.find((result) => result.title === 'src/loader.ts');
+    expect(loader?.metadata.extractionId).toBeNull();
+    expect(loader?.metadata.sourceVersionId).not.toBe(older[0].metadata.sourceVersionId);
+  });
+
+  it('finds path-only sources through metadata_only indexes exactly like the scan', () => {
+    const legacy = run('index notes');
+    index.rebuildProject(PROJECT_ID);
+    const indexed = run('index notes');
+    expect(indexed).toEqual(legacy);
+    expect(indexed.map((result) => result.title)).toContain('docs/index-notes.md');
+  });
+
+  it('keeps candidate lookup isolated per project', () => {
+    db.prepare(
+      `INSERT INTO knowledge_projects (id, workspace_root, name, status, created_at, updated_at)
+       VALUES ('project_2', '/workspace/other', 'Other', 'active', ?, ?)`,
+    ).run(CREATED_AT, CREATED_AT);
+    sourceStore.register({ projectId: 'project_2', kind: 'file', path: 'src/loader.ts', content: 'other project loader', format: 'typescript' });
+    index.rebuildProject(PROJECT_ID);
+    index.rebuildProject('project_2');
+
+    const results = run('loader');
+
+    expect(results.length).toBeGreaterThan(0);
+    expect(results.every((result) => result.projectId === PROJECT_ID)).toBe(true);
+    expect(run('loader', 'project_2').every((result) => result.projectId === 'project_2')).toBe(true);
+  });
+
+  it('falls back to the full scan and reports a diagnostic when the index status query fails', () => {
+    const legacy = snapshot();
+    db.exec('DROP TABLE knowledge_search_index_fields; DROP TABLE knowledge_search_indexes;');
+    const diagnostics: Array<{ code: string; message: string }> = [];
+
+    const results = QUERIES.map((query) =>
+      run(query, PROJECT_ID, { onDiagnostic: (diagnostic: { code: string; message: string }) => diagnostics.push(diagnostic) }),
+    );
+
+    expect(results).toEqual(legacy);
+    expect(diagnostics.length).toBeGreaterThan(0);
+    expect(diagnostics[0].code).toBe('search_index_unavailable');
+  });
+
+  it('throws instead of returning an empty success when both the index and the fallback fail', () => {
+    db.exec('DROP TABLE knowledge_search_index_fields; DROP TABLE knowledge_search_indexes;');
+    db.exec('ALTER TABLE knowledge_extractions RENAME TO knowledge_extractions_broken');
+
+    expect(() => run('loader', PROJECT_ID, { onDiagnostic: () => undefined })).toThrow();
+  });
+
+  it('bounds fallback scanning to unindexed sources when most of the project is indexed', () => {
+    index.rebuildProject(PROJECT_ID);
+    const late = addSource('src/late_loader.ts', 'lateLoader');
+    expect(late).toBeTruthy();
+    expect(index.getUnindexedSourceIds(PROJECT_ID)).toEqual([late]);
+
+    const results = run('lateLoader');
+
+    expect(results[0]).toMatchObject({ id: late, title: 'src/late_loader.ts' });
   });
 });

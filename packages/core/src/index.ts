@@ -136,7 +136,22 @@ export type {
   KnowledgeSearchOptions,
   KnowledgeSearchResult,
   KnowledgeSearchResultKind,
+  KnowledgeSearchDiagnostic,
 } from './knowledge/KnowledgeSearch.js';
+export {
+  KNOWLEDGE_SEARCH_INDEX_VERSION,
+  KnowledgeSearchIndex,
+  setKnowledgeSearchIndexChangedHook,
+} from './knowledge/KnowledgeSearchIndex.js';
+export type {
+  KnowledgeSearchIndexChange,
+  KnowledgeSearchIndexChangedHook,
+  ReplaceSearchIndexInput,
+  SearchIndexCandidate,
+  SearchIndexCandidateQuery,
+  SearchIndexRebuildReport,
+  SearchIndexStatus,
+} from './knowledge/KnowledgeSearchIndex.js';
 export {
   discoverKnowledgeSkills,
   KnowledgeSkillRegistry,

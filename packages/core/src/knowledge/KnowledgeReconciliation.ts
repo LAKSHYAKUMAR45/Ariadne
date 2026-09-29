@@ -2,6 +2,7 @@ import type Database from 'better-sqlite3';
 import { createHash } from 'node:crypto';
 import { createKnowledgeId } from './KnowledgeIds.js';
 import { KnowledgePageStore } from './KnowledgePageStore.js';
+import { KnowledgeSearchIndex } from './KnowledgeSearchIndex.js';
 import type {
   KnowledgePageId,
   KnowledgePageType,
@@ -301,6 +302,7 @@ export class KnowledgeReconciliation {
          WHERE project_id = @projectId AND id = @sourceId`,
       )
       .run({ projectId, sourceId, updatedAt: this.now() });
+    new KnowledgeSearchIndex(this.db).markSourceStale(projectId, sourceId);
   }
 
   private markPageStatus(projectId: string, pageId: string, status: 'archived' | 'stale'): void {

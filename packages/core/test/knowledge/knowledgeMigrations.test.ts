@@ -8,6 +8,7 @@ import {
   applyKnowledgeReviewDeduplicationMigration,
   KNOWLEDGE_SCHEMA_VERSION,
 } from '../../src/knowledge/knowledgeMigrations.js';
+import { MIGRATIONS } from '../../src/migrations.js';
 import { SCHEMA_SQL } from '../../src/schema.js';
 
 const KNOWLEDGE_TABLES = [
@@ -93,7 +94,7 @@ describe('knowledge schema migrations', () => {
 
     expect(tableNames(db)).toEqual(expect.arrayContaining(KNOWLEDGE_TABLES));
     expect(indexNames(db)).toEqual(expect.arrayContaining(REQUIRED_INDEXES));
-    expect(KNOWLEDGE_SCHEMA_VERSION).toBe(6);
+    expect(KNOWLEDGE_SCHEMA_VERSION).toBe(7);
     expect(columns(db, 'knowledge_extractions')).toEqual(
       expect.arrayContaining([
         'analyzer_id',
@@ -524,5 +525,140 @@ describe('knowledge schema migrations', () => {
     ]);
 
     db.close();
+  });
+});
+
+
+describe('knowledge search index migration (global version 11, knowledge revision 7)', () => {
+  it('registers contiguous ladder versions with search index at 11', () => {
+    const versions = MIGRATIONS.map((migration) => migration.version);
+    expect(versions).toEqual(Array.from({ length: versions.length }, (_, index) => index + 2));
+    expect(MIGRATIONS.find((migration) => migration.version === 11)?.description).toMatch(/search index/i);
+  });
+
+  it('creates the derived index tables, columns, and lookup indexes on a fresh database', () => {
+    const db = openDatabase(':memory:');
+
+    expect(tableNames(db)).toEqual(
+      expect.arrayContaining(['knowledge_search_indexes', 'knowledge_search_index_fields']),
+    );
+    expect(columns(db, 'knowledge_search_indexes')).toEqual([
+      'id',
+      'project_id',
+      'source_version_id',
+      'index_version',
+      'status',
+      'coverage',
+      'extraction_id',
+      'field_count',
+      'created_at',
+      'updated_at',
+    ]);
+    expect(columns(db, 'knowledge_search_index_fields')).toEqual([
+      'id',
+      'project_id',
+      'index_id',
+      'field_order',
+      'field_kind',
+      'field_text',
+      'field_weight',
+      'rank_class',
+      'span_id',
+      'symbol_kind',
+      'symbol_name',
+      'created_at',
+    ]);
+    expect(indexNames(db)).toEqual(
+      expect.arrayContaining(['idx_knowledge_search_indexes_project_status']),
+    );
+    db.close();
+  });
+
+  it('enforces coverage, status, and extraction-id consistency constraints', () => {
+    const db = openDatabase(':memory:');
+    applyKnowledgeMigrations(db);
+    const now = '2026-09-29T00:00:00.000Z';
+    db.prepare(
+      `INSERT INTO knowledge_projects (id, workspace_root, name, status, created_at, updated_at)
+       VALUES ('p', '/w', 'P', 'active', ?, ?)`,
+    ).run(now, now);
+    db.prepare(
+      `INSERT INTO knowledge_sources (id, project_id, source_kind, source_path, status, created_at, updated_at)
+       VALUES ('s', 'p', 'file', 'a.md', 'active', ?, ?)`,
+    ).run(now, now);
+    db.prepare(
+      `INSERT INTO knowledge_source_versions (id, project_id, source_id, version_number, content_hash, content_path, byte_length, created_at)
+       VALUES ('v', 'p', 's', 1, 'h', 'a.md', 1, ?)`,
+    ).run(now);
+    const insert = db.prepare(
+      `INSERT INTO knowledge_search_indexes
+       (id, project_id, source_version_id, index_version, status, coverage, extraction_id, field_count, created_at, updated_at)
+       VALUES (?, 'p', 'v', 1, ?, ?, ?, 0, ?, ?)`,
+    );
+    expect(() => insert.run('i1', 'active', 'extraction', null, now, now)).toThrow();
+    expect(() => insert.run('i2', 'active', 'metadata_only', 'e', now, now)).toThrow();
+    expect(() => insert.run('i3', 'bogus', 'metadata_only', null, now, now)).toThrow();
+    insert.run('i4', 'active', 'metadata_only', null, now, now);
+    expect(() => insert.run('i5', 'active', 'metadata_only', null, now, now)).toThrow();
+    db.close();
+  });
+
+  it('cascades index rows when the source version is deleted', () => {
+    const db = openDatabase(':memory:');
+    const now = '2026-09-29T00:00:00.000Z';
+    db.prepare(
+      `INSERT INTO knowledge_projects (id, workspace_root, name, status, created_at, updated_at)
+       VALUES ('p', '/w', 'P', 'active', ?, ?)`,
+    ).run(now, now);
+    db.prepare(
+      `INSERT INTO knowledge_sources (id, project_id, source_kind, source_path, status, created_at, updated_at)
+       VALUES ('s', 'p', 'file', 'a.md', 'active', ?, ?)`,
+    ).run(now, now);
+    db.prepare(
+      `INSERT INTO knowledge_source_versions (id, project_id, source_id, version_number, content_hash, content_path, byte_length, created_at)
+       VALUES ('v', 'p', 's', 1, 'h', 'a.md', 1, ?)`,
+    ).run(now);
+    db.prepare(
+      `INSERT INTO knowledge_search_indexes
+       (id, project_id, source_version_id, index_version, status, coverage, extraction_id, field_count, created_at, updated_at)
+       VALUES ('i', 'p', 'v', 1, 'active', 'metadata_only', NULL, 1, ?, ?)`,
+    ).run(now, now);
+    db.prepare(
+      `INSERT INTO knowledge_search_index_fields
+       (id, project_id, index_id, field_order, field_kind, field_text, field_weight, rank_class, created_at)
+       VALUES ('f', 'p', 'i', 0, 'path', 'a.md', 0, 1, ?)`,
+    ).run(now);
+
+    db.prepare(`DELETE FROM knowledge_sources WHERE id = 's'`).run();
+
+    expect(db.prepare('SELECT COUNT(*) AS c FROM knowledge_search_indexes').get()).toEqual({ c: 0 });
+    expect(db.prepare('SELECT COUNT(*) AS c FROM knowledge_search_index_fields').get()).toEqual({ c: 0 });
+    db.close();
+  });
+
+  it('upgrades a version-10 database, keeps data, and reopens idempotently', () => {
+    const directory = mkdtempSync(join(process.cwd(), '.test-knowledge-index-migration-'));
+    temporaryDirectories.push(directory);
+    const databasePath = join(directory, 'state.db');
+
+    const first = openDatabase(databasePath);
+    first.exec('DROP TABLE knowledge_search_index_fields; DROP TABLE knowledge_search_indexes;');
+    first.prepare(`UPDATE schema_meta SET value = '10' WHERE key = 'schema_version'`).run();
+    first.close();
+
+    const upgraded = openDatabase(databasePath);
+    expect(tableNames(upgraded)).toEqual(
+      expect.arrayContaining(['knowledge_search_indexes', 'knowledge_search_index_fields']),
+    );
+    expect(
+      Number((upgraded.prepare(`SELECT value FROM schema_meta WHERE key = 'schema_version'`).get() as { value: string }).value),
+    ).toBeGreaterThanOrEqual(11);
+    upgraded.close();
+
+    const reopened = openDatabase(databasePath);
+    expect(tableNames(reopened)).toEqual(
+      expect.arrayContaining(['knowledge_search_indexes', 'knowledge_search_index_fields']),
+    );
+    reopened.close();
   });
 });

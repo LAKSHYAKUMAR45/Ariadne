@@ -4,10 +4,15 @@ import { redactLines } from '../Redactor.js';
 import { searchWorkspace, type SearchResult as WorkspaceSearchResult } from '../Search.js';
 import type { TaskStore } from '../TaskStore.js';
 import {
-  validateDeterministicExtraction,
-  type ExtractedSymbolKind,
-  type KnowledgeSourceSpan,
-} from './KnowledgeExtraction.js';
+  EXTRACTION_MATCH_RANK_CLASS,
+  KnowledgeSearchIndex,
+  MAX_RESULT_CANDIDATES,
+  METADATA_MATCH_RANK_CLASS,
+  deriveExtractionSearchData,
+  type ExtractionSearchData,
+  type PersistedSpanRow,
+  type SearchIndexCandidate,
+} from './KnowledgeSearchIndex.js';
 import type {
   KnowledgePageId,
   KnowledgePageType,
@@ -57,6 +62,11 @@ export interface KnowledgeSearchResult {
   metadata: Record<string, string | number | null>;
 }
 
+export interface KnowledgeSearchDiagnostic {
+  code: 'search_index_unavailable';
+  message: string;
+}
+
 export interface KnowledgeSearchOptions {
   db: Database.Database;
   projectId: string;
@@ -65,6 +75,8 @@ export interface KnowledgeSearchOptions {
   limit?: number;
   maxGraphExpansions?: number;
   graphExpansion?: (result: KnowledgeSearchResult) => KnowledgeSearchGraphExpansion[];
+  /** Receives index failures that were served by the full source scan. Defaults to a Node process warning. */
+  onDiagnostic?: (diagnostic: KnowledgeSearchDiagnostic) => void;
 }
 
 export interface KnowledgeSearchContextOptions {
@@ -123,47 +135,13 @@ interface CitationRow {
   label: string | null;
 }
 
-interface PersistedSpanRow {
-  id: string;
-  start_offset: number;
-  end_offset: number;
-  start_line: number | null;
-  start_column: number | null;
-  end_line: number | null;
-  end_column: number | null;
-  label: string | null;
-}
-
-interface SearchableField {
-  text: string;
-  weight: number;
-  rankClass: number;
-  span: PersistedSpanRow | null;
-}
-
-interface ExtractionSearchData {
-  extractionId: string;
-  analyzerId: string | null;
-  analyzerVersion: string | null;
-  fields: SearchableField[];
-  symbolKinds: ExtractedSymbolKind[];
-  symbolNames: string[];
-}
-
 const DEFAULT_LIMIT = 20;
 const SOURCE_SNIPPET_LIMIT = 180;
 const MAX_QUERY_LENGTH = 256;
 const MAX_QUERY_BYTES = 256;
 const MAX_QUERY_TERMS = 16;
-const MAX_EXTRACTION_JSON_BYTES = 1_048_576;
-const MAX_EXTRACTION_SECTIONS = 200;
-const MAX_EXTRACTION_SYMBOLS = 200;
-const MAX_SEARCH_FIELDS = 800;
-const MAX_PERSISTED_SPANS = 2_000;
-const MAX_RESULT_CANDIDATES = 500;
-const EXTRACTION_MATCH_RANK_CLASS = 2;
-const METADATA_MATCH_RANK_CLASS = 1;
 const DEFAULT_MATCH_RANK_CLASS = 0;
+const FALLBACK_BATCH_SIZE = 100;
 const SEARCH_STOP_WORDS = new Set([
   'a',
   'an',
@@ -321,7 +299,19 @@ function pageRows(db: Database.Database, projectId: string): PageSearchRow[] {
     .all(projectId) as PageSearchRow[];
 }
 
-function sourceRows(db: Database.Database, projectId: string): SourceSearchRow[] {
+function activeSourceIds(db: Database.Database, projectId: string): string[] {
+  return (
+    db
+      .prepare(
+        `SELECT id FROM knowledge_sources
+         WHERE project_id = ? AND status = 'active'
+         ORDER BY updated_at DESC, id ASC`,
+      )
+      .all(projectId) as Array<{ id: string }>
+  ).map((row) => row.id);
+}
+
+function sourceRows(db: Database.Database, projectId: string, sourceIds: readonly string[]): SourceSearchRow[] {
   return db
     .prepare(
       `SELECT s.id, s.project_id, s.source_kind, s.source_path, s.source_url,
@@ -355,9 +345,10 @@ function sourceRows(db: Database.Database, projectId: string): SourceSearchRow[]
           LIMIT 1
         )
        WHERE s.project_id = ? AND s.status = 'active'
+         AND s.id IN (SELECT value FROM json_each(?))
        ORDER BY s.updated_at DESC, s.id ASC`,
     )
-    .all(projectId) as SourceSearchRow[];
+    .all(projectId, JSON.stringify(sourceIds)) as SourceSearchRow[];
 }
 
 function citationsForPage(db: Database.Database, projectId: string, pageId: string, versionId: string | null): KnowledgeSearchCitation[] {
@@ -482,67 +473,6 @@ function buildBoundedSnippet(text: string, query: string, limit = SOURCE_SNIPPET
   return `${prefix}${snippet}${suffix}`;
 }
 
-function loadPersistedSpans(
-  db: Database.Database,
-  projectId: string,
-  sourceVersionId: string,
-): { spans: PersistedSpanRow[]; overflow: boolean } {
-  const rows = db
-    .prepare(
-      `SELECT id, start_offset, end_offset, start_line, start_column, end_line, end_column, label
-       FROM knowledge_source_spans
-       WHERE project_id = ? AND source_version_id = ?
-       ORDER BY start_offset ASC, end_offset ASC, id ASC
-       LIMIT ?`,
-    )
-    .all(projectId, sourceVersionId, MAX_PERSISTED_SPANS + 1) as PersistedSpanRow[];
-  return {
-    spans: rows.slice(0, MAX_PERSISTED_SPANS),
-    overflow: rows.length > MAX_PERSISTED_SPANS,
-  };
-}
-
-function spanKey(span: {
-  startOffset: number;
-  endOffset: number;
-  startLine: number;
-  startColumn: number;
-  endLine: number;
-  endColumn: number;
-  label?: string | null;
-}): string {
-  return [
-    span.startOffset,
-    span.endOffset,
-    span.startLine,
-    span.startColumn,
-    span.endLine,
-    span.endColumn,
-    span.label ?? '',
-  ].join('\0');
-}
-
-function matchPersistedSpan(
-  spans: ReadonlyMap<string, PersistedSpanRow>,
-  span: KnowledgeSourceSpan | null | undefined,
-): PersistedSpanRow | null {
-  if (!span) return null;
-  return spans.get(spanKey(span)) ?? null;
-}
-
-function searchFieldRankClass(span: PersistedSpanRow | null): number {
-  return span ? EXTRACTION_MATCH_RANK_CLASS : METADATA_MATCH_RANK_CLASS;
-}
-
-function searchableField(text: string, weight: number, span: PersistedSpanRow | null): SearchableField {
-  return {
-    text,
-    weight,
-    rankClass: searchFieldRankClass(span),
-    span,
-  };
-}
-
 function redactTaskResult(taskResult: WorkspaceSearchResult): WorkspaceSearchResult {
   return {
     ...taskResult,
@@ -556,63 +486,14 @@ function redactTaskResult(taskResult: WorkspaceSearchResult): WorkspaceSearchRes
 
 function parseExtractionSearchData(db: Database.Database, row: SourceSearchRow): ExtractionSearchData | null {
   if (!row.source_version_id || !row.extraction_id || !row.extraction_result_json) return null;
-  if (Buffer.byteLength(row.extraction_result_json, 'utf8') > MAX_EXTRACTION_JSON_BYTES) return null;
-  try {
-    const extraction = validateDeterministicExtraction(JSON.parse(row.extraction_result_json) as unknown);
-    const persistedSpans = loadPersistedSpans(db, row.project_id, row.source_version_id);
-    if (persistedSpans.overflow) return null;
-    const spans = new Map(
-      persistedSpans.spans.map((span) => [
-        spanKey({
-          startOffset: span.start_offset,
-          endOffset: span.end_offset,
-          startLine: span.start_line ?? 0,
-          startColumn: span.start_column ?? 0,
-          endLine: span.end_line ?? 0,
-          endColumn: span.end_column ?? 0,
-          label: span.label,
-        }),
-        span,
-      ]),
-    );
-    const fields: SearchableField[] = [
-      ...extraction.symbols.slice(0, MAX_EXTRACTION_SYMBOLS).flatMap((symbol) => [
-        ...(symbol.qualifiedName
-          ? [
-              searchableField(
-                redactLines(symbol.qualifiedName),
-                10,
-                matchPersistedSpan(spans, symbol.span),
-              ),
-            ]
-          : []),
-        searchableField(redactLines(symbol.name), 8, matchPersistedSpan(spans, symbol.span)),
-      ]),
-      ...extraction.sections.slice(0, MAX_EXTRACTION_SECTIONS).flatMap((section) => [
-        ...(section.title
-          ? [
-              searchableField(redactLines(section.title), 7, matchPersistedSpan(spans, section.span)),
-            ]
-          : []),
-        searchableField(redactLines(section.text), 5, matchPersistedSpan(spans, section.span)),
-      ]),
-      { text: redactLines(extraction.title), weight: 6, rankClass: METADATA_MATCH_RANK_CLASS, span: null },
-      { text: redactLines(extraction.summary), weight: 3, rankClass: METADATA_MATCH_RANK_CLASS, span: null },
-    ].slice(0, MAX_SEARCH_FIELDS);
-    return {
-      extractionId: row.extraction_id,
-      analyzerId: row.extraction_analyzer_id,
-      analyzerVersion: row.extraction_analyzer_version,
-      fields,
-      symbolKinds: extraction.symbols.slice(0, MAX_EXTRACTION_SYMBOLS).map((symbol) => symbol.kind),
-      symbolNames: extraction.symbols.slice(0, MAX_EXTRACTION_SYMBOLS).flatMap((symbol) => [
-        symbol.name,
-        ...(symbol.qualifiedName ? [symbol.qualifiedName] : []),
-      ]),
-    };
-  } catch {
-    return null;
-  }
+  return deriveExtractionSearchData(db, {
+    projectId: row.project_id,
+    sourceVersionId: row.source_version_id,
+    extractionId: row.extraction_id,
+    resultJson: row.extraction_result_json,
+    analyzerId: row.extraction_analyzer_id,
+    analyzerVersion: row.extraction_analyzer_version,
+  });
 }
 
 function sourceCitationFromMatch(row: SourceSearchRow, span: PersistedSpanRow | null): KnowledgeSearchCitation {
@@ -689,109 +570,253 @@ function searchPages(query: string, options: KnowledgeSearchOptions): KnowledgeS
   return results;
 }
 
+function scoreSourceDocument(
+  query: string,
+  { row, extractionData }: ScoringDocument,
+  termWeights: ReadonlyMap<string, number>,
+  mode: KnowledgeSearchMode,
+  options: KnowledgeSearchOptions,
+): RankedKnowledgeSearchResult | null {
+  const title = redactLines(row.source_path ?? row.source_url ?? row.content_path ?? row.id);
+  const fieldMatches =
+    extractionData?.fields
+      .map((field) => ({
+        field,
+        score: lexicalScoreWithTermWeights(query, [{ text: field.text, weight: field.weight }], termWeights),
+      }))
+      .filter((match) => match.score > 0) ?? [];
+  const rankedFieldMatches = fieldMatches.sort(
+      (left, right) =>
+        right.field.rankClass - left.field.rankClass || right.score - left.score || right.field.weight - left.field.weight,
+    );
+  const bestMatch = rankedFieldMatches[0] ?? null;
+  const citationMatch = rankedFieldMatches.find((match) => match.field.span) ?? bestMatch;
+  const extractionScore = rankedFieldMatches
+    .slice(0, 5)
+    .reduce((sum, match) => sum + match.score, 0);
+  const metadataScore = lexicalScore(query, [
+    { text: row.source_path, weight: 2 },
+    { text: row.source_url, weight: 2 },
+    { text: row.content_path, weight: 2 },
+    { text: row.source_kind, weight: 1 },
+    { text: row.mime_type, weight: 1 },
+    { text: row.current_hash, weight: 1 },
+  ]);
+  const hasSpanBackedExtractionMatch = rankedFieldMatches.some(
+    (match) => match.field.rankClass === EXTRACTION_MATCH_RANK_CLASS && match.field.span !== null,
+  );
+  const structuralBonus = hasSpanBackedExtractionMatch ? structuralScore(query, row, extractionData) : 0;
+  const rankClass = bestMatch ? bestMatch.field.rankClass : metadataScore > 0 ? METADATA_MATCH_RANK_CLASS : DEFAULT_MATCH_RANK_CLASS;
+  const score = bestMatch
+    ? extractionScore + Math.min(metadataScore * 4, extractionScore) + structuralBonus
+    : metadataScore + structuralBonus;
+  if (score === 0 || (!bestMatch && metadataScore === 0)) return null;
+  const result = withGraphExpansions(
+    {
+      mode,
+      kind: 'source',
+      id: row.id,
+      projectId: row.project_id as KnowledgeProjectId,
+      title,
+      snippet: bestMatch
+        ? buildBoundedSnippet(bestMatch.field.text, query)
+        : buildBoundedSnippet(redactLines(row.content_path ?? row.source_url ?? row.source_path ?? ''), query),
+      score,
+      citations: [citationMatch ? sourceCitationFromMatch(row, citationMatch.field.span) : sourceCitation(row)],
+      graphExpansions: [],
+      metadata: {
+        kind: row.source_kind,
+        contentHash: row.current_hash,
+        mimeType: row.mime_type,
+        sourceVersionId: row.source_version_id,
+        extractionId: extractionData?.extractionId ?? null,
+        analyzerId: extractionData?.analyzerId ?? null,
+        analyzerVersion: extractionData?.analyzerVersion ?? null,
+      },
+    },
+    options,
+  ) as RankedKnowledgeSearchResult;
+  result.rankClass = rankClass;
+  return result;
+}
+
+interface ScoringDocument {
+  row: SourceSearchRow;
+  extractionData: ExtractionSearchData | null;
+  relevance: number;
+}
+
+interface IndexedLookup {
+  candidates: ScoringDocument[];
+  documentCount: number;
+  documentFrequency: ReadonlyMap<string, number>;
+  /** Sources the index cannot serve; null means every active source must be scanned. */
+  unindexedSourceIds: string[] | null;
+}
+
+interface SourceScan {
+  retained: ScoringDocument[];
+  documentCount: number;
+  documentFrequency: ReadonlyMap<string, number>;
+}
+
+function reportSearchDiagnostic(options: KnowledgeSearchOptions, error: unknown): void {
+  const detail = error instanceof Error ? error.message : String(error);
+  const message = redactLines(`Knowledge search index unavailable; scanning sources instead: ${detail}`);
+  if (options.onDiagnostic) {
+    options.onDiagnostic({ code: 'search_index_unavailable', message });
+    return;
+  }
+  process.emitWarning(message, { code: 'ARIADNE_SEARCH_INDEX_UNAVAILABLE' });
+}
+
+function documentSortPath(row: SourceSearchRow): string {
+  return row.source_path ?? row.source_url ?? row.content_path ?? row.id;
+}
+
+function compareScoringDocuments(left: ScoringDocument, right: ScoringDocument): number {
+  if (left.relevance !== right.relevance) return right.relevance - left.relevance;
+  const leftPath = documentSortPath(left.row);
+  const rightPath = documentSortPath(right.row);
+  if (leftPath !== rightPath) return leftPath < rightPath ? -1 : 1;
+  const leftVersion = left.row.source_version_id ?? '';
+  const rightVersion = right.row.source_version_id ?? '';
+  if (leftVersion === rightVersion) return 0;
+  return leftVersion < rightVersion ? -1 : 1;
+}
+
+function retainTopCandidates(documents: ScoringDocument[]): ScoringDocument[] {
+  return documents.sort(compareScoringDocuments).slice(0, MAX_RESULT_CANDIDATES);
+}
+
+function indexedCandidateToDocument(projectId: string, candidate: SearchIndexCandidate): ScoringDocument {
+  return {
+    row: {
+      id: candidate.sourceId,
+      project_id: projectId,
+      source_kind: candidate.sourceKind as KnowledgeSourceKind,
+      source_path: candidate.sourcePath,
+      source_url: candidate.sourceUrl,
+      current_hash: candidate.currentHash,
+      status: candidate.sourceStatus,
+      updated_at: candidate.sourceUpdatedAt,
+      source_version_id: candidate.sourceVersionId,
+      content_path: candidate.contentPath,
+      mime_type: candidate.mimeType,
+      extraction_id: candidate.extractionId,
+      extraction_result_json: null,
+      extraction_analyzer_id: candidate.analyzerId,
+      extraction_analyzer_version: candidate.analyzerVersion,
+    },
+    extractionData: candidate.extraction,
+    relevance: candidate.relevance,
+  };
+}
+
+function lookupIndexedCandidates(
+  needles: readonly string[],
+  variantsByTerm: ReadonlyArray<{ term: string; variants: string[] }>,
+  options: KnowledgeSearchOptions,
+): IndexedLookup {
+  const unavailable: IndexedLookup = {
+    candidates: [],
+    documentCount: 0,
+    documentFrequency: new Map(),
+    unindexedSourceIds: null,
+  };
+  try {
+    return options.db.transaction((): IndexedLookup => {
+      const index = new KnowledgeSearchIndex(options.db);
+      const status = index.getStatus(options.projectId);
+      if (status.indexedCount === 0) return unavailable;
+      return {
+        candidates: index
+          .findCandidates({ projectId: options.projectId, needles })
+          .map((candidate) => indexedCandidateToDocument(options.projectId, candidate)),
+        documentCount: status.indexedCount,
+        documentFrequency: index.documentFrequency(options.projectId, variantsByTerm),
+        unindexedSourceIds: index.getUnindexedSourceIds(options.projectId),
+      };
+    })();
+  } catch (error) {
+    reportSearchDiagnostic(options, error);
+    return unavailable;
+  }
+}
+
+function scanSources(
+  sourceIds: readonly string[],
+  needles: readonly string[],
+  variantsByTerm: ReadonlyArray<{ term: string; variants: string[] }>,
+  options: KnowledgeSearchOptions,
+): SourceScan {
+  const documentFrequency = new Map<string, number>(variantsByTerm.map(({ term }) => [term, 0]));
+  let documentCount = 0;
+  let retained: ScoringDocument[] = [];
+  for (let offset = 0; offset < sourceIds.length; offset += FALLBACK_BATCH_SIZE) {
+    const batch = sourceRows(options.db, options.projectId, sourceIds.slice(offset, offset + FALLBACK_BATCH_SIZE));
+    for (const row of batch) {
+      documentCount += 1;
+      const extractionData = parseExtractionSearchData(options.db, row);
+      const fields = [
+        ...(extractionData?.fields.map((field) => field.text) ?? []),
+        row.source_path,
+        row.source_url,
+        row.content_path,
+        row.source_kind,
+        row.mime_type,
+        row.current_hash,
+      ].filter((text): text is string => Boolean(text));
+      const foldedFields = fields.map((field) => normalize(field));
+      let anyTermPresent = false;
+      for (const { term, variants } of variantsByTerm) {
+        if (variants.some((variant) => foldedFields.some((field) => field.includes(variant)))) {
+          documentFrequency.set(term, (documentFrequency.get(term) ?? 0) + 1);
+          anyTermPresent = true;
+        }
+      }
+      if (!anyTermPresent) continue;
+      const matchedRankClasses = (extractionData?.fields ?? [])
+        .filter((field) => needles.some((needle) => normalize(field.text).includes(needle)))
+        .map((field) => field.rankClass);
+      retained.push({ row, extractionData, relevance: Math.max(METADATA_MATCH_RANK_CLASS, ...matchedRankClasses) });
+    }
+    retained = retainTopCandidates(retained);
+  }
+  return { retained, documentCount, documentFrequency };
+}
+
 function searchSources(query: string, options: KnowledgeSearchOptions): KnowledgeSearchResult[] {
   const mode = options.mode ?? 'sources';
-  const extractionCache = new Map<string, ExtractionSearchData | null>();
-  const rows = sourceRows(options.db, options.projectId);
-  const queryTerms = terms(query);
-  const documentFrequency = new Map<string, number>();
-  const searchableDocuments = rows.map((row) => {
-    const extractionData =
-      extractionCache.get(row.extraction_id ?? row.id) ??
-      parseExtractionSearchData(options.db, row);
-    extractionCache.set(row.extraction_id ?? row.id, extractionData);
-    const fields = [
-      ...(extractionData?.fields.map((field) => field.text) ?? []),
-      row.source_path,
-      row.source_url,
-      row.content_path,
-      row.source_kind,
-      row.mime_type,
-      row.current_hash,
-    ]
-      .filter((text): text is string => Boolean(text));
-    const presentTerms = new Set(
-      queryTerms.filter((term) =>
-        termVariants(term).some((variant) =>
-          fields.some((field) => normalize(field).includes(variant)),
-        ),
-      ),
-    );
-    return { row, extractionData, presentTerms };
-  });
-  for (const term of queryTerms) {
-    const count = searchableDocuments.filter(({ presentTerms }) => presentTerms.has(term)).length;
-    documentFrequency.set(term, count);
-  }
+  const queryTerms = [...new Set(terms(query))];
+  const variantsByTerm = queryTerms.map((term) => ({ term, variants: termVariants(term) }));
+  const needles = [...new Set([normalize(query), ...variantsByTerm.flatMap(({ variants }) => variants)])];
+  const lookup = lookupIndexedCandidates(needles, variantsByTerm, options);
+  const scan = scanSources(
+    lookup.unindexedSourceIds ?? activeSourceIds(options.db, options.projectId),
+    needles,
+    variantsByTerm,
+    options,
+  );
+
+  const documentCount = lookup.documentCount + scan.documentCount;
   const termWeights = new Map(
     queryTerms.map((term) => [
       term,
-      Math.log((searchableDocuments.length + 1) / ((documentFrequency.get(term) ?? 0) + 1)) + 1,
+      Math.log(
+        (documentCount + 1) /
+          ((lookup.documentFrequency.get(term) ?? 0) + (scan.documentFrequency.get(term) ?? 0) + 1),
+      ) + 1,
     ]),
   );
+  const pool = new Map<string, ScoringDocument>();
+  for (const document of [...lookup.candidates, ...scan.retained]) {
+    if (!pool.has(document.row.id)) pool.set(document.row.id, document);
+  }
   const results: RankedKnowledgeSearchResult[] = [];
-  for (const { row, extractionData } of searchableDocuments) {
-    const title = redactLines(row.source_path ?? row.source_url ?? row.content_path ?? row.id);
-    const fieldMatches =
-      extractionData?.fields
-        .map((field) => ({
-          field,
-          score: lexicalScoreWithTermWeights(query, [{ text: field.text, weight: field.weight }], termWeights),
-        }))
-        .filter((match) => match.score > 0) ?? [];
-    const rankedFieldMatches = fieldMatches.sort(
-        (left, right) =>
-          right.field.rankClass - left.field.rankClass || right.score - left.score || right.field.weight - left.field.weight,
-      );
-    const bestMatch = rankedFieldMatches[0] ?? null;
-    const citationMatch = rankedFieldMatches.find((match) => match.field.span) ?? bestMatch;
-    const extractionScore = rankedFieldMatches
-      .slice(0, 5)
-      .reduce((sum, match) => sum + match.score, 0);
-    const metadataScore = lexicalScore(query, [
-      { text: row.source_path, weight: 2 },
-      { text: row.source_url, weight: 2 },
-      { text: row.content_path, weight: 2 },
-      { text: row.source_kind, weight: 1 },
-      { text: row.mime_type, weight: 1 },
-      { text: row.current_hash, weight: 1 },
-    ]);
-    const hasSpanBackedExtractionMatch = rankedFieldMatches.some(
-      (match) => match.field.rankClass === EXTRACTION_MATCH_RANK_CLASS && match.field.span !== null,
-    );
-    const structuralBonus = hasSpanBackedExtractionMatch ? structuralScore(query, row, extractionData) : 0;
-    const rankClass = bestMatch ? bestMatch.field.rankClass : metadataScore > 0 ? METADATA_MATCH_RANK_CLASS : DEFAULT_MATCH_RANK_CLASS;
-    const score = bestMatch
-      ? extractionScore + Math.min(metadataScore * 4, extractionScore) + structuralBonus
-      : metadataScore + structuralBonus;
-    if (score === 0 || (!bestMatch && metadataScore === 0)) continue;
-    const result = withGraphExpansions(
-      {
-        mode,
-        kind: 'source',
-        id: row.id,
-        projectId: row.project_id as KnowledgeProjectId,
-        title,
-        snippet: bestMatch
-          ? buildBoundedSnippet(bestMatch.field.text, query)
-          : buildBoundedSnippet(redactLines(row.content_path ?? row.source_url ?? row.source_path ?? ''), query),
-        score,
-        citations: [citationMatch ? sourceCitationFromMatch(row, citationMatch.field.span) : sourceCitation(row)],
-        graphExpansions: [],
-        metadata: {
-          kind: row.source_kind,
-          contentHash: row.current_hash,
-          mimeType: row.mime_type,
-          sourceVersionId: row.source_version_id,
-          extractionId: extractionData?.extractionId ?? null,
-          analyzerId: extractionData?.analyzerId ?? null,
-          analyzerVersion: extractionData?.analyzerVersion ?? null,
-        },
-      },
-      options,
-    ) as RankedKnowledgeSearchResult;
-    result.rankClass = rankClass;
-    results.push(result);
+  for (const document of retainTopCandidates([...pool.values()])) {
+    const result = scoreSourceDocument(query, document, termWeights, mode, options);
+    if (result) results.push(result);
   }
   return results;
 }

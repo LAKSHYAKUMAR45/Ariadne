@@ -25,6 +25,7 @@ import {
   type DeterministicExtraction,
 } from './KnowledgeExtractionStore.js';
 import { KnowledgeGraphMaterializer } from './KnowledgeGraphMaterializer.js';
+import { KnowledgeSearchIndex } from './KnowledgeSearchIndex.js';
 import { buildDeterministicPagePayload, type DeterministicPageBuildInput } from './DeterministicPageBuilder.js';
 import { KnowledgeGraph } from './graph/KnowledgeGraph.js';
 import { AnalyzerRegistry, createDefaultAnalyzerRegistry, type DeterministicAnalyzer } from './analyzers/index.js';
@@ -136,6 +137,7 @@ export interface KnowledgeWorkerDependencies {
   };
   analyzers?: Pick<AnalyzerRegistry, 'require'>;
   extractionStore?: Pick<KnowledgeExtractionStore, 'save'>;
+  searchIndex?: Pick<KnowledgeSearchIndex, 'replaceForSourceVersion'>;
   graphMaterializer?: Pick<KnowledgeGraphMaterializer, 'materialize'>;
   generator?: Pick<KnowledgeGeneratorService, 'runKnowledgeGeneration'>;
   pageBuilder?: (input: DeterministicPageBuildInput) => KnowledgeGenerationPayload;
@@ -335,6 +337,7 @@ export class KnowledgeWorker {
   private readonly sourceLoader: KnowledgeSourceLoader;
   private readonly analyzers: Pick<AnalyzerRegistry, 'require'>;
   private readonly extractionStore: Pick<KnowledgeExtractionStore, 'save'>;
+  private readonly searchIndex: Pick<KnowledgeSearchIndex, 'replaceForSourceVersion'>;
   private readonly graphMaterializer: Pick<KnowledgeGraphMaterializer, 'materialize'>;
   private readonly generator: Pick<KnowledgeGeneratorService, 'runKnowledgeGeneration'>;
   private readonly pageBuilder: (input: DeterministicPageBuildInput) => KnowledgeGenerationPayload;
@@ -363,6 +366,7 @@ export class KnowledgeWorker {
       };
     this.analyzers = dependencies.analyzers ?? createDefaultAnalyzerRegistry();
     this.extractionStore = dependencies.extractionStore ?? new KnowledgeExtractionStore(db);
+    this.searchIndex = dependencies.searchIndex ?? new KnowledgeSearchIndex(db, { now: this.now });
     this.graphMaterializer =
       dependencies.graphMaterializer ?? new KnowledgeGraphMaterializer(new KnowledgeGraph(db));
     this.generator =
@@ -717,7 +721,21 @@ export class KnowledgeWorker {
 
   private persistExtraction(projectId: string, extraction: DeterministicExtraction) {
     try {
-      return this.extractionStore.save({ projectId, extraction, extractorKind: 'deterministic', completedAt: this.now() });
+      return this.db.transaction(() => {
+        const saved = this.extractionStore.save({
+          projectId,
+          extraction,
+          extractorKind: 'deterministic',
+          completedAt: this.now(),
+        });
+        this.searchIndex.replaceForSourceVersion({
+          projectId,
+          sourceVersionId: extraction.sourceVersionId,
+          coverage: 'extraction',
+          extractionId: saved.id,
+        });
+        return saved;
+      })();
     } catch (error) {
       throw new KnowledgeWorkerStageError('extraction_persist_failed', asErrorMessage(error), { cause: error });
     }

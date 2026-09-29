@@ -13,6 +13,7 @@ import { KnowledgePageStore } from '../../src/knowledge/KnowledgePageStore.js';
 import { KnowledgeQueue } from '../../src/knowledge/KnowledgeQueue.js';
 import { createKnowledgeReview, listKnowledgeReviews } from '../../src/knowledge/KnowledgeReview.js';
 import { searchKnowledge } from '../../src/knowledge/KnowledgeSearch.js';
+import { KnowledgeSearchIndex } from '../../src/knowledge/KnowledgeSearchIndex.js';
 import { KnowledgeSourceStore } from '../../src/knowledge/KnowledgeSourceStore.js';
 import { KnowledgeWorker, type KnowledgeEnrichmentService } from '../../src/knowledge/KnowledgeWorker.js';
 import { KnowledgeGraph } from '../../src/knowledge/graph/KnowledgeGraph.js';
@@ -220,6 +221,62 @@ describe('KnowledgeWorker', () => {
       status: 'failed',
       failureCode: 'unsupported_source',
     });
+  });
+
+  it('materializes the search index in the same transaction as extraction persistence', async () => {
+    const python = registerSource(PROJECT_A, 'src/indexed.py', 'class Indexed:\n    def greet(self):\n        return 1\n');
+    queue.enqueue({
+      projectId: PROJECT_A,
+      jobKind: 'analyze',
+      sourceVersionId: python.sourceVersionId,
+      payload: { sourceVersionId: python.sourceVersionId },
+    });
+
+    const worker = new KnowledgeWorker(db, { workerId: 'worker-index', now: () => CREATED_AT });
+    await worker.runOnce(PROJECT_A);
+
+    const extraction = db.prepare(
+      'SELECT id FROM knowledge_extractions WHERE project_id = ? AND source_version_id = ?',
+    ).get(PROJECT_A, python.sourceVersionId) as { id: string };
+    expect(
+      db.prepare(
+        'SELECT status, coverage, extraction_id AS extractionId, field_count AS fieldCount FROM knowledge_search_indexes WHERE project_id = ? AND source_version_id = ?',
+      ).get(PROJECT_A, python.sourceVersionId),
+    ).toMatchObject({ status: 'active', coverage: 'extraction', extractionId: extraction.id, fieldCount: expect.any(Number) });
+    expect(new KnowledgeSearchIndex(db).getStatus(PROJECT_A)).toMatchObject({ indexedCount: 1, unindexedCount: 0 });
+    expect(searchKnowledge('greet', { db, projectId: PROJECT_A, mode: 'sources' })[0]).toMatchObject({
+      title: 'src/indexed.py',
+      metadata: expect.objectContaining({ extractionId: extraction.id }),
+    });
+  });
+
+  it('rolls back extraction persistence and fails the job when the search index write fails', async () => {
+    const python = registerSource(PROJECT_A, 'src/rollback.py', 'print("rollback")\n');
+    const job = queue.enqueue({
+      projectId: PROJECT_A,
+      jobKind: 'analyze',
+      sourceVersionId: python.sourceVersionId,
+      payload: { sourceVersionId: python.sourceVersionId },
+    });
+    const worker = new KnowledgeWorker(
+      db,
+      { workerId: 'worker-index-fail', now: () => CREATED_AT },
+      {
+        searchIndex: {
+          replaceForSourceVersion() {
+            throw new Error('index write failed');
+          },
+        },
+      },
+    );
+
+    const result = await worker.runOnce(PROJECT_A);
+
+    expect(result).toMatchObject({ claimed: 1, completed: 0, failed: 1 });
+    expect(queue.get(job.id)).toMatchObject({ status: 'failed', failureCode: 'extraction_persist_failed' });
+    expect(db.prepare('SELECT COUNT(*) AS count FROM knowledge_extractions WHERE project_id = ?').get(PROJECT_A)).toEqual({ count: 0 });
+    expect(db.prepare('SELECT COUNT(*) AS count FROM knowledge_source_spans WHERE project_id = ?').get(PROJECT_A)).toEqual({ count: 0 });
+    expect(db.prepare('SELECT COUNT(*) AS count FROM knowledge_search_indexes WHERE project_id = ?').get(PROJECT_A)).toEqual({ count: 0 });
   });
 
   it('fails permanently when immutable source content no longer matches its recorded hash', async () => {

@@ -1419,8 +1419,26 @@ See [[graph|the graph]].
     });
 
     describe('replaceExisting', () => {
+      function insertDerivedIndexRow(db: ReturnType<typeof openDatabase>, projectId: string) {
+        db.prepare(
+          `INSERT INTO knowledge_sources
+           (id, project_id, source_kind, source_path, source_url, title, current_hash, status, created_at, updated_at)
+           VALUES ('old_source', ?, 'file', 'docs/old.md', NULL, 'Old', 'hash_old', 'active', '2026-01-01', '2026-01-01')`,
+        ).run(projectId);
+        db.prepare(
+          `INSERT INTO knowledge_source_versions
+           (id, project_id, source_id, version_number, content_hash, content_path, byte_length, mime_type, created_at)
+           VALUES ('old_version', ?, 'old_source', 1, 'hash_old', 'sources/old.md', 1, 'text/markdown', '2026-01-01')`,
+        ).run(projectId);
+        db.prepare(
+          `INSERT INTO knowledge_search_indexes
+           (id, project_id, source_version_id, index_version, status, coverage, extraction_id, field_count, created_at, updated_at)
+           VALUES ('idx_1', ?, 'old_version', 1, 'active', 'metadata_only', NULL, 0, '2026-01-01', '2026-01-01')`,
+        ).run(projectId);
+      }
+
       function createHostTables(db: ReturnType<typeof openDatabase>) {
-        for (const table of ['knowledge_search_indexes', 'knowledge_source_freshness']) {
+        for (const table of ['knowledge_source_freshness']) {
           db.exec(`CREATE TABLE ${table} (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, payload TEXT NOT NULL)`);
         }
         db.exec(
@@ -1472,7 +1490,7 @@ See [[graph|the graph]].
         insertSetting(target, projectId, 'portable.theme', 'stale-local');
         insertSetting(target, projectId, 'portable.local_only', 'stale-local');
         createHostTables(target);
-        target.prepare('INSERT INTO knowledge_search_indexes VALUES (?, ?, ?)').run('idx_1', projectId, 'derived');
+        insertDerivedIndexRow(target, projectId);
         target.prepare('INSERT INTO knowledge_source_freshness VALUES (?, ?, ?)').run('fresh_1', projectId, 'host');
         target.prepare('INSERT INTO knowledge_source_freshness VALUES (?, ?, ?)').run('fresh_other', 'project_unrelated', 'host');
         target
@@ -1558,7 +1576,7 @@ See [[graph|the graph]].
         new KnowledgeProjectStore(target).create({ id: projectId as never, workspaceRoot: imported.workspaceRoot, name: 'Old target' });
         insertSetting(target, projectId, 'host.worker.concurrency', '3');
         createHostTables(target);
-        target.prepare('INSERT INTO knowledge_search_indexes VALUES (?, ?, ?)').run('idx_1', projectId, 'derived');
+        insertDerivedIndexRow(target, projectId);
 
         expect(() => importKnowledgeProject(target, tampered, imported)).toThrow(/required feature/i);
         expect(target.prepare('SELECT name FROM knowledge_projects WHERE id = ?').get(projectId)).toEqual({ name: 'Old target' });
