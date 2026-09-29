@@ -36,6 +36,11 @@ export interface KnowledgeAccuracySearchResult {
   citations: ReadonlyArray<{ span: unknown }>;
 }
 
+interface ProjectedKnowledgeAccuracyResult {
+  title: string;
+  hasSpanCitation: boolean;
+}
+
 interface GraphEvidenceRow {
   node_type: string;
   edge_type: string;
@@ -130,6 +135,15 @@ function hasNonNullSpan(result: KnowledgeAccuracySearchResult): boolean {
   return result.citations.some((citation) => citation.span !== null);
 }
 
+function projectKnowledgeAccuracyResults(
+  results: readonly KnowledgeAccuracySearchResult[],
+): ProjectedKnowledgeAccuracyResult[] {
+  return results.map((result) => ({
+    title: result.title,
+    hasSpanCitation: hasNonNullSpan(result),
+  }));
+}
+
 export function hasKnowledgeTypedGraphEvidence(
   db: Database.Database,
   options: {
@@ -183,13 +197,17 @@ export function scoreKnowledgeAccuracy(
   const failures: KnowledgeAccuracyFailure[] = [];
 
   for (const question of corpus.questions) {
-    const results = [...search(question.prompt)];
+    if (!question.required) {
+      continue;
+    }
+
+    const results = projectKnowledgeAccuracyResults(search(question.prompt));
     const returnedPaths = results.map((result) => result.title);
     const expectedPaths = [...question.expectedPaths];
 
     const top1 = returnedPaths[0] !== undefined && expectedPaths.includes(returnedPaths[0]);
     const top3 = returnedPaths.slice(0, 3).some((path) => expectedPaths.includes(path));
-    const spanCitation = results.some((result) => expectedPaths.includes(result.title) && hasNonNullSpan(result));
+    const spanCitation = results.some((result) => expectedPaths.includes(result.title) && result.hasSpanCitation);
 
     let typedGraphEvidence = false;
     for (const path of expectedPaths) {
@@ -199,28 +217,26 @@ export function scoreKnowledgeAccuracy(
       }
     }
 
-    if (question.required) {
-      if (top1) top1PathHits += 1;
-      if (top3) top3PathHits += 1;
-      if (spanCitation) spanCitationHits += 1;
-      if (typedGraphEvidence) typedGraphEvidenceHits += 1;
+    if (top1) top1PathHits += 1;
+    if (top3) top3PathHits += 1;
+    if (spanCitation) spanCitationHits += 1;
+    if (typedGraphEvidence) typedGraphEvidenceHits += 1;
 
-      const missing = [
-        top1 ? null : 'top1',
-        top3 ? null : 'top3',
-        spanCitation ? null : 'spanCitation',
-        typedGraphEvidence ? null : 'typedGraphEvidence',
-      ].filter((value): value is string => value !== null);
+    const missing = [
+      top1 ? null : 'top1',
+      top3 ? null : 'top3',
+      spanCitation ? null : 'spanCitation',
+      typedGraphEvidence ? null : 'typedGraphEvidence',
+    ].filter((value): value is string => value !== null);
 
-      if (missing.length > 0) {
-        failures.push({
-          id: question.id,
-          prompt: question.prompt,
-          expectedPaths,
-          returnedPaths,
-          missing,
-        });
-      }
+    if (missing.length > 0) {
+      failures.push({
+        id: question.id,
+        prompt: question.prompt,
+        expectedPaths,
+        returnedPaths,
+        missing,
+      });
     }
   }
 

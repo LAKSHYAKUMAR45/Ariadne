@@ -107,6 +107,7 @@ describe('KnowledgeWorker synthetic NAAS-shaped acceptance', () => {
     expect(report.spanCitationHits).toBe(10);
     expect(report.typedGraphEvidenceHits).toBeGreaterThanOrEqual(8);
     expect(report.failures).toEqual([]);
+    expect(JSON.stringify(report)).not.toContain('config.task_manager_defaults');
 
     const remainingJobs = db.prepare(
       `SELECT status, COUNT(*) AS count

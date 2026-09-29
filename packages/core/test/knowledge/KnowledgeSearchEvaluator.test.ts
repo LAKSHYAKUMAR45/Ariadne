@@ -110,6 +110,58 @@ describe('scoreKnowledgeAccuracy', () => {
     });
   });
 
+  it('does not expose source contents in failures', () => {
+    const report = scoreKnowledgeAccuracy(
+      corpus,
+      () => [{
+        title: 'secret.py',
+        citations: [{ span: null }],
+        snippet: 'must not be serialized',
+      }],
+      () => false,
+    );
+
+    expect(JSON.stringify(report)).not.toContain('must not be serialized');
+  });
+
+  it('does not invoke graph evidence for non-required questions', () => {
+    let calls = 0;
+
+    scoreKnowledgeAccuracy(
+      {
+        ...corpus,
+        questions: [
+          { ...corpus.questions[0], required: false },
+          { ...corpus.questions[1], required: false },
+        ],
+      },
+      () => [],
+      () => {
+        calls += 1;
+        return true;
+      },
+    );
+
+    expect(calls).toBe(0);
+  });
+
+  it('serializes identical inputs deterministically across repeated runs', () => {
+    const search = () =>
+      [
+        {
+          title: 'b.py',
+          citations: [{ span: { startOffset: 3 } }],
+          snippet: 'should stay out of reports',
+        },
+        { title: 'a.py', citations: [{ span: null }] },
+      ] satisfies readonly KnowledgeAccuracySearchResult[];
+
+    const first = JSON.stringify(scoreKnowledgeAccuracy(corpus, search, () => false));
+    const second = JSON.stringify(scoreKnowledgeAccuracy(corpus, search, () => false));
+
+    expect(first).toBe(second);
+  });
+
   it('counts top-three hits from later acceptable paths', () => {
     const report = scoreKnowledgeAccuracy(
       {

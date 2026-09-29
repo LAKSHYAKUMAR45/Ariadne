@@ -71,12 +71,49 @@ successful deterministic run.
 
 The core test suite includes an offline regression over original, minimal
 Python fixtures shaped around task-manager patterns. It runs the real worker,
-then reports `questionCount`, `top1PathHits`, `top3PathHits`,
-`spanCitationHits`, and `typedGraphEvidenceHits`. The acceptance requires ten
-questions, at least eight top-three path hits, ten span citations, at least
-eight typed graph evidence hits, and no jobs left queued or running.
+then scores a stable `naas-v1` fixture corpus.
 
-Run it with:
+Run the evaluator and synthetic worker acceptance with:
+
+```bash
+pnpm --filter @ariadne-dev/core exec vitest run \
+  test/knowledge/KnowledgeSearchEvaluator.test.ts \
+  test/knowledge/KnowledgeWorker.naas.test.ts
+```
+
+The synthetic worker report always uses this JSON shape:
+
+- `corpusVersion`
+- `questionCount`
+- `top1PathHits`
+- `top3PathHits`
+- `spanCitationHits`
+- `typedGraphEvidenceHits`
+- `failures[]`, where each failure contains only:
+  - `id`
+  - `prompt`
+  - `expectedPaths`
+  - `returnedPaths`
+  - `missing`
+
+Evidence is intentionally bounded to paths and boolean hit metrics. The report
+must not serialize snippets, source contents, provider responses, arbitrary
+metadata, or other result payloads, which makes it safe to write outside the
+repository for local scoring artifacts.
+
+The synthetic acceptance requires:
+
+- `questionCount === 10`
+- `top3PathHits >= 8`
+- `spanCitationHits === 10`
+- `typedGraphEvidenceHits >= 8`
+- no jobs left queued or running
+
+The real NAAS scorer remains a separate read-only local validation step. It is
+not part of CI, does not call providers, and should only read existing local
+state when comparing deterministic search output against external evidence.
+
+Run the synthetic worker acceptance alone with:
 
 ```bash
 pnpm --filter @ariadne-dev/core exec vitest run test/knowledge/KnowledgeWorker.naas.test.ts
