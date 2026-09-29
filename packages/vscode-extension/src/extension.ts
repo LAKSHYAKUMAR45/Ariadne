@@ -218,8 +218,9 @@ export function activate(context: vscode.ExtensionContext): void {
           workerId: `vscode-${process.pid}`,
         }).runOnce(project.id);
         refreshAll();
+        const warningSummary = result.warnings.length > 0 ? `, ${result.warnings.length} warning(s)` : '';
         void vscode.window.showInformationMessage(
-          `Ariadne knowledge worker: completed ${result.completed}, failed ${result.failed}, cancelled ${result.cancelled}.`,
+          `Ariadne knowledge worker: completed ${result.completed}, failed ${result.failed}, cancelled ${result.cancelled}${warningSummary}.`,
         );
       } catch (err) {
         const message = logError('ariadne.knowledgeWorkerRunOnce', err);

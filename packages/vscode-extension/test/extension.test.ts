@@ -3,7 +3,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import { execFileSync } from 'node:child_process';
-import { KnowledgeProjectStore, KnowledgeQueue, openDatabase } from '@ariadne-dev/core';
+import { KnowledgeProjectStore, KnowledgeQueue, KnowledgeWorker, openDatabase } from '@ariadne-dev/core';
 
 vi.mock('node:child_process', () => ({ execFileSync: vi.fn() }));
 
@@ -319,6 +319,39 @@ describe('chat participant error handling', () => {
     expect(vi.mocked(vscode.window.showInformationMessage)).toHaveBeenCalledWith(
       expect.stringMatching(/completed 0.*failed 1/i),
     );
+  });
+
+  it('reports run-once warning counts without exposing warning diagnostics', async () => {
+    const db = openDatabase(path.join(tmpDir, '.ariadne', 'state.db'));
+    const project = new KnowledgeProjectStore(db).create({
+      name: 'Workspace knowledge',
+      workspaceRoot: tmpDir,
+    });
+    db.close();
+    warningChoice = 'Run once';
+    const runOnce = vi.spyOn(KnowledgeWorker.prototype, 'runOnce').mockResolvedValue({
+      projectId: project.id,
+      claimed: 1,
+      completed: 1,
+      failed: 0,
+      cancelled: 0,
+      unsupportedCoverageCount: 0,
+      warnings: [{ jobId: 'job-1', code: 'provider_fallback', message: 'secret=sk-abcdefghijklmnopqrstuvwxyz' }],
+    });
+
+    try {
+      await registeredCommands.find((entry) => entry.command === 'ariadne.knowledgeWorkerRunOnce')?.handler();
+
+      const vscode = await import('vscode');
+      expect(vi.mocked(vscode.window.showInformationMessage)).toHaveBeenCalledWith(
+        expect.stringMatching(/completed 1.*1 warning/i),
+      );
+      expect(vi.mocked(vscode.window.showInformationMessage).mock.calls.flat().join('\n')).not.toContain(
+        'sk-abcdefghijklmnopqrstuvwxyz',
+      );
+    } finally {
+      runOnce.mockRestore();
+    }
   });
 
   it('contributes the run-once command to the command palette', () => {

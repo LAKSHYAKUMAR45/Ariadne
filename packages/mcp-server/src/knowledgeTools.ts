@@ -22,6 +22,7 @@ import {
   resolveKnowledgeReview,
   searchKnowledge,
   writeKnowledgeManifest,
+  getKnowledgeSurfaceStatus,
   redact,
   type KnowledgePageType,
   type KnowledgeReviewAction,
@@ -114,6 +115,22 @@ function workerSummary(db: ReturnType<typeof openDatabase>, projectId: string): 
   activeWorkerCount: number;
   deterministicCompleted: number;
   enrichedCompleted: number;
+  coverage: {
+    supported: number;
+    partial: number;
+    unsupported: number;
+    failed: number;
+    legacyUnknown: number;
+    deferredRelationships: number;
+  };
+  graph: { nodeCount: number; edgeCount: number };
+  synthesis: {
+    summaryCount: number;
+    deterministic: number;
+    providerRefined: number;
+    fallbackWarning: number;
+  };
+  analytics: { enabled: boolean };
 } {
   const queueStatus = new KnowledgeQueue(db).getQueueStatus(projectId);
   const row = db.prepare(
@@ -150,6 +167,7 @@ function workerSummary(db: ReturnType<typeof openDatabase>, projectId: string): 
     activeWorkerCount: row.active_worker_count ?? 0,
     deterministicCompleted: row.deterministic_completed ?? 0,
     enrichedCompleted: row.enriched_completed ?? 0,
+    ...getKnowledgeSurfaceStatus(db, projectId),
   };
 }
 

@@ -70,7 +70,9 @@ profile metadata. Provider setup UX and durable credential management remain
 
 ## Answer synthesis and semantic summaries
 
-Core exposes two opt-in, deterministic-first services (no CLI/MCP surface yet):
+Core exposes two deterministic-first services. The summary-building operations
+remain core-only; CLI/MCP do not expose a command that creates or refines
+summaries:
 
 - `KnowledgeAnswerSynthesizer` turns search results into cross-file answers with
   sections (Answer, Supporting evidence, Open questions / ambiguity), per-claim
@@ -90,6 +92,43 @@ strictly validated and every claim or bullet must cite known evidence. Any
 failure (`no_profile`, `profile_disabled`, `capability_missing`, `missing_credentials`, `timeout`,
 `unsafe_endpoint`, `provider_error`, `invalid_response`) falls back to the
 deterministic result with exactly one bounded warning.
+
+## Cross-surface status and search confidence
+
+The existing CLI worker status command and MCP `knowledge_worker_status` tool
+include additive, project-scoped operational summaries:
+
+- **Coverage** reports supported, partial, unsupported, failed, legacy-unknown,
+  and deferred-relationship counts. It does not return analyzer diagnostics or
+  source text.
+- **Graph** reports node and edge counts.
+- **Synthesis** reports summary counts by deterministic, provider-refined, and
+  fallback-warning strategy.
+- **Analytics** reports only whether opt-in analytics is enabled; query,
+  feedback, and regression rows are not exposed in status.
+
+CLI search JSON retains the core result fields, including confidence,
+ambiguity details, and citations; human output prints confidence when it is
+available and the citation references. MCP search keeps its existing
+`{ data, citations }` result shape and includes confidence/citations in the
+bounded result context. The dashboard search page validates and renders the
+optional confidence/ambiguity fields alongside its existing citation list.
+
+The VS Code extension can request knowledge search/overview and run the worker
+once. Its search panel displays confidence/ambiguity with citations, and its
+run-once notification shows a warning count without exposing diagnostic text.
+The panel bridge has no worker-status or operational-summary response contract.
+The dashboard project overview likewise receives only the existing project
+and worker counts from its API; it does not expose coverage, graph, synthesis,
+or analytics status. Those surfaces are intentionally unchanged until their
+backing API contracts carry these fields.
+
+Archive import returns a `derived_data_rebuild_required` warning and names the
+local search-index and semantic-model rebuild targets. The CLI displays these
+warnings in human mode as well as JSON. Worker execution and semantic-summary
+generation retain their deterministic path when optional providers are
+unavailable; provider assistance does not become a prerequisite for local
+processing.
 
 ## CLI workflow
 

@@ -307,14 +307,22 @@ describe('ariadne knowledge commands', () => {
         await run('search', projectId, 'greet', '--mode', 'sources', '--json');
         const results = lastJson().data as Array<{
           snippet: string;
+          searchConfidence?: string;
           citations: Array<{ span?: { startLine: number; endLine: number } }>;
         }>;
         expect(results.length).toBeGreaterThan(0);
         expect(results[0]?.snippet).toContain('greet');
+        expect(results[0]?.searchConfidence).toBe('clear');
         expect(results[0]?.citations[0]?.span).toMatchObject({
           startLine: 2,
           endLine: 2,
         });
+
+        clearConsole();
+        resetCommanderOptionState(program);
+        await run('search', projectId, 'greet', '--mode', 'sources');
+        expect(allConsoleText()).toContain('Confidence: clear');
+        expect(allConsoleText()).toContain('citation:');
 
         clearConsole();
         await run('worker', 'status', projectId, '--json');
@@ -344,6 +352,23 @@ describe('ariadne knowledge commands', () => {
               analyzerVersion: expect.any(String),
             }),
           ],
+          coverage: {
+            supported: 1,
+            partial: 0,
+            unsupported: 0,
+            failed: 0,
+          },
+          graph: {
+            nodeCount: expect.any(Number),
+            edgeCount: expect.any(Number),
+          },
+          synthesis: {
+            summaryCount: expect.any(Number),
+            deterministic: expect.any(Number),
+            providerRefined: expect.any(Number),
+            fallbackWarning: expect.any(Number),
+          },
+          analytics: { enabled: false },
         });
 
         clearConsole();
@@ -676,6 +701,17 @@ describe('ariadne knowledge commands', () => {
         const warnings = (status.data as { warnings: Array<{ code: string; message: string }> }).warnings;
         expect(warnings.length).toBeLessThanOrEqual(8);
         expect(JSON.stringify(warnings)).not.toContain('sk-live-secret-value');
+      });
+
+      it('redacts secret-shaped values from JSON diagnostics', async () => {
+        clearConsole();
+        await run('worker', 'status', 'sk-proj-abcdefghijklmnopqrstuvwxyz', '--json');
+
+        expect(lastJson()).toMatchObject({
+          ok: false,
+          error: { message: expect.stringMatching(/\*{3}|\[REDACTED\]/) },
+        });
+        expect(JSON.stringify(lastJson())).not.toContain('sk-proj-abcdefghijklmnopqrstuvwxyz');
       });
 
       it('degrades gracefully when a completed job result row is malformed', async () => {
@@ -1178,6 +1214,15 @@ describe('ariadne knowledge commands', () => {
       const imported = lastJson();
       expect(imported.ok).toBe(true);
       expect((imported.data as { projectId: string }).projectId).toBe(projectId);
+      expect((imported.data as { warnings: Array<{ code: string }> }).warnings).toEqual(
+        expect.arrayContaining([expect.objectContaining({ code: 'derived_data_rebuild_required' })]),
+      );
+
+      clearConsole();
+      resetCommanderOptionState(program);
+      await run('import', projectId, outputDir, '--replace');
+      expect(allConsoleText()).toContain('derived_data_rebuild_required');
+      expect(allConsoleText()).toContain('rebuild the search index');
 
       await run('project', 'show', projectId, '--json');
       expect((lastJson().data as { name: string }).name).toBe('Exportable');

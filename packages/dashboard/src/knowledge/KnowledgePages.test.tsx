@@ -149,6 +149,9 @@ describe('knowledge dashboard pages', () => {
             title: 'Queue recovery',
             snippet: 'Retry cancelled ingestion jobs after fixing the source.',
             score: 7,
+            searchConfidence: 'ambiguous',
+            ambiguityReason: 'near_tie',
+            ambiguityAlternatives: 1,
             citations: [{
               pageId: 'page-1',
               sourceId: 'source-1',
@@ -171,10 +174,45 @@ describe('knowledge dashboard pages', () => {
 
     expect(await screen.findByText('Queue recovery')).toBeVisible();
     expect(screen.getByText('docs/queue.md - Recovery')).toBeVisible();
+    expect(screen.getByText('Confidence: ambiguous (near tie)')).toBeVisible();
+    expect(screen.getByText('1 competing alternative')).toBeVisible();
     expect(fetchMock).toHaveBeenCalledWith(
       '/api/v1/admin/knowledge/projects/project-1/search?query=queue&mode=hybrid',
       expect.anything(),
     );
+  });
+
+  it('rejects contradictory search confidence metadata from the API', async () => {
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === '/api/v1/admin/session') return Promise.resolve(json(session));
+      if (url === '/api/v1/admin/knowledge/projects') return Promise.resolve(json(projects));
+      if (url === '/api/v1/admin/knowledge/projects/project-1/search?query=queue&mode=hybrid') {
+        return Promise.resolve(json({
+          projectId: 'project-1',
+          query: 'queue',
+          results: [{
+            id: 'page-1',
+            kind: 'page',
+            title: 'Queue recovery',
+            snippet: 'Retry cancelled ingestion jobs after fixing the source.',
+            score: 7,
+            searchConfidence: 'clear',
+            ambiguityReason: 'near_tie',
+            ambiguityAlternatives: 1,
+            citations: [],
+          }],
+        }));
+      }
+      return Promise.resolve(new Response(null, { status: 404 }));
+    }));
+
+    const user = userEvent.setup();
+    renderWithProvider(<KnowledgeSearchPage />);
+    await user.type(await screen.findByLabelText('Search knowledge'), 'queue');
+    await user.click(screen.getByRole('button', { name: 'Search' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(/invalid response/i);
   });
 
   it('clears a previous project search when the project boundary changes', async () => {

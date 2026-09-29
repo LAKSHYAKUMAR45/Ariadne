@@ -609,6 +609,28 @@ See [[graph|the graph]].
     expect(() => importKnowledgeProject(database(), archiveWithMissingColumn, importOptions())).toThrow(/missing required column/i);
   });
 
+  it('does not echo untrusted unknown archive column names in validation errors', () => {
+    const source = database();
+    const { projectId } = seed(source);
+    const archive = exportKnowledgeProject(source, { projectId });
+    const pageRows = tableRows<Record<string, unknown>>(archive, 'knowledge_pages');
+    const attackerControlledKey = 'sk-proj-abcdefghijklmnopqrstuvwxyz';
+    const tampered = rewriteTableRows(archive, 'knowledge_pages', [
+      { ...pageRows[0], [attackerControlledKey]: 'untrusted value' },
+    ]);
+
+    let failure: unknown;
+    try {
+      importKnowledgeProject(database(), tampered, importOptions());
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(failure).toBeInstanceOf(Error);
+    expect((failure as Error).message).toContain('contains an unknown column.');
+    expect((failure as Error).message).not.toContain(attackerControlledKey);
+  });
+
   it('rejects incorrect column types before insertion', () => {
     const source = database();
     const { projectId } = seed(source);

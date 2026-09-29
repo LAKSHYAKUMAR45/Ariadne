@@ -621,7 +621,7 @@ function parseTableRows(
     const keys = Object.keys(row);
     for (const key of keys) {
       if (!allowed.has(key)) {
-        throw importRejected(`table ${schema.name} row ${rowNumber} contains unknown column ${key}.`);
+        throw importRejected(`table ${schema.name} row ${rowNumber} contains an unknown column.`);
       }
       assertArchiveScalar(row[key], `table ${schema.name} row ${rowNumber} column ${key}`);
     }

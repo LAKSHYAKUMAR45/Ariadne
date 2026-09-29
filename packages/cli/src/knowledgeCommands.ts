@@ -35,6 +35,8 @@ import {
   resolveKnowledgeWorkerConcurrency,
   validateKnowledgeWorkerConcurrency,
   KnowledgeProviderProfileStore,
+  getKnowledgeSurfaceStatus,
+  redact,
   OpenAICompatibleProvider,
   OpenAICompatibleEnrichmentService,
   normalizeOpenAICompatibleEndpoint,
@@ -113,6 +115,22 @@ interface CliWorkerStatus {
     enabled: number;
   };
   warnings: Array<{ code: string; message: string }>;
+  coverage: {
+    supported: number;
+    partial: number;
+    unsupported: number;
+    failed: number;
+    legacyUnknown: number;
+    deferredRelationships: number;
+  };
+  graph: { nodeCount: number; edgeCount: number };
+  synthesis: {
+    summaryCount: number;
+    deterministic: number;
+    providerRefined: number;
+    fallbackWarning: number;
+  };
+  analytics: { enabled: boolean };
 }
 
 const DEFAULT_PROVIDER_TIMEOUT_MS = 10_000;
@@ -197,7 +215,7 @@ async function runKnowledgeAction<T>(
       console.log(JSON.stringify(result, null, 2));
     }
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
+    const message = redact(err instanceof Error ? err.message : String(err));
     const capability =
       err instanceof ResearchProviderRequiredError || err instanceof KnowledgeProviderRequiredError
         ? (err as { capability?: string }).capability ?? 'research'
@@ -520,6 +538,7 @@ export function buildCliWorkerStatus(db: KnowledgeDb, projectId: string): CliWor
       enabled: listedProviders.profiles.filter((profile) => profile.enabled).length,
     },
     warnings: [...statusWarnings, ...listedProviders.warnings].slice(0, MAX_STATUS_WARNINGS),
+    ...getKnowledgeSurfaceStatus(db, scopedProjectId),
   };
 }
 
@@ -989,6 +1008,10 @@ export function registerKnowledgeCommands(program: Command): void {
               `Workers: ${status.activeWorkers.workerCount} active.`,
               status.concurrency ? `Concurrency: ${status.concurrency.value} (${status.concurrency.source}).` : 'Concurrency: invalid stored setting.',
               `Completions: ${status.completions.deterministic} deterministic, ${status.completions.enriched} enriched, ${status.completions.unknown} unknown.`,
+              `Coverage: ${status.coverage.supported} supported, ${status.coverage.partial} partial, ${status.coverage.unsupported} unsupported, ${status.coverage.failed} failed, ${status.coverage.legacyUnknown} legacy unknown.`,
+              `Graph: ${status.graph.nodeCount} nodes, ${status.graph.edgeCount} edges.`,
+              `Synthesis: ${status.synthesis.summaryCount} summaries (${status.synthesis.deterministic} deterministic, ${status.synthesis.providerRefined} provider-refined, ${status.synthesis.fallbackWarning} fallback warnings).`,
+              `Search analytics: ${status.analytics.enabled ? 'enabled' : 'disabled'}.`,
             ].join(' '),
           );
           if (status.queue.oldestQueuedRequestedAt) {
@@ -1183,6 +1206,10 @@ export function registerKnowledgeCommands(program: Command): void {
         }
         for (const result of results) {
           console.log(`[${result.kind}] ${result.title}  (score ${result.score.toFixed(2)})`);
+          if (result.searchConfidence) {
+            const reason = result.ambiguityReason ? ` (${result.ambiguityReason.replaceAll('_', ' ')})` : '';
+            console.log(`  Confidence: ${result.searchConfidence}${reason}`);
+          }
           console.log(`  ${result.snippet}`);
           for (const citation of result.citations) {
             console.log(`  citation: ${citation.pageId ?? citation.sourceId ?? ''}${citation.path ? ` (${citation.path})` : ''}`);
@@ -1564,6 +1591,11 @@ export function registerKnowledgeCommands(program: Command): void {
           }
           return importKnowledgeProject(db, { manifest, files }, { replaceExisting: opts.replace, expectedProjectId: projectId, workspaceRoot });
         }),
-      (result) => console.log(`Imported project ${result.projectId}: ${result.tables} table(s), ${result.rows} row(s), ${result.files.length} file(s).`));
+      (result) => {
+        console.log(`Imported project ${result.projectId}: ${result.tables} table(s), ${result.rows} row(s), ${result.files.length} file(s).`);
+        for (const warning of result.warnings) {
+          console.log(`Warning: ${warning.code} ${redact(warning.message)}`);
+        }
+      });
     });
 }

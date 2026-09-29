@@ -150,6 +150,15 @@ export function KnowledgeSearchPage() {
                   </div>
                   <span className="member-static">Score {result.score.toFixed(1)}</span>
                 </div>
+                {result.searchConfidence ? (
+                  <p>
+                    Confidence: {result.searchConfidence}
+                    {result.ambiguityReason ? ` (${result.ambiguityReason.replaceAll('_', ' ')})` : ''}
+                  </p>
+                ) : null}
+                {result.searchConfidence === 'ambiguous' && result.ambiguityAlternatives !== undefined ? (
+                  <p>{result.ambiguityAlternatives} competing alternative{result.ambiguityAlternatives === 1 ? '' : 's'}</p>
+                ) : null}
                 <p>{result.snippet}</p>
                 <div className="citation-list" aria-label={`Citations for ${result.title}`}>
                   {result.citations.length === 0 ? <span className="member-static">No source citation available.</span> : null}

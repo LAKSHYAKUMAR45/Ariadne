@@ -6,12 +6,25 @@ import type { AriadneBridge } from '../bridge';
 
 describe('KnowledgeSearchPanel', () => {
   it('searches and renders cited results', async () => {
-    const request = vi.fn(async () => ({ results: [{ id: 'p1', title: 'Auth', kind: 'page', snippet: 'Auth flow', citations: [{ id: 's1', label: 'docs/auth.md' }] }] }));
+    const request = vi.fn(async () => ({
+      results: [{
+        id: 'p1',
+        title: 'Auth',
+        kind: 'page',
+        snippet: 'Auth flow',
+        searchConfidence: 'ambiguous' as const,
+        ambiguityReason: 'near_tie' as const,
+        ambiguityAlternatives: 2,
+        citations: [{ id: 's1', label: 'docs/auth.md' }],
+      }],
+    }));
     const bridge: AriadneBridge = { request, subscribe: vi.fn(() => () => undefined) };
     render(<KnowledgeSearchPanel bridge={bridge} />);
     await userEvent.type(screen.getByLabelText('Knowledge search query'), 'auth');
     await userEvent.click(screen.getByRole('button', { name: 'Search' }));
     await waitFor(() => expect(screen.getByText('Auth')).toBeInTheDocument());
     expect(screen.getByText(/docs\/auth\.md/)).toBeInTheDocument();
+    expect(screen.getByText('Confidence: ambiguous (near tie)')).toBeInTheDocument();
+    expect(screen.getByText('2 competing alternatives')).toBeInTheDocument();
   });
 });

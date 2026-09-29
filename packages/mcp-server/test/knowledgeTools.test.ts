@@ -47,6 +47,17 @@ describe('knowledge MCP tools', () => {
           activeWorkerCount: 0,
           deterministicCompleted: 0,
           enrichedCompleted: 0,
+          coverage: {
+            supported: 0,
+            partial: 0,
+            unsupported: 0,
+            failed: 0,
+            legacyUnknown: 0,
+            deferredRelationships: 0,
+          },
+          graph: { nodeCount: 0, edgeCount: 0 },
+          synthesis: { summaryCount: 0, deterministic: 0, providerRefined: 0, fallbackWarning: 0 },
+          analytics: { enabled: false },
         },
         citations: [{ kind: 'project', id: projectId }],
       });
@@ -162,10 +173,27 @@ describe('knowledge MCP tools', () => {
       });
       expect(pageResult.isError).toBeUndefined();
 
-      const searchResult = await state.tools.knowledge_search.handler({ projectId, query: 'SQLite', limit: 1 });
-      const search = JSON.parse(searchResult.content[0].text) as { data: { results: Array<{ title: string; citations: unknown[] }> } };
-      expect(search.data.results[0].title).toBe('SQLite');
-      expect(search.data.results[0].citations).toEqual([]);
+      const source = await state.tools.knowledge_source_register.handler({
+        projectId,
+        kind: 'file',
+        path: 'docs/sqlite.md',
+        contentHash: 'sha256:sqlite',
+        contentPath: 'sources/sqlite.md',
+        confirm: true,
+      });
+      expect(source.isError).toBeUndefined();
+      const searchResult = await state.tools.knowledge_search.handler({
+        projectId,
+        query: 'sqlite',
+        mode: 'sources',
+        limit: 1,
+      });
+      const search = JSON.parse(searchResult.content[0].text) as {
+        data: { results: Array<{ title: string; searchConfidence?: string; citations: Array<{ path: string | null }> }> };
+      };
+      expect(search.data.results[0].title).toContain('sqlite');
+      expect(search.data.results[0].searchConfidence).toBe('clear');
+      expect(search.data.results[0].citations[0]?.path).toBe('docs/sqlite.md');
 
       const pageId = JSON.parse(pageResult.content[0].text).data.pageId as string;
       const page = await state.tools.knowledge_page_get.handler({ projectId, pageId });

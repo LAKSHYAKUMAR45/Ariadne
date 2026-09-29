@@ -440,6 +440,8 @@ function isKnowledgeCitation(value: unknown): value is KnowledgeCitation {
 }
 
 function isKnowledgeSearchResult(value: unknown): value is KnowledgeSearchResult {
+  const hasAmbiguityMetadata = value !== null && typeof value === 'object' &&
+    ('ambiguityReason' in value || 'ambiguityAlternatives' in value);
   return (
     isRecord(value) &&
     isNonEmptyString(value.id) &&
@@ -447,7 +449,14 @@ function isKnowledgeSearchResult(value: unknown): value is KnowledgeSearchResult
     isNonEmptyString(value.title) &&
     isString(value.snippet) &&
     isFiniteNumber(value.score) &&
-    isArrayOf(value.citations, isKnowledgeCitation)
+    isArrayOf(value.citations, isKnowledgeCitation) &&
+    (value.searchConfidence === undefined || value.searchConfidence === 'clear' || value.searchConfidence === 'ambiguous') &&
+    (value.ambiguityReason === undefined ||
+      value.ambiguityReason === 'near_tie' ||
+      value.ambiguityReason === 'shared_role' ||
+      value.ambiguityReason === 'insufficient_intent') &&
+    (value.ambiguityAlternatives === undefined || isNonNegativeInteger(value.ambiguityAlternatives)) &&
+    (!hasAmbiguityMetadata || value.searchConfidence === 'ambiguous')
   );
 }
 

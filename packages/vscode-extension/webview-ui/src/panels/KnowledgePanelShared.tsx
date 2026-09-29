@@ -40,6 +40,9 @@ export interface KnowledgeSearchResult {
   score?: number;
   stale?: boolean;
   citations?: KnowledgeCitation[];
+  searchConfidence?: 'clear' | 'ambiguous';
+  ambiguityReason?: 'near_tie' | 'shared_role' | 'insufficient_intent';
+  ambiguityAlternatives?: number;
 }
 
 export interface KnowledgeGraph {

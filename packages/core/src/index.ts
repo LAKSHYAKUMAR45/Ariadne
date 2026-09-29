@@ -146,6 +146,8 @@ export type {
   KnowledgeAnalysisCoverageSummaryCounts,
   KnowledgeDeferredRelationshipRecord,
 } from './knowledge/KnowledgeAnalysisCoverageStore.js';
+export { getKnowledgeSurfaceStatus } from './knowledge/KnowledgeSurfaceStatus.js';
+export type { KnowledgeSurfaceStatus } from './knowledge/KnowledgeSurfaceStatus.js';
 export {
   KnowledgeGraphReporter,
   MAX_AMBIGUITY_CANDIDATES,

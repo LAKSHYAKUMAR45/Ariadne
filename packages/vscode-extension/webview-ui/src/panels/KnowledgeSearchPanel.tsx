@@ -24,6 +24,17 @@ export default function KnowledgeSearchPanel({ bridge, onOpenPage }: KnowledgeSe
         {results.map((result) => <article key={result.id} style={styles.card}>
           <button type="button" style={{ ...styles.button, border: 0, padding: 0, textAlign: 'left' }} onClick={() => onOpenPage?.(result.id)}><strong>{result.title}</strong></button>
           <span style={styles.muted}>{result.kind}{result.stale ? ' · stale' : ''}{result.score === undefined ? '' : ` · score ${result.score.toFixed(2)}`}</span>
+          {result.searchConfidence ? (
+            <span style={styles.muted}>
+              Confidence: {result.searchConfidence}
+              {result.ambiguityReason ? ` (${result.ambiguityReason.replaceAll('_', ' ')})` : ''}
+            </span>
+          ) : null}
+          {result.searchConfidence === 'ambiguous' && result.ambiguityAlternatives !== undefined ? (
+            <span style={styles.muted}>
+              {result.ambiguityAlternatives} competing alternative{result.ambiguityAlternatives === 1 ? '' : 's'}
+            </span>
+          ) : null}
           <p style={{ margin: 0 }}>{result.snippet}</p>
           {result.citations?.length ? <small style={styles.muted}>Citations: {result.citations.map((citation) => citation.label).join(', ')}</small> : null}
         </article>)}
