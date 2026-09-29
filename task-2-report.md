@@ -43,7 +43,7 @@ The task-1 corpus parser and fixture were left intact.
 
 ## Commit
 
-- Pending at report write time
+- `1754d2c` — `test(knowledge): add deterministic search scorer`
 
 ## Concerns
 
