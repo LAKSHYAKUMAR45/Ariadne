@@ -244,6 +244,8 @@ describe('searchKnowledge', () => {
 
     expect(relevant).toBeGreaterThan(noisy);
     expect(lexicalScore('design', [{ text: 'descriptive metadata', weight: 1 }])).toBe(0);
+    expect(lexicalScore('allocated routing', [{ text: 'allocate_route', weight: 1 }])).toBeGreaterThanOrEqual(2);
+    expect(lexicalScore('task-manager', [{ text: 'TaskManager', weight: 1 }])).toBeGreaterThan(0);
   });
 
   it('ignores stale pages, handles empty and Unicode queries, and tolerates missing source rows', () => {

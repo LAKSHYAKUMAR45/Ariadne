@@ -181,9 +181,19 @@ function normalize(value: string): string {
   return value.trim().toLocaleLowerCase();
 }
 
+function searchTokens(value: string): string[] {
+  const tokens = value
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2')
+    .toLocaleLowerCase()
+    .split(/[^\p{L}\p{N}]+/u)
+    .filter(Boolean);
+  return [...new Set(tokens)];
+}
+
 function terms(query: string): string[] {
   return normalize(query)
-    .split(/[^\p{L}\p{N}_-]+/u)
+    .split(/[^\p{L}\p{N}]+/u)
     .filter((term) => term && !SEARCH_STOP_WORDS.has(term))
     .slice(0, MAX_QUERY_TERMS);
 }
@@ -191,21 +201,15 @@ function terms(query: string): string[] {
 function termVariants(term: string): string[] {
   const variants = [term];
   if (term.length > 4 && term.endsWith('ies') && term.length - 3 >= 4) variants.push(`${term.slice(0, -3)}y`);
-  if (term.length > 4 && term.endsWith('ing') && term.length - 3 >= 4) variants.push(term.slice(0, -3));
+  if (term.length > 4 && term.endsWith('ing') && term.length - 3 >= 4) {
+    const stem = term.slice(0, -3);
+    variants.push(stem);
+    if (stem.endsWith('t')) variants.push(`${stem}e`);
+  }
+  if (term.length > 5 && term.endsWith('ated')) variants.push(term.slice(0, -1));
   if (term.length > 4 && term.endsWith('ed') && term.length - 2 >= 4) variants.push(term.slice(0, -2));
   if (term.length > 4 && term.endsWith('s') && term.length - 1 >= 4) variants.push(term.slice(0, -1));
   return [...new Set(variants)];
-}
-
-function countOccurrences(haystack: string, needle: string): number {
-  if (!needle) return 0;
-  let count = 0;
-  let index = haystack.indexOf(needle);
-  while (index !== -1) {
-    count += 1;
-    index = haystack.indexOf(needle, index + needle.length);
-  }
-  return count;
 }
 
 export function lexicalScore(query: string, weightedFields: Array<{ text: string | null; weight: number }>): number {
@@ -225,13 +229,19 @@ function lexicalScoreWithTermWeights(
   for (const field of weightedFields) {
     const text = normalize(field.text ?? '');
     if (!text) continue;
+    const fieldTokens = searchTokens(field.text ?? '');
     if (text.includes(phrase)) score += field.weight * 4;
+    let matchedTerms = 0;
     for (const term of queryTerms) {
       const variantScore = Math.max(
-        ...termVariants(term).map((variant) => Math.min(countOccurrences(text, variant), 3)),
+        ...termVariants(term).map(
+          (variant) => Math.min(fieldTokens.filter((token) => token === variant).length, 3),
+        ),
       );
+      if (variantScore > 0) matchedTerms += 1;
       score += variantScore * field.weight * (termWeights.get(term) ?? 1);
     }
+    if (matchedTerms > 1) score += (matchedTerms - 1) * field.weight * 1.5;
   }
   return score;
 }
@@ -674,6 +684,7 @@ function searchSources(query: string, options: KnowledgeSearchOptions): Knowledg
           right.field.rankClass - left.field.rankClass || right.score - left.score || right.field.weight - left.field.weight,
       );
     const bestMatch = rankedFieldMatches[0] ?? null;
+    const citationMatch = rankedFieldMatches.find((match) => match.field.span) ?? bestMatch;
     const extractionScore = rankedFieldMatches
       .slice(0, 5)
       .reduce((sum, match) => sum + match.score, 0);
@@ -686,7 +697,7 @@ function searchSources(query: string, options: KnowledgeSearchOptions): Knowledg
       { text: row.current_hash, weight: 1 },
     ]);
     const rankClass = bestMatch ? bestMatch.field.rankClass : metadataScore > 0 ? METADATA_MATCH_RANK_CLASS : DEFAULT_MATCH_RANK_CLASS;
-    const score = bestMatch ? extractionScore : metadataScore;
+    const score = bestMatch ? extractionScore + Math.min(metadataScore * 4, extractionScore) : metadataScore;
     if (score === 0) continue;
     const result = withGraphExpansions(
       {
@@ -699,7 +710,7 @@ function searchSources(query: string, options: KnowledgeSearchOptions): Knowledg
           ? buildBoundedSnippet(bestMatch.field.text, query)
           : buildBoundedSnippet(redactLines(row.content_path ?? row.source_url ?? row.source_path ?? ''), query),
         score,
-        citations: [bestMatch ? sourceCitationFromMatch(row, bestMatch.field.span) : sourceCitation(row)],
+        citations: [citationMatch ? sourceCitationFromMatch(row, citationMatch.field.span) : sourceCitation(row)],
         graphExpansions: [],
         metadata: {
           kind: row.source_kind,
