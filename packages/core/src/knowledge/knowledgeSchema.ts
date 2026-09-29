@@ -1,4 +1,5 @@
 export const KNOWLEDGE_SCHEMA_VERSION = 6;
+export const KNOWLEDGE_HOST_SETTING_PREFIX = 'host.';
 export const KNOWLEDGE_JOB_COMPLETION_MODES = ['deterministic', 'enriched', 'unknown'] as const;
 
 export const KNOWLEDGE_SCHEMA_SQL = `

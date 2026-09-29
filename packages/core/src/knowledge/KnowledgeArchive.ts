@@ -4,8 +4,47 @@ import path from 'node:path';
 import type Database from 'better-sqlite3';
 import { normalizeKnowledgePath } from './KnowledgeIds.js';
 import { assertNoSymlinkComponents, isPathWithinRoot } from './KnowledgePathSecurity.js';
+import {
+  KNOWLEDGE_ARCHIVE_FEATURE_CHAT_PAYLOAD_V2,
+  KNOWLEDGE_ARCHIVE_HOST_SETTING_ROW_FILTER,
+  KNOWLEDGE_ARCHIVE_SETTINGS_TABLE,
+  KNOWLEDGE_ARCHIVE_TABLE_REGISTRY,
+  assertTableFingerprints,
+  assessAuthenticity,
+  assessManifestCompatibility,
+  expectedOmissions,
+  featuresForTables,
+  getKnowledgeArchiveRegistration,
+  importRejected,
+  manifestVersionIncompatible,
+  rebuildTargetsAfterImport,
+  registeredTablesOfClass,
+  reviewArchiveDataFiles,
+  signKnowledgeArchiveManifest,
+  type KnowledgeArchiveAuthenticity,
+  type KnowledgeArchiveAuthenticityResult,
+  type KnowledgeArchiveAuthenticitySigner,
+  type KnowledgeArchiveAuthenticityVerifier,
+  type KnowledgeArchiveCompatibilityBlock,
+  type KnowledgeArchiveCompatibilityPolicy,
+  type KnowledgeArchiveRebuildTarget,
+  type KnowledgeArchiveWarning,
+} from './KnowledgeArchiveCompatibility.js';
+import { KNOWLEDGE_HOST_SETTING_PREFIX, KNOWLEDGE_SCHEMA_VERSION } from './knowledgeSchema.js';
 import { renderKnowledgePage } from './KnowledgeRenderer.js';
 
+export { KNOWLEDGE_ARCHIVE_TABLE_REGISTRY };
+export type {
+  KnowledgeArchiveAuthenticity,
+  KnowledgeArchiveAuthenticityResult,
+  KnowledgeArchiveAuthenticitySigner,
+  KnowledgeArchiveAuthenticityVerifier,
+  KnowledgeArchiveCompatibilityBlock,
+  KnowledgeArchiveCompatibilityPolicy,
+  KnowledgeArchiveWarning,
+};
+
+/** Version written by default when a project has no version 2 only data. */
 export const KNOWLEDGE_ARCHIVE_VERSION = 1 as const;
 
 export interface KnowledgeArchiveEntry {
@@ -16,12 +55,19 @@ export interface KnowledgeArchiveEntry {
 }
 
 export interface KnowledgeArchiveManifest {
-  archiveVersion: typeof KNOWLEDGE_ARCHIVE_VERSION;
+  archiveVersion: 1 | 2;
   format: 'ariadne-knowledge-archive';
   projectId: string;
   generatedAt: string;
   entries: KnowledgeArchiveEntry[];
   omitted: string[];
+  compatibility?: KnowledgeArchiveCompatibilityBlock;
+  authenticity?: KnowledgeArchiveAuthenticity;
+}
+
+export interface KnowledgeArchiveManifestV2 extends KnowledgeArchiveManifest {
+  archiveVersion: 2;
+  compatibility: KnowledgeArchiveCompatibilityBlock;
 }
 
 export type KnowledgeArchiveFile = string | Uint8Array;
@@ -37,12 +83,16 @@ export interface ExportKnowledgeProjectOptions {
   contentRoot?: string;
   pageContents?: Record<string, string>;
   includeObsidian?: boolean;
+  manifestVersion?: 1 | 2 | 'auto';
+  authenticitySigner?: KnowledgeArchiveAuthenticitySigner;
 }
 
 export interface ImportKnowledgeProjectOptions {
   replaceExisting?: boolean;
   expectedProjectId?: string;
   workspaceRoot?: string;
+  compatibilityPolicy?: KnowledgeArchiveCompatibilityPolicy;
+  authenticityVerifier?: KnowledgeArchiveAuthenticityVerifier;
 }
 
 export interface ImportResult {
@@ -50,6 +100,9 @@ export interface ImportResult {
   tables: number;
   rows: number;
   files: string[];
+  warnings: KnowledgeArchiveWarning[];
+  postImport: { rebuildRequired: KnowledgeArchiveRebuildTarget[] };
+  authenticity: KnowledgeArchiveAuthenticityResult;
 }
 
 const TABLES = [
@@ -85,7 +138,11 @@ const TABLES = [
   'knowledge_operation_log',
 ] as const;
 
+/** Tables written as `data/<table>.json`, in foreign-key dependency order. */
+export const KNOWLEDGE_ARCHIVE_TABLES: readonly string[] = TABLES;
+
 const OMITTED_TABLES = ['knowledge_provider_profiles'];
+const SUPPORTED_TABLE_NAMES: ReadonlySet<string> = new Set(TABLES);
 
 type ArchiveTableName = (typeof TABLES)[number];
 
@@ -111,6 +168,8 @@ interface ArchiveImportPlan {
   staleArtifactPaths: string[];
   tables: number;
   rows: number;
+  warnings: KnowledgeArchiveWarning[];
+  authenticity: KnowledgeArchiveAuthenticityResult;
 }
 
 type ArchiveArtifactRoot = 'knowledge-root' | 'workspace-root';
@@ -430,10 +489,6 @@ function addFile(files: Record<string, KnowledgeArchiveFile>, filePath: string, 
   files[assertSafePath(filePath)] = content;
 }
 
-function importRejected(reason: string): Error {
-  return new Error(`Knowledge archive import rejected: ${reason}`);
-}
-
 function requireNonEmptyArchiveText(value: unknown, label: string): string {
   if (typeof value !== 'string') {
     throw importRejected(`${label} must be a non-empty string.`);
@@ -487,9 +542,17 @@ function parseJsonFile(archive: KnowledgeArchive, filePath: string, label: strin
   }
 }
 
-function parseTableRows(archive: KnowledgeArchive, schema: ArchiveTableSchema): Record<string, unknown>[] {
+function parseTableRows(
+  archive: KnowledgeArchive,
+  schema: ArchiveTableSchema,
+  warnings: KnowledgeArchiveWarning[],
+): Record<string, unknown>[] {
   const value = parseJsonFile(archive, `data/${schema.name}.json`, `table ${schema.name}`);
   if (value === undefined) {
+    if (getKnowledgeArchiveRegistration(schema.name)?.class === 'optional') {
+      warnings.push({ code: 'optional_table_absent', message: `Optional archive table ${schema.name} is absent.` });
+      return [];
+    }
     throw importRejected(`table ${schema.name} is required.`);
   }
   if (!Array.isArray(value)) {
@@ -1428,7 +1491,60 @@ function pageMarkdown(
   return rendered.replace(/\[([^\]]+)\]\(pages\/[^/]+\/([^/)]+)\.md\)/g, '[[$2|$1]]');
 }
 
+function isHostSettingRow(row: Record<string, unknown>): boolean {
+  return typeof row.setting_key === 'string' && row.setting_key.startsWith(KNOWLEDGE_HOST_SETTING_PREFIX);
+}
+
+function isChatPayloadV2(content: KnowledgeArchiveFile | undefined): boolean {
+  if (content === undefined) {
+    return false;
+  }
+  try {
+    const parsed = JSON.parse(Buffer.from(bytes(content)).toString('utf8')) as unknown;
+    return isPlainObject(parsed) && parsed.schemaVersion === 2;
+  } catch {
+    return false;
+  }
+}
+
+function containsChatPayloadV2(
+  files: Readonly<Record<string, KnowledgeArchiveFile>>,
+  messageRows: readonly Record<string, unknown>[],
+): boolean {
+  return messageRows.some((row) => typeof row.content_path === 'string' && isChatPayloadV2(files[row.content_path]));
+}
+
+function assertExportTablesClassified(): void {
+  for (const table of TABLES) {
+    const archiveClass = getKnowledgeArchiveRegistration(table)?.class;
+    if (archiveClass !== 'required' && archiveClass !== 'optional') {
+      throw new Error(`Knowledge archive export rejected: table ${table} has no exportable archive classification.`);
+    }
+  }
+}
+
+function resolveManifestVersion(
+  requested: ExportKnowledgeProjectOptions['manifestVersion'],
+  requiresVersion2: boolean,
+  signing: boolean,
+): 1 | 2 {
+  if (requested !== undefined && requested !== 'auto' && requested !== 1 && requested !== 2) {
+    throw new Error(`Knowledge archive export rejected: unsupported manifest version ${String(requested)}.`);
+  }
+  if (requested === 1 && requiresVersion2) {
+    throw manifestVersionIncompatible('the project has data that requires a version 2 archive.');
+  }
+  if (requested === 1 && signing) {
+    throw manifestVersionIncompatible('signed archives require manifest version 2.');
+  }
+  if (requested === 1 || requested === 2) {
+    return requested;
+  }
+  return requiresVersion2 || signing ? 2 : 1;
+}
+
 export function exportKnowledgeProject(db: Database.Database, options: ExportKnowledgeProjectOptions): KnowledgeArchive {
+  assertExportTablesClassified();
   const project = db.prepare('SELECT * FROM knowledge_projects WHERE id = ?').get(options.projectId) as Record<string, unknown> | undefined;
   if (!project) throw new Error(`Knowledge project not found: ${options.projectId}`);
   const exportedProject = redactProjectWorkspaceRoot(project);
@@ -1437,11 +1553,17 @@ export function exportKnowledgeProject(db: Database.Database, options: ExportKno
   const files: Record<string, KnowledgeArchiveFile> = {};
   const rowsByTable = new Map<ArchiveTableName, Record<string, unknown>[]>();
   for (const table of TABLES) {
-    const rows = table === 'knowledge_projects' ? [exportedProject] : rowsFor(db, table, options.projectId);
+    let rows: Record<string, unknown>[];
+    if (table === 'knowledge_projects') {
+      rows = [exportedProject];
+    } else if (table === KNOWLEDGE_ARCHIVE_SETTINGS_TABLE) {
+      rows = rowsFor(db, table, options.projectId).filter((row) => !isHostSettingRow(row));
+    } else {
+      rows = rowsFor(db, table, options.projectId);
+    }
     rowsByTable.set(table, rows);
     addFile(files, `data/${table}.json`, json(rows));
   }
-  addFile(files, 'data/knowledge_provider_profiles.json', json(redactProviderProfiles(db, options.projectId)));
   addFile(files, 'project.json', json(exportedProject));
   const pages = rowsByTable.get('knowledge_pages') ?? [];
   for (const page of pages) {
@@ -1472,27 +1594,56 @@ export function exportKnowledgeProject(db: Database.Database, options: ExportKno
   addFile(files, 'graph.json', json(graph));
   if (options.includeObsidian) addFile(files, '.obsidian/app.json', json({ alwaysUpdateLinks: true, newFileLocation: 'folder' }));
   addArchiveArtifactFiles(files, rowsByTable, projectWorkspaceRoot);
+
+  const tablesWithRows = TABLES.filter((table) => (rowsByTable.get(table)?.length ?? 0) > 0);
+  const features = featuresForTables(tablesWithRows);
+  if (containsChatPayloadV2(files, rowsByTable.get('knowledge_messages') ?? [])) {
+    features.required = [...features.required, KNOWLEDGE_ARCHIVE_FEATURE_CHAT_PAYLOAD_V2].sort();
+  }
+  const version = resolveManifestVersion(options.manifestVersion, features.required.length > 0, options.authenticitySigner !== undefined);
+  if (version === 1) {
+    // Version 1 keeps shipping the secret-redacted profile table; version 2 declares it as omitted instead.
+    addFile(files, 'data/knowledge_provider_profiles.json', json(redactProviderProfiles(db, options.projectId)));
+  }
+
   const omitted = [...OMITTED_TABLES].map((table) => `${table}.configuration_json`);
   const entries = Object.entries(files)
     .map(([filePath, content]) => ({ path: filePath, size: bytes(content).byteLength, sha256: createHash('sha256').update(bytes(content)).digest('hex'), mediaType: mediaType(filePath) }))
     .sort((left, right) => left.path.localeCompare(right.path));
-  return {
-    manifest: {
-      archiveVersion: KNOWLEDGE_ARCHIVE_VERSION,
-      format: 'ariadne-knowledge-archive',
-      projectId: options.projectId,
-      generatedAt: options.generatedAt ?? new Date().toISOString(),
-      entries,
-      omitted,
-    },
-    files,
+  const generatedAt = options.generatedAt ?? new Date().toISOString();
+  const manifest: KnowledgeArchiveManifest = {
+    archiveVersion: version,
+    format: 'ariadne-knowledge-archive',
+    projectId: options.projectId,
+    generatedAt,
+    entries,
+    omitted,
   };
+  if (version === 2) {
+    manifest.compatibility = {
+      minimumReaderArchiveVersion: 2,
+      producedBy: { packageVersion: null, knowledgeSchemaVersion: KNOWLEDGE_SCHEMA_VERSION },
+      requiredFeatures: features.required,
+      optionalFeatures: features.optional,
+      tableFingerprints: TABLES.map((table) => ({
+        table,
+        sha256: createHash('sha256').update(bytes(files[`data/${table}.json`])).digest('hex'),
+        rowCount: rowsByTable.get(table)?.length ?? 0,
+      })),
+      omissions: expectedOmissions(),
+    };
+  }
+  if (options.authenticitySigner) {
+    manifest.authenticity = signKnowledgeArchiveManifest(manifest, options.authenticitySigner, generatedAt);
+  }
+  return { manifest, files };
 }
 
-function validateArchive(archive: KnowledgeArchive): void {
-  if (archive.manifest.archiveVersion !== KNOWLEDGE_ARCHIVE_VERSION) {
-    throw new Error(`Unsupported knowledge archive version: ${String(archive.manifest.archiveVersion)}`);
-  }
+function validateArchive(
+  archive: KnowledgeArchive,
+  options: ImportKnowledgeProjectOptions,
+): ReturnType<typeof assessManifestCompatibility> & { authenticity: ReturnType<typeof assessAuthenticity> } {
+  const compatibility = assessManifestCompatibility(archive.manifest, options.compatibilityPolicy);
   if (archive.manifest.format !== 'ariadne-knowledge-archive') throw new Error('Invalid knowledge archive format');
   requireNonEmptyArchiveText(archive.manifest.projectId, 'archive project ID');
   if (!Array.isArray(archive.manifest.entries)) {
@@ -1545,10 +1696,13 @@ function validateArchive(archive: KnowledgeArchive): void {
   if (filePaths.length !== manifestPaths.size) {
     throw importRejected('manifest entries and archive files must match exactly.');
   }
+  return { ...compatibility, authenticity: assessAuthenticity(archive.manifest, options.authenticityVerifier) };
 }
 
 function buildImportPlan(db: Database.Database, archive: KnowledgeArchive, options: ImportKnowledgeProjectOptions): ArchiveImportPlan {
-  validateArchive(archive);
+  const validation = validateArchive(archive, options);
+  const warnings: KnowledgeArchiveWarning[] = [...validation.warnings, ...validation.authenticity.warnings];
+  warnings.push(...reviewArchiveDataFiles(Object.keys(archive.files), validation.version, SUPPORTED_TABLE_NAMES).warnings);
 
   const projectId = requireNonEmptyArchiveText(archive.manifest.projectId, 'archive project ID');
   if (options.expectedProjectId !== undefined && options.expectedProjectId !== projectId) {
@@ -1575,9 +1729,21 @@ function buildImportPlan(db: Database.Database, archive: KnowledgeArchive, optio
   );
 
   const rowsByTable = new Map<ArchiveTableName, Record<string, unknown>[]>();
+  const archiveTables = new Map<string, { sha256: string; rowCount: number }>();
   let totalRows = 0;
   for (const schema of TABLE_SCHEMAS) {
-    const rows = parseTableRows(archive, schema);
+    const rows = parseTableRows(archive, schema, warnings);
+    if (schema.name === KNOWLEDGE_ARCHIVE_SETTINGS_TABLE && rows.some(isHostSettingRow)) {
+      const position = rows.findIndex(isHostSettingRow) + 1;
+      throw importRejected(`table ${schema.name} row ${position} contains a host-local setting.`);
+    }
+    const tableFile = archive.files[`data/${schema.name}.json`];
+    if (tableFile !== undefined) {
+      archiveTables.set(schema.name, {
+        sha256: createHash('sha256').update(bytes(tableFile)).digest('hex'),
+        rowCount: rows.length,
+      });
+    }
     if (schema.name === 'knowledge_projects' && rows[0]) {
       rows[0] = { ...rows[0], workspace_root: workspaceRoot };
     }
@@ -1588,8 +1754,17 @@ function buildImportPlan(db: Database.Database, archive: KnowledgeArchive, optio
     }
     rowsByTable.set(schema.name, rows);
   }
+  if (validation.block) {
+    assertTableFingerprints(validation.block, archiveTables);
+  }
   assertArchiveRelationships(rowsByTable, projectId);
   const materializedFiles = buildArchiveMaterializedFiles(archive, rowsByTable, workspaceRoot);
+  if (
+    containsChatPayloadV2(archive.files, rowsByTable.get('knowledge_messages') ?? []) &&
+    !validation.block?.requiredFeatures.includes(KNOWLEDGE_ARCHIVE_FEATURE_CHAT_PAYLOAD_V2)
+  ) {
+    throw importRejected(`chat payload version 2 requires the ${KNOWLEDGE_ARCHIVE_FEATURE_CHAT_PAYLOAD_V2} feature declaration.`);
+  }
 
   const existing = db.prepare('SELECT id FROM knowledge_projects WHERE id = ?').get(projectId);
   if (existing && !options.replaceExisting) {
@@ -1618,7 +1793,67 @@ function buildImportPlan(db: Database.Database, archive: KnowledgeArchive, optio
     staleArtifactPaths,
     tables: TABLES.reduce((count, table) => count + ((rowsByTable.get(table)?.length ?? 0) > 0 ? 1 : 0), 0),
     rows: totalRows,
+    warnings,
+    authenticity: validation.authenticity.result,
   };
+}
+
+const SQL_COLUMN_PATTERN = /^[a-z_]+$/;
+
+function registeredTableExists(db: Database.Database, table: string): boolean {
+  return db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(table) !== undefined;
+}
+
+function existingRegisteredTables(db: Database.Database, ...classes: Parameters<typeof registeredTablesOfClass>): string[] {
+  return registeredTablesOfClass(...classes).filter((table) => registeredTableExists(db, table));
+}
+
+/** Host-local and privacy-omitted state that `replaceExisting` must carry over instead of dropping with the project. */
+interface PreservedHostState {
+  settings: Record<string, unknown>[];
+  privateRows: Array<{ table: string; rows: Record<string, unknown>[] }>;
+}
+
+function captureHostState(db: Database.Database, projectId: string): PreservedHostState {
+  const settings = db
+    .prepare(`SELECT * FROM ${KNOWLEDGE_ARCHIVE_SETTINGS_TABLE} WHERE project_id = ? AND substr(setting_key, 1, ?) = ?`)
+    .all(projectId, KNOWLEDGE_HOST_SETTING_PREFIX.length, KNOWLEDGE_HOST_SETTING_PREFIX) as Record<string, unknown>[];
+  const privateRows = existingRegisteredTables(db, 'privacy-omitted')
+    .filter((table) => table !== KNOWLEDGE_ARCHIVE_SETTINGS_TABLE)
+    .map((table) => ({ table, rows: rowsFor(db, table, projectId) }))
+    .filter((entry) => entry.rows.length > 0);
+  return { settings, privateRows };
+}
+
+function clearRebuildableProjectState(db: Database.Database, projectId: string): void {
+  for (const table of existingRegisteredTables(db, 'derived-rebuild', 'host-local')) {
+    db.prepare(`DELETE FROM ${table} WHERE project_id = ?`).run(projectId);
+  }
+}
+
+function insertPreservedRow(db: Database.Database, table: string, row: Record<string, unknown>): void {
+  const columns = Object.keys(row);
+  if (columns.length === 0 || !columns.every((column) => SQL_COLUMN_PATTERN.test(column))) {
+    throw new Error(`Knowledge archive import could not restore preserved host state for ${table}.`);
+  }
+  db.prepare(`INSERT INTO ${table} (${columns.join(', ')}) VALUES (${columns.map((column) => `@${column}`).join(', ')})`).run(row);
+}
+
+function restoreHostState(db: Database.Database, preserved: PreservedHostState, importedSettingIds: ReadonlySet<string>): void {
+  const usedIds = new Set(importedSettingIds);
+  for (const setting of preserved.settings) {
+    let id = String(setting.id);
+    if (usedIds.has(id)) {
+      id = `host_setting_${createHash('sha256').update(`${String(setting.project_id)}:${String(setting.setting_key)}`).digest('hex').slice(0, 24)}`;
+    }
+    usedIds.add(id);
+    insertPreservedRow(db, KNOWLEDGE_ARCHIVE_SETTINGS_TABLE, { ...setting, id });
+  }
+  for (const { table, rows } of preserved.privateRows) {
+    for (const row of rows) {
+      insertPreservedRow(db, table, row);
+    }
+  }
 }
 
 export function importKnowledgeProject(
@@ -1634,7 +1869,10 @@ export function importKnowledgeProject(
     db.exec('BEGIN IMMEDIATE');
     transactionOpen = true;
     const existing = db.prepare('SELECT id FROM knowledge_projects WHERE id = ?').get(plan.projectId);
+    let preserved: PreservedHostState = { settings: [], privateRows: [] };
     if (existing) {
+      preserved = captureHostState(db, plan.projectId);
+      clearRebuildableProjectState(db, plan.projectId);
       db.prepare('DELETE FROM knowledge_projects WHERE id = ?').run(plan.projectId);
     }
     let rows = 0;
@@ -1648,12 +1886,28 @@ export function importKnowledgeProject(
       rows += inserted.rows;
       tables += inserted.tables;
     }
+    const importedSettingIds = new Set((plan.rowsByTable.get('knowledge_settings') ?? []).map((row) => String(row.id)));
+    restoreHostState(db, preserved, importedSettingIds);
     fileCommit = commitArchiveFiles(plan.workspaceRoot, plan.materializedFiles, plan.staleArtifactPaths);
     db.exec('COMMIT');
     transactionOpen = false;
     committed = true;
     fileCommit.finalize();
-    return { projectId: plan.projectId, tables, rows, files: plan.files };
+    return {
+      projectId: plan.projectId,
+      tables,
+      rows,
+      files: plan.files,
+      warnings: [
+        ...plan.warnings,
+        {
+          code: 'derived_data_rebuild_required',
+          message: 'Derived search data is not imported; rebuild the search index and semantic model locally.',
+        },
+      ],
+      postImport: { rebuildRequired: rebuildTargetsAfterImport() },
+      authenticity: plan.authenticity,
+    };
   } catch (error) {
     if (fileCommit && !committed) {
       try {

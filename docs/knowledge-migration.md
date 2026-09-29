@@ -3,8 +3,8 @@
 This document describes the implemented migration path for moving an Ariadne
 knowledge project between workspaces or into an Obsidian vault.
 
-> **Status:** archive export/import is implemented at archive version `1`.
-> There is no background sync, live Obsidian integration, or provider-secret
+> **Status:** archive export/import is implemented; the reader accepts archive
+> versions `1` and `2`. There is no background sync, live Obsidian integration, or provider-secret
 > migration. Those surfaces remain in progress.
 
 ## What is migrated
@@ -89,6 +89,30 @@ Replacement is transactional and replaces the database project rows. It does
 not delete unrelated projects, task history, or files outside the imported
 archive. Importing does not restore provider credentials or execute queued
 research/chat jobs.
+
+## Archive versions and host-local state
+
+The manifest is version `1` unless the project has data only version `2` can
+carry (for example a V2 chat payload). The core `manifestVersion` option
+(`1`, `2`, or `'auto'`; the CLI uses `'auto'`) controls this.
+An explicit version `1` for such a project fails with
+`manifest_version_incompatible` instead of dropping data.
+
+Version `2` manifests add a `compatibility` block (required and optional
+feature ids, per-table SHA-256 fingerprints, and omission declarations) and
+may carry optional Ed25519 `authenticity` metadata that is verified locally
+only when the caller supplies a verifier. Every knowledge table has one archive
+class (`required`, `optional`, `derived-rebuild`, `host-local`,
+`privacy-omitted`); archives containing derived, host-local, or privacy-omitted
+table files, unclassified tables, unknown required features, or `host.*`
+settings rows are rejected.
+
+Host-local `host.*` settings are never exported, imported, or echoed in
+errors. `--replace` preserves the target project's `host.*` settings, provider
+profiles, and other privacy-omitted rows, and clears its derived search rows.
+Derived search data is never imported: after import, `postImport.rebuildRequired`
+lists `search_index` and `semantic_model`, and a `derived_data_rebuild_required`
+warning is returned until those are rebuilt locally.
 
 ## Cross-workspace procedure
 

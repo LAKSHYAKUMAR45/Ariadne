@@ -521,15 +521,26 @@ export {
   validateKnowledgeGeneration,
 } from './knowledge/KnowledgeAnalysis.js';
 export {
+  KNOWLEDGE_ARCHIVE_TABLES,
+  KNOWLEDGE_ARCHIVE_TABLE_REGISTRY,
   KNOWLEDGE_ARCHIVE_VERSION,
   exportKnowledgeProject,
   importKnowledgeProject,
 } from './knowledge/KnowledgeArchive.js';
+export { KNOWLEDGE_HOST_SETTING_PREFIX } from './knowledge/knowledgeSchema.js';
 export type {
   KnowledgeArchive,
+  KnowledgeArchiveAuthenticity,
+  KnowledgeArchiveAuthenticityResult,
+  KnowledgeArchiveAuthenticitySigner,
+  KnowledgeArchiveAuthenticityVerifier,
+  KnowledgeArchiveCompatibilityBlock,
+  KnowledgeArchiveCompatibilityPolicy,
   KnowledgeArchiveEntry,
   KnowledgeArchiveFile,
   KnowledgeArchiveManifest,
+  KnowledgeArchiveManifestV2,
+  KnowledgeArchiveWarning,
   ExportKnowledgeProjectOptions,
   ImportKnowledgeProjectOptions,
   ImportResult,

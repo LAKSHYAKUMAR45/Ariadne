@@ -1,9 +1,16 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { createHash } from 'node:crypto';
+import { createHash, generateKeyPairSync, sign, verify } from 'node:crypto';
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { openDatabase } from '../../src/db.js';
-import { exportKnowledgeProject, importKnowledgeProject } from '../../src/knowledge/KnowledgeArchive.js';
+import {
+  KNOWLEDGE_ARCHIVE_TABLES,
+  KNOWLEDGE_ARCHIVE_TABLE_REGISTRY,
+  exportKnowledgeProject,
+  importKnowledgeProject,
+  type KnowledgeArchiveCompatibilityBlock,
+} from '../../src/knowledge/KnowledgeArchive.js';
+import { KNOWLEDGE_SCHEMA_VERSION } from '../../src/knowledge/knowledgeSchema.js';
 import { loadKnowledgeSourceVersion } from '../../src/knowledge/KnowledgeSourceVersionLoader.js';
 import { KnowledgePageStore } from '../../src/knowledge/KnowledgePageStore.js';
 import { KnowledgeProjectStore } from '../../src/knowledge/KnowledgeProjectStore.js';
@@ -873,5 +880,604 @@ See [[graph|the graph]].
     });
 
     expect(() => importKnowledgeProject(target, archive, imported)).toThrow(/another project in this workspace/i);
+  });
+
+  describe('archive v2 compatibility contracts', () => {
+    const REGISTRY_CLASSES = {
+      knowledge_settings: 'required',
+      knowledge_search_indexes: 'derived-rebuild',
+      knowledge_search_index_fields: 'derived-rebuild',
+      knowledge_search_semantic_models: 'derived-rebuild',
+      knowledge_search_semantic_vectors: 'derived-rebuild',
+      knowledge_search_semantic_neighbors: 'derived-rebuild',
+      knowledge_source_freshness: 'host-local',
+      knowledge_project_watchers: 'host-local',
+      knowledge_search_regression_runs: 'host-local',
+      knowledge_analysis_coverage: 'required',
+      knowledge_deferred_relationships: 'required',
+      knowledge_graph_reports: 'optional',
+      knowledge_graph_ambiguities: 'optional',
+      knowledge_semantic_summaries: 'optional',
+      knowledge_search_feedback: 'privacy-omitted',
+      knowledge_query_analytics_daily: 'privacy-omitted',
+      knowledge_provider_profiles: 'privacy-omitted',
+    } as const;
+
+    function sha256(content: string): string {
+      return createHash('sha256').update(content, 'utf8').digest('hex');
+    }
+
+    function insertSetting(db: ReturnType<typeof openDatabase>, projectId: string, key: string, value: string) {
+      db.prepare(
+        `INSERT INTO knowledge_settings (id, project_id, setting_key, setting_value, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      ).run(`setting_${key}`, projectId, key, value, '2026-01-01', '2026-01-01');
+    }
+
+    function settingKeys(db: ReturnType<typeof openDatabase>, projectId: string): string[] {
+      return (
+        db
+          .prepare('SELECT setting_key FROM knowledge_settings WHERE project_id = ? ORDER BY setting_key')
+          .all(projectId) as Array<{ setting_key: string }>
+      ).map((row) => row.setting_key);
+    }
+
+    type Archive = ReturnType<typeof exportKnowledgeProject>;
+
+    function compatibilityOf(archive: Archive): KnowledgeArchiveCompatibilityBlock {
+      return archive.manifest.compatibility as KnowledgeArchiveCompatibilityBlock;
+    }
+
+    function withManifest(archive: Archive, patch: Record<string, unknown>): Archive {
+      return { ...archive, manifest: { ...archive.manifest, ...patch } as Archive['manifest'] };
+    }
+
+    function withCompatibility(archive: Archive, patch: Record<string, unknown>): Archive {
+      return withManifest(archive, { compatibility: { ...compatibilityOf(archive), ...patch } });
+    }
+
+    function rewriteV2TableRows(archive: Archive, table: string, rows: Record<string, unknown>[]): Archive {
+      const rewritten = rewriteTableRows(archive, table, rows);
+      const content = String(rewritten.files[`data/${table}.json`]);
+      return withCompatibility(rewritten, {
+        tableFingerprints: compatibilityOf(rewritten).tableFingerprints.map((fingerprint) =>
+          fingerprint.table === table ? { ...fingerprint, sha256: sha256(content), rowCount: rows.length } : fingerprint,
+        ),
+      });
+    }
+
+    function addArchiveFile(archive: Archive, filePath: string, content: string): Archive {
+      return {
+        manifest: {
+          ...archive.manifest,
+          entries: [
+            ...archive.manifest.entries,
+            { path: filePath, size: Buffer.byteLength(content, 'utf8'), sha256: sha256(content), mediaType: 'application/json' },
+          ].sort((left, right) => left.path.localeCompare(right.path)),
+        },
+        files: { ...archive.files, [filePath]: content },
+      };
+    }
+
+    function exportV2(db: ReturnType<typeof openDatabase>, projectId: string, extra: Record<string, unknown> = {}): Archive {
+      return exportKnowledgeProject(db, { projectId, generatedAt: '2026-01-02', manifestVersion: 2, ...extra });
+    }
+
+    function seedWithV2Payload(db: ReturnType<typeof openDatabase>) {
+      const seeded = seed(db);
+      writeWorkspaceFile(
+        seeded.workspaceRoot,
+        'conversations/conversation_1/message_1.json',
+        JSON.stringify({ schemaVersion: 2, content: 'Imported question', citations: [], retrievalMode: 'knowledge' }),
+      );
+      return seeded;
+    }
+
+    it('classifies every knowledge table and keeps exported tables in the required or optional classes', () => {
+      const db = database();
+      const tables = (
+        db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'knowledge\\_%' ESCAPE '\\'").all() as Array<{
+          name: string;
+        }>
+      ).map((row) => row.name);
+      expect(tables.length).toBeGreaterThan(20);
+      for (const table of tables) {
+        expect(KNOWLEDGE_ARCHIVE_TABLE_REGISTRY[table], `${table} must have an archive class`).toBeDefined();
+      }
+      for (const table of KNOWLEDGE_ARCHIVE_TABLES) {
+        expect(['required', 'optional']).toContain(KNOWLEDGE_ARCHIVE_TABLE_REGISTRY[table]?.class);
+      }
+      for (const [table, registration] of Object.entries(KNOWLEDGE_ARCHIVE_TABLE_REGISTRY)) {
+        if (tables.includes(table) && ['required', 'optional'].includes(registration.class)) {
+          expect(KNOWLEDGE_ARCHIVE_TABLES as readonly string[]).toContain(table);
+        }
+      }
+      for (const [table, archiveClass] of Object.entries(REGISTRY_CLASSES)) {
+        expect(KNOWLEDGE_ARCHIVE_TABLE_REGISTRY[table]?.class).toBe(archiveClass);
+      }
+    });
+
+    it('keeps version 1 by default when the project has no v2-only data', () => {
+      const db = database();
+      const { projectId } = seed(db);
+      const archive = exportKnowledgeProject(db, { projectId });
+      expect(archive.manifest.archiveVersion).toBe(1);
+      expect(archive.manifest.compatibility).toBeUndefined();
+      expect(archive.files['data/knowledge_provider_profiles.json']).toBeDefined();
+    });
+
+    it('exports a version 2 manifest with classification-driven omissions and table fingerprints', () => {
+      const db = database();
+      const { projectId } = seed(db);
+      const archive = exportV2(db, projectId);
+      const compatibility = compatibilityOf(archive);
+
+      expect(archive.manifest.archiveVersion).toBe(2);
+      expect(compatibility.minimumReaderArchiveVersion).toBe(2);
+      expect(compatibility.requiredFeatures).toEqual([]);
+      expect(compatibility.optionalFeatures).toEqual([]);
+      expect(compatibility.producedBy.knowledgeSchemaVersion).toBe(KNOWLEDGE_SCHEMA_VERSION);
+      expect(compatibility.omissions).toEqual(
+        expect.arrayContaining([
+          { table: 'knowledge_search_indexes', reason: 'derived_rebuild' },
+          { table: 'knowledge_search_semantic_vectors', reason: 'derived_rebuild' },
+          { table: 'knowledge_source_freshness', reason: 'host_local_only' },
+          { table: 'knowledge_project_watchers', reason: 'host_local_only' },
+          { table: 'knowledge_query_analytics_daily', reason: 'privacy_omitted' },
+          { table: 'knowledge_provider_profiles', reason: 'secret_omitted' },
+          { table: 'knowledge_settings', reason: 'host_local_only', rowFilter: { column: 'setting_key', prefix: 'host.' } },
+        ]),
+      );
+      expect(archive.files['data/knowledge_provider_profiles.json']).toBeUndefined();
+      expect(compatibility.tableFingerprints.map((fingerprint) => fingerprint.table)).toEqual([...KNOWLEDGE_ARCHIVE_TABLES]);
+      for (const fingerprint of compatibility.tableFingerprints) {
+        const content = String(archive.files[`data/${fingerprint.table}.json`]);
+        expect(fingerprint.sha256).toBe(sha256(content));
+        expect(fingerprint.rowCount).toBe((JSON.parse(content) as unknown[]).length);
+      }
+    });
+
+    it('round-trips both manifest versions and reports derived rebuilds', () => {
+      const source = database();
+      const { projectId } = seed(source);
+      for (const manifestVersion of [1, 2] as const) {
+        const archive = exportKnowledgeProject(source, { projectId, manifestVersion });
+        const target = database();
+        const result = importKnowledgeProject(target, archive, importOptions());
+        expect(result.postImport).toEqual({ rebuildRequired: ['search_index', 'semantic_model'] });
+        expect(result.warnings.map((warning) => warning.code)).toEqual(
+          expect.arrayContaining(['derived_data_rebuild_required', 'authenticity_absent']),
+        );
+        expect(result.authenticity).toEqual({ state: 'absent' });
+        expect(target.prepare('SELECT name FROM knowledge_projects WHERE id = ?').get(projectId)).toEqual({ name: 'Archive Wiki' });
+      }
+    });
+
+    it('never exports host.* settings and keeps portable settings', () => {
+      const db = database();
+      const { projectId } = seed(db);
+      insertSetting(db, projectId, 'host.worker.concurrency', '4');
+      insertSetting(db, projectId, 'host.provider.synthesis_profile', 'private-profile-name');
+      insertSetting(db, projectId, 'portable.theme', 'dark');
+
+      for (const manifestVersion of [1, 2] as const) {
+        const archive = exportKnowledgeProject(db, { projectId, manifestVersion });
+        expect(tableRows<{ setting_key: string }>(archive, 'knowledge_settings').map((row) => row.setting_key)).toEqual([
+          'portable.theme',
+        ]);
+        expect(Object.values(archive.files).map(String).join('\n')).not.toMatch(/host\.|private-profile-name/);
+      }
+      const v2 = exportV2(db, projectId);
+      const settingsFingerprint = compatibilityOf(v2).tableFingerprints.find((entry) => entry.table === 'knowledge_settings');
+      expect(settingsFingerprint).toEqual({
+        table: 'knowledge_settings',
+        sha256: sha256(String(v2.files['data/knowledge_settings.json'])),
+        rowCount: 1,
+      });
+    });
+
+    it.each([1, 2] as const)('rejects a host.* settings row in a version %i archive without echoing it', (manifestVersion) => {
+      const db = database();
+      const { projectId } = seed(db);
+      const archive = exportKnowledgeProject(db, { projectId, manifestVersion });
+      const hostRow = {
+        id: 'setting_leak',
+        project_id: projectId,
+        setting_key: 'host.analytics.salt',
+        setting_value: 'super-secret-salt',
+        created_at: '2026-01-01',
+        updated_at: '2026-01-01',
+      };
+      const tampered =
+        manifestVersion === 1
+          ? rewriteTableRows(archive, 'knowledge_settings', [hostRow])
+          : rewriteV2TableRows(archive, 'knowledge_settings', [hostRow]);
+      const target = database();
+      let message = '';
+      try {
+        importKnowledgeProject(target, tampered, importOptions());
+      } catch (error) {
+        message = (error as Error).message;
+      }
+      expect(message).toMatch(/host-local setting/i);
+      expect(message).not.toMatch(/host\.analytics|super-secret-salt/);
+      expect(target.prepare('SELECT COUNT(*) AS count FROM knowledge_projects').get()).toEqual({ count: 0 });
+    });
+
+    it.each([
+      ['knowledge_source_freshness', /host-local/i],
+      ['knowledge_search_indexes', /derived/i],
+      ['knowledge_query_analytics_daily', /privacy/i],
+      ['knowledge_unclassified_table', /no archive classification/i],
+    ])('rejects archives that contain a data file for %s', (table, pattern) => {
+      const db = database();
+      const { projectId } = seed(db);
+      for (const archive of [exportKnowledgeProject(db, { projectId }), exportV2(db, projectId)]) {
+        const tampered = addArchiveFile(archive, `data/${table}.json`, '[]\n');
+        expect(() => importKnowledgeProject(database(), tampered, importOptions())).toThrow(pattern);
+      }
+    });
+
+    it('rejects a version 2 archive that still contains an omitted provider profile table', () => {
+      const db = database();
+      const { projectId } = seed(db);
+      const tampered = addArchiveFile(exportV2(db, projectId), 'data/knowledge_provider_profiles.json', '[]\n');
+      expect(() => importKnowledgeProject(database(), tampered, importOptions())).toThrow(/secret_omitted|omitted/i);
+    });
+
+    it('does not leak provider endpoints, models, key variables, or profile names in any export', () => {
+      const db = database();
+      const { projectId } = seed(db);
+      db.prepare('UPDATE knowledge_provider_profiles SET configuration_json = ? WHERE project_id = ?').run(
+        JSON.stringify({ endpoint: 'https://provider.example/v1', model: 'gpt-secret-model', apiKeyEnv: 'PROVIDER_SECRET_ENV' }),
+        projectId,
+      );
+      insertSetting(db, projectId, 'host.provider.summary_profile', 'default');
+      for (const manifestVersion of [1, 2] as const) {
+        const archive = exportKnowledgeProject(db, { projectId, manifestVersion });
+        const serialized = `${JSON.stringify(archive.manifest)}\n${Object.values(archive.files).map(String).join('\n')}`;
+        expect(serialized).not.toMatch(/provider\.example|gpt-secret-model|PROVIDER_SECRET_ENV|host\.provider/);
+      }
+    });
+
+    it('selects version 2 automatically for a V2 chat payload and fails closed for an explicit version 1', () => {
+      const db = database();
+      const { projectId } = seedWithV2Payload(db);
+      const auto = exportKnowledgeProject(db, { projectId });
+      expect(auto.manifest.archiveVersion).toBe(2);
+      expect(compatibilityOf(auto).requiredFeatures).toEqual(['knowledge-chat-payload-v2']);
+      expect(() => exportKnowledgeProject(db, { projectId, manifestVersion: 1 })).toThrow(/manifest_version_incompatible/);
+
+      const target = database();
+      const imported = importOptions();
+      importKnowledgeProject(target, auto, imported);
+      expect(readFileSync(join(imported.workspaceRoot, 'conversations', 'conversation_1', 'message_1.json'), 'utf8')).toContain(
+        '"schemaVersion":2',
+      );
+    });
+
+    it('rejects a V2 chat payload in an archive that does not declare the required feature', () => {
+      const db = database();
+      const { projectId } = seedWithV2Payload(db);
+      const archive = exportKnowledgeProject(db, { projectId });
+      expect(() => importKnowledgeProject(database(), withCompatibility(archive, { requiredFeatures: [] }), importOptions())).toThrow(
+        /knowledge-chat-payload-v2/,
+      );
+    });
+
+    it('rejects unsupported versions, unknown required features, and readers that are too old', () => {
+      const db = database();
+      const { projectId } = seed(db);
+      const v2 = exportV2(db, projectId);
+
+      expect(() => importKnowledgeProject(database(), withManifest(v2, { archiveVersion: 3 }), importOptions())).toThrow(
+        /Unsupported knowledge archive version/,
+      );
+      expect(() =>
+        importKnowledgeProject(database(), v2, importOptions({ compatibilityPolicy: { maxSupportedArchiveVersion: 1 } })),
+      ).toThrow(/Unsupported knowledge archive version/);
+      expect(() =>
+        importKnowledgeProject(database(), withCompatibility(v2, { requiredFeatures: ['knowledge-future-feature-v9'] }), importOptions()),
+      ).toThrow(/required feature/i);
+      expect(() =>
+        importKnowledgeProject(database(), withCompatibility(v2, { requiredFeatures: ['knowledge-analysis-coverage-v1'] }), importOptions()),
+      ).toThrow(/required feature/i);
+      expect(() =>
+        importKnowledgeProject(database(), withCompatibility(v2, { minimumReaderArchiveVersion: 3 }), importOptions()),
+      ).toThrow(/newer reader/i);
+    });
+
+    it('warns about unknown optional features unless the caller accepts them', () => {
+      const db = database();
+      const { projectId } = seed(db);
+      const archive = withCompatibility(exportV2(db, projectId), { optionalFeatures: ['knowledge-graph-reports-v1'] });
+
+      const warned = importKnowledgeProject(database(), archive, importOptions());
+      expect(warned.warnings).toContainEqual(expect.objectContaining({ code: 'optional_feature_ignored' }));
+      const accepted = importKnowledgeProject(
+        database(),
+        archive,
+        importOptions({
+          compatibilityPolicy: {
+            maxSupportedArchiveVersion: 2,
+            acceptedOptionalFeatures: new Set(['knowledge-graph-reports-v1']),
+          },
+        }),
+      );
+      expect(accepted.warnings.map((warning) => warning.code)).not.toContain('optional_feature_ignored');
+    });
+
+    it.each([
+      ['a missing compatibility block', (archive: Archive) => withManifest(archive, { compatibility: undefined }), /compatibility/i],
+      ['a version 1 manifest carrying a compatibility block', (archive: Archive) => withManifest(archive, { archiveVersion: 1 }), /version 1/i],
+      ['a malformed fingerprint', (archive: Archive) => withCompatibility(archive, { tableFingerprints: [{ table: 'knowledge_pages', sha256: 'xyz', rowCount: 1 }] }), /fingerprint/i],
+      ['a non-array feature list', (archive: Archive) => withCompatibility(archive, { requiredFeatures: 'none' }), /requiredFeatures/],
+      [
+        'a fingerprint hash mismatch',
+        (archive: Archive) =>
+          withCompatibility(archive, {
+            tableFingerprints: compatibilityOf(archive).tableFingerprints.map((entry) =>
+              entry.table === 'knowledge_pages' ? { ...entry, sha256: '0'.repeat(64) } : entry,
+            ),
+          }),
+        /fingerprint mismatch/i,
+      ],
+      [
+        'a fingerprint row-count mismatch',
+        (archive: Archive) =>
+          withCompatibility(archive, {
+            tableFingerprints: compatibilityOf(archive).tableFingerprints.map((entry) =>
+              entry.table === 'knowledge_pages' ? { ...entry, rowCount: 99 } : entry,
+            ),
+          }),
+        /fingerprint mismatch/i,
+      ],
+      [
+        'a missing fingerprint',
+        (archive: Archive) =>
+          withCompatibility(archive, {
+            tableFingerprints: compatibilityOf(archive).tableFingerprints.filter((entry) => entry.table !== 'knowledge_pages'),
+          }),
+        /fingerprint/i,
+      ],
+      [
+        'an omission that hides a required table',
+        (archive: Archive) =>
+          withCompatibility(archive, {
+            omissions: [...compatibilityOf(archive).omissions, { table: 'knowledge_pages', reason: 'privacy_omitted' }],
+          }),
+        /omission/i,
+      ],
+      [
+        'an omission with the wrong reason',
+        (archive: Archive) =>
+          withCompatibility(archive, {
+            omissions: [{ table: 'knowledge_source_freshness', reason: 'derived_rebuild' }],
+          }),
+        /omission/i,
+      ],
+      [
+        'an omission for an unclassified table',
+        (archive: Archive) =>
+          withCompatibility(archive, { omissions: [{ table: 'knowledge_mystery', reason: 'privacy_omitted' }] }),
+        /omission/i,
+      ],
+      [
+        'a settings omission with a different row filter',
+        (archive: Archive) =>
+          withCompatibility(archive, {
+            omissions: [
+              { table: 'knowledge_settings', reason: 'host_local_only', rowFilter: { column: 'setting_key', prefix: 'other.' } },
+            ],
+          }),
+        /omission/i,
+      ],
+    ])('rejects %s', (_label, mutate, pattern) => {
+      const db = database();
+      const { projectId } = seed(db);
+      const target = database();
+      expect(() => importKnowledgeProject(target, mutate(exportV2(db, projectId)), importOptions())).toThrow(pattern);
+      expect(target.prepare('SELECT COUNT(*) AS count FROM knowledge_projects').get()).toEqual({ count: 0 });
+    });
+
+    describe('authenticity', () => {
+      function signer() {
+        const { privateKey, publicKey } = generateKeyPairSync('ed25519');
+        return {
+          signer: {
+            keyId: 'test-key',
+            signerHint: 'unit-test',
+            signManifestSha256: (digest: string) => sign(null, Buffer.from(digest, 'utf8'), privateKey).toString('base64'),
+          },
+          verifier: {
+            verify: (input: { signatureBase64: string }, digest: string) =>
+              verify(null, Buffer.from(digest, 'utf8'), publicKey, Buffer.from(input.signatureBase64, 'base64'))
+                ? ('verified' as const)
+                : ('invalid' as const),
+          },
+        };
+      }
+
+      it('signs a version 2 archive and verifies it locally', () => {
+        const db = database();
+        const { projectId } = seed(db);
+        const { signer: authenticitySigner, verifier } = signer();
+        const archive = exportKnowledgeProject(db, { projectId, generatedAt: '2026-01-02', authenticitySigner });
+        expect(archive.manifest.archiveVersion).toBe(2);
+        expect(archive.manifest.authenticity).toMatchObject({ algorithm: 'ed25519-detached', keyId: 'test-key', signerHint: 'unit-test' });
+
+        const verified = importKnowledgeProject(database(), archive, importOptions({ authenticityVerifier: verifier }));
+        expect(verified.authenticity).toEqual({ state: 'verified', keyId: 'test-key' });
+
+        const unverified = importKnowledgeProject(database(), archive, importOptions());
+        expect(unverified.authenticity).toEqual({ state: 'unverified', keyId: 'test-key' });
+        expect(unverified.warnings.map((warning) => warning.code)).toContain('authenticity_unverified');
+      });
+
+      it('rejects explicit version 1 exports that request signing', () => {
+        const db = database();
+        const { projectId } = seed(db);
+        expect(() =>
+          exportKnowledgeProject(db, { projectId, manifestVersion: 1, authenticitySigner: signer().signer }),
+        ).toThrow(/manifest_version_incompatible/);
+      });
+
+      it('rejects malformed authenticity metadata and signer output', () => {
+        const db = database();
+        const { projectId } = seed(db);
+        const { signer: authenticitySigner } = signer();
+        const signed = exportKnowledgeProject(db, { projectId, authenticitySigner });
+        const authenticity = signed.manifest.authenticity as unknown as Record<string, unknown>;
+        for (const patch of [
+          { algorithm: 'rsa' },
+          { keyId: '' },
+          { signedManifestSha256: 'nothex' },
+          { signatureBase64: '***' },
+          { signedAt: 42 },
+        ]) {
+          expect(() =>
+            importKnowledgeProject(database(), withManifest(signed, { authenticity: { ...authenticity, ...patch } }), importOptions()),
+          ).toThrow(/authenticity/i);
+        }
+        expect(() =>
+          importKnowledgeProject(database(), withManifest(signed, { authenticity: 'signed' }), importOptions()),
+        ).toThrow(/authenticity/i);
+        expect(() =>
+          exportKnowledgeProject(db, { projectId, authenticitySigner: { ...authenticitySigner, signManifestSha256: () => '***' } }),
+        ).toThrow(/signature/i);
+      });
+
+      it('rejects invalid signatures and manifests changed after signing', () => {
+        const db = database();
+        const { projectId } = seed(db);
+        const { signer: authenticitySigner, verifier } = signer();
+        const signed = exportKnowledgeProject(db, { projectId, generatedAt: '2026-01-02', authenticitySigner });
+
+        const other = signer();
+        expect(() =>
+          importKnowledgeProject(database(), signed, importOptions({ authenticityVerifier: other.verifier })),
+        ).toThrow(/authenticity verification failed/i);
+        expect(() =>
+          importKnowledgeProject(database(), withManifest(signed, { generatedAt: '2030-01-01' }), importOptions({ authenticityVerifier: verifier })),
+        ).toThrow(/authenticity/i);
+        expect(() =>
+          importKnowledgeProject(database(), withManifest(signed, { generatedAt: '2030-01-01' }), importOptions()),
+        ).toThrow(/authenticity/i);
+      });
+    });
+
+    describe('replaceExisting', () => {
+      function createHostTables(db: ReturnType<typeof openDatabase>) {
+        for (const table of ['knowledge_search_indexes', 'knowledge_source_freshness']) {
+          db.exec(`CREATE TABLE ${table} (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, payload TEXT NOT NULL)`);
+        }
+        db.exec(
+          `CREATE TABLE knowledge_query_analytics_daily (
+             id TEXT PRIMARY KEY,
+             project_id TEXT NOT NULL REFERENCES knowledge_projects(id) ON DELETE CASCADE,
+             payload TEXT NOT NULL
+           )`,
+        );
+      }
+
+      it('preserves host.* settings, replaces portable settings, and clears derived and freshness rows', () => {
+        const source = database();
+        const { projectId } = seed(source);
+        insertSetting(source, projectId, 'portable.theme', 'from-archive');
+        const archive = exportKnowledgeProject(source, { projectId });
+
+        const target = database();
+        const imported = importOptions({ replaceExisting: true });
+        new KnowledgeProjectStore(target).create({ id: projectId as never, workspaceRoot: imported.workspaceRoot, name: 'Old target' });
+        insertSetting(target, projectId, 'host.worker.concurrency', '3');
+        insertSetting(target, projectId, 'portable.theme', 'stale-local');
+        insertSetting(target, projectId, 'portable.local_only', 'stale-local');
+        createHostTables(target);
+        target.prepare('INSERT INTO knowledge_search_indexes VALUES (?, ?, ?)').run('idx_1', projectId, 'derived');
+        target.prepare('INSERT INTO knowledge_source_freshness VALUES (?, ?, ?)').run('fresh_1', projectId, 'host');
+        target.prepare('INSERT INTO knowledge_source_freshness VALUES (?, ?, ?)').run('fresh_other', 'project_unrelated', 'host');
+        target.prepare('INSERT INTO knowledge_query_analytics_daily VALUES (?, ?, ?)').run('analytics_1', projectId, 'counts-only');
+
+        importKnowledgeProject(target, archive, imported);
+
+        expect(settingKeys(target, projectId)).toEqual(['host.worker.concurrency', 'portable.theme']);
+        expect(
+          target.prepare("SELECT setting_value FROM knowledge_settings WHERE setting_key = 'host.worker.concurrency'").get(),
+        ).toEqual({ setting_value: '3' });
+        expect(target.prepare("SELECT setting_value FROM knowledge_settings WHERE setting_key = 'portable.theme'").get()).toEqual({
+          setting_value: 'from-archive',
+        });
+        expect(target.prepare('SELECT COUNT(*) AS count FROM knowledge_search_indexes WHERE project_id = ?').get(projectId)).toEqual({
+          count: 0,
+        });
+        expect(target.prepare('SELECT id FROM knowledge_source_freshness').all()).toEqual([{ id: 'fresh_other' }]);
+        expect(target.prepare('SELECT id, payload FROM knowledge_query_analytics_daily').all()).toEqual([
+          { id: 'analytics_1', payload: 'counts-only' },
+        ]);
+      });
+
+      it('preserves host provider profiles that host.provider.* settings refer to', () => {
+        const source = database();
+        const { projectId } = seed(source);
+        const archive = exportKnowledgeProject(source, { projectId });
+
+        const target = database();
+        const imported = importOptions({ replaceExisting: true });
+        new KnowledgeProjectStore(target).create({ id: projectId as never, workspaceRoot: imported.workspaceRoot, name: 'Old target' });
+        insertSetting(target, projectId, 'host.provider.summary_profile', 'local-profile');
+        target
+          .prepare(
+            `INSERT INTO knowledge_provider_profiles
+             (id, project_id, provider_kind, profile_name, configuration_json, created_at, updated_at)
+             VALUES ('provider_local', ?, 'remote', 'local-profile', '{}', '2026-01-01', '2026-01-01')`,
+          )
+          .run(projectId);
+
+        importKnowledgeProject(target, archive, imported);
+        expect(target.prepare('SELECT profile_name FROM knowledge_provider_profiles WHERE project_id = ?').all(projectId)).toEqual([
+          { profile_name: 'local-profile' },
+        ]);
+        expect(settingKeys(target, projectId)).toContain('host.provider.summary_profile');
+      });
+
+      it('keeps preserved host.* settings when the archive reuses their row id', () => {
+        const source = database();
+        const { projectId } = seed(source);
+        insertSetting(source, projectId, 'portable.theme', 'from-archive');
+        const archive = exportKnowledgeProject(source, { projectId });
+
+        const target = database();
+        const imported = importOptions({ replaceExisting: true });
+        new KnowledgeProjectStore(target).create({ id: projectId as never, workspaceRoot: imported.workspaceRoot, name: 'Old target' });
+        target
+          .prepare(
+            `INSERT INTO knowledge_settings (id, project_id, setting_key, setting_value, created_at, updated_at)
+             VALUES ('setting_portable.theme', ?, 'host.worker.concurrency', '2', '2026-01-01', '2026-01-01')`,
+          )
+          .run(projectId);
+
+        importKnowledgeProject(target, archive, imported);
+        expect(settingKeys(target, projectId)).toEqual(['host.worker.concurrency', 'portable.theme']);
+      });
+
+      it('leaves the previous project, host settings, and derived rows untouched when the replacement is rejected', () => {
+        const source = database();
+        const { projectId } = seed(source);
+        const archive = exportV2(source, projectId);
+        const tampered = withCompatibility(archive, { requiredFeatures: ['knowledge-future-feature-v9'] });
+
+        const target = database();
+        const imported = importOptions({ replaceExisting: true });
+        new KnowledgeProjectStore(target).create({ id: projectId as never, workspaceRoot: imported.workspaceRoot, name: 'Old target' });
+        insertSetting(target, projectId, 'host.worker.concurrency', '3');
+        createHostTables(target);
+        target.prepare('INSERT INTO knowledge_search_indexes VALUES (?, ?, ?)').run('idx_1', projectId, 'derived');
+
+        expect(() => importKnowledgeProject(target, tampered, imported)).toThrow(/required feature/i);
+        expect(target.prepare('SELECT name FROM knowledge_projects WHERE id = ?').get(projectId)).toEqual({ name: 'Old target' });
+        expect(settingKeys(target, projectId)).toEqual(['host.worker.concurrency']);
+        expect(target.prepare('SELECT COUNT(*) AS count FROM knowledge_search_indexes').get()).toEqual({ count: 1 });
+      });
+    });
   });
 });
