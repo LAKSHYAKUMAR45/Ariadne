@@ -8,6 +8,7 @@ import { KnowledgeQueue } from '../../src/knowledge/KnowledgeQueue.js';
 import { searchKnowledge } from '../../src/knowledge/KnowledgeSearch.js';
 import { KnowledgeSourceStore } from '../../src/knowledge/KnowledgeSourceStore.js';
 import { KnowledgeWorker } from '../../src/knowledge/KnowledgeWorker.js';
+import { parseKnowledgeAccuracyCorpus, type KnowledgeAccuracyQuestion } from './KnowledgeSearchEvaluator.js';
 
 const PROJECT_ID = 'synthetic-naas-acceptance';
 const FIXTURE_ROOT = join(process.cwd(), 'test/knowledge/fixtures/naas');
@@ -15,13 +16,6 @@ const FIXTURE_CONTENT_PATH = 'sources/files';
 const CREATED_AT = '2026-09-28T00:00:00.000Z';
 const TYPED_EDGE_TYPES = new Set(['calls', 'contains', 'defines', 'imports', 'inherits', 'references']);
 const TYPED_EVIDENCE_TYPES = new Set(['explicit_link', 'semantic_relationship']);
-
-interface KnowledgeAccuracyQuestion {
-  id: string;
-  query: string;
-  expectedPaths: string[];
-  expectedSymbols: string[];
-}
 
 interface KnowledgeAccuracyReport {
   questionCount: number;
@@ -83,7 +77,7 @@ function scoreAccuracy(
   let typedGraphEvidenceHits = 0;
 
   for (const question of questions) {
-    const results = searchKnowledge(question.query, { db, projectId: PROJECT_ID, mode: 'sources' });
+    const results = searchKnowledge(question.prompt, { db, projectId: PROJECT_ID, mode: 'sources' });
     const expectedResults = results.filter((result) => question.expectedPaths.includes(result.title));
     if (question.expectedPaths.includes(results[0]?.title ?? '')) top1PathHits += 1;
     if (results.slice(0, 3).some((result) => question.expectedPaths.includes(result.title))) top3PathHits += 1;
@@ -131,9 +125,9 @@ describe('KnowledgeWorker synthetic NAAS-shaped acceptance', () => {
   });
 
   it('meets path, citation, and typed-graph thresholds for ten offline worker questions', async () => {
-    const questions = JSON.parse(
+    const questions = parseKnowledgeAccuracyCorpus(JSON.parse(
       readFileSync(join(FIXTURE_ROOT, 'questions.json'), 'utf8'),
-    ) as KnowledgeAccuracyQuestion[];
+    )).questions as KnowledgeAccuracyQuestion[];
     const fixturePaths = [
       'task-managers/device.py',
       'task-managers/gnmi.py',
