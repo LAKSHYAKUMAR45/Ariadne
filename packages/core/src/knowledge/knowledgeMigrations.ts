@@ -700,6 +700,62 @@ export function applyKnowledgeFreshnessMigration(db: Database.Database): void {
 }
 
 /**
+ * Creates the derived local semantic model tables (global migration 16, knowledge revision 12). All three are
+ * rebuildable from the search index, so they are never archived. The partial unique indexes allow one active and one
+ * building model per project, which is what makes a concurrent rebuild fail fast instead of racing.
+ */
+export function applyKnowledgeSemanticMigration(db: Database.Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS knowledge_search_semantic_models (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL,
+      model_version INTEGER NOT NULL,
+      status TEXT NOT NULL,
+      source_count INTEGER NOT NULL,
+      built_at TEXT,
+      lease_expires_at TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      CHECK (status IN ('building', 'active', 'stale')),
+      UNIQUE (project_id, id),
+      FOREIGN KEY (project_id) REFERENCES knowledge_projects(id) ON DELETE CASCADE
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_semantic_models_one_active
+      ON knowledge_search_semantic_models(project_id) WHERE status = 'active';
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_semantic_models_one_building
+      ON knowledge_search_semantic_models(project_id) WHERE status = 'building';
+    CREATE TABLE IF NOT EXISTS knowledge_search_semantic_vectors (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL,
+      model_id TEXT NOT NULL,
+      source_version_id TEXT NOT NULL,
+      vector_json TEXT NOT NULL,
+      norm REAL NOT NULL,
+      created_at TEXT NOT NULL,
+      UNIQUE (project_id, model_id, source_version_id),
+      FOREIGN KEY (project_id, model_id)
+        REFERENCES knowledge_search_semantic_models(project_id, id) ON DELETE CASCADE,
+      FOREIGN KEY (project_id, source_version_id)
+        REFERENCES knowledge_source_versions(project_id, id) ON DELETE CASCADE
+    );
+    CREATE TABLE IF NOT EXISTS knowledge_search_semantic_neighbors (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL,
+      model_id TEXT NOT NULL,
+      term TEXT NOT NULL,
+      neighbor_term TEXT NOT NULL,
+      neighbor_rank INTEGER NOT NULL,
+      weight REAL NOT NULL,
+      UNIQUE (project_id, model_id, term, neighbor_term),
+      FOREIGN KEY (project_id, model_id)
+        REFERENCES knowledge_search_semantic_models(project_id, id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_semantic_neighbors_term
+      ON knowledge_search_semantic_neighbors(project_id, model_id, term, neighbor_rank);
+  `);
+}
+
+/**
  * Creates the additive knowledge schema atomically. It is idempotent so it
  * can be called safely by the shared migration runner on every database open.
  */
@@ -715,5 +771,6 @@ export function applyKnowledgeMigrations(db: Database.Database): void {
     applyKnowledgeAnalysisCoverageMigration(db);
     applyKnowledgeGraphReportMigration(db);
     applyKnowledgeFreshnessMigration(db);
+    applyKnowledgeSemanticMigration(db);
   })();
 }

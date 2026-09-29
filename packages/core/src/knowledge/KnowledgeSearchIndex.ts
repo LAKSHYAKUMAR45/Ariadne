@@ -1,6 +1,7 @@
 import type Database from 'better-sqlite3';
 import { redactLines } from '../Redactor.js';
 import { createKnowledgeId } from './KnowledgeIds.js';
+import { markLocalSemanticModelStale } from './KnowledgeLocalSemanticInvalidation.js';
 import { currentSourceVersionNumberSql } from './KnowledgeSourceVersionSql.js';
 import { SEARCH_TOKEN_LENGTH, foldSearchText, needleNarrowingGrams, trigramsOf } from './KnowledgeSearchTokens.js';
 import {
@@ -99,6 +100,16 @@ export interface SearchIndexCandidateQuery {
   /** Lowercase substrings; a source is a candidate when any indexed field or metadata column contains one. */
   needles: readonly string[];
   limit?: number;
+  /** Only sources with a span-backed indexed field match; metadata columns and span-less fields are ignored. */
+  spanBackedOnly?: boolean;
+  /** Source IDs to leave out (for example candidates already in the lexical pool). */
+  excludeSourceIds?: readonly string[];
+}
+
+export interface UsableSearchIndex {
+  indexId: string;
+  sourceId: string;
+  sourceVersionId: string;
 }
 
 export interface SearchIndexCandidate {
@@ -131,20 +142,30 @@ export type KnowledgeSearchIndexChange =
   | { projectId: string; sourceId: string; reason: 'stale' }
   | { projectId: string; reason: 'project_stale' };
 
-export type KnowledgeSearchIndexChangedHook = (change: KnowledgeSearchIndexChange) => void;
+export interface KnowledgeSearchIndexChangeContext {
+  /** The connection that owns the write transaction the hook runs in. */
+  db: Database.Database;
+}
+
+export type KnowledgeSearchIndexChangedHook = (
+  change: KnowledgeSearchIndexChange,
+  context: KnowledgeSearchIndexChangeContext,
+) => void;
 
 let indexChangedHook: KnowledgeSearchIndexChangedHook | null = null;
 
 /**
  * Registers the optional "index changed" hook. It runs synchronously inside the index write transaction, so a
  * throwing hook rolls the write back. Pass `null` to clear it; with no hook registered the notification is a no-op.
+ * Local semantic model invalidation is built in and does not depend on this hook.
  */
 export function setKnowledgeSearchIndexChangedHook(hook: KnowledgeSearchIndexChangedHook | null): void {
   indexChangedHook = hook;
 }
 
-function notifyIndexChanged(change: KnowledgeSearchIndexChange): void {
-  indexChangedHook?.(change);
+function notifyIndexChanged(db: Database.Database, change: KnowledgeSearchIndexChange, timestamp: string): void {
+  markLocalSemanticModelStale(db, change.projectId, timestamp);
+  indexChangedHook?.(change, { db });
 }
 
 function requireId(value: string, label: string): string {
@@ -613,7 +634,7 @@ export class KnowledgeSearchIndex {
           now: timestamp,
         });
       });
-      notifyIndexChanged({ projectId, sourceVersionId, reason: 'replaced' });
+      notifyIndexChanged(this.db, { projectId, sourceVersionId, reason: 'replaced' }, timestamp);
     })();
   }
 
@@ -621,6 +642,7 @@ export class KnowledgeSearchIndex {
     const scopedProjectId = requireId(projectId, 'project ID');
     const scopedSourceId = requireId(sourceId, 'source ID');
     this.db.transaction(() => {
+      const timestamp = this.now();
       const result = this.db
         .prepare(
           `UPDATE knowledge_search_indexes
@@ -631,9 +653,9 @@ export class KnowledgeSearchIndex {
                SELECT id FROM knowledge_source_versions WHERE project_id = @projectId AND source_id = @sourceId
              )`,
         )
-        .run({ projectId: scopedProjectId, sourceId: scopedSourceId, now: this.now() });
+        .run({ projectId: scopedProjectId, sourceId: scopedSourceId, now: timestamp });
       if (result.changes > 0) {
-        notifyIndexChanged({ projectId: scopedProjectId, sourceId: scopedSourceId, reason: 'stale' });
+        notifyIndexChanged(this.db, { projectId: scopedProjectId, sourceId: scopedSourceId, reason: 'stale' }, timestamp);
       }
     })();
   }
@@ -747,6 +769,28 @@ export class KnowledgeSearchIndex {
     return rows.map((row) => row.source_id);
   }
 
+  /** Usable indexes of active sources' current versions in a stable path order, bounded by `limit`. */
+  public listUsableIndexes(projectId: string, limit: number): UsableSearchIndex[] {
+    const scopedProjectId = requireId(projectId, 'project ID');
+    const bounded = Math.max(0, Math.trunc(limit));
+    if (bounded === 0) return [];
+    const rows = this.db
+      .prepare(
+        `WITH ${CURRENT_SOURCES_CTE}
+         SELECT usable_index_id, source_id, source_version_id
+         FROM cur
+         WHERE usable_index_id IS NOT NULL
+         ORDER BY COALESCE(source_path, source_url, content_path, source_id) ASC, source_version_id ASC
+         LIMIT @limit`,
+      )
+      .all({ ...this.cteParams(scopedProjectId), limit: bounded }) as Array<{
+      usable_index_id: string;
+      source_id: string;
+      source_version_id: string;
+    }>;
+    return rows.map((row) => ({ indexId: row.usable_index_id, sourceId: row.source_id, sourceVersionId: row.source_version_id }));
+  }
+
   public findCandidates(query: SearchIndexCandidateQuery): SearchIndexCandidate[] {
     const projectId = requireId(query.projectId, 'project ID');
     const needles = foldNeedles(query.needles);
@@ -754,6 +798,8 @@ export class KnowledgeSearchIndex {
     const limit = Math.max(0, Math.min(MAX_RESULT_CANDIDATES, Math.trunc(query.limit ?? MAX_RESULT_CANDIDATES)));
     if (limit === 0) return [];
     const matches = fieldMatchCtes(needles.map((needle) => ({ termKey: 0, needle })));
+    const spanBackedOnly = query.spanBackedOnly === true;
+    const excluded = JSON.stringify([...new Set(query.excludeSourceIds ?? [])]);
     const rows = this.db
       .prepare(
         `WITH ${CURRENT_SOURCES_CTE},
@@ -761,19 +807,22 @@ export class KnowledgeSearchIndex {
          SELECT cur.*, COALESCE(m.relevance, ${METADATA_MATCH_RANK_CLASS}) AS relevance
          FROM cur
          LEFT JOIN (
-           SELECT index_id, MAX(rank_class) AS relevance FROM field_hits GROUP BY index_id
+           SELECT index_id, MAX(rank_class) AS relevance FROM field_hits
+           ${spanBackedOnly ? `WHERE rank_class = ${EXTRACTION_MATCH_RANK_CLASS}` : ''}
+           GROUP BY index_id
          ) m ON m.index_id = cur.usable_index_id
          WHERE cur.usable_index_id IS NOT NULL
+           AND cur.source_id NOT IN (SELECT value FROM json_each(@excluded))
            AND (
              m.index_id IS NOT NULL
-             OR EXISTS (SELECT 1 FROM needle_all n WHERE ${METADATA_MATCH_CONDITION})
+             ${spanBackedOnly ? '' : `OR EXISTS (SELECT 1 FROM needle_all n WHERE ${METADATA_MATCH_CONDITION})`}
            )
          ORDER BY COALESCE(m.relevance, ${METADATA_MATCH_RANK_CLASS}) DESC,
                   COALESCE(cur.source_path, cur.source_url, cur.content_path, cur.source_id) ASC,
                   cur.source_version_id ASC
          LIMIT @limit`,
       )
-      .all({ ...this.cteParams(projectId), ...matches.params, limit }) as CandidateRow[];
+      .all({ ...this.cteParams(projectId), ...matches.params, limit, excluded }) as CandidateRow[];
     return rows.map((row) => this.toCandidate(projectId, row));
   }
 
@@ -819,6 +868,7 @@ export class KnowledgeSearchIndex {
 
   private markSupersededStale(projectId: string): number {
     return this.db.transaction(() => {
+      const timestamp = this.now();
       const result = this.db
         .prepare(
           `UPDATE knowledge_search_indexes
@@ -835,9 +885,9 @@ export class KnowledgeSearchIndex {
                WHERE s.project_id = @projectId AND s.status = 'active'
              )`,
         )
-        .run({ projectId, now: this.now() });
+        .run({ projectId, now: timestamp });
       if (result.changes > 0) {
-        notifyIndexChanged({ projectId, reason: 'project_stale' });
+        notifyIndexChanged(this.db, { projectId, reason: 'project_stale' }, timestamp);
       }
       return result.changes;
     })();

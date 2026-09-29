@@ -11,12 +11,15 @@ import {
   importKnowledgeProject,
   type KnowledgeArchiveCompatibilityBlock,
 } from '../../src/knowledge/KnowledgeArchive.js';
+import { searchKnowledge } from '../../src/knowledge/KnowledgeSearch.js';
+import { KnowledgeLocalSemanticIndex } from '../../src/knowledge/KnowledgeLocalSemanticIndex.js';
 import { KNOWLEDGE_SCHEMA_VERSION } from '../../src/knowledge/knowledgeSchema.js';
 import { loadKnowledgeSourceVersion } from '../../src/knowledge/KnowledgeSourceVersionLoader.js';
 import { KnowledgePageStore } from '../../src/knowledge/KnowledgePageStore.js';
 import { KnowledgeProjectStore } from '../../src/knowledge/KnowledgeProjectStore.js';
 import {
   KnowledgeHostSettingsStore,
+  KnowledgeSearchSettingsStore,
   KnowledgeWorkerSettingsStore,
   resolveKnowledgeWorkerConcurrency,
 } from '../../src/knowledge/KnowledgeHostSettingsStore.js';
@@ -1773,6 +1776,32 @@ See [[graph|the graph]].
     });
 
     describe('replaceExisting', () => {
+    function insertSemanticRows(
+      db: ReturnType<typeof openDatabase>,
+      projectId: string,
+      modelId: string,
+      term: string,
+      sourceVersionId?: string,
+    ) {
+      db.prepare(
+        `INSERT INTO knowledge_search_semantic_models
+         (id, project_id, model_version, status, source_count, built_at, lease_expires_at, created_at, updated_at)
+         VALUES (?, ?, 1001, 'active', 1, '2026-01-01', NULL, '2026-01-01', '2026-01-01')`,
+      ).run(modelId, projectId);
+      db.prepare(
+        `INSERT INTO knowledge_search_semantic_neighbors
+         (id, project_id, model_id, term, neighbor_term, neighbor_rank, weight)
+         VALUES (?, ?, ?, ?, 'billing', 0, 0.5)`,
+      ).run(`${modelId}_neighbor`, projectId, modelId, term);
+      if (sourceVersionId) {
+        db.prepare(
+          `INSERT INTO knowledge_search_semantic_vectors
+           (id, project_id, model_id, source_version_id, vector_json, norm, created_at)
+           VALUES (?, ?, ?, ?, '[1]', 1, '2026-01-01')`,
+        ).run(`${modelId}_vector`, projectId, modelId, sourceVersionId);
+      }
+    }
+
       function insertDerivedIndexRow(db: ReturnType<typeof openDatabase>, projectId: string) {
         db.prepare(
           `INSERT INTO knowledge_sources
@@ -1886,6 +1915,45 @@ See [[graph|the graph]].
         expect(target.prepare('SELECT id, result_ref, feedback_count, ambiguity_state FROM knowledge_search_feedback').all()).toEqual([
           { id: 'feedback_1', result_ref: 'ref_1', feedback_count: 4, ambiguity_state: null },
         ]);
+      });
+
+      it('omits local semantic rows from exports, clears them on replace, keeps the host hybrid setting, and reports a rebuild', () => {
+        const source = database();
+        const { projectId } = seed(source);
+        insertSemanticRows(source, projectId, 'sem_source', 'zebrafish');
+        const archive = exportV2(source, projectId);
+        expect(Object.keys(archive.files).filter((name) => name.includes('semantic_models') || name.includes('semantic_vectors') || name.includes('semantic_neighbors'))).toEqual([]);
+        expect(Object.values(archive.files).map(String).join('\n')).not.toContain('zebrafish');
+        expect(compatibilityOf(archive).omissions).toEqual(
+          expect.arrayContaining([
+            { table: 'knowledge_search_semantic_models', reason: 'derived_rebuild' },
+            { table: 'knowledge_search_semantic_vectors', reason: 'derived_rebuild' },
+            { table: 'knowledge_search_semantic_neighbors', reason: 'derived_rebuild' },
+          ]),
+        );
+
+        const target = database();
+        const imported = importOptions({ replaceExisting: true });
+        new KnowledgeProjectStore(target).create({ id: projectId as never, workspaceRoot: imported.workspaceRoot, name: 'Old target' });
+        insertDerivedIndexRow(target, projectId);
+        insertSemanticRows(target, projectId, 'sem_target', 'quokka', 'old_version');
+        new KnowledgeSearchSettingsStore(new KnowledgeHostSettingsStore(target)).setHybridEnabled(projectId, true);
+        new KnowledgeProjectStore(target).create({ id: 'project_unrelated' as never, workspaceRoot: `${imported.workspaceRoot}-unrelated`, name: 'Unrelated' });
+        insertSemanticRows(target, 'project_unrelated', 'sem_unrelated', 'okapi');
+
+        const result = importKnowledgeProject(target, archive, imported);
+
+        expect(result.postImport).toEqual({ rebuildRequired: ['search_index', 'semantic_model'] });
+        const remaining = (table: string) =>
+          target.prepare(`SELECT project_id AS projectId, COUNT(*) AS count FROM ${table} GROUP BY project_id`).all();
+        for (const table of ['knowledge_search_semantic_models', 'knowledge_search_semantic_neighbors']) {
+          expect(remaining(table)).toEqual([{ projectId: 'project_unrelated', count: 1 }]);
+        }
+        expect(remaining('knowledge_search_semantic_vectors')).toEqual([]);
+        expect(new KnowledgeLocalSemanticIndex(target).getStatus(projectId)).toMatchObject({ state: 'absent', usable: false });
+        expect(new KnowledgeSearchSettingsStore(new KnowledgeHostSettingsStore(target)).getHybridEnabled(projectId)).toBe(true);
+        const results = searchKnowledge('archive', { db: target, projectId, mode: 'sources', semanticRetrieval: 'if-available' });
+        expect(results.filter((entry) => entry.rankingMethod !== undefined)).toEqual([]);
       });
 
       it('keeps the worker concurrency setting host-local: never exported, defaulted on import, preserved on replace', () => {

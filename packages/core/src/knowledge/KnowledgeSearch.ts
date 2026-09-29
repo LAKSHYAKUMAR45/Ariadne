@@ -14,6 +14,15 @@ import {
   type SearchableField,
   type SearchIndexCandidate,
 } from './KnowledgeSearchIndex.js';
+import { searchTokens } from './KnowledgeSearchTokens.js';
+import {
+  KnowledgeHostSettingsStore,
+  KnowledgeSearchSettingsStore,
+  resolveKnowledgeSemanticRetrieval,
+  type KnowledgeSemanticRetrievalOption,
+} from './KnowledgeHostSettingsStore.js';
+import { orderHybridCandidates, type HybridLexicalEntry } from './KnowledgeHybridOrdering.js';
+import { KnowledgeLocalSemanticIndex, MAX_EXPANSION_CANDIDATES } from './KnowledgeLocalSemanticIndex.js';
 import { currentSourceVersionNumberSql } from './KnowledgeSourceVersionSql.js';
 import { deriveCitationContext, type KnowledgeCitationContext, type KnowledgeCitationFieldKind } from './KnowledgeCitationContext.js';
 import type {
@@ -73,10 +82,18 @@ export interface KnowledgeSearchResult {
   ambiguityReason?: KnowledgeAmbiguityReason;
   /** Count of immediately competing source results in the first near-equal cluster. */
   ambiguityAlternatives?: number;
+  /** Set only when the local semantic model contributed to this result list. */
+  rankingMethod?: 'lexical' | 'hybrid';
+  /** Cosine similarity to the query under the local semantic model, in [0, 1]. */
+  semanticScore?: number;
+  /** The semantic layer moved this result relative to the lexical order. */
+  semanticReordered?: boolean;
+  /** Found through a stored neighbor term rather than the query's own words; always span-backed. */
+  expandedByNeighbor?: boolean;
 }
 
 export interface KnowledgeSearchDiagnostic {
-  code: 'search_index_unavailable';
+  code: 'search_index_unavailable' | 'semantic_retrieval_unavailable';
   message: string;
 }
 
@@ -90,6 +107,11 @@ export interface KnowledgeSearchOptions {
   graphExpansion?: (result: KnowledgeSearchResult) => KnowledgeSearchGraphExpansion[];
   /** Receives index failures that were served by the full source scan. Defaults to a Node process warning. */
   onDiagnostic?: (diagnostic: KnowledgeSearchDiagnostic) => void;
+  /**
+   * Local semantic reranking for source modes. Precedence: this option, then the host-local
+   * `host.search.hybrid.enabled` setting, then off. It never builds a model and falls back to lexical-only ranking.
+   */
+  semanticRetrieval?: KnowledgeSemanticRetrievalOption;
 }
 
 export interface KnowledgeSearchContextOptions {
@@ -191,20 +213,6 @@ const ambiguityFeatures = new WeakMap<KnowledgeSearchResult, AmbiguityFeatures>(
 
 function normalize(value: string): string {
   return value.trim().toLocaleLowerCase();
-}
-
-function searchTokens(value: string): string[] {
-  const tokens = value
-    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
-    .replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2')
-    .toLocaleLowerCase()
-    .split(/[^\p{L}\p{N}]+/u)
-    .filter(Boolean);
-  return [
-    ...new Set(
-      tokens.flatMap((token) => (token === 'usecase' ? [token, 'use', 'case'] : [token])),
-    ),
-  ];
 }
 
 function terms(query: string): string[] {
@@ -917,7 +925,191 @@ function searchSources(query: string, options: KnowledgeSearchOptions): Knowledg
   }
   results.sort(sortResults);
   annotateTopOneConfidence(query, results);
-  return results;
+  if (mode !== 'sources' && mode !== 'read-sources-only') return results;
+  return applyLocalSemanticRanking(query, results, variantsByTerm, mode, options);
+}
+
+function reportSemanticDiagnostic(options: KnowledgeSearchOptions, error: unknown): void {
+  const detail = error instanceof Error ? error.message : String(error);
+  const message = redactLines(`Local semantic retrieval unavailable; using lexical ranking: ${detail}`);
+  if (options.onDiagnostic) {
+    options.onDiagnostic({ code: 'semantic_retrieval_unavailable', message });
+    return;
+  }
+  process.emitWarning(message, { code: 'ARIADNE_SEMANTIC_RETRIEVAL_UNAVAILABLE' });
+}
+
+interface SemanticPlan {
+  ordered: RankedKnowledgeSearchResult[];
+  scores: ReadonlyMap<string, number>;
+  expandedIds: ReadonlySet<string>;
+}
+
+/** Near-tie cluster around an ambiguous leader, mirroring the alternatives rule of the ambiguity annotation. */
+function ambiguityCluster(results: readonly RankedKnowledgeSearchResult[]): boolean[] {
+  const flags = results.map(() => false);
+  const topFeatures = results[0] ? ambiguityFeatures.get(results[0]) : undefined;
+  if (!topFeatures) return flags;
+  flags[0] = true;
+  let alternatives = 0;
+  for (let index = 1; index < results.length; index += 1) {
+    const features = ambiguityFeatures.get(results[index]);
+    if (!features) break;
+    const outOfBand =
+      features.rankClass !== topFeatures.rankClass ||
+      topFeatures.score - features.score > topFeatures.score * AMBIGUITY_SCORE_BAND;
+    if (outOfBand) break;
+    if (features.exactSymbolHits < topFeatures.exactSymbolHits || features.distinctTermCoverage < topFeatures.distinctTermCoverage) {
+      continue;
+    }
+    flags[index] = true;
+    alternatives += 1;
+    if (alternatives === MAX_AMBIGUITY_ALTERNATIVES) break;
+  }
+  return flags;
+}
+
+function expansionCandidates(
+  query: string,
+  expansionTerms: ReadonlyArray<{ term: string }>,
+  excludeSourceIds: readonly string[],
+  mode: KnowledgeSearchMode,
+  options: KnowledgeSearchOptions,
+): RankedKnowledgeSearchResult[] {
+  if (expansionTerms.length === 0) return [];
+  const expansionQuery = expansionTerms.map((entry) => entry.term).join(' ');
+  const candidates = options.db.transaction(() =>
+    new KnowledgeSearchIndex(options.db).findCandidates({
+      projectId: options.projectId,
+      needles: expansionTerms.map((entry) => entry.term),
+      limit: MAX_EXPANSION_CANDIDATES,
+      spanBackedOnly: true,
+      excludeSourceIds,
+    }),
+  )();
+  const scored: RankedKnowledgeSearchResult[] = [];
+  for (const candidate of candidates) {
+    const result = scoreSourceDocument(expansionQuery, indexedCandidateToDocument(options.projectId, candidate), new Map(), mode, options);
+    // Only span-backed evidence may carry an expansion candidate into the results.
+    if (result && result.rankClass === EXTRACTION_MATCH_RANK_CLASS && result.citations[0]?.span) scored.push(result);
+  }
+  return scored;
+}
+
+function planLocalSemanticRanking(
+  query: string,
+  results: RankedKnowledgeSearchResult[],
+  variantsByTerm: ReadonlyArray<{ term: string; variants: string[] }>,
+  mode: KnowledgeSearchMode,
+  options: KnowledgeSearchOptions,
+): SemanticPlan | null {
+  const retrieval = resolveKnowledgeSemanticRetrieval(
+    new KnowledgeSearchSettingsStore(new KnowledgeHostSettingsStore(options.db)),
+    options.projectId,
+    options.semanticRetrieval,
+  );
+  if (!retrieval.enabled) return null;
+  const semantic = new KnowledgeLocalSemanticIndex(options.db);
+  if (semantic.getUsableModelId(options.projectId) === null) return null;
+
+  const queryTerms = [...new Set(variantsByTerm.flatMap(({ variants }) => variants))];
+  const expansion = semantic.expandQueryTerms({ projectId: options.projectId, terms: queryTerms });
+  const leader = results[0];
+  const confidence = leader ? (leader.searchConfidence ?? 'clear') : 'none';
+  const distinctQueryTerms = variantsByTerm.length;
+  const weakPool = !results.some((result) => {
+    const features = ambiguityFeatures.get(result);
+    return features !== undefined && features.rankClass === EXTRACTION_MATCH_RANK_CLASS && features.distinctTermCoverage >= distinctQueryTerms;
+  });
+  const wantsExpansion = confidence !== 'clear' || weakPool || results.length === 0;
+  const expanded = wantsExpansion
+    ? expansionCandidates(query, expansion.terms, results.map((result) => result.id), mode, options)
+    : [];
+  if (confidence === 'clear' && expanded.length === 0) return null;
+
+  const versionIdOf = (result: RankedKnowledgeSearchResult): string | null =>
+    typeof result.metadata.sourceVersionId === 'string' ? result.metadata.sourceVersionId : null;
+  const scoreByVersion = new Map(
+    semantic
+      .rankCandidates({
+        projectId: options.projectId,
+        queryTerms,
+        expansionTerms: expansion.terms,
+        sourceVersionIds: [...results, ...expanded].flatMap((result) => versionIdOf(result) ?? []),
+      })
+      .map((entry) => [entry.sourceVersionId, entry.score] as const),
+  );
+  const scores = new Map<string, number>();
+  for (const result of [...results, ...expanded]) {
+    const version = versionIdOf(result);
+    scores.set(result.id, version === null ? 0 : (scoreByVersion.get(version) ?? 0));
+  }
+
+  const cluster = confidence === 'ambiguous' ? ambiguityCluster(results) : results.map(() => false);
+  const ordering = orderHybridCandidates({
+    lexical: results.map((result, index): HybridLexicalEntry => ({
+      key: result.id,
+      semanticScore: scores.get(result.id) ?? 0,
+      inCluster: cluster[index],
+    })),
+    expansion: expanded.map((result) => ({ key: result.id, semanticScore: scores.get(result.id) ?? 0 })),
+    confidence,
+    weakPool,
+  });
+  const byId = new Map([...results, ...expanded].map((result) => [result.id, result] as const));
+  const ordered = ordering.order.map((entry) => byId.get(entry.key) as RankedKnowledgeSearchResult);
+  const unchanged = expanded.length === 0 && ordered.every((result, index) => result === results[index]);
+  if (unchanged) return null;
+  return { ordered, scores, expandedIds: new Set(expanded.map((result) => result.id)) };
+}
+
+/** Applies a computed plan; it only assigns fields, so a failed plan can never leave a half-annotated result list. */
+function commitSemanticPlan(results: RankedKnowledgeSearchResult[], plan: SemanticPlan): RankedKnowledgeSearchResult[] {
+  const lexicalIndex = new Map(results.map((result, index) => [result.id, index] as const));
+  const previousLeader = results[0];
+  const newLeader = plan.ordered[0];
+  plan.ordered.forEach((result, index) => {
+    const expanded = plan.expandedIds.has(result.id);
+    result.rankingMethod = 'hybrid';
+    result.semanticScore = Math.round((plan.scores.get(result.id) ?? 0) * 1e6) / 1e6;
+    if (expanded) {
+      result.expandedByNeighbor = true;
+      if (index < results.length) result.semanticReordered = true;
+    } else if (lexicalIndex.get(result.id) !== index) {
+      result.semanticReordered = true;
+    }
+  });
+  if (newLeader && newLeader !== previousLeader) {
+    const rescued = plan.expandedIds.has(newLeader.id);
+    const reason = rescued ? 'insufficient_intent' : (previousLeader?.ambiguityReason ?? 'near_tie');
+    const alternatives = previousLeader?.ambiguityAlternatives ?? Math.min(plan.ordered.length - 1, MAX_AMBIGUITY_ALTERNATIVES);
+    if (previousLeader) {
+      delete previousLeader.searchConfidence;
+      delete previousLeader.ambiguityReason;
+      delete previousLeader.ambiguityAlternatives;
+    }
+    newLeader.searchConfidence = 'ambiguous';
+    newLeader.ambiguityReason = reason;
+    newLeader.ambiguityAlternatives = alternatives;
+    newLeader.semanticReordered = true;
+  }
+  return plan.ordered;
+}
+
+function applyLocalSemanticRanking(
+  query: string,
+  results: RankedKnowledgeSearchResult[],
+  variantsByTerm: ReadonlyArray<{ term: string; variants: string[] }>,
+  mode: KnowledgeSearchMode,
+  options: KnowledgeSearchOptions,
+): RankedKnowledgeSearchResult[] {
+  try {
+    const plan = planLocalSemanticRanking(query, results, variantsByTerm, mode, options);
+    return plan ? commitSemanticPlan(results, plan) : results;
+  } catch (error) {
+    reportSemanticDiagnostic(options, error);
+    return results;
+  }
 }
 
 function searchTasks(query: string, options: KnowledgeSearchOptions): KnowledgeSearchResult[] {
@@ -990,8 +1182,10 @@ export function searchKnowledge(query: string, options: KnowledgeSearchOptions):
     resultSets.push(searchPages(normalizedQuery, scopedOptions), searchSources(normalizedQuery, scopedOptions), searchTasks(normalizedQuery, scopedOptions));
   }
 
-  return dedupeResults(resultSets.flat())
-    .sort(sortResults)
+  const merged = dedupeResults(resultSets.flat());
+  // Source modes arrive already ordered (including any semantic reorder), so re-sorting would undo it.
+  const sourceOrdered = mode === 'sources' || mode === 'read-sources-only';
+  return (sourceOrdered ? merged : merged.sort(sortResults))
     .slice(0, Math.min(MAX_RESULT_CANDIDATES, options.limit ?? DEFAULT_LIMIT))
     .map((result) => withCitationContext(result, options));
 }

@@ -305,6 +305,59 @@ describe('KnowledgeSearchIndex', () => {
     expect(index.findCandidates({ projectId: PROJECT_ID, needles: [] })).toEqual([]);
   });
 
+  it('restricts candidates to span-backed field matches and excludes named sources', () => {
+    const backed = register('src/loader.ts');
+    index.replaceForSourceVersion({
+      projectId: PROJECT_ID,
+      sourceVersionId: backed.versionId,
+      coverage: 'extraction',
+      extractionId: analyze(backed.versionId).id,
+    });
+    const metadataOnly = register('docs/loadwidget-notes.md', 'notes');
+    index.replaceForSourceVersion({ projectId: PROJECT_ID, sourceVersionId: metadataOnly.versionId, coverage: 'metadata_only' });
+    const query = { projectId: PROJECT_ID, needles: ['loadwidget'] };
+
+    expect(index.findCandidates(query).map((candidate) => candidate.sourceId).sort()).toEqual(
+      [backed.source.id, metadataOnly.source.id].sort(),
+    );
+    const spanBacked = index.findCandidates({ ...query, spanBackedOnly: true });
+    expect(spanBacked.map((candidate) => candidate.sourceId)).toEqual([backed.source.id]);
+    expect(spanBacked[0].relevance).toBe(2);
+    expect(index.findCandidates({ ...query, spanBackedOnly: true, excludeSourceIds: [backed.source.id] })).toEqual([]);
+    expect(index.findCandidates({ ...query, excludeSourceIds: [backed.source.id] }).map((candidate) => candidate.sourceId)).toEqual([
+      metadataOnly.source.id,
+    ]);
+    expect(index.findCandidates({ ...query, limit: 1 })).toHaveLength(1);
+  });
+
+  it('lists usable indexes of current versions in a stable path order within the limit', () => {
+    const b = register('src/b.ts');
+    const a = register('src/a.ts');
+    const stale = register('src/stale.ts');
+    const foreign = register('src/foreign.ts', 'foreign', OTHER_PROJECT_ID);
+    register('src/unindexed.ts');
+    for (const entry of [b, a, stale]) {
+      index.replaceForSourceVersion({ projectId: PROJECT_ID, sourceVersionId: entry.versionId, coverage: 'metadata_only' });
+    }
+    index.replaceForSourceVersion({ projectId: OTHER_PROJECT_ID, sourceVersionId: foreign.versionId, coverage: 'metadata_only' });
+    index.markSourceStale(PROJECT_ID, stale.source.id);
+
+    expect(index.listUsableIndexes(PROJECT_ID, 10).map((entry) => entry.sourceVersionId)).toEqual([a.versionId, b.versionId]);
+    expect(index.listUsableIndexes(PROJECT_ID, 1).map((entry) => entry.sourceVersionId)).toEqual([a.versionId]);
+    expect(index.listUsableIndexes(PROJECT_ID, 0)).toEqual([]);
+    expect(index.listUsableIndexes(OTHER_PROJECT_ID, 10).map((entry) => entry.sourceVersionId)).toEqual([foreign.versionId]);
+  });
+
+  it('passes the owning connection to the change hook so consumers write in the same transaction', () => {
+    const { versionId } = register('src/loader.ts');
+    const contexts: unknown[] = [];
+    setKnowledgeSearchIndexChangedHook((_event, context) => contexts.push(context.db));
+
+    index.replaceForSourceVersion({ projectId: PROJECT_ID, sourceVersionId: versionId, coverage: 'metadata_only' });
+
+    expect(contexts).toEqual([db]);
+  });
+
   it('excludes stale, superseded-version, superseded-extraction, and old index-version rows', () => {
     const a = register('src/alpha.ts', 'alpha v1');
     index.replaceForSourceVersion({

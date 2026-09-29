@@ -6,6 +6,7 @@ import {
   applyKnowledgeReviewDeduplicationMigration,
   applyKnowledgeAnalysisCoverageMigration,
   applyKnowledgeFreshnessMigration,
+  applyKnowledgeSemanticMigration,
   applyKnowledgeGraphReportMigration,
   applyKnowledgeJobResultSchemaMigration,
   applyKnowledgeSearchIndexMigration,
@@ -219,6 +220,11 @@ export const MIGRATIONS: Migration[] = [
     version: 15,
     description: 'Add host-local knowledge source freshness and project watcher recovery tables',
     up: (db) => applyKnowledgeFreshnessMigration(db),
+  },
+  {
+    version: 16,
+    description: 'Add derived local semantic model, vector, and neighbor tables for bounded hybrid search',
+    up: (db) => applyKnowledgeSemanticMigration(db),
   },
 ];
 

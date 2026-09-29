@@ -19,3 +19,18 @@ export function foldSearchText(value: string): string {
 export function needleNarrowingGrams(foldedNeedle: string): string[] {
   return trigramsOf(foldedNeedle).slice(0, MAX_NEEDLE_GRAMS);
 }
+
+/** Identifier-aware distinct tokens shared by lexical scoring and the local semantic model. */
+export function searchTokens(value: string): string[] {
+  const tokens = value
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2')
+    .toLocaleLowerCase()
+    .split(/[^\p{L}\p{N}]+/u)
+    .filter(Boolean);
+  return [
+    ...new Set(
+      tokens.flatMap((token) => (token === 'usecase' ? [token, 'use', 'case'] : [token])),
+    ),
+  ];
+}

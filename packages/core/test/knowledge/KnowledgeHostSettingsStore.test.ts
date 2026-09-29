@@ -7,7 +7,9 @@ import {
   KNOWLEDGE_WORKER_CONCURRENCY_DEFAULT,
   KNOWLEDGE_WORKER_CONCURRENCY_MAX,
   KnowledgeHostSettingsStore,
+  KnowledgeSearchSettingsStore,
   KnowledgeWorkerSettingsStore,
+  resolveKnowledgeSemanticRetrieval,
   resolveKnowledgeWorkerConcurrency,
 } from '../../src/knowledge/KnowledgeHostSettingsStore.js';
 
@@ -206,5 +208,59 @@ describe('KnowledgeWorkerSettingsStore and concurrency resolution', () => {
 
     expect(() => resolveKnowledgeWorkerConcurrency(settings, PROJECT_A)).toThrow(/invalid stored value/i);
     expect(resolveKnowledgeWorkerConcurrency(settings, PROJECT_A, 2)).toEqual({ value: 2, source: 'override' });
+  });
+});
+
+describe('hybrid search enablement setting', () => {
+  let db: Database.Database;
+  let settings: KnowledgeSearchSettingsStore;
+
+  beforeEach(() => {
+    db = openDatabase(':memory:');
+    applyKnowledgeMigrations(db);
+    for (const projectId of [PROJECT_A, PROJECT_B]) {
+      db.prepare(
+        `INSERT INTO knowledge_projects (id, workspace_root, name, status, created_at, updated_at)
+         VALUES (?, ?, ?, 'active', ?, ?)`,
+      ).run(projectId, `/tmp/${projectId}`, projectId, NOW, NOW);
+    }
+    settings = new KnowledgeSearchSettingsStore(new KnowledgeHostSettingsStore(db, { now: () => NOW }));
+  });
+
+  afterEach(() => db.close());
+
+  it('is off by default and only enabled explicitly per project', () => {
+    expect(settings.getHybridEnabled(PROJECT_A)).toBeNull();
+    expect(resolveKnowledgeSemanticRetrieval(settings, PROJECT_A)).toEqual({ enabled: false, source: 'default' });
+
+    settings.setHybridEnabled(PROJECT_A, true);
+
+    expect(db.prepare('SELECT setting_value FROM knowledge_settings WHERE setting_key = ?').get(KNOWLEDGE_HOST_SETTING_KEYS.hybridSearchEnabled)).toEqual({
+      setting_value: 'true',
+    });
+    expect(resolveKnowledgeSemanticRetrieval(settings, PROJECT_A)).toEqual({ enabled: true, source: 'host-setting' });
+    expect(resolveKnowledgeSemanticRetrieval(settings, PROJECT_B)).toEqual({ enabled: false, source: 'default' });
+    settings.setHybridEnabled(PROJECT_A, false);
+    expect(resolveKnowledgeSemanticRetrieval(settings, PROJECT_A)).toEqual({ enabled: false, source: 'host-setting' });
+    expect(settings.clearHybridEnabled(PROJECT_A)).toBe(true);
+    expect(settings.getHybridEnabled(PROJECT_A)).toBeNull();
+  });
+
+  it('lets the per-call option override the setting in either direction', () => {
+    settings.setHybridEnabled(PROJECT_A, true);
+    expect(resolveKnowledgeSemanticRetrieval(settings, PROJECT_A, 'off')).toEqual({ enabled: false, source: 'option' });
+    settings.setHybridEnabled(PROJECT_A, false);
+    expect(resolveKnowledgeSemanticRetrieval(settings, PROJECT_A, 'if-available')).toEqual({ enabled: true, source: 'option' });
+  });
+
+  it('rejects an unknown option value and a corrupt stored value instead of clamping', () => {
+    expect(() => resolveKnowledgeSemanticRetrieval(settings, PROJECT_A, 'always' as never)).toThrow(/semanticRetrieval/);
+    db.prepare(
+      `INSERT INTO knowledge_settings (id, project_id, setting_key, setting_value, created_at, updated_at)
+       VALUES ('s1', ?, 'host.search.hybrid.enabled', 'maybe', ?, ?)`,
+    ).run(PROJECT_A, NOW, NOW);
+
+    expect(() => resolveKnowledgeSemanticRetrieval(settings, PROJECT_A)).toThrow(/invalid stored value/i);
+    expect(resolveKnowledgeSemanticRetrieval(settings, PROJECT_A, 'off')).toEqual({ enabled: false, source: 'option' });
   });
 });

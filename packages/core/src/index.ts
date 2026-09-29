@@ -189,8 +189,25 @@ export {
   KnowledgeSearchIndex,
   setKnowledgeSearchIndexChangedHook,
 } from './knowledge/KnowledgeSearchIndex.js';
+export {
+  KNOWLEDGE_SEMANTIC_MODEL_VERSION,
+  KnowledgeLocalSemanticIndex,
+  MAX_EXPANSION_CANDIDATES,
+  semanticModelStorageVersion,
+} from './knowledge/KnowledgeLocalSemanticIndex.js';
+export type {
+  KnowledgeLocalSemanticIndexOptions,
+  LocalSemanticCandidateScore,
+  LocalSemanticExpansion,
+  LocalSemanticRebuildReport,
+  LocalSemanticState,
+  LocalSemanticStatus,
+} from './knowledge/KnowledgeLocalSemanticIndex.js';
+export { orderHybridCandidates } from './knowledge/KnowledgeHybridOrdering.js';
+export type { HybridOrdering, HybridOrderingInput } from './knowledge/KnowledgeHybridOrdering.js';
 export type {
   KnowledgeSearchIndexChange,
+  KnowledgeSearchIndexChangeContext,
   KnowledgeSearchIndexChangedHook,
   ReplaceSearchIndexInput,
   SearchIndexCandidate,
@@ -411,13 +428,18 @@ export {
   KNOWLEDGE_WORKER_CONCURRENCY_MAX,
   KNOWLEDGE_WORKER_CONCURRENCY_MIN,
   KnowledgeHostSettingsStore,
+  KnowledgeSearchSettingsStore,
   KnowledgeWorkerSettingsStore,
+  resolveKnowledgeSemanticRetrieval,
   resolveKnowledgeWorkerConcurrency,
   validateKnowledgeWorkerConcurrency,
 } from './knowledge/KnowledgeHostSettingsStore.js';
 export type {
   KnowledgeHostSettingKey,
+  KnowledgeSearchSettingsStoreLike,
+  KnowledgeSemanticRetrievalOption,
   KnowledgeWorkerSettingsStoreLike,
+  ResolvedKnowledgeSemanticRetrieval,
   ResolvedKnowledgeWorkerConcurrency,
 } from './knowledge/KnowledgeHostSettingsStore.js';
 export {

@@ -132,6 +132,50 @@ export class KnowledgeWorkerSettingsStore implements KnowledgeWorkerSettingsStor
   }
 }
 
+export type KnowledgeSemanticRetrievalOption = 'off' | 'if-available';
+
+export interface KnowledgeSearchSettingsStoreLike {
+  getHybridEnabled(projectId: string): boolean | null;
+}
+
+export class KnowledgeSearchSettingsStore implements KnowledgeSearchSettingsStoreLike {
+  public constructor(private readonly settings: KnowledgeHostSettingsStore) {}
+
+  public getHybridEnabled(projectId: string): boolean | null {
+    const stored = this.settings.get(projectId, KNOWLEDGE_HOST_SETTING_KEYS.hybridSearchEnabled);
+    return stored === null ? null : stored === 'true';
+  }
+
+  public setHybridEnabled(projectId: string, enabled: boolean): void {
+    this.settings.set(projectId, KNOWLEDGE_HOST_SETTING_KEYS.hybridSearchEnabled, enabled ? 'true' : 'false');
+  }
+
+  public clearHybridEnabled(projectId: string): boolean {
+    return this.settings.delete(projectId, KNOWLEDGE_HOST_SETTING_KEYS.hybridSearchEnabled);
+  }
+}
+
+export interface ResolvedKnowledgeSemanticRetrieval {
+  enabled: boolean;
+  source: 'default' | 'host-setting' | 'option';
+}
+
+/** Precedence: the per-call option, then the host-local setting, then off. Never reads the setting when an option is given. */
+export function resolveKnowledgeSemanticRetrieval(
+  settings: KnowledgeSearchSettingsStoreLike,
+  projectId: string,
+  option?: KnowledgeSemanticRetrievalOption,
+): ResolvedKnowledgeSemanticRetrieval {
+  if (option !== undefined) {
+    if (option !== 'off' && option !== 'if-available') {
+      throw new Error("semanticRetrieval must be 'off' or 'if-available'");
+    }
+    return { enabled: option === 'if-available', source: 'option' };
+  }
+  const stored = settings.getHybridEnabled(projectId);
+  return stored === null ? { enabled: false, source: 'default' } : { enabled: stored, source: 'host-setting' };
+}
+
 export interface ResolvedKnowledgeWorkerConcurrency {
   value: number;
   source: 'default' | 'host-setting' | 'override';
