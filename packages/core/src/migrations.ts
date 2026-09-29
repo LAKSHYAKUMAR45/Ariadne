@@ -7,6 +7,7 @@ import {
   applyKnowledgeAnalysisCoverageMigration,
   applyKnowledgeFreshnessMigration,
   applyKnowledgeSemanticMigration,
+  applyKnowledgeSemanticSummaryMigration,
   applyKnowledgeGraphReportMigration,
   applyKnowledgeJobResultSchemaMigration,
   applyKnowledgeSearchIndexMigration,
@@ -225,6 +226,11 @@ export const MIGRATIONS: Migration[] = [
     version: 16,
     description: 'Add derived local semantic model, vector, and neighbor tables for bounded hybrid search',
     up: (db) => applyKnowledgeSemanticMigration(db),
+  },
+  {
+    version: 17,
+    description: 'Add grounded semantic summary records with reference-only evidence',
+    up: (db) => applyKnowledgeSemanticSummaryMigration(db),
   },
 ];
 

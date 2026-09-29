@@ -729,6 +729,7 @@ export type {
   KnowledgeChatProviderRequest,
   KnowledgeChatRole,
   KnowledgeChatServiceOptions,
+  KnowledgeChatSynthesisOptions,
   KnowledgeConversationRecord,
   ListKnowledgeConversationsOptions,
   ListKnowledgeMessagesOptions,
@@ -736,6 +737,46 @@ export type {
   SaveKnowledgeChatMessageToPageInput,
   StreamKnowledgeChatInput,
 } from './knowledge/KnowledgeChat.js';
+export { KnowledgeAnswerSynthesizer } from './knowledge/KnowledgeAnswerSynthesis.js';
+export type { KnowledgeAnswerSynthesizerOptions } from './knowledge/KnowledgeAnswerSynthesis.js';
+export type {
+  KnowledgeAnswerStrategy,
+  KnowledgeAnswerSynthesisService,
+  KnowledgeSynthesisClaim,
+  KnowledgeSynthesisClaimConfidence,
+  KnowledgeSynthesisEvidence,
+  KnowledgeSynthesisResult,
+  KnowledgeSynthesisSection,
+  KnowledgeSynthesisWarning,
+  KnowledgeSynthesisWarningCode,
+  PersistedKnowledgeSynthesis,
+  PersistedKnowledgeSynthesisEvidence,
+  SynthesizeKnowledgeAnswerInput,
+} from './knowledge/KnowledgeSynthesisTypes.js';
+export { parsePersistedKnowledgeSynthesis, toPersistedKnowledgeSynthesis } from './knowledge/KnowledgeSynthesisPersistence.js';
+export { KnowledgeGenerationGateway } from './knowledge/KnowledgeGenerationGateway.js';
+export type {
+  KnowledgeGenerationFailure,
+  KnowledgeGenerationGatewayOptions,
+  KnowledgeGenerationOutcome,
+  KnowledgeGenerationRequest,
+  KnowledgeJsonCompletionClient,
+  KnowledgeJsonCompletionInput,
+} from './knowledge/KnowledgeGenerationGateway.js';
+export { PROVIDER_FALLBACK_REASONS, providerFallbackWarning } from './knowledge/KnowledgeProviderFallback.js';
+export type { ProviderFallbackReason, ProviderFallbackWarning } from './knowledge/KnowledgeProviderFallback.js';
+export { KnowledgeSemanticSummaryStore } from './knowledge/KnowledgeSemanticSummaries.js';
+export type { KnowledgeSemanticSummaryStoreOptions } from './knowledge/KnowledgeSemanticSummaries.js';
+export { KNOWLEDGE_SUMMARY_SCOPE_KINDS, KNOWLEDGE_SUMMARY_STRATEGIES } from './knowledge/KnowledgeSemanticSummaryTypes.js';
+export type {
+  BuildKnowledgeSemanticSummaryInput,
+  KnowledgeSemanticSummaryEvidence,
+  KnowledgeSemanticSummaryRecord,
+  KnowledgeSemanticSummaryService,
+  KnowledgeSemanticSummaryWarning,
+  KnowledgeSummaryScopeKind,
+  KnowledgeSummaryStrategy,
+} from './knowledge/KnowledgeSemanticSummaryTypes.js';
 export {
   deriveCitationContext,
   legacyCitationContext,
@@ -751,7 +792,7 @@ export type {
   KnowledgeCitationSnippetPolicy,
 } from './knowledge/KnowledgeCitationContext.js';
 export { parseMessagePayload, serializeMessagePayload } from './knowledge/KnowledgeChatPayload.js';
-export type { MessagePayloadV2, PersistedKnowledgeSynthesis } from './knowledge/KnowledgeChatPayload.js';
+export type { MessagePayloadV2 } from './knowledge/KnowledgeChatPayload.js';
 export {
   KnowledgeResearchService,
   ResearchConfirmationRequiredError,

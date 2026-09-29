@@ -94,7 +94,7 @@ const FEATURES: ReadonlyMap<string, KnowledgeArchiveFeatureDefinition> = new Map
   ['knowledge-analysis-coverage-v1', { kind: 'required', implemented: true }],
   [KNOWLEDGE_ARCHIVE_FEATURE_CHAT_PAYLOAD_V2, { kind: 'required', implemented: true }],
   ['knowledge-graph-reports-v1', { kind: 'optional', implemented: true }],
-  ['knowledge-semantic-summaries-v1', { kind: 'optional', implemented: false }],
+  ['knowledge-semantic-summaries-v1', { kind: 'optional', implemented: true }],
 ]);
 
 const required = (feature?: string): KnowledgeArchiveTableRegistration => ({ class: 'required', ...(feature ? { feature } : {}) });

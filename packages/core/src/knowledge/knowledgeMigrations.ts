@@ -756,6 +756,34 @@ export function applyKnowledgeSemanticMigration(db: Database.Database): void {
 }
 
 /**
+ * Creates the grounded semantic summary table (global migration 17, knowledge revision 13). Summaries are accepted,
+ * reference-only artifacts: `summary_json` holds prose, evidence IDs, and reference-only citations, never prompts,
+ * responses, or excerpts. `provider_profile_name` is a host-local label and is exported as NULL.
+ */
+export function applyKnowledgeSemanticSummaryMigration(db: Database.Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS knowledge_semantic_summaries (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL,
+      scope_kind TEXT NOT NULL,
+      scope_id TEXT NOT NULL,
+      strategy TEXT NOT NULL,
+      provider_profile_name TEXT,
+      summary_json TEXT NOT NULL,
+      warnings_json TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      CHECK (scope_kind IN ('source_version', 'page_version', 'project')),
+      CHECK (strategy IN ('deterministic', 'provider_refined', 'fallback_warning')),
+      CHECK (json_valid(summary_json)),
+      CHECK (json_valid(warnings_json)),
+      UNIQUE (project_id, scope_kind, scope_id, created_at),
+      FOREIGN KEY (project_id) REFERENCES knowledge_projects(id) ON DELETE CASCADE
+    );
+  `);
+}
+
+/**
  * Creates the additive knowledge schema atomically. It is idempotent so it
  * can be called safely by the shared migration runner on every database open.
  */
@@ -772,5 +800,6 @@ export function applyKnowledgeMigrations(db: Database.Database): void {
     applyKnowledgeGraphReportMigration(db);
     applyKnowledgeFreshnessMigration(db);
     applyKnowledgeSemanticMigration(db);
+    applyKnowledgeSemanticSummaryMigration(db);
   })();
 }

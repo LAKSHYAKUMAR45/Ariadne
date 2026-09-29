@@ -34,6 +34,7 @@ import type {
   KnowledgeEnrichmentReviewInput,
   KnowledgeEnrichmentService,
 } from '../KnowledgeWorker.js';
+import { KnowledgeProviderCallError } from '../KnowledgeProviderFallback.js';
 import { redact } from '../../Redactor.js';
 
 const MAX_REQUEST_SYSTEM_PROMPT_LENGTH = 2_000;
@@ -78,6 +79,14 @@ export interface OpenAICompatibleGenerateInput {
   sourceId: string;
   sourceVersionId: string;
   sourceSpans: readonly KnowledgeAnalysisSourceSpan[];
+  signal?: AbortSignal;
+}
+
+export interface OpenAICompatibleCompleteJsonInput {
+  profile: KnowledgeProviderProfile;
+  environment: NodeJS.ProcessEnv;
+  prompt: string;
+  systemPrompt: string;
   signal?: AbortSignal;
 }
 
@@ -693,6 +702,25 @@ export class OpenAICompatibleProvider implements KnowledgeProviderTestAdapter {
     return { value: generation, warnings: result.warnings };
   }
 
+  /**
+   * Single-shot, non-streaming request whose message content must be one JSON document. Failures carry a classified
+   * `KnowledgeProviderCallError`; callers own semantic validation of the returned value.
+   */
+  public async completeJson(input: OpenAICompatibleCompleteJsonInput): Promise<OpenAICompatibleProviderResult<unknown>> {
+    const result = await this.executeRequest({
+      profile: input.profile,
+      environment: input.environment,
+      prompt: input.prompt,
+      systemPrompt: input.systemPrompt,
+      signal: input.signal,
+    });
+    try {
+      return { value: safeParseJson(result.content, 'Provider message content'), warnings: result.warnings };
+    } catch (error) {
+      throw new KnowledgeProviderCallError('invalid_response', error instanceof Error ? sanitizeExcerpt(error.message) : 'invalid response');
+    }
+  }
+
   public async testProfile(input: KnowledgeProviderTestAdapterInput): Promise<KnowledgeProviderTestAdapterResult> {
     const result = await this.executeRequest({
       profile: input.profile,
@@ -729,7 +757,12 @@ export class OpenAICompatibleProvider implements KnowledgeProviderTestAdapter {
     if (utf8ByteLength(input.systemPrompt) > MAX_REQUEST_SYSTEM_PROMPT_LENGTH) {
       throw new Error(`Provider system prompt exceeds the ${MAX_REQUEST_SYSTEM_PROMPT_LENGTH}-byte limit`);
     }
-    const endpoint = normalizeOpenAICompatibleEndpoint(input.profile.endpoint);
+    let endpoint: string;
+    try {
+      endpoint = normalizeOpenAICompatibleEndpoint(input.profile.endpoint);
+    } catch (error) {
+      throw new KnowledgeProviderCallError('unsafe_endpoint', error instanceof Error ? sanitizeExcerpt(error.message) : 'unsafe endpoint');
+    }
     const url = new URL('chat/completions', `${endpoint}/`).toString();
     const resolvedKey = input.resolvedKey ?? resolveKnowledgeProviderApiKey(input.profile, input.environment, this.credentialPolicy);
     const requestSignal = composeSignals(input.signal, input.profile.timeoutMs);
@@ -776,16 +809,22 @@ export class OpenAICompatibleProvider implements KnowledgeProviderTestAdapter {
           `Provider request failed with status ${response.status}. Response body was redacted.`,
         );
       }
-      const parsed = safeParseJson(responseText, 'Provider response');
-      return {
-        content: extractResponseContent(parsed),
-        warnings: resolvedKey.warnings,
-      };
+      let content: string;
+      try {
+        content = extractResponseContent(safeParseJson(responseText, 'Provider response'));
+      } catch (error) {
+        throw new KnowledgeProviderCallError('invalid_response', error instanceof Error ? error.message : String(error));
+      }
+      return { content, warnings: resolvedKey.warnings };
     } catch (error) {
       if (requestSignal.timeoutReached()) {
-        throw new Error(
+        throw new KnowledgeProviderCallError(
+          'timeout',
           `Provider request to ${endpoint} timed out after ${input.profile.timeoutMs}ms.`,
         );
+      }
+      if (error instanceof KnowledgeProviderCallError) {
+        throw new KnowledgeProviderCallError(error.reason, sanitizeExcerpt(error.message));
       }
       if (error instanceof Error) {
         throw new Error(sanitizeExcerpt(error.message));
@@ -810,7 +849,8 @@ export class OpenAICompatibleProvider implements KnowledgeProviderTestAdapter {
       this.hostPolicy.allowedOrigins?.has(url.origin) === true ||
       this.hostPolicy.isOriginAllowed?.({ origin: url.origin, profile, hasCredentials }) === true;
     if (!originAllowed) {
-      throw new Error(
+      throw new KnowledgeProviderCallError(
+        'unsafe_endpoint',
         hasCredentials
           ? `Host policy rejected credential-bearing provider origin ${url.origin}`
           : `Host policy rejected provider origin ${url.origin}`,
@@ -864,7 +904,7 @@ export class OpenAICompatibleProvider implements KnowledgeProviderTestAdapter {
   private validateLiteralIpDestination(url: URL, address: string): void {
     const classification = classifyProviderEndpointIp(address);
     if (!classification.isGlobalDestination && !classification.isExactLoopbackLiteral) {
-      throw new Error(`Provider endpoint ${url.origin} resolves to a private or reserved address`);
+      throw new KnowledgeProviderCallError('unsafe_endpoint', `Provider endpoint ${url.origin} resolves to a private or reserved address`);
     }
   }
 
@@ -878,7 +918,7 @@ export class OpenAICompatibleProvider implements KnowledgeProviderTestAdapter {
     const canonicalAddresses = addresses.map((address) => validatePinnedResolvedAddress(address));
     const privateOrReserved = canonicalAddresses.some((address) => !classifyProviderEndpointIp(address.address).isGlobalDestination);
     if (privateOrReserved) {
-      throw new Error(`Provider endpoint ${url.origin} resolves to a private or reserved address`);
+      throw new KnowledgeProviderCallError('unsafe_endpoint', `Provider endpoint ${url.origin} resolves to a private or reserved address`);
     }
     return canonicalAddresses;
   }

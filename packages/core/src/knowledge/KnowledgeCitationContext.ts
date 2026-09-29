@@ -154,6 +154,31 @@ export function toPersistedCitationContext(context: KnowledgeCitationContext): K
   };
 }
 
+/** Rebuilds a citation from an allowlist so excerpt text can never reach disk. */
+export function toPersistedCitation(citation: KnowledgeSearchCitation): KnowledgeSearchCitation {
+  const span = citation.span;
+  return {
+    pageId: citation.pageId,
+    sourceId: citation.sourceId,
+    path: citation.path,
+    url: citation.url,
+    span:
+      span === null || span === undefined
+        ? null
+        : {
+            id: span.id,
+            startOffset: span.startOffset,
+            endOffset: span.endOffset,
+            ...(span.startLine !== undefined ? { startLine: span.startLine } : {}),
+            ...(span.startColumn !== undefined ? { startColumn: span.startColumn } : {}),
+            ...(span.endLine !== undefined ? { endLine: span.endLine } : {}),
+            ...(span.endColumn !== undefined ? { endColumn: span.endColumn } : {}),
+            label: span.label,
+          },
+    ...(citation.context !== undefined ? { context: toPersistedCitationContext(citation.context) } : {}),
+  };
+}
+
 /**
  * Builds an explicit context for citations that predate persisted context. It
  * reuses only identifiers already present on the citation and never invents a

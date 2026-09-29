@@ -143,9 +143,11 @@ describe('parseMessagePayload', () => {
     expect(payload.citations[0]?.context?.legacyState).toBe('legacy_unknown');
   });
 
-  it('validates the synthesis slot as a plain object or null', () => {
+  it('validates the synthesis slot as a strict synthesis block or null', () => {
     const base = { schemaVersion: 2, content: 'hi', citations: [], retrievalMode: null };
-    expect(parseMessagePayload(JSON.stringify({ ...base, synthesis: { any: 'shape' } })).synthesis).toEqual({ any: 'shape' });
+    const block = { synthesisVersion: 1, strategy: 'deterministic', sections: [], evidence: [], warnings: [] };
+    expect(parseMessagePayload(JSON.stringify({ ...base, synthesis: block })).synthesis).toEqual(block);
+    expect(() => parseMessagePayload(JSON.stringify({ ...base, synthesis: { any: 'shape' } }))).toThrow(/synthesis/i);
     expect(parseMessagePayload(JSON.stringify({ ...base, synthesis: null })).synthesis).toBeNull();
     expect(() => parseMessagePayload(JSON.stringify({ ...base, synthesis: 'x' }))).toThrow(/synthesis/i);
   });

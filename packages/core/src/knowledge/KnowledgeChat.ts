@@ -3,7 +3,15 @@ import path from 'node:path';
 import type Database from 'better-sqlite3';
 import { createKnowledgeId, normalizeKnowledgePath } from './KnowledgeIds.js';
 import { deriveCitationContext, tryParseCitationContext } from './KnowledgeCitationContext.js';
-import { parseMessagePayload, serializeMessagePayload, type MessagePayloadV2 } from './KnowledgeChatPayload.js';
+import {
+  parseMessagePayload,
+  serializeMessagePayload,
+  type MessagePayloadV2,
+  type PersistedKnowledgeSynthesis,
+} from './KnowledgeChatPayload.js';
+import { KnowledgeAnswerSynthesizer } from './KnowledgeAnswerSynthesis.js';
+import { parsePersistedKnowledgeSynthesis, toPersistedKnowledgeSynthesis } from './KnowledgeSynthesisPersistence.js';
+import type { KnowledgeAnswerSynthesisService, KnowledgeSynthesisResult } from './KnowledgeSynthesisTypes.js';
 import {
   buildKnowledgeSearchContext,
   searchKnowledge,
@@ -41,6 +49,8 @@ export interface KnowledgeChatMessageRecord {
   citations: KnowledgeSearchCitation[];
   retrievalMode: KnowledgeSearchMode | null;
   createdAt: string;
+  /** Present only on answers produced through the synthesis opt-in; reference-only. */
+  synthesis?: PersistedKnowledgeSynthesis;
 }
 
 export interface CreateKnowledgeConversationInput {
@@ -75,6 +85,12 @@ export type KnowledgeChatProvider = (
   context: KnowledgeProviderExecutionContext,
 ) => AsyncIterable<string>;
 
+/** Opting in replaces provider text streaming with a validated, deterministic-or-provider-assisted synthesis. */
+export interface KnowledgeChatSynthesisOptions {
+  providerStrategy?: 'never' | 'if-available';
+  providerProfileName?: string | null;
+}
+
 export interface StreamKnowledgeChatInput {
   projectId: string;
   conversationId: string;
@@ -86,6 +102,7 @@ export interface StreamKnowledgeChatInput {
   tokenBudget?: number;
   timeoutMs?: number;
   signal?: AbortSignal;
+  synthesis?: KnowledgeChatSynthesisOptions;
 }
 
 export interface RegenerateKnowledgeChatInput {
@@ -97,6 +114,7 @@ export interface RegenerateKnowledgeChatInput {
   tokenBudget?: number;
   timeoutMs?: number;
   signal?: AbortSignal;
+  synthesis?: KnowledgeChatSynthesisOptions;
 }
 
 export interface SaveKnowledgeChatMessageToPageInput {
@@ -129,6 +147,8 @@ export interface KnowledgeChatServiceOptions {
   historyLimit?: number;
   now?: () => string;
   redact?: KnowledgeRedactionHook;
+  /** Defaults to a deterministic-only synthesizer; supply one with a generation gateway to allow provider assistance. */
+  synthesisService?: KnowledgeAnswerSynthesisService;
 }
 
 interface ConversationRow {
@@ -153,6 +173,7 @@ interface ProjectRow {
 }
 
 const DEFAULT_HISTORY_LIMIT = 50;
+const SYNTHESIS_DELTA_CHARS = 256;
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -196,6 +217,7 @@ export class KnowledgeChatService {
   private readonly now: () => string;
   private readonly redact: (value: string) => string;
   private readonly activeStreams = new Map<string, AbortController>();
+  private readonly synthesisService: KnowledgeAnswerSynthesisService;
 
   public constructor(
     private readonly db: Database.Database,
@@ -207,6 +229,7 @@ export class KnowledgeChatService {
     this.historyLimit = options.historyLimit ?? DEFAULT_HISTORY_LIMIT;
     this.now = options.now ?? nowIso;
     this.redact = (value: string) => redactKnowledgeProviderPayload(value, options.redact);
+    this.synthesisService = options.synthesisService ?? new KnowledgeAnswerSynthesizer({ db, redact: options.redact });
   }
 
   public createConversation(input: CreateKnowledgeConversationInput): KnowledgeConversationRecord {
@@ -327,6 +350,7 @@ export class KnowledgeChatService {
       tokenBudget: input.tokenBudget,
       timeoutMs: input.timeoutMs,
       signal: input.signal,
+      synthesis: input.synthesis,
     });
   }
 
@@ -360,6 +384,7 @@ export class KnowledgeChatService {
       tokenBudget: input.tokenBudget,
       timeoutMs: input.timeoutMs,
       signal: input.signal,
+      synthesis: input.synthesis,
     });
   }
 
@@ -370,7 +395,7 @@ export class KnowledgeChatService {
     const message = this.getMessage(input.projectId, input.messageId);
     const workspaceRoot = this.workspaceRoot(message.projectId);
 
-    const provenance = citationProvenance(message.citations);
+    const provenance = citationProvenance([...synthesisClaimCitations(message.synthesis), ...message.citations]);
 
     const contentPath = pageContentPath(input.type, input.slug);
     const outputRoot = this.knowledgeOutputRoot(workspaceRoot);
@@ -410,6 +435,7 @@ export class KnowledgeChatService {
     tokenBudget?: number;
     timeoutMs?: number;
     signal?: AbortSignal;
+    synthesis?: KnowledgeChatSynthesisOptions;
   }): AsyncGenerator<KnowledgeChatEvent> {
     const { conversation } = params;
     const workspaceRoot = this.workspaceRoot(conversation.projectId);
@@ -437,6 +463,10 @@ export class KnowledgeChatService {
     this.activeStreams.set(assistantMessageId, controller);
 
     try {
+      if (params.synthesis !== undefined) {
+        yield* this.streamSynthesis(params, params.synthesis, assistantMessageId, controller);
+        return;
+      }
       let searchResults;
       try {
         searchResults = searchKnowledge(params.query, {
@@ -542,6 +572,92 @@ export class KnowledgeChatService {
     }
   }
 
+  /** Non-streaming synthesis is validated first; only then is the answer emitted as chunked deltas and persisted. */
+  private async *streamSynthesis(
+    params: {
+      conversation: KnowledgeConversationRecord;
+      query: string;
+      mode: KnowledgeSearchMode;
+      taskStore?: TaskStore;
+      limit?: number;
+      maxGraphExpansions?: number;
+      tokenBudget?: number;
+    },
+    options: KnowledgeChatSynthesisOptions,
+    assistantMessageId: string,
+    controller: AbortController,
+  ): AsyncGenerator<KnowledgeChatEvent> {
+    const { conversation } = params;
+    let result: KnowledgeSynthesisResult;
+    try {
+      result = await this.synthesisService.synthesize({
+        projectId: conversation.projectId,
+        query: params.query,
+        mode: params.mode,
+        taskStore: params.taskStore,
+        limit: params.limit,
+        maxGraphExpansions: params.maxGraphExpansions,
+        tokenBudget: params.tokenBudget,
+        providerStrategy: options.providerStrategy,
+        providerProfileName: options.providerProfileName,
+        signal: controller.signal,
+      });
+    } catch (error) {
+      yield { type: 'error', messageId: assistantMessageId, message: this.errorMessage(error) };
+      return;
+    }
+    if (controller.signal.aborted) {
+      yield { type: 'cancelled', messageId: assistantMessageId };
+      return;
+    }
+
+    const citations = result.citations.map((citation) => this.citationWithContext(conversation.projectId, citation));
+    yield {
+      type: 'meta',
+      conversationId: conversation.id,
+      messageId: assistantMessageId,
+      retrievalMode: params.mode,
+      providerId: `synthesis:${result.strategy}`,
+      resultCount: new Set(result.evidence.map((entry) => entry.resultId)).size,
+      citationCount: citations.length,
+    };
+    for (const citation of citations) yield { type: 'citation', messageId: assistantMessageId, citation };
+
+    const content = result.answerMarkdown.split('\n').map((line) => this.redact(line)).join('\n');
+    for (let offset = 0; offset < content.length; offset += SYNTHESIS_DELTA_CHARS) {
+      if (controller.signal.aborted) break;
+      yield { type: 'delta', messageId: assistantMessageId, text: content.slice(offset, offset + SYNTHESIS_DELTA_CHARS) };
+    }
+    if (controller.signal.aborted) {
+      yield { type: 'cancelled', messageId: assistantMessageId };
+      return;
+    }
+
+    let record: KnowledgeChatMessageRecord;
+    try {
+      const synthesis = parsePersistedKnowledgeSynthesis(
+        toPersistedKnowledgeSynthesis(result, (citation) => this.citationWithContext(conversation.projectId, citation)),
+      );
+      record = this.writeMessage(this.workspaceRoot(conversation.projectId), {
+        id: assistantMessageId,
+        projectId: conversation.projectId,
+        conversationId: conversation.id,
+        role: 'assistant',
+        content,
+        citations,
+        retrievalMode: params.mode,
+        createdAt: this.now(),
+        synthesis,
+      });
+    } catch (error) {
+      yield { type: 'error', messageId: assistantMessageId, message: this.errorMessage(error) };
+      return;
+    }
+    this.touchConversation(conversation.id);
+    this.trimHistory(this.workspaceRoot(conversation.projectId), conversation.id);
+    yield { type: 'done', messageId: assistantMessageId, message: record };
+  }
+
   private errorMessage(error: unknown): string {
     return error instanceof Error ? this.redact(error.message) : 'Knowledge chat provider failed';
   }
@@ -603,6 +719,7 @@ export class KnowledgeChatService {
       citations: KnowledgeSearchCitation[];
       retrievalMode: KnowledgeSearchMode | null;
       createdAt: string;
+      synthesis?: PersistedKnowledgeSynthesis;
     },
   ): KnowledgeChatMessageRecord {
     const relativePath = conversationRelativePath(input.conversationId, input.id);
@@ -611,20 +728,26 @@ export class KnowledgeChatService {
       content: input.content,
       citations,
       retrievalMode: input.retrievalMode,
+      synthesis: input.synthesis,
     });
-    this.db
-      .prepare(
-        `INSERT INTO knowledge_messages (id, project_id, conversation_id, role, content_path, created_at)
-         VALUES (@id, @projectId, @conversationId, @role, @contentPath, @createdAt)`,
-      )
-      .run({
-        id: input.id,
-        projectId: input.projectId,
-        conversationId: input.conversationId,
-        role: input.role,
-        contentPath: relativePath,
-        createdAt: input.createdAt,
-      });
+    try {
+      this.db
+        .prepare(
+          `INSERT INTO knowledge_messages (id, project_id, conversation_id, role, content_path, created_at)
+           VALUES (@id, @projectId, @conversationId, @role, @contentPath, @createdAt)`,
+        )
+        .run({
+          id: input.id,
+          projectId: input.projectId,
+          conversationId: input.conversationId,
+          role: input.role,
+          contentPath: relativePath,
+          createdAt: input.createdAt,
+        });
+    } catch (error) {
+      rmSync(resolveConversationPayloadPath(workspaceRoot, relativePath), { force: true });
+      throw error;
+    }
     return {
       id: input.id,
       projectId: input.projectId,
@@ -634,6 +757,7 @@ export class KnowledgeChatService {
       citations,
       retrievalMode: input.retrievalMode,
       createdAt: input.createdAt,
+      ...(input.synthesis === undefined ? {} : { synthesis: input.synthesis }),
     };
   }
 
@@ -648,6 +772,7 @@ export class KnowledgeChatService {
       citations: payload.citations,
       retrievalMode: payload.retrievalMode,
       createdAt: row.created_at,
+      ...(payload.synthesis === undefined || payload.synthesis === null ? {} : { synthesis: payload.synthesis }),
     };
   }
 
@@ -659,7 +784,7 @@ export class KnowledgeChatService {
   private writePayload(
     workspaceRoot: string,
     relativePath: string,
-    payload: Pick<MessagePayloadV2, 'content' | 'citations' | 'retrievalMode'>,
+    payload: Pick<MessagePayloadV2, 'content' | 'citations' | 'retrievalMode' | 'synthesis'>,
   ): void {
     const absolutePath = resolveConversationPayloadPath(workspaceRoot, relativePath);
     mkdirSync(path.dirname(absolutePath), { recursive: true });
@@ -728,6 +853,10 @@ function citationProvenance(citations: readonly KnowledgeSearchCitation[]): Know
     provenance.push(reference);
   }
   return provenance;
+}
+
+function synthesisClaimCitations(synthesis: PersistedKnowledgeSynthesis | undefined): KnowledgeSearchCitation[] {
+  return (synthesis?.sections ?? []).flatMap((section) => section.claims.flatMap((claim) => claim.citations));
 }
 
 function pageContentPath(type: string, slug: string): string {

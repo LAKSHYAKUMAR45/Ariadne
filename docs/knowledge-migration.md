@@ -107,6 +107,15 @@ class (`required`, `optional`, `derived-rebuild`, `host-local`,
 table files, unclassified tables, unknown required features, or `host.*`
 settings rows are rejected.
 
+Grounded semantic summaries (`knowledge_semantic_summaries`, optional feature
+`knowledge-semantic-summaries-v1`) travel in version `2` archives with
+`provider_profile_name` always exported as `NULL`; import rejects a non-null
+name, an unresolvable `scope_id` (it must reference a source version, page
+version, or the project inside the archive), and malformed or oversized summary
+or warning JSON. An archive without the table imports with an
+`optional_table_absent` warning, and summaries can be rebuilt on demand. Chat
+message payloads with a `synthesis` block are validated strictly on import.
+
 Host-local `host.*` settings are never exported, imported, or echoed in
 errors. `--replace` preserves the target project's `host.*` settings, provider
 profiles, and other privacy-omitted rows, and clears its derived search rows.

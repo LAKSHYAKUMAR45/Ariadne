@@ -68,6 +68,29 @@ but archive export omits `configuration_json` and includes only redacted
 profile metadata. Provider setup UX and durable credential management remain
 **in progress**.
 
+## Answer synthesis and semantic summaries
+
+Core exposes two opt-in, deterministic-first services (no CLI/MCP surface yet):
+
+- `KnowledgeAnswerSynthesizer` turns search results into cross-file answers with
+  sections (Answer, Supporting evidence, Open questions / ambiguity), per-claim
+  citations, and reference-only evidence. Ambiguity from search is propagated as
+  `ambiguous_evidence`/`insufficient_exact_spans` warnings. Chat uses it only when
+  a caller passes `synthesis` options; other chat behavior is unchanged. The
+  persisted `MessagePayloadV2.synthesis` block stores claims, citations, and
+  warnings only, never prompts, responses, or excerpts.
+- `KnowledgeSemanticSummaryStore` builds grounded source-version, page-version, and
+  project summaries (migration 17, `knowledge_semantic_summaries`).
+
+Provider assistance is optional. It uses only an existing reviewed provider
+profile with the `generation` capability, chosen by explicit profile, then the
+`host.provider.synthesis_profile` / `host.provider.summary_profile` setting (no
+default profile is guessed). Requests are single-shot, bounded, and non-streaming; responses are
+strictly validated and every claim or bullet must cite known evidence. Any
+failure (`no_profile`, `profile_disabled`, `capability_missing`, `missing_credentials`, `timeout`,
+`unsafe_endpoint`, `provider_error`, `invalid_response`) falls back to the
+deterministic result with exactly one bounded warning.
+
 ## CLI workflow
 
 Build the workspace from source, then use the knowledge command tree:

@@ -11,6 +11,8 @@ import {
   importKnowledgeProject,
   type KnowledgeArchiveCompatibilityBlock,
 } from '../../src/knowledge/KnowledgeArchive.js';
+import { reviewArchiveDataFiles } from '../../src/knowledge/KnowledgeArchiveCompatibility.js';
+import { KnowledgeSemanticSummaryStore } from '../../src/knowledge/KnowledgeSemanticSummaries.js';
 import { searchKnowledge } from '../../src/knowledge/KnowledgeSearch.js';
 import { KnowledgeLocalSemanticIndex } from '../../src/knowledge/KnowledgeLocalSemanticIndex.js';
 import { KNOWLEDGE_SCHEMA_VERSION } from '../../src/knowledge/knowledgeSchema.js';
@@ -805,6 +807,69 @@ See [[graph|the graph]].
       ).toThrow(/synthesis/i);
     });
 
+    describe('synthesis payload block', () => {
+      const PERSISTED_CITATION = { ...CITATION, context: CONTEXT };
+      const SYNTHESIS = {
+        synthesisVersion: 1,
+        strategy: 'deterministic',
+        sections: [
+          {
+            id: 'section_1',
+            heading: 'Answer',
+            claims: [
+              {
+                id: 'claim_1',
+                text: 'SQLite is defined in docs/sqlite.md',
+                evidenceIds: ['evidence_1'],
+                citations: [PERSISTED_CITATION],
+                confidence: 'clear',
+              },
+            ],
+          },
+        ],
+        evidence: [
+          {
+            id: 'evidence_1',
+            resultId: 'source_1',
+            kind: 'source',
+            title: 'SQLite source',
+            path: 'docs/sqlite.md',
+            rank: 1,
+            citation: PERSISTED_CITATION,
+            snippetPolicy: 'reference_only',
+            searchConfidence: 'clear',
+          },
+        ],
+        warnings: [],
+      };
+
+      function importWith(synthesis: unknown): void {
+        const source = database();
+        const { projectId } = seedWithV2PayloadForContext(source);
+        const archive = exportKnowledgeProject(source, { projectId });
+        const payload = v2Payload(PERSISTED_CITATION, { synthesis });
+        importKnowledgeProject(database(), rewriteArchiveFile(archive, 'conversations/conversation_1/message_1.json', payload), importOptions());
+      }
+
+      it('accepts a valid reference-only synthesis block', () => {
+        expect(() => importWith(SYNTHESIS)).not.toThrow();
+      });
+
+      it('accepts a null synthesis slot', () => {
+        expect(() => importWith(null)).not.toThrow();
+      });
+
+      it.each([
+        ['an unknown key', { ...SYNTHESIS, prompt: 'raw prompt' }],
+        ['an ephemeral snippet on evidence', { ...SYNTHESIS, evidence: [{ ...SYNTHESIS.evidence[0], ephemeralSnippet: 'raw excerpt' }] }],
+        ['an ungrounded claim', { ...SYNTHESIS, sections: [{ ...SYNTHESIS.sections[0], claims: [{ ...SYNTHESIS.sections[0].claims[0], evidenceIds: ['missing'] }] }] }],
+        ['an unsupported version', { ...SYNTHESIS, synthesisVersion: 2 }],
+        ['an ephemeral snippet policy', { ...SYNTHESIS, evidence: [{ ...SYNTHESIS.evidence[0], snippetPolicy: 'ephemeral_redacted' }] }],
+      ])('rejects a synthesis block with %s', (_label, synthesis) => {
+        expect(() => importWith(synthesis)).toThrow(/synthesis/i);
+      });
+    });
+
     function seedWithV2PayloadForContext(db: ReturnType<typeof openDatabase>) {
       const seeded = seed(db);
       writeWorkspaceFile(seeded.workspaceRoot, 'conversations/conversation_1/message_1.json', v2Payload({ ...CITATION, context: CONTEXT }));
@@ -1250,34 +1315,22 @@ See [[graph|the graph]].
       }
     });
 
-    it('imports a version 2 archive with a fingerprinted unsupported optional table and warns', () => {
-      const db = database();
-      const { projectId } = seed(db);
-      const content = '[{"id":"report_1"}]\n';
-      const base = exportV2(db, projectId);
-      const archive = withCompatibility(addArchiveFile(base, 'data/knowledge_semantic_summaries.json', content), {
-        tableFingerprints: [
-          ...compatibilityOf(base).tableFingerprints,
-          { table: 'knowledge_semantic_summaries', sha256: sha256(content), rowCount: 1 },
-        ],
-      });
-      const target = database();
-      const result = importKnowledgeProject(target, archive, importOptions());
-      expect(result.warnings).toContainEqual(expect.objectContaining({ code: 'optional_table_unsupported' }));
-      expect(target.prepare('SELECT COUNT(*) AS count FROM knowledge_pages WHERE project_id = ?').get(projectId)).not.toEqual({ count: 0 });
+    it('warns about and ignores an optional table the reader does not support', () => {
+      const supported = new Set(KNOWLEDGE_ARCHIVE_TABLES.filter((table) => table !== 'knowledge_semantic_summaries'));
+      const review = reviewArchiveDataFiles(['data/knowledge_semantic_summaries.json', 'data/knowledge_pages.json'], 2, supported);
+      expect(review.warnings).toContainEqual(expect.objectContaining({ code: 'optional_table_unsupported' }));
+      expect(review.ignoredOptionalTables.has('knowledge_semantic_summaries')).toBe(true);
     });
 
-    it('still verifies the fingerprint of an ignored optional table and of imported tables', () => {
+    it('still verifies the fingerprint of an optional table and of imported tables', async () => {
       const db = database();
       const { projectId } = seed(db);
-      const content = '[{"id":"report_1"}]\n';
+      await buildSummaries(db, projectId);
       const base = exportV2(db, projectId);
-      const withFile = addArchiveFile(base, 'data/knowledge_semantic_summaries.json', content);
-      const tampered = withCompatibility(withFile, {
-        tableFingerprints: [
-          ...compatibilityOf(base).tableFingerprints,
-          { table: 'knowledge_semantic_summaries', sha256: sha256('[]\n'), rowCount: 1 },
-        ],
+      const tampered = withCompatibility(base, {
+        tableFingerprints: compatibilityOf(base).tableFingerprints.map((fingerprint) =>
+          fingerprint.table === 'knowledge_semantic_summaries' ? { ...fingerprint, sha256: sha256('[]\n') } : fingerprint,
+        ),
       });
       expect(() => importKnowledgeProject(database(), tampered, importOptions())).toThrow(/fingerprint mismatch/i);
       const dropped = withCompatibility(base, {
@@ -1596,10 +1649,151 @@ See [[graph|the graph]].
       });
     });
 
+    async function buildSummaries(db: ReturnType<typeof openDatabase>, projectId: string): Promise<void> {
+      const store = new KnowledgeSemanticSummaryStore({ db });
+      await store.build({ projectId, scopeKind: 'source_version', scopeId: 'source_version_1' });
+      const pageVersion = db.prepare('SELECT id FROM knowledge_page_versions WHERE project_id = ?').get(projectId) as { id: string };
+      await store.build({ projectId, scopeKind: 'page_version', scopeId: pageVersion.id });
+      await store.build({ projectId, scopeKind: 'project', scopeId: projectId });
+      db.prepare(
+        `UPDATE knowledge_semantic_summaries SET strategy = 'provider_refined', provider_profile_name = 'private-profile'
+         WHERE project_id = ? AND scope_kind = 'page_version'`,
+      ).run(projectId);
+    }
+
+    describe('semantic summaries', () => {
+      it('declares the optional feature and round-trips summaries with the profile name exported as NULL', async () => {
+        const db = database();
+        const { projectId } = seed(db);
+        await buildSummaries(db, projectId);
+        const archive = exportV2(db, projectId);
+        const rows = tableRows<Record<string, unknown>>(archive, 'knowledge_semantic_summaries');
+        expect(rows).toHaveLength(3);
+        expect(rows.every((row) => row.provider_profile_name === null)).toBe(true);
+        expect(compatibilityOf(archive).optionalFeatures).toContain('knowledge-semantic-summaries-v1');
+        expect(compatibilityOf(archive).requiredFeatures).not.toContain('knowledge-semantic-summaries-v1');
+        const serialized = Object.values(archive.files).map(String).join('\n');
+        expect(serialized).not.toMatch(/private-profile|apiKeyEnv|endpoint/);
+
+        const target = database();
+        const result = importKnowledgeProject(target, archive, importOptions());
+        expect(result.warnings.map((warning) => warning.code)).not.toContain('optional_feature_ignored');
+        const imported = target
+          .prepare('SELECT scope_kind, strategy, provider_profile_name FROM knowledge_semantic_summaries ORDER BY scope_kind')
+          .all();
+        expect(imported).toEqual([
+          { scope_kind: 'page_version', strategy: 'provider_refined', provider_profile_name: null },
+          { scope_kind: 'project', strategy: 'deterministic', provider_profile_name: null },
+          { scope_kind: 'source_version', strategy: 'deterministic', provider_profile_name: null },
+        ]);
+      });
+
+      it('does not modify the source database while exporting', async () => {
+        const db = database();
+        const { projectId } = seed(db);
+        await buildSummaries(db, projectId);
+        exportV2(db, projectId);
+        expect(db.prepare("SELECT provider_profile_name FROM knowledge_semantic_summaries WHERE strategy = 'provider_refined'").get()).toEqual({
+          provider_profile_name: 'private-profile',
+        });
+      });
+
+      it('omits the feature when no summaries exist', () => {
+        const db = database();
+        const { projectId } = seed(db);
+        expect(compatibilityOf(exportV2(db, projectId)).optionalFeatures).not.toContain('knowledge-semantic-summaries-v1');
+      });
+
+      it('imports an archive without the table with an absent warning and leaves summaries empty', async () => {
+        const db = database();
+        const { projectId } = seed(db);
+        await buildSummaries(db, projectId);
+        let archive = exportV2(db, projectId);
+        archive = withCompatibility(removeArchiveFile(archive, 'data/knowledge_semantic_summaries.json'), {
+          tableFingerprints: compatibilityOf(archive).tableFingerprints.filter((entry) => entry.table !== 'knowledge_semantic_summaries'),
+        });
+        const target = database();
+        const result = importKnowledgeProject(target, archive, importOptions());
+        expect(result.warnings).toContainEqual(expect.objectContaining({ code: 'optional_table_absent' }));
+        expect(target.prepare('SELECT COUNT(*) AS count FROM knowledge_semantic_summaries').get()).toEqual({ count: 0 });
+      });
+
+      it('replaces existing summaries on replaceExisting import', async () => {
+        const source = database();
+        const { projectId } = seed(source);
+        await buildSummaries(source, projectId);
+        const archive = exportV2(source, projectId);
+        const target = database();
+        const targetRoot = createWorkspaceRoot('.knowledge-archive-replace-');
+        importKnowledgeProject(target, archive, importOptions({ workspaceRoot: targetRoot }));
+        target.prepare(
+          `INSERT INTO knowledge_semantic_summaries
+           (id, project_id, scope_kind, scope_id, strategy, provider_profile_name, summary_json, warnings_json, created_at, updated_at)
+           VALUES ('stale', ?, 'project', ?, 'deterministic', NULL, '{}', '[]', 'now', 'now')`,
+        ).run(projectId, projectId);
+        importKnowledgeProject(target, archive, importOptions({ workspaceRoot: targetRoot, replaceExisting: true }));
+        expect(target.prepare("SELECT COUNT(*) AS count FROM knowledge_semantic_summaries WHERE id = 'stale'").get()).toEqual({ count: 0 });
+        expect(target.prepare('SELECT COUNT(*) AS count FROM knowledge_semantic_summaries').get()).toEqual({ count: 3 });
+      });
+
+      describe('rejects malformed summary rows', () => {
+        async function exported(): Promise<Archive> {
+          const db = database();
+          const { projectId } = seed(db);
+          await buildSummaries(db, projectId);
+          return exportV2(db, projectId);
+        }
+        function tamper(archive: Archive, patch: (row: Record<string, unknown>) => Record<string, unknown>, only?: string): Archive {
+          return rewriteV2TableRows(
+            archive,
+            'knowledge_semantic_summaries',
+            tableRows<Record<string, unknown>>(archive, 'knowledge_semantic_summaries').map((row) =>
+              only === undefined || row.scope_kind === only ? patch(row) : row,
+            ),
+          );
+        }
+
+        it('an unresolvable scope_id', async () => {
+          const archive = await exported();
+          for (const kind of ['source_version', 'page_version', 'project']) {
+            const tampered = tamper(archive, (row) => ({ ...row, scope_id: 'missing_scope' }), kind);
+            expect(() => importKnowledgeProject(database(), tampered, importOptions())).toThrow(/scope_id/i);
+          }
+        });
+
+        it('a scope_id that belongs to a different scope kind', async () => {
+          const tampered = tamper(await exported(), (row) => ({ ...row, scope_id: 'source_version_1' }), 'page_version');
+          expect(() => importKnowledgeProject(database(), tampered, importOptions())).toThrow(/scope_id/i);
+        });
+
+        it('a non-null provider_profile_name', async () => {
+          const tampered = tamper(await exported(), (row) => ({ ...row, provider_profile_name: 'leaked-profile' }), 'project');
+          expect(() => importKnowledgeProject(database(), tampered, importOptions())).toThrow(/provider_profile_name/i);
+        });
+
+        it('rows owned by another project', async () => {
+          const tampered = tamper(await exported(), (row) => ({ ...row, project_id: 'other_project' }), 'project');
+          expect(() => importKnowledgeProject(database(), tampered, importOptions())).toThrow(/project/i);
+        });
+
+        it.each([
+          ['an unknown scope_kind', { scope_kind: 'workspace' }, /scope_kind/i],
+          ['an unknown strategy', { strategy: 'magic' }, /strategy/i],
+          ['non-JSON summary_json', { summary_json: 'not json' }, /summary_json/i],
+          ['a summary with unknown keys', { summary_json: JSON.stringify({ title: 't', summary: 's', bullets: [], evidence: [], prompt: 'raw' }) }, /summary_json/i],
+          ['oversized summary_json', { summary_json: JSON.stringify({ title: 'x'.repeat(300_000) }) }, /summary_json/i],
+          ['malformed warnings_json', { warnings_json: '{"code":"x"}' }, /warnings_json/i],
+        ])('%s', async (_label, patch, expected) => {
+          const tampered = tamper(await exported(), (row) => ({ ...row, ...patch }), 'project');
+          expect(() => importKnowledgeProject(database(), tampered, importOptions())).toThrow(expected);
+        });
+      });
+    });
+
     it('warns about unknown optional features unless the caller accepts them', () => {
       const db = database();
       const { projectId } = seed(db);
-      const archive = withCompatibility(exportV2(db, projectId), { optionalFeatures: ['knowledge-semantic-summaries-v1'] });
+      const archive = withCompatibility(exportV2(db, projectId), { optionalFeatures: ['knowledge-future-feature-v1'] });
 
       const warned = importKnowledgeProject(database(), archive, importOptions());
       expect(warned.warnings).toContainEqual(expect.objectContaining({ code: 'optional_feature_ignored' }));
@@ -1609,7 +1803,7 @@ See [[graph|the graph]].
         importOptions({
           compatibilityPolicy: {
             maxSupportedArchiveVersion: 2,
-            acceptedOptionalFeatures: new Set(['knowledge-semantic-summaries-v1']),
+            acceptedOptionalFeatures: new Set(['knowledge-future-feature-v1']),
           },
         }),
       );

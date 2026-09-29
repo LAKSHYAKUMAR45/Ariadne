@@ -34,6 +34,12 @@ import {
 } from './KnowledgeArchiveCompatibility.js';
 import { KNOWLEDGE_HOST_SETTING_PREFIX, KNOWLEDGE_SCHEMA_VERSION } from './knowledgeSchema.js';
 import { parseCitationContext } from './KnowledgeCitationContext.js';
+import {
+  KNOWLEDGE_SEMANTIC_SUMMARIES_TABLE,
+  assertArchiveSummaryRows,
+  redactSummaryRowsForExport,
+} from './KnowledgeArchiveSummaries.js';
+import { parsePersistedKnowledgeSynthesis } from './KnowledgeSynthesisPersistence.js';
 import { renderKnowledgePage } from './KnowledgeRenderer.js';
 
 export { KNOWLEDGE_ARCHIVE_PRESERVED_TABLE_COLUMNS, KNOWLEDGE_ARCHIVE_TABLE_REGISTRY };
@@ -125,6 +131,7 @@ const TABLES = [
   'knowledge_extractions',
   'knowledge_pages',
   'knowledge_page_versions',
+  'knowledge_semantic_summaries',
   'knowledge_page_sources',
   'knowledge_page_provenance',
   'knowledge_page_aliases',
@@ -360,6 +367,12 @@ const TABLE_SCHEMAS: readonly ArchiveTableSchema[] = [
     name: 'knowledge_page_versions',
     columns: ['id', 'project_id', 'page_id', 'version_number', 'content_hash', 'content_path', 'summary', 'created_at'],
     optionalColumns: ['summary'],
+    identityColumns: ['id'],
+  },
+  {
+    name: 'knowledge_semantic_summaries',
+    columns: ['id', 'project_id', 'scope_kind', 'scope_id', 'strategy', 'provider_profile_name', 'summary_json', 'warnings_json', 'created_at', 'updated_at'],
+    optionalColumns: ['provider_profile_name'],
     identityColumns: ['id'],
   },
   {
@@ -992,6 +1005,7 @@ function assertArchiveRelationships(
   for (const [index, row] of (rowsByTable.get('knowledge_extractions') ?? []).entries()) {
     assertReferenceExists('knowledge_extractions', index, 'source_version_id', row.source_version_id, 'knowledge_source_versions', sourceVersionIds);
   }
+  assertArchiveSummaryRows(rowsByTable.get(KNOWLEDGE_SEMANTIC_SUMMARIES_TABLE) ?? [], { projectId, sourceVersionIds, pageVersionIds });
   for (const [index, row] of (rowsByTable.get('knowledge_page_versions') ?? []).entries()) {
     assertReferenceExists('knowledge_page_versions', index, 'page_id', row.page_id, 'knowledge_pages', pageIds);
     const page = pagesById.get(row.page_id as string);
@@ -1255,6 +1269,13 @@ function assertArchiveMessagePayload(content: Uint8Array, context: string): void
   }
   if (parsed.synthesis !== undefined && parsed.synthesis !== null && !isPlainObject(parsed.synthesis)) {
     throw importRejected(`${context} field synthesis must be a plain object or null.`);
+  }
+  if (isPlainObject(parsed.synthesis)) {
+    try {
+      parsePersistedKnowledgeSynthesis(parsed.synthesis);
+    } catch (error) {
+      throw importRejected(`${context} field synthesis is invalid: ${error instanceof Error ? error.message : 'unknown error'}.`);
+    }
   }
   if (!Array.isArray(parsed.citations)) {
     throw importRejected(`${context} field citations must be an array.`);
@@ -1655,6 +1676,8 @@ export function exportKnowledgeProject(db: Database.Database, options: ExportKno
       rows = [exportedProject];
     } else if (table === KNOWLEDGE_ARCHIVE_SETTINGS_TABLE) {
       rows = rowsFor(db, table, options.projectId).filter((row) => !isHostSettingRow(row));
+    } else if (table === KNOWLEDGE_SEMANTIC_SUMMARIES_TABLE) {
+      rows = redactSummaryRowsForExport(rowsFor(db, table, options.projectId));
     } else {
       rows = rowsFor(db, table, options.projectId);
     }

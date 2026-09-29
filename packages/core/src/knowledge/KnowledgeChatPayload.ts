@@ -1,15 +1,14 @@
 import {
   legacyCitationContext,
   parseCitationContext,
-  toPersistedCitationContext,
+  toPersistedCitation,
 } from './KnowledgeCitationContext.js';
 import type { KnowledgeSearchCitation, KnowledgeSearchMode } from './KnowledgeSearch.js';
+import { parsePersistedKnowledgeSynthesis } from './KnowledgeSynthesisPersistence.js';
+import type { PersistedKnowledgeSynthesis } from './KnowledgeSynthesisTypes.js';
 
-/**
- * Reserved extension slot owned by the answer-synthesis slice, which narrows
- * this type. Until then the slot is parsed as a plain object and written absent.
- */
-export type PersistedKnowledgeSynthesis = Readonly<Record<string, unknown>>;
+/** The only extension slot; its shape and validator are owned by the answer-synthesis slice. */
+export type { PersistedKnowledgeSynthesis } from './KnowledgeSynthesisTypes.js';
 
 export interface MessagePayloadV2 {
   schemaVersion: 2;
@@ -99,45 +98,26 @@ export function parseMessagePayload(raw: string): MessagePayloadV2 {
       throw new Error('Knowledge chat payload retrievalMode must be a supported search mode or null');
     }
   }
-  if (parsed.synthesis !== undefined && parsed.synthesis !== null && !isPlainObject(parsed.synthesis)) {
-    throw new Error('Knowledge chat payload synthesis must be a plain object or null');
+  let synthesis: PersistedKnowledgeSynthesis | null = null;
+  if (parsed.synthesis !== undefined && parsed.synthesis !== null) {
+    try {
+      synthesis = parsePersistedKnowledgeSynthesis(parsed.synthesis);
+    } catch (error) {
+      throw new Error(`Knowledge chat payload synthesis is invalid: ${error instanceof Error ? error.message : 'invalid'}`);
+    }
   }
   return {
     schemaVersion: 2,
     content: parsed.content,
     citations,
     retrievalMode: (parsed.retrievalMode ?? null) as KnowledgeSearchMode | null,
-    synthesis: (parsed.synthesis ?? null) as PersistedKnowledgeSynthesis | null,
-  };
-}
-
-function persistedCitation(citation: KnowledgeSearchCitation): KnowledgeSearchCitation {
-  const span = citation.span;
-  return {
-    pageId: citation.pageId,
-    sourceId: citation.sourceId,
-    path: citation.path,
-    url: citation.url,
-    span:
-      span === null || span === undefined
-        ? null
-        : {
-            id: span.id,
-            startOffset: span.startOffset,
-            endOffset: span.endOffset,
-            ...(span.startLine !== undefined ? { startLine: span.startLine } : {}),
-            ...(span.startColumn !== undefined ? { startColumn: span.startColumn } : {}),
-            ...(span.endLine !== undefined ? { endLine: span.endLine } : {}),
-            ...(span.endColumn !== undefined ? { endColumn: span.endColumn } : {}),
-            label: span.label,
-          },
-    ...(citation.context !== undefined ? { context: toPersistedCitationContext(citation.context) } : {}),
+    synthesis,
   };
 }
 
 /**
  * Serializes reference-only V2 JSON. Citations are rebuilt from an allowlist so
- * excerpt text can never reach disk; the synthesis slot is omitted until set.
+ * excerpt text can never reach disk; the synthesis slot is omitted unless set.
  */
 export function serializeMessagePayload(input: {
   content: string;
@@ -148,7 +128,7 @@ export function serializeMessagePayload(input: {
   const payload: MessagePayloadV2 = {
     schemaVersion: 2,
     content: input.content,
-    citations: input.citations.map(persistedCitation),
+    citations: input.citations.map(toPersistedCitation),
     retrievalMode: input.retrievalMode,
     ...(input.synthesis !== undefined && input.synthesis !== null ? { synthesis: input.synthesis } : {}),
   };
