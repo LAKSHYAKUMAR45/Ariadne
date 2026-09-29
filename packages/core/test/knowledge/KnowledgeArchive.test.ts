@@ -1786,10 +1786,15 @@ See [[graph|the graph]].
         ).run(projectId);
       }
 
+      function insertFreshnessRow(db: ReturnType<typeof openDatabase>, id: string, projectId: string, sourceId: string) {
+        db.prepare(
+          `INSERT INTO knowledge_source_freshness
+           (id, project_id, source_id, freshness_state, created_at, updated_at)
+           VALUES (?, ?, ?, 'pending', '2026-01-01', '2026-01-01')`,
+        ).run(id, projectId, sourceId);
+      }
+
       function createHostTables(db: ReturnType<typeof openDatabase>) {
-        for (const table of ['knowledge_source_freshness']) {
-          db.exec(`CREATE TABLE ${table} (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, payload TEXT NOT NULL)`);
-        }
         db.exec(
           `CREATE TABLE knowledge_query_analytics_daily (
              id TEXT PRIMARY KEY,
@@ -1840,8 +1845,16 @@ See [[graph|the graph]].
         insertSetting(target, projectId, 'portable.local_only', 'stale-local');
         createHostTables(target);
         insertDerivedIndexRow(target, projectId);
-        target.prepare('INSERT INTO knowledge_source_freshness VALUES (?, ?, ?)').run('fresh_1', projectId, 'host');
-        target.prepare('INSERT INTO knowledge_source_freshness VALUES (?, ?, ?)').run('fresh_other', 'project_unrelated', 'host');
+        insertFreshnessRow(target, 'fresh_1', projectId, 'old_source');
+        new KnowledgeProjectStore(target).create({ id: 'project_unrelated' as never, workspaceRoot: `${imported.workspaceRoot}-unrelated`, name: 'Unrelated' });
+        target
+          .prepare(
+            `INSERT INTO knowledge_sources
+             (id, project_id, source_kind, source_path, source_url, title, current_hash, status, created_at, updated_at)
+             VALUES ('other_source', 'project_unrelated', 'file', 'docs/other.md', NULL, 'Other', 'hash_other', 'active', '2026-01-01', '2026-01-01')`,
+          )
+          .run();
+        insertFreshnessRow(target, 'fresh_other', 'project_unrelated', 'other_source');
         target
           .prepare('INSERT INTO knowledge_query_analytics_daily VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
           .run('analytics_1', projectId, '2026-01-01', 'lexical', 5, 1, 0, 2, 3, 1, 9, '2026-01-01', '2026-01-02');

@@ -97,6 +97,14 @@ function rowToVersion(row: VersionRow): KnowledgeSourceVersionRecord {
   };
 }
 
+/** Thrown when content matches a superseded version: versions are content-addressed and never renumbered. */
+export class KnowledgeSourceVersionRevertError extends Error {
+  public constructor(sourceId: string) {
+    super(`Knowledge source ${sourceId} content matches an older superseded version`);
+    this.name = 'KnowledgeSourceVersionRevertError';
+  }
+}
+
 export class KnowledgeSourceStore {
   public constructor(private readonly db: Database.Database) {}
 
@@ -131,7 +139,17 @@ export class KnowledgeSourceStore {
             now: timestamp,
           });
         this.insertVersion(input, sourceId, contentHash, contentVersion?.size ?? 0, timestamp, 1);
-      } else if (existing.contentHash !== contentHash || existing.deletedAt !== null) {
+      } else if (existing.contentHash === contentHash && existing.deletedAt !== null) {
+        this.db
+          .prepare(
+            `UPDATE knowledge_sources SET status = 'active', updated_at = @now
+             WHERE project_id = @projectId AND id = @id`,
+          )
+          .run({ now: timestamp, projectId: input.projectId, id: sourceId });
+      } else if (existing.contentHash !== contentHash) {
+        if (this.hasVersionWithHash(input.projectId, sourceId, contentHash)) {
+          throw new KnowledgeSourceVersionRevertError(sourceId);
+        }
         const nextVersion = this.nextVersion(input.projectId, sourceId);
         this.db
           .prepare(
@@ -183,6 +201,16 @@ export class KnowledgeSourceStore {
       new KnowledgeSearchIndex(this.db).markSourceStale(projectId, sourceId);
     })();
     return this.get(projectId, sourceId) as KnowledgeSourceRecord;
+  }
+
+  private hasVersionWithHash(projectId: string, sourceId: KnowledgeSourceId, contentHash: string): boolean {
+    return (
+      this.db
+        .prepare(
+          'SELECT 1 FROM knowledge_source_versions WHERE project_id = ? AND source_id = ? AND content_hash = ?',
+        )
+        .get(projectId, sourceId, contentHash) !== undefined
+    );
   }
 
   private nextVersion(projectId: string, sourceId: KnowledgeSourceId): number {

@@ -8,6 +8,7 @@ import {
   applyKnowledgeJobResultSchemaMigration,
   applyKnowledgeAnalysisCoverageMigration,
   applyKnowledgeGraphReportMigration,
+  applyKnowledgeFreshnessMigration,
   applyKnowledgeSearchIndexMigration,
   applyKnowledgeReviewDeduplicationMigration,
   KNOWLEDGE_SCHEMA_VERSION,
@@ -98,7 +99,7 @@ describe('knowledge schema migrations', () => {
 
     expect(tableNames(db)).toEqual(expect.arrayContaining(KNOWLEDGE_TABLES));
     expect(indexNames(db)).toEqual(expect.arrayContaining(REQUIRED_INDEXES));
-    expect(KNOWLEDGE_SCHEMA_VERSION).toBe(10);
+    expect(KNOWLEDGE_SCHEMA_VERSION).toBe(11);
     expect(columns(db, 'knowledge_jobs')).toContain('result_schema_version');
     expect(columns(db, 'knowledge_extractions')).toEqual(
       expect.arrayContaining([
@@ -742,7 +743,7 @@ describe('knowledge job result schema migration (global version 12, knowledge re
   it('registers version 12 after the search index migration', () => {
     const migration = MIGRATIONS.find((entry) => entry.version === 12);
     expect(migration?.description).toMatch(/result schema version/i);
-    expect(MIGRATIONS.map((entry) => entry.version).filter((version) => version >= 11)).toEqual([11, 12, 13, 14]);
+    expect(MIGRATIONS.map((entry) => entry.version).filter((version) => version >= 11)).toEqual([11, 12, 13, 14, 15]);
   });
 
   it('adds a nullable integer column on a fresh database without touching other jobs columns', () => {
@@ -788,7 +789,7 @@ describe('knowledge job result schema migration (global version 12, knowledge re
       result_schema_version: null,
     });
     expect(upgraded.prepare(`SELECT sql FROM sqlite_master WHERE name = 'idx_knowledge_jobs_project_completed_mode'`).get()).toEqual(before);
-    expect(Number((upgraded.prepare(`SELECT value FROM schema_meta WHERE key = 'schema_version'`).get() as { value: string }).value)).toBe(14);
+    expect(Number((upgraded.prepare(`SELECT value FROM schema_meta WHERE key = 'schema_version'`).get() as { value: string }).value)).toBe(15);
     upgraded.close();
 
     const reopened = openDatabase(databasePath);
@@ -829,7 +830,7 @@ describe('knowledge analysis coverage migration (global version 13, knowledge re
   it('registers version 13 after the job result migration', () => {
     const migration = MIGRATIONS.find((entry) => entry.version === 13);
     expect(migration?.description).toMatch(/analysis coverage/i);
-    expect(MIGRATIONS.map((entry) => entry.version).filter((version) => version >= 11)).toEqual([11, 12, 13, 14]);
+    expect(MIGRATIONS.map((entry) => entry.version).filter((version) => version >= 11)).toEqual([11, 12, 13, 14, 15]);
   });
 
   it('creates both tables with the specified columns and constraints on a fresh database', () => {
@@ -901,7 +902,7 @@ describe('knowledge analysis coverage migration (global version 13, knowledge re
     );
     expect(upgraded.prepare('SELECT COUNT(*) AS count FROM knowledge_analysis_coverage').get()).toEqual({ count: 0 });
     expect(upgraded.prepare(`SELECT COUNT(*) AS count FROM knowledge_source_versions`).get()).toEqual({ count: 1 });
-    expect(Number((upgraded.prepare(`SELECT value FROM schema_meta WHERE key = 'schema_version'`).get() as { value: string }).value)).toBe(14);
+    expect(Number((upgraded.prepare(`SELECT value FROM schema_meta WHERE key = 'schema_version'`).get() as { value: string }).value)).toBe(15);
     upgraded.close();
 
     const reopened = openDatabase(databasePath);
@@ -927,7 +928,7 @@ describe('knowledge graph report migration (global version 14, knowledge revisio
   it('registers version 14 after the analysis coverage migration', () => {
     const migration = MIGRATIONS.find((entry) => entry.version === 14);
     expect(migration?.description).toMatch(/graph (completeness|report)/i);
-    expect(MIGRATIONS.map((entry) => entry.version).filter((version) => version >= 13)).toEqual([13, 14]);
+    expect(MIGRATIONS.map((entry) => entry.version).filter((version) => version >= 13)).toEqual([13, 14, 15]);
   });
 
   it('creates both tables with the specified columns and constraints on a fresh database', () => {
@@ -986,13 +987,103 @@ describe('knowledge graph report migration (global version 14, knowledge revisio
     expect(tableNames(upgraded)).toEqual(expect.arrayContaining(['knowledge_graph_reports', 'knowledge_graph_ambiguities']));
     expect(upgraded.prepare('SELECT COUNT(*) AS count FROM knowledge_graph_reports').get()).toEqual({ count: 0 });
     expect(upgraded.prepare('SELECT COUNT(*) AS count FROM knowledge_graph_snapshots').get()).toEqual({ count: 1 });
-    expect(Number((upgraded.prepare(`SELECT value FROM schema_meta WHERE key = 'schema_version'`).get() as { value: string }).value)).toBe(14);
+    expect(Number((upgraded.prepare(`SELECT value FROM schema_meta WHERE key = 'schema_version'`).get() as { value: string }).value)).toBe(15);
     upgraded.close();
 
     const reopened = openDatabase(databasePath);
     applyKnowledgeGraphReportMigration(reopened);
     applyKnowledgeMigrations(reopened);
     expect(tableNames(reopened).filter((name) => name === 'knowledge_graph_reports')).toHaveLength(1);
+    reopened.close();
+  });
+});
+
+describe('knowledge freshness migration (global version 15, knowledge revision 11)', () => {
+  function seedSource(db: Database.Database): void {
+    db.prepare(
+      `INSERT INTO knowledge_projects (id, workspace_root, name, status, created_at, updated_at)
+       VALUES ('project_1', 'workspace', 'Wiki', 'active', 'now', 'now')`,
+    ).run();
+    db.prepare(
+      `INSERT INTO knowledge_sources (id, project_id, source_kind, source_path, current_hash, status, created_at, updated_at)
+       VALUES ('source_1', 'project_1', 'file', 'a.md', 'h', 'active', 'now', 'now')`,
+    ).run();
+    db.prepare(
+      `INSERT INTO knowledge_source_versions
+       (id, project_id, source_id, version_number, content_hash, content_path, byte_length, created_at)
+       VALUES ('version_1', 'project_1', 'source_1', 1, 'h', 'a.md', 1, 'now')`,
+    ).run();
+  }
+
+  it('registers version 15 after the graph report migration', () => {
+    const migration = MIGRATIONS.find((entry) => entry.version === 15);
+    expect(migration?.description).toMatch(/freshness/i);
+    expect(MIGRATIONS.map((entry) => entry.version).filter((version) => version >= 14)).toEqual([14, 15]);
+    expect(KNOWLEDGE_SCHEMA_VERSION).toBe(11);
+  });
+
+  it('creates both host-local tables with the specified columns and cascades', () => {
+    const db = openDatabase(':memory:');
+    expect(columns(db, 'knowledge_source_freshness')).toEqual([
+      'id', 'project_id', 'source_id', 'freshness_state', 'current_source_version_id', 'last_observed_hash',
+      'last_scan_at', 'last_event_kind', 'last_event_at', 'last_enqueued_job_id', 'last_error_code',
+      'last_error_message', 'created_at', 'updated_at',
+    ]);
+    expect(columns(db, 'knowledge_project_watchers')).toEqual([
+      'project_id', 'watcher_status', 'generation', 'last_scan_at', 'last_successful_scan_at', 'last_event_at',
+      'last_restart_at', 'consecutive_error_count', 'last_error_code', 'last_error_message', 'updated_at',
+    ]);
+    seedSource(db);
+    const insertFreshness = (id: string, state: string, sourceId = 'source_1', versionId: string | null = 'version_1') =>
+      db.prepare(
+        `INSERT INTO knowledge_source_freshness
+         (id, project_id, source_id, freshness_state, current_source_version_id, created_at, updated_at)
+         VALUES (?, 'project_1', ?, ?, ?, 'now', 'now')`,
+      ).run(id, sourceId, state, versionId);
+    expect(() => insertFreshness('f_bad', 'sparkly')).toThrow(/CHECK/);
+    expect(() => insertFreshness('f_orphan', 'fresh', 'source_missing', null)).toThrow(/FOREIGN KEY/);
+    insertFreshness('f1', 'pending');
+    expect(() => insertFreshness('f2', 'fresh')).toThrow(/UNIQUE/);
+    expect(() =>
+      db.prepare(
+        `INSERT INTO knowledge_project_watchers (project_id, watcher_status, generation, consecutive_error_count, updated_at)
+         VALUES ('project_1', 'melting', 0, 0, 'now')`,
+      ).run(),
+    ).toThrow(/CHECK/);
+    db.prepare(
+      `INSERT INTO knowledge_project_watchers (project_id, watcher_status, generation, consecutive_error_count, updated_at)
+       VALUES ('project_1', 'idle', 0, 0, 'now')`,
+    ).run();
+    db.prepare(`DELETE FROM knowledge_projects WHERE id = 'project_1'`).run();
+    expect(db.prepare('SELECT COUNT(*) AS count FROM knowledge_source_freshness').get()).toEqual({ count: 0 });
+    expect(db.prepare('SELECT COUNT(*) AS count FROM knowledge_project_watchers').get()).toEqual({ count: 0 });
+    db.close();
+  });
+
+  it('opens a version-14 database without the tables, upgrades, and reopens idempotently', () => {
+    const directory = mkdtempSync(join(process.cwd(), '.test-knowledge-freshness-migration-'));
+    temporaryDirectories.push(directory);
+    const databasePath = join(directory, 'state.db');
+
+    const first = openDatabase(databasePath);
+    seedSource(first);
+    first.exec('DROP TABLE knowledge_source_freshness; DROP TABLE knowledge_project_watchers;');
+    first.prepare(`UPDATE schema_meta SET value = '14' WHERE key = 'schema_version'`).run();
+    expect(tableNames(first)).not.toContain('knowledge_source_freshness');
+    first.close();
+
+    const upgraded = openDatabase(databasePath);
+    expect(tableNames(upgraded)).toEqual(
+      expect.arrayContaining(['knowledge_source_freshness', 'knowledge_project_watchers']),
+    );
+    expect(upgraded.prepare('SELECT COUNT(*) AS count FROM knowledge_sources').get()).toEqual({ count: 1 });
+    expect(Number((upgraded.prepare(`SELECT value FROM schema_meta WHERE key = 'schema_version'`).get() as { value: string }).value)).toBe(15);
+    upgraded.close();
+
+    const reopened = openDatabase(databasePath);
+    applyKnowledgeFreshnessMigration(reopened);
+    applyKnowledgeMigrations(reopened);
+    expect(tableNames(reopened).filter((name) => name === 'knowledge_source_freshness')).toHaveLength(1);
     reopened.close();
   });
 });

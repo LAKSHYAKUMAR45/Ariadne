@@ -4,6 +4,7 @@ import { openDatabase } from '../../src/db.js';
 import { applyKnowledgeMigrations } from '../../src/knowledge/knowledgeMigrations.js';
 import {
   KnowledgeSourceStore,
+  KnowledgeSourceVersionRevertError,
   computeSourceVersion,
 } from '../../src/knowledge/KnowledgeSourceStore.js';
 
@@ -78,5 +79,35 @@ describe('KnowledgeSourceStore', () => {
     expect(stale.deletedAt).not.toBeNull();
     expect(store.get('project_1', source.id)?.deletedAt).not.toBeNull();
     expect(store.list('project_1')).toHaveLength(1);
+  });
+  it('reactivates a stale source whose content is unchanged without inserting a duplicate version', () => {
+    const source = store.register({ projectId: 'project_1', kind: 'file', path: 'docs/readme.md', content: 'one' });
+    store.markDeleted('project_1', source.id);
+
+    const restored = store.register({ projectId: 'project_1', kind: 'file', path: 'docs/readme.md', content: 'one' });
+
+    expect(restored.deletedAt).toBeNull();
+    expect(store.listVersions('project_1', source.id)).toHaveLength(1);
+  });
+
+  it('adds a new version when a stale source returns with different content', () => {
+    const source = store.register({ projectId: 'project_1', kind: 'file', path: 'docs/readme.md', content: 'one' });
+    store.markDeleted('project_1', source.id);
+
+    const restored = store.register({ projectId: 'project_1', kind: 'file', path: 'docs/readme.md', content: 'two' });
+
+    expect(restored.deletedAt).toBeNull();
+    expect(store.listVersions('project_1', source.id).map((version) => version.versionNumber)).toEqual([1, 2]);
+  });
+
+  it('rejects content that matches an older, superseded version with an explicit error', () => {
+    const source = store.register({ projectId: 'project_1', kind: 'file', path: 'docs/readme.md', content: 'one' });
+    store.register({ projectId: 'project_1', kind: 'file', path: 'docs/readme.md', content: 'two' });
+
+    expect(() =>
+      store.register({ projectId: 'project_1', kind: 'file', path: 'docs/readme.md', content: 'one' }),
+    ).toThrow(KnowledgeSourceVersionRevertError);
+    expect(store.listVersions('project_1', source.id)).toHaveLength(2);
+    expect(store.get('project_1', source.id)?.contentHash).toBe(computeSourceVersion('two').hash);
   });
 });

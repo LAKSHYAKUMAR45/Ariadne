@@ -5,6 +5,7 @@ import {
   applyKnowledgeQueueMigration,
   applyKnowledgeReviewDeduplicationMigration,
   applyKnowledgeAnalysisCoverageMigration,
+  applyKnowledgeFreshnessMigration,
   applyKnowledgeGraphReportMigration,
   applyKnowledgeJobResultSchemaMigration,
   applyKnowledgeSearchIndexMigration,
@@ -213,6 +214,11 @@ export const MIGRATIONS: Migration[] = [
     version: 14,
     description: 'Add knowledge graph completeness report and ambiguity tables',
     up: (db) => applyKnowledgeGraphReportMigration(db),
+  },
+  {
+    version: 15,
+    description: 'Add host-local knowledge source freshness and project watcher recovery tables',
+    up: (db) => applyKnowledgeFreshnessMigration(db),
   },
 ];
 

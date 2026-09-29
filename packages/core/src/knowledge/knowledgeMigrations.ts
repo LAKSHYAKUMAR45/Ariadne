@@ -642,6 +642,64 @@ export function applyKnowledgeGraphReportMigration(db: Database.Database): void 
 }
 
 /**
+ * Creates the host-local freshness and watcher recovery tables (global migration 15, knowledge revision 11). Both
+ * describe this host's scan and watcher state, so they are never archived and bootstrap on the first refresh. The
+ * version and job references are deferred checks: SQLite would otherwise try to null the NOT NULL `project_id` half of
+ * a composite key on delete, and rows only disappear with their project or source (which cascade to these rows).
+ */
+export function applyKnowledgeFreshnessMigration(db: Database.Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS knowledge_source_freshness (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL,
+      source_id TEXT NOT NULL,
+      freshness_state TEXT NOT NULL,
+      current_source_version_id TEXT,
+      last_observed_hash TEXT,
+      last_scan_at TEXT,
+      last_event_kind TEXT,
+      last_event_at TEXT,
+      last_enqueued_job_id TEXT,
+      last_error_code TEXT,
+      last_error_message TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      CHECK (freshness_state IN ('fresh', 'pending', 'failed', 'missing')),
+      UNIQUE (project_id, source_id),
+      FOREIGN KEY (project_id, source_id)
+        REFERENCES knowledge_sources(project_id, id) ON DELETE CASCADE,
+      FOREIGN KEY (project_id, current_source_version_id)
+        REFERENCES knowledge_source_versions(project_id, id)
+        ON DELETE NO ACTION
+        DEFERRABLE INITIALLY DEFERRED,
+      FOREIGN KEY (project_id, last_enqueued_job_id)
+        REFERENCES knowledge_jobs(project_id, id)
+        ON DELETE NO ACTION
+        DEFERRABLE INITIALLY DEFERRED
+    );
+    CREATE INDEX IF NOT EXISTS idx_knowledge_source_freshness_project_state
+      ON knowledge_source_freshness(project_id, freshness_state);
+    CREATE TABLE IF NOT EXISTS knowledge_project_watchers (
+      project_id TEXT PRIMARY KEY,
+      watcher_status TEXT NOT NULL,
+      generation INTEGER NOT NULL,
+      last_scan_at TEXT,
+      last_successful_scan_at TEXT,
+      last_event_at TEXT,
+      last_restart_at TEXT,
+      consecutive_error_count INTEGER NOT NULL,
+      last_error_code TEXT,
+      last_error_message TEXT,
+      updated_at TEXT NOT NULL,
+      CHECK (watcher_status IN ('idle', 'watching', 'recovering', 'degraded', 'stopped')),
+      CHECK (generation >= 0),
+      CHECK (consecutive_error_count >= 0),
+      FOREIGN KEY (project_id) REFERENCES knowledge_projects(id) ON DELETE CASCADE
+    );
+  `);
+}
+
+/**
  * Creates the additive knowledge schema atomically. It is idempotent so it
  * can be called safely by the shared migration runner on every database open.
  */
@@ -656,5 +714,6 @@ export function applyKnowledgeMigrations(db: Database.Database): void {
     applyKnowledgeJobResultSchemaMigration(db);
     applyKnowledgeAnalysisCoverageMigration(db);
     applyKnowledgeGraphReportMigration(db);
+    applyKnowledgeFreshnessMigration(db);
   })();
 }

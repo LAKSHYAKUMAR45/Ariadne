@@ -88,6 +88,38 @@ export interface KnowledgeRecoverySummary {
   failedIds: string[];
 }
 
+export type KnowledgeRequeueReason =
+  | 'manual'
+  | 'analyzer_upgraded'
+  | 'coverage_adapter_available'
+  | 'cancelled_recovery';
+
+export const KNOWLEDGE_REQUEUE_REASONS: readonly KnowledgeRequeueReason[] = [
+  'manual',
+  'analyzer_upgraded',
+  'coverage_adapter_available',
+  'cancelled_recovery',
+];
+
+export interface KnowledgeRequeueContext {
+  /** Analyzer the requeue targets; recorded so a trigger can be limited to once per analyzer version. */
+  analyzerId?: string;
+  analyzerVersion?: string;
+}
+
+export interface KnowledgeRequeueEvent {
+  id: string;
+  projectId: string;
+  jobId: string;
+  reason: KnowledgeRequeueReason;
+  previousStatus: KnowledgeJobStatus;
+  previousResultSchemaVersion: number | null;
+  previousFailureCode: string | null;
+  previousRetryCount: number;
+  targetAnalyzer: string | null;
+  createdAt: string;
+}
+
 export interface KnowledgeQueueOptions {
   leaseDurationMs?: number;
   now?: () => string;
@@ -580,6 +612,93 @@ export class KnowledgeQueue {
       throw new KnowledgeQueueTransitionError(`Knowledge job ${jobId} changed before retry could be applied`);
     }
     return this.require(jobId);
+  }
+
+  /**
+   * Explicit terminal-to-queued transition for the one analyze job a source version can ever have. Reuses the row
+   * (the `(project_id, job_kind, source_version_id)` identity is unique), so it only acts on a completed, failed, or
+   * cancelled row that holds no worker or lease. Returns null when nothing changed.
+   */
+  public requeueAnalyze(
+    jobId: string,
+    reason: KnowledgeRequeueReason,
+    context: KnowledgeRequeueContext = {},
+  ): KnowledgeJobRecord | null {
+    if (!KNOWLEDGE_REQUEUE_REASONS.includes(reason)) {
+      throw new Error(`Unsupported knowledge requeue reason: ${String(reason)}`);
+    }
+    return this.db.transaction(() => {
+      const previous = this.db
+        .prepare(`SELECT * FROM knowledge_jobs WHERE id = ? AND job_kind = 'analyze'`)
+        .get(jobId) as JobRow | undefined;
+      if (!previous) return null;
+      const now = this.now();
+      const requeued = this.db
+        .prepare(
+          `UPDATE knowledge_jobs
+           SET status = 'queued', started_at = NULL, completed_at = NULL,
+               failure_code = NULL, failure_message = NULL,
+               result_json = NULL, result_processing_mode = NULL, result_schema_version = NULL,
+               retry_count = 0
+           WHERE id = @id
+             AND project_id = @projectId
+             AND job_kind = 'analyze'
+             AND status IN ('completed', 'failed', 'cancelled')
+             AND worker_id IS NULL
+             AND lease_expires_at IS NULL`,
+        )
+        .run({ id: previous.id, projectId: previous.project_id });
+      if (requeued.changes !== 1) return null;
+      const targetAnalyzer =
+        context.analyzerId && context.analyzerVersion
+          ? `${boundedRedactedLine(context.analyzerId, MAX_PROGRESS_KEY_LENGTH)}@${boundedRedactedLine(context.analyzerVersion, MAX_PROGRESS_KEY_LENGTH)}`
+          : null;
+      this.db
+        .prepare(
+          `INSERT INTO knowledge_job_events (id, project_id, job_id, event_kind, detail_json, created_at)
+           VALUES (@id, @projectId, @jobId, 'requeued', @detailJson, @createdAt)`,
+        )
+        .run({
+          id: createKnowledgeId('job-event'),
+          projectId: previous.project_id,
+          jobId: previous.id,
+          createdAt: now,
+          detailJson: JSON.stringify({
+            reason,
+            previousStatus: previous.status,
+            previousResultSchemaVersion: previous.result_schema_version ?? null,
+            previousFailureCode:
+              previous.failure_code === null ? null : boundedRedactedLine(previous.failure_code, MAX_WARNING_CODE_LENGTH),
+            previousRetryCount: previous.retry_count,
+            targetAnalyzer,
+          }),
+        });
+      return this.require(jobId);
+    })();
+  }
+
+  public listRequeueEvents(jobId: string): KnowledgeRequeueEvent[] {
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM knowledge_job_events
+         WHERE job_id = ? AND event_kind = 'requeued' ORDER BY created_at, rowid`,
+      )
+      .all(jobId) as ProgressRow[];
+    return rows.map((row) => {
+      const detail = JSON.parse(row.detail_json) as Record<string, unknown>;
+      return {
+        id: row.id,
+        projectId: row.project_id,
+        jobId: row.job_id,
+        reason: detail.reason as KnowledgeRequeueReason,
+        previousStatus: detail.previousStatus as KnowledgeJobStatus,
+        previousResultSchemaVersion: (detail.previousResultSchemaVersion as number | null) ?? null,
+        previousFailureCode: (detail.previousFailureCode as string | null) ?? null,
+        previousRetryCount: (detail.previousRetryCount as number | undefined) ?? 0,
+        targetAnalyzer: (detail.targetAnalyzer as string | null) ?? null,
+        createdAt: row.created_at,
+      };
+    });
   }
 
   public renewLease(jobId: string, workerId: string): KnowledgeJobRecord {

@@ -291,7 +291,27 @@ export type {
   ListKnowledgeProjectsOptions,
   UpdateKnowledgeProjectInput,
 } from './knowledge/KnowledgeProjectStore.js';
-export { KnowledgeSourceStore, registerKnowledgeSource } from './knowledge/KnowledgeSourceStore.js';
+export { KnowledgeSourceStore, KnowledgeSourceVersionRevertError, registerKnowledgeSource } from './knowledge/KnowledgeSourceStore.js';
+export { KnowledgeFreshnessService } from './knowledge/KnowledgeFreshness.js';
+export type {
+  KnowledgeFreshnessReason,
+  KnowledgeFreshnessRunResult,
+  KnowledgeFreshnessServiceOptions,
+  KnowledgeFreshnessStatus,
+  KnowledgeFreshnessWatchOptions,
+  KnowledgeFreshnessWatcherFactory,
+} from './knowledge/KnowledgeFreshness.js';
+export { KnowledgeFreshnessStore, boundedFreshnessCode, boundedFreshnessMessage } from './knowledge/KnowledgeFreshnessStore.js';
+export type {
+  KnowledgeFreshnessState,
+  KnowledgeProjectWatcherRecord,
+  KnowledgeSourceFreshnessRecord,
+  KnowledgeWatcherStatus,
+  UpdateProjectWatcherInput,
+  UpsertSourceFreshnessInput,
+} from './knowledge/KnowledgeFreshnessStore.js';
+export type { KnowledgeFreshnessWatcherHandle } from './knowledge/KnowledgeFreshnessWatch.js';
+export { storeImmutableKnowledgeSourceContent } from './knowledge/KnowledgeSourceContentStore.js';
 export type {
   RegisterKnowledgeSourceInput,
   KnowledgeSourceVersionRecord,
@@ -394,7 +414,11 @@ export type {
   KnowledgeQueueStatus,
   KnowledgeProgressEvent,
   KnowledgeQueueOptions,
+  KnowledgeRequeueContext,
+  KnowledgeRequeueEvent,
+  KnowledgeRequeueReason,
 } from './knowledge/KnowledgeQueue.js';
+export { KNOWLEDGE_REQUEUE_REASONS } from './knowledge/KnowledgeQueue.js';
 export { KnowledgeProvenance } from './knowledge/KnowledgeProvenance.js';
 export type { RecordKnowledgeProvenanceInput } from './knowledge/KnowledgeProvenance.js';
 export { KnowledgeOperationLog } from './knowledge/KnowledgeOperationLog.js';
