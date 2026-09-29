@@ -252,7 +252,8 @@ export type KnowledgeRequeueReason =
   | 'manual'
   | 'analyzer_upgraded'
   | 'coverage_adapter_available'
-  | 'cancelled_recovery';
+  | 'cancelled_recovery'
+  | 'source_reverted';
 
 requeueAnalyze(jobId: string, reason: KnowledgeRequeueReason): KnowledgeJobRecord | null;
 ```
@@ -285,6 +286,17 @@ requeueAnalyze(jobId: string, reason: KnowledgeRequeueReason): KnowledgeJobRecor
 - `manual`: a `manual` refresh may requeue a `failed` job.
 - `cancelled_recovery`: a `cancelled` job found on a `manual`, `startup`, or
   `watch-recovery` refresh.
+- `source_reverted`: the file's content changed back to a hash with an existing
+  immutable version (A→B→A). Register reuses that version as current
+  (`knowledge_sources.current_hash` moves back; no version row is inserted,
+  renumbered, or rewritten), the source's search indexes are marked stale, and
+  the reused version's analyze job is requeued from any terminal status
+  (`completed`, `failed`, `cancelled`) so its analysis is replaced. A queued or
+  leased job is left untouched. The freshness row records `pending` with
+  `last_event_kind = 'reverted'` and no error; it becomes `fresh` when the job
+  completes. "Current version" everywhere is the version whose hash equals
+  `current_hash` (falling back to the highest version number only when no
+  version carries that hash).
 - **Periodic and watch-event refreshes never requeue `failed` jobs** and never
   requeue the same trigger twice, so a permanently failing file cannot loop.
   Retryable failures keep using the queue's existing retry/backoff.

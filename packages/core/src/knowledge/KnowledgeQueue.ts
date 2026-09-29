@@ -92,13 +92,15 @@ export type KnowledgeRequeueReason =
   | 'manual'
   | 'analyzer_upgraded'
   | 'coverage_adapter_available'
-  | 'cancelled_recovery';
+  | 'cancelled_recovery'
+  | 'source_reverted';
 
 export const KNOWLEDGE_REQUEUE_REASONS: readonly KnowledgeRequeueReason[] = [
   'manual',
   'analyzer_upgraded',
   'coverage_adapter_available',
   'cancelled_recovery',
+  'source_reverted',
 ];
 
 export interface KnowledgeRequeueContext {

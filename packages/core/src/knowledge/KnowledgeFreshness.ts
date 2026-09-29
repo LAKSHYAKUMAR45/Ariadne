@@ -23,7 +23,6 @@ import { scanKnowledgeSources } from './KnowledgeSourceScanner.js';
 import { storeImmutableKnowledgeSourceContent } from './KnowledgeSourceContentStore.js';
 import {
   KnowledgeSourceStore,
-  KnowledgeSourceVersionRevertError,
   computeSourceVersion,
   type KnowledgeSourceVersionRecord,
 } from './KnowledgeSourceStore.js';
@@ -310,7 +309,8 @@ export class KnowledgeFreshnessService {
   ): boolean {
     const sourceId = this.sourceIdFor(project.id, file.path);
     const before = this.sources.get(project.id, sourceId);
-    const versionsBefore = before ? this.sources.listVersions(project.id, sourceId) : [];
+    const versionIdsBefore = new Set(before ? this.sources.listVersions(project.id, sourceId).map((version) => version.id) : []);
+    const currentBefore = before ? this.sources.currentVersion(project.id, sourceId) : null;
     try {
       this.sources.register({
         projectId: project.id,
@@ -320,29 +320,29 @@ export class KnowledgeFreshnessService {
         contentPath: file.contentPath,
       });
     } catch (error) {
-      return this.recordRegisterFailure(project, sourceId, file, versionsBefore.at(-1), timestamp, result, error);
+      return this.recordRegisterFailure(project, sourceId, file, currentBefore ?? undefined, timestamp, result, error);
     }
 
-    const versions = this.sources.listVersions(project.id, sourceId);
-    const latest = versions.at(-1) as KnowledgeSourceVersionRecord;
-    const newVersion = latest.id !== versionsBefore.at(-1)?.id;
-    const restored = before !== null && before.deletedAt !== null && !newVersion;
+    const current = this.sources.currentVersion(project.id, sourceId) as KnowledgeSourceVersionRecord;
+    const newVersion = !versionIdsBefore.has(current.id);
+    const reverted = !newVersion && currentBefore !== null && currentBefore.id !== current.id;
+    const restored = before !== null && before.deletedAt !== null && !newVersion && !reverted;
     if (!before) result.registeredSources += 1;
     if (newVersion) result.newVersions += 1;
-    if (before && newVersion) new KnowledgeSearchIndex(this.db, { now: this.now }).markSourceStale(project.id, sourceId);
+    if (before && (newVersion || reverted)) new KnowledgeSearchIndex(this.db, { now: this.now }).markSourceStale(project.id, sourceId);
 
-    const existingJob = this.findAnalyzeJob(project.id, latest.id);
+    const existingJob = this.findAnalyzeJob(project.id, current.id);
     let job = this.queue.enqueue({
       projectId: project.id,
       jobKind: ANALYZE_JOB_KIND,
-      sourceVersionId: latest.id,
-      payload: { sourceId, sourceVersionId: latest.id, path: file.path },
+      sourceVersionId: current.id,
+      payload: { sourceId, sourceVersionId: current.id, path: file.path },
     });
     let requeued = false;
     if (existingJob === null) {
       result.enqueuedJobs += 1;
     } else {
-      const decision = this.requeueDecision(job, reason, restored, file.path, latest);
+      const decision = reverted ? { reason: 'source_reverted' as const } : this.requeueDecision(job, reason, restored, file.path, current);
       const updated = decision ? this.queue.requeueAnalyze(job.id, decision.reason, decision.context) : null;
       if (updated) {
         job = updated;
@@ -353,12 +353,12 @@ export class KnowledgeFreshnessService {
 
     const state = stateForJob(job);
     if (state === 'failed') result.failedSources += 1;
-    const eventKind = !before ? 'created' : newVersion ? 'changed' : restored ? 'restored' : undefined;
+    const eventKind = !before ? 'created' : newVersion ? 'changed' : reverted ? 'reverted' : restored ? 'restored' : undefined;
     this.store.upsertSource({
       projectId: project.id,
       sourceId,
       state,
-      currentSourceVersionId: latest.id,
+      currentSourceVersionId: current.id,
       lastObservedHash: file.hash,
       lastScanAt: timestamp,
       ...(eventKind ? { lastEventKind: eventKind, lastEventAt: timestamp } : {}),
@@ -366,7 +366,7 @@ export class KnowledgeFreshnessService {
       lastErrorCode: state === 'failed' ? (job.failureCode ?? 'job_failed') : null,
       lastErrorMessage: state === 'failed' ? job.failureMessage : null,
     });
-    const changed = existingJob === null || newVersion || restored || requeued;
+    const changed = existingJob === null || newVersion || reverted || restored || requeued;
     if (!changed) result.unchangedSources += 1;
     return changed;
   }
@@ -375,14 +375,14 @@ export class KnowledgeFreshnessService {
     project: KnowledgeProject,
     sourceId: KnowledgeSourceId,
     file: ObservedFile,
-    latestBefore: KnowledgeSourceVersionRecord | undefined,
+    currentBefore: KnowledgeSourceVersionRecord | undefined,
     timestamp: string,
     result: KnowledgeFreshnessRunResult,
     error: unknown,
   ): boolean {
     result.failedSources += 1;
-    const code = error instanceof KnowledgeSourceVersionRevertError ? 'source_version_reverted' : 'source_register_failed';
-    if (!latestBefore) {
+    const code = 'source_register_failed';
+    if (!currentBefore) {
       this.warn(result.warnings, `Could not register ${file.path}: ${code}`);
       return false;
     }
@@ -390,7 +390,7 @@ export class KnowledgeFreshnessService {
       projectId: project.id,
       sourceId,
       state: 'failed',
-      currentSourceVersionId: latestBefore.id,
+      currentSourceVersionId: currentBefore.id,
       lastObservedHash: file.hash,
       lastScanAt: timestamp,
       lastErrorCode: code,
@@ -423,7 +423,7 @@ export class KnowledgeFreshnessService {
         newlyMissing = true;
       }
       const current = this.store.getSource(project.id, sourceId);
-      const latest = this.sources.listVersions(project.id, sourceId).at(-1);
+      const latest = this.sources.currentVersion(project.id, sourceId);
       this.store.upsertSource({
         projectId: project.id,
         sourceId,

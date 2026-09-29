@@ -1,6 +1,7 @@
 import type Database from 'better-sqlite3';
 import { redactLines } from '../Redactor.js';
 import { createKnowledgeId } from './KnowledgeIds.js';
+import { currentSourceVersionNumberSql } from './KnowledgeSourceVersionSql.js';
 import { SEARCH_TOKEN_LENGTH, foldSearchText, needleNarrowingGrams, trigramsOf } from './KnowledgeSearchTokens.js';
 import {
   validateDeterministicExtraction,
@@ -330,11 +331,7 @@ const CURRENT_SOURCES_CTE = `
     LEFT JOIN knowledge_source_versions v
       ON v.project_id = s.project_id
      AND v.source_id = s.id
-     AND v.version_number = (
-       SELECT MAX(latest.version_number)
-       FROM knowledge_source_versions latest
-       WHERE latest.project_id = s.project_id AND latest.source_id = s.id
-     )
+     AND v.version_number = ${currentSourceVersionNumberSql('s.project_id', 's.id', 's.current_hash')}
     LEFT JOIN knowledge_extractions ce
       ON ce.project_id = s.project_id
      AND ce.rowid = (
@@ -834,11 +831,7 @@ export class KnowledgeSearchIndex {
                JOIN knowledge_source_versions v
                  ON v.project_id = s.project_id
                 AND v.source_id = s.id
-                AND v.version_number = (
-                  SELECT MAX(latest.version_number)
-                  FROM knowledge_source_versions latest
-                  WHERE latest.project_id = s.project_id AND latest.source_id = s.id
-                )
+                AND v.version_number = ${currentSourceVersionNumberSql('s.project_id', 's.id', 's.current_hash')}
                WHERE s.project_id = @projectId AND s.status = 'active'
              )`,
         )

@@ -3,6 +3,8 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { KnowledgeFreshnessService } from '../../src/knowledge/KnowledgeFreshness.js';
 import { KnowledgeQueue } from '../../src/knowledge/KnowledgeQueue.js';
+import { searchKnowledge } from '../../src/knowledge/KnowledgeSearch.js';
+import { computeSourceVersion } from '../../src/knowledge/KnowledgeSourceStore.js';
 import { KnowledgeSearchIndex } from '../../src/knowledge/KnowledgeSearchIndex.js';
 import { KnowledgeWorker } from '../../src/knowledge/KnowledgeWorker.js';
 import { AnalyzerRegistry, type DeterministicAnalyzer } from '../../src/knowledge/analyzers/index.js';
@@ -407,17 +409,130 @@ describe('KnowledgeFreshnessService.refreshProject', () => {
       expect(harness.queue.listRequeueEvents(job.id)[0]).toMatchObject({ previousStatus: 'failed', previousFailureCode: 'unsupported_source' });
       expect(analyzeJobs()).toHaveLength(2);
     });
+  });
 
-    it('records a content revert to an older version as a failed source instead of rewriting history', async () => {
+  describe('content revert (A→B→A)', () => {
+    const sourceRow = () =>
+      harness.db.prepare(`SELECT current_hash, status FROM knowledge_sources WHERE project_id = ? AND source_path = 'a.md'`).get(project.id) as {
+        current_hash: string;
+        status: string;
+      };
+    const versionIds = () =>
+      (harness.db
+        .prepare(
+          `SELECT v.id FROM knowledge_source_versions v JOIN knowledge_sources s ON s.project_id = v.project_id AND s.id = v.source_id
+           WHERE v.project_id = ? AND s.source_path = 'a.md' ORDER BY v.version_number`,
+        )
+        .all(project.id) as Array<{ id: string }>).map(
+        (row) => row.id,
+      );
+    const indexStatus = (versionId: string) =>
+      (harness.db.prepare('SELECT status FROM knowledge_search_indexes WHERE source_version_id = ?').get(versionId) as { status: string } | undefined)?.status;
+
+    it('reuses the immutable older version as current, requeues its analysis with an audited reason, and marks derived state stale', async () => {
+      harness.writeFile(project.workspaceRoot, 'a.md', 'one');
+      await service.refreshProject(project.id, 'startup');
+      const jobA = jobFor('a.md');
+      completeJob(jobA.id);
+      harness.writeFile(project.workspaceRoot, 'a.md', 'two');
+      await service.refreshProject(project.id, 'watch-event');
+      const [versionA, versionB] = versionIds();
+      const search = new KnowledgeSearchIndex(harness.db);
+      search.replaceForSourceVersion({ projectId: project.id, sourceVersionId: versionA, coverage: 'metadata_only' });
+      search.replaceForSourceVersion({ projectId: project.id, sourceVersionId: versionB, coverage: 'metadata_only' });
+      const beforeRevert = harness.db.prepare('SELECT * FROM knowledge_source_versions WHERE id = ?').get(versionA);
+
+      harness.writeFile(project.workspaceRoot, 'a.md', 'one');
+      const result = await service.refreshProject(project.id, 'watch-event');
+
+      expect(result).toMatchObject({ newVersions: 0, enqueuedJobs: 0, requeuedJobs: 1, failedSources: 0 });
+      expect(versionIds()).toEqual([versionA, versionB]);
+      expect(harness.db.prepare('SELECT * FROM knowledge_source_versions WHERE id = ?').get(versionA)).toEqual(beforeRevert);
+      expect(sourceRow()).toEqual({ current_hash: computeSourceVersion('one').hash, status: 'active' });
+      expect(analyzeJobs()).toHaveLength(2);
+      expect(harness.queue.get(jobA.id)).toMatchObject({ status: 'queued', result: null });
+      expect(harness.queue.listRequeueEvents(jobA.id).at(-1)).toMatchObject({ reason: 'source_reverted', previousStatus: 'completed' });
+      expect(freshnessRows()[0]).toMatchObject({
+        freshness_state: 'pending',
+        current_source_version_id: versionA,
+        last_observed_hash: computeSourceVersion('one').hash,
+        last_event_kind: 'reverted',
+        last_enqueued_job_id: jobA.id,
+        last_error_code: null,
+      });
+      expect(indexStatus(versionA)).toBe('stale');
+      expect(indexStatus(versionB)).toBe('stale');
+
+      const again = await service.refreshProject(project.id, 'periodic-rescan');
+      expect(again).toMatchObject({ newVersions: 0, enqueuedJobs: 0, requeuedJobs: 0, unchangedSources: 1 });
+    });
+
+    it('replaces the old analysis so the reverted version is the one searched and freshness becomes fresh', async () => {
+      const worker = () => new KnowledgeWorker(harness.db, { workerId: 'worker-revert', now: () => clock });
+      const defaultService = new KnowledgeFreshnessService(harness.db, { now: () => clock, queue: harness.queue });
+      harness.writeFile(project.workspaceRoot, 'a.md', '# Alpha heading\n');
+      await defaultService.refreshProject(project.id, 'startup');
+      await worker().runOnce(project.id);
+      harness.writeFile(project.workspaceRoot, 'a.md', '# Beta heading\n');
+      await defaultService.refreshProject(project.id, 'watch-event');
+      await worker().runOnce(project.id);
+      const [versionA, versionB] = versionIds();
+      expect(indexStatus(versionB)).toBe('active');
+
+      harness.writeFile(project.workspaceRoot, 'a.md', '# Alpha heading\n');
+      await defaultService.refreshProject(project.id, 'watch-event');
+      expect(indexStatus(versionA)).toBe('stale');
+      expect(indexStatus(versionB)).toBe('stale');
+      const run = await worker().runOnce(project.id);
+      await defaultService.refreshProject(project.id, 'periodic-rescan');
+
+      expect(run).toMatchObject({ completed: 1, failed: 0 });
+      expect(indexStatus(versionA)).toBe('active');
+      expect(indexStatus(versionB)).toBe('stale');
+      expect(freshnessRows()[0]).toMatchObject({ freshness_state: 'fresh', current_source_version_id: versionA, last_error_code: null });
+      const alpha = searchKnowledge('Alpha heading', { db: harness.db, projectId: project.id, mode: 'sources' });
+      expect(alpha.map((result) => result.title)).toContain('a.md');
+      expect(alpha.map((result) => result.snippet).join(' ')).toContain('Alpha heading');
+      const beta = searchKnowledge('Beta heading', { db: harness.db, projectId: project.id, mode: 'sources' });
+      expect(beta.map((result) => result.snippet).join(' ')).not.toContain('Beta heading');
+    });
+
+    it('requeues a failed or cancelled job for the reverted version and keeps other projects untouched', async () => {
+      const other = harness.createProject('project_other');
+      harness.writeFile(other.workspaceRoot, 'a.md', 'one');
+      await service.refreshProject(other.id, 'startup');
+      const otherBefore = { jobs: count('knowledge_jobs', other.id), versions: count('knowledge_source_versions', other.id) };
+      harness.writeFile(project.workspaceRoot, 'a.md', 'one');
+      await service.refreshProject(project.id, 'startup');
+      const jobA = jobFor('a.md');
+      failJob(jobA.id);
       harness.writeFile(project.workspaceRoot, 'a.md', 'two');
       await service.refreshProject(project.id, 'watch-event');
       harness.writeFile(project.workspaceRoot, 'a.md', 'one');
 
       const result = await service.refreshProject(project.id, 'watch-event');
 
-      expect(result).toMatchObject({ failedSources: 1, newVersions: 0 });
-      expect(freshnessRows()[0]).toMatchObject({ freshness_state: 'failed', last_error_code: 'source_version_reverted' });
-      expect(count('knowledge_source_versions')).toBe(2);
+      expect(result).toMatchObject({ requeuedJobs: 1, failedSources: 0 });
+      expect(harness.queue.get(jobA.id)?.status).toBe('queued');
+      expect(harness.queue.listRequeueEvents(jobA.id).at(-1)).toMatchObject({ reason: 'source_reverted', previousStatus: 'failed' });
+      expect({ jobs: count('knowledge_jobs', other.id), versions: count('knowledge_source_versions', other.id) }).toEqual(otherBefore);
+      expect(harness.queue.list(other.id).every((job) => job.status === 'queued')).toBe(true);
+    });
+
+    it('does not touch a leased job for the reverted version', async () => {
+      harness.writeFile(project.workspaceRoot, 'a.md', 'one');
+      await service.refreshProject(project.id, 'startup');
+      const jobA = jobFor('a.md');
+      harness.queue.claim(project.id, 'worker-busy');
+      harness.writeFile(project.workspaceRoot, 'a.md', 'two');
+      await service.refreshProject(project.id, 'watch-event');
+      harness.writeFile(project.workspaceRoot, 'a.md', 'one');
+
+      const result = await service.refreshProject(project.id, 'watch-event');
+
+      expect(result.requeuedJobs).toBe(0);
+      expect(harness.queue.get(jobA.id)).toMatchObject({ status: 'running', workerId: 'worker-busy' });
+      expect(freshnessRows()[0]).toMatchObject({ freshness_state: 'pending', last_event_kind: 'reverted' });
     });
   });
 

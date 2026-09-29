@@ -722,8 +722,7 @@ export function registerKnowledgeCommands(program: Command): void {
             content,
             contentPath: storedContentPath,
           });
-          const versions = sourceStore.listVersions(projectId, registered.id);
-          const latestVersion = versions.at(-1);
+          const latestVersion = sourceStore.currentVersion(projectId, registered.id);
           const job = new KnowledgeQueue(db).enqueue({
             projectId,
             jobKind: opts.jobKind ?? 'analyze',
@@ -761,8 +760,7 @@ export function registerKnowledgeCommands(program: Command): void {
               content,
               contentPath: storedContentPath,
             });
-            const versions = sourceStore.listVersions(projectId, registered.id);
-            const latestVersion = versions.at(-1);
+            const latestVersion = sourceStore.currentVersion(projectId, registered.id);
             const job = new KnowledgeQueue(db).enqueue({
               projectId,
               jobKind: opts.jobKind ?? 'analyze',

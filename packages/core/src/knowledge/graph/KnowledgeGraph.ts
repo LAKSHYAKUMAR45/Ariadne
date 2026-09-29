@@ -1,6 +1,7 @@
 import type Database from 'better-sqlite3';
 import type { KnowledgeSourceSpan } from '../KnowledgeExtraction.js';
 import { createKnowledgeId, normalizeKnowledgePath } from '../KnowledgeIds.js';
+import { currentSourceVersionNumberSql } from '../KnowledgeSourceVersionSql.js';
 import {
   sanitizeGraphJsonValue,
   sanitizeLegacyProvenanceMetadata,
@@ -538,9 +539,9 @@ export class KnowledgeGraph {
     const latestVersionClause = `
       AND (
         nodes.source_version_id IS NULL OR versions.version_number = (
-          SELECT MAX(latest.version_number)
-          FROM knowledge_source_versions latest
-          WHERE latest.project_id = versions.project_id AND latest.source_id = versions.source_id
+          SELECT ${currentSourceVersionNumberSql('current_source.project_id', 'current_source.id', 'current_source.current_hash')}
+          FROM knowledge_sources current_source
+          WHERE current_source.project_id = versions.project_id AND current_source.id = versions.source_id
         )
       )`;
     const byQualifiedName = this.db

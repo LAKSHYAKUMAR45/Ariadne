@@ -31,3 +31,25 @@ RED observed first for: migration ladder/tables, requeue API (methods missing), 
 - Restored file with identical content requeues its completed job with reason `manual`.
 - Not wired into CLI/MCP commands or the daemon; service API only.
 - Pre-existing uncommitted `knowledge-search-evaluation/progress.md` was not committed.
+
+## Review fix: A→B→A content revert (Important)
+
+Previously a source that returned to an older known hash was recorded as a permanent `failed` freshness row (`source_version_reverted`) and never re-analyzed.
+
+### Fix
+- `KnowledgeSourceStore.register` now reuses the existing immutable version for a reverted hash: `current_hash` moves back, status becomes `active`, no version row is inserted/renumbered/rewritten. `KnowledgeSourceVersionRevertError` was removed (no longer thrown). Added `currentVersion()` (version whose hash equals `current_hash`).
+- "Latest version" reads in search, search-index, graph reporting and graph node lookup previously used `MAX(version_number)`, which would keep serving version B after a revert. They now use the shared `currentSourceVersionNumberSql` (current hash first, `MAX` fallback for legacy/inconsistent rows). CLI `ingest` uses `currentVersion()`.
+- Freshness: a revert marks the source's search indexes stale, enqueues (unique identity preserved, no new job row) and requeues the reused version's analyze job from `completed`/`failed`/`cancelled` with new audited reason `source_reverted`; queued/leased jobs are untouched (lease fencing unchanged). The freshness row is `pending`, `current_source_version_id` = reused version, `last_event_kind = 'reverted'`, no error; it turns `fresh` once the job completes. Missing files and genuine register failures (`source_register_failed`) behave as before.
+- Spec updated (`2026-09-29-freshness-watcher-recovery-design.md`).
+
+### Tests (RED first: 6 failing, revert threw/recorded failure)
+- `KnowledgeFreshness.test.ts` › `content revert (A→B→A)`: reuse/no history rewrite/audited requeue/stale indexes/idempotent rescan; real worker run replaces the old analysis, A's index is active, B's stale, freshness `fresh`, search returns A content and not B; failed-job requeue with project isolation; leased job untouched.
+- `KnowledgeSourceStore.test.ts`: revert reuses version; stale-source revert reactivates.
+
+### Output
+- `packages/core`: `tsc --noEmit` clean; vitest 75 files / 926 tests passed.
+- `packages/cli`: `tsc --noEmit` clean; vitest 12 files / 133 tests passed.
+
+### Concerns
+- Requeue on revert also applies to a `failed` job (an explicit content change, bounded by the number of flips), which departs from "never requeue failed on watch events" only for this trigger.
+- Pre-existing uncommitted `progress.md` change in the worktree was left untouched.

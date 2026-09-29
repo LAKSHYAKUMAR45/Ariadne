@@ -4,7 +4,6 @@ import { openDatabase } from '../../src/db.js';
 import { applyKnowledgeMigrations } from '../../src/knowledge/knowledgeMigrations.js';
 import {
   KnowledgeSourceStore,
-  KnowledgeSourceVersionRevertError,
   computeSourceVersion,
 } from '../../src/knowledge/KnowledgeSourceStore.js';
 
@@ -100,14 +99,28 @@ describe('KnowledgeSourceStore', () => {
     expect(store.listVersions('project_1', source.id).map((version) => version.versionNumber)).toEqual([1, 2]);
   });
 
-  it('rejects content that matches an older, superseded version with an explicit error', () => {
+  it('reuses the older immutable version when content reverts without rewriting history', () => {
     const source = store.register({ projectId: 'project_1', kind: 'file', path: 'docs/readme.md', content: 'one' });
     store.register({ projectId: 'project_1', kind: 'file', path: 'docs/readme.md', content: 'two' });
+    const versions = store.listVersions('project_1', source.id);
 
-    expect(() =>
-      store.register({ projectId: 'project_1', kind: 'file', path: 'docs/readme.md', content: 'one' }),
-    ).toThrow(KnowledgeSourceVersionRevertError);
+    const reverted = store.register({ projectId: 'project_1', kind: 'file', path: 'docs/readme.md', content: 'one' });
+
+    expect(reverted.contentHash).toBe(computeSourceVersion('one').hash);
+    expect(reverted.deletedAt).toBeNull();
+    expect(store.listVersions('project_1', source.id)).toEqual(versions);
+    expect(store.currentVersion('project_1', source.id)).toEqual(versions[0]);
+  });
+
+  it('reactivates a stale source whose content reverted to an older version', () => {
+    const source = store.register({ projectId: 'project_1', kind: 'file', path: 'docs/readme.md', content: 'one' });
+    store.register({ projectId: 'project_1', kind: 'file', path: 'docs/readme.md', content: 'two' });
+    store.markDeleted('project_1', source.id);
+
+    const restored = store.register({ projectId: 'project_1', kind: 'file', path: 'docs/readme.md', content: 'one' });
+
+    expect(restored.deletedAt).toBeNull();
+    expect(store.currentVersion('project_1', source.id)?.versionNumber).toBe(1);
     expect(store.listVersions('project_1', source.id)).toHaveLength(2);
-    expect(store.get('project_1', source.id)?.contentHash).toBe(computeSourceVersion('two').hash);
   });
 });

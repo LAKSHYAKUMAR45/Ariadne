@@ -291,7 +291,7 @@ export type {
   ListKnowledgeProjectsOptions,
   UpdateKnowledgeProjectInput,
 } from './knowledge/KnowledgeProjectStore.js';
-export { KnowledgeSourceStore, KnowledgeSourceVersionRevertError, registerKnowledgeSource } from './knowledge/KnowledgeSourceStore.js';
+export { KnowledgeSourceStore, registerKnowledgeSource } from './knowledge/KnowledgeSourceStore.js';
 export { KnowledgeFreshnessService } from './knowledge/KnowledgeFreshness.js';
 export type {
   KnowledgeFreshnessReason,

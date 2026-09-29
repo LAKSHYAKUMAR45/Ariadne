@@ -97,14 +97,6 @@ function rowToVersion(row: VersionRow): KnowledgeSourceVersionRecord {
   };
 }
 
-/** Thrown when content matches a superseded version: versions are content-addressed and never renumbered. */
-export class KnowledgeSourceVersionRevertError extends Error {
-  public constructor(sourceId: string) {
-    super(`Knowledge source ${sourceId} content matches an older superseded version`);
-    this.name = 'KnowledgeSourceVersionRevertError';
-  }
-}
-
 export class KnowledgeSourceStore {
   public constructor(private readonly db: Database.Database) {}
 
@@ -148,7 +140,15 @@ export class KnowledgeSourceStore {
           .run({ now: timestamp, projectId: input.projectId, id: sourceId });
       } else if (existing.contentHash !== contentHash) {
         if (this.hasVersionWithHash(input.projectId, sourceId, contentHash)) {
-          throw new KnowledgeSourceVersionRevertError(sourceId);
+          // A→B→A: the existing immutable version for this hash becomes current again; history is not rewritten.
+          this.db
+            .prepare(
+              `UPDATE knowledge_sources
+               SET current_hash = @hash, status = 'active', updated_at = @now
+               WHERE project_id = @projectId AND id = @id`,
+            )
+            .run({ hash: contentHash, now: timestamp, projectId: input.projectId, id: sourceId });
+          return;
         }
         const nextVersion = this.nextVersion(input.projectId, sourceId);
         this.db
@@ -187,6 +187,18 @@ export class KnowledgeSourceStore {
       )
       .all(projectId, sourceId) as VersionRow[];
     return rows.map(rowToVersion);
+  }
+
+  /** The version whose content hash is the source's current hash; may be older than the highest version number. */
+  public currentVersion(projectId: string, sourceId: KnowledgeSourceId): KnowledgeSourceVersionRecord | null {
+    const row = this.db
+      .prepare(
+        `SELECT v.* FROM knowledge_source_versions v
+         JOIN knowledge_sources s ON s.project_id = v.project_id AND s.id = v.source_id AND s.current_hash = v.content_hash
+         WHERE v.project_id = ? AND v.source_id = ?`,
+      )
+      .get(projectId, sourceId) as VersionRow | undefined;
+    return row ? rowToVersion(row) : null;
   }
 
   public markDeleted(projectId: string, sourceId: KnowledgeSourceId): KnowledgeSourceRecord {

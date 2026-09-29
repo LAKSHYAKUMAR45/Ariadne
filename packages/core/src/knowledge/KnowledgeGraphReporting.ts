@@ -12,6 +12,7 @@ import {
   type KnowledgeGraphReportingService,
 } from './KnowledgeGraphReportTypes.js';
 import { createKnowledgeId } from './KnowledgeIds.js';
+import { currentSourceVersionNumberSql } from './KnowledgeSourceVersionSql.js';
 import type { DeferredRelationshipResolutionKind } from './KnowledgeExtraction.js';
 import { KnowledgeGraph } from './graph/KnowledgeGraph.js';
 
@@ -269,10 +270,7 @@ export class KnowledgeGraphReporter implements KnowledgeGraphReportingService {
          FROM knowledge_sources s
          LEFT JOIN knowledge_source_versions v
            ON v.project_id = s.project_id AND v.source_id = s.id
-          AND v.version_number = (
-            SELECT MAX(latest.version_number) FROM knowledge_source_versions latest
-            WHERE latest.project_id = s.project_id AND latest.source_id = s.id
-          )
+          AND v.version_number = ${currentSourceVersionNumberSql('s.project_id', 's.id', 's.current_hash')}
          LEFT JOIN knowledge_analysis_coverage c
            ON c.project_id = v.project_id AND c.source_version_id = v.id
          WHERE s.project_id = ? AND s.status = 'active'`,
@@ -297,10 +295,7 @@ export class KnowledgeGraphReporter implements KnowledgeGraphReportingService {
          JOIN knowledge_source_versions v ON v.project_id = d.project_id AND v.id = d.source_version_id
          JOIN knowledge_sources s ON s.project_id = v.project_id AND s.id = v.source_id AND s.status = 'active'
          WHERE d.project_id = ?
-           AND v.version_number = (
-             SELECT MAX(latest.version_number) FROM knowledge_source_versions latest
-             WHERE latest.project_id = v.project_id AND latest.source_id = v.source_id
-           )
+           AND v.version_number = ${currentSourceVersionNumberSql('s.project_id', 's.id', 's.current_hash')}
          ORDER BY d.id`,
       )
       .all(projectId) as DeferredRow[];

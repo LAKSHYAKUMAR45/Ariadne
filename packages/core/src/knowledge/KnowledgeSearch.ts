@@ -14,6 +14,7 @@ import {
   type SearchableField,
   type SearchIndexCandidate,
 } from './KnowledgeSearchIndex.js';
+import { currentSourceVersionNumberSql } from './KnowledgeSourceVersionSql.js';
 import { deriveCitationContext, type KnowledgeCitationContext, type KnowledgeCitationFieldKind } from './KnowledgeCitationContext.js';
 import type {
   KnowledgePageId,
@@ -366,11 +367,7 @@ function sourceRows(db: Database.Database, projectId: string, sourceIds: readonl
        LEFT JOIN knowledge_source_versions v
          ON v.project_id = s.project_id
         AND v.source_id = s.id
-        AND v.version_number = (
-          SELECT MAX(version_number)
-          FROM knowledge_source_versions latest
-          WHERE latest.project_id = s.project_id AND latest.source_id = s.id
-        )
+        AND v.version_number = ${currentSourceVersionNumberSql('s.project_id', 's.id', 's.current_hash')}
        LEFT JOIN knowledge_extractions e
          ON e.project_id = s.project_id
         AND e.source_version_id = v.id
