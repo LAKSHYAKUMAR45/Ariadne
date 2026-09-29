@@ -5,7 +5,7 @@ import {
   KNOWLEDGE_JOB_RESULT_SCHEMA_VERSION,
   parseStoredKnowledgeJobResult,
   validateAnalyzedJobResult,
-  type KnowledgeAnalyzedJobResult,
+  validateCoverageOnlyJobResult,
   type KnowledgeJobProcessingMode,
   type KnowledgeJobResult,
   type KnowledgeJobResultInput,
@@ -148,15 +148,21 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-function sanitizePersistedResult(result: KnowledgeJobResultInput): KnowledgeAnalyzedJobResult {
+function sanitizePersistedResult(result: KnowledgeJobResultInput): KnowledgeJobResult {
+  const boundWarnings = (warnings: KnowledgeJobResult['warnings']): KnowledgeJobResult['warnings'] =>
+    warnings.slice(0, MAX_RESULT_WARNINGS).map((warning) => ({
+      code: boundedRedactedCode(warning.code),
+      message: boundedRedactedLine(warning.message, MAX_WARNING_MESSAGE_LENGTH),
+    }));
+  if (result.resultKind === 'coverage_only') {
+    const validated = validateCoverageOnlyJobResult(result);
+    return { ...validated, warnings: boundWarnings(validated.warnings) };
+  }
   const validated = validateAnalyzedJobResult({ resultKind: 'analyzed', ...result });
   return {
     ...validated,
     pageVersionIds: validated.pageVersionIds.slice(0, MAX_PROGRESS_ARRAY_ITEMS),
-    warnings: validated.warnings.slice(0, MAX_RESULT_WARNINGS).map((warning) => ({
-      code: boundedRedactedCode(warning.code),
-      message: boundedRedactedLine(warning.message, MAX_WARNING_MESSAGE_LENGTH),
-    })),
+    warnings: boundWarnings(validated.warnings),
   };
 }
 

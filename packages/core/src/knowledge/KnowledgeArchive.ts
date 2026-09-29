@@ -108,6 +108,9 @@ export interface ImportResult {
   authenticity: KnowledgeArchiveAuthenticityResult;
 }
 
+const ANALYSIS_COVERAGE_FEATURE = 'knowledge-analysis-coverage-v1';
+const COVERAGE_TABLES: ReadonlySet<string> = new Set(['knowledge_analysis_coverage', 'knowledge_deferred_relationships']);
+
 const TABLES = [
   'knowledge_projects',
   'knowledge_project_roots',
@@ -117,6 +120,8 @@ const TABLES = [
   'knowledge_source_versions',
   'knowledge_source_assets',
   'knowledge_source_spans',
+  'knowledge_analysis_coverage',
+  'knowledge_deferred_relationships',
   'knowledge_extractions',
   'knowledge_pages',
   'knowledge_page_versions',
@@ -324,6 +329,18 @@ const TABLE_SCHEMAS: readonly ArchiveTableSchema[] = [
     name: 'knowledge_source_spans',
     columns: ['id', 'project_id', 'source_version_id', 'start_offset', 'end_offset', 'start_line', 'start_column', 'end_line', 'end_column', 'label', 'created_at'],
     optionalColumns: ['start_line', 'start_column', 'end_line', 'end_column', 'label'],
+    identityColumns: ['id'],
+  },
+  {
+    name: 'knowledge_analysis_coverage',
+    columns: ['id', 'project_id', 'source_version_id', 'status', 'analyzer_id', 'analyzer_version', 'generated_code', 'generated_reason', 'unsupported_reason', 'supported_features_json', 'missing_features_json', 'diagnostics_json', 'created_at', 'updated_at'],
+    optionalColumns: ['analyzer_id', 'analyzer_version', 'generated_reason', 'unsupported_reason'],
+    identityColumns: ['id'],
+  },
+  {
+    name: 'knowledge_deferred_relationships',
+    columns: ['id', 'project_id', 'source_version_id', 'relationship_type', 'source_symbol_id', 'target_symbol_id', 'target_reference', 'resolution_kind', 'evidence_kind', 'confidence', 'span_id', 'metadata_json', 'created_at'],
+    optionalColumns: ['source_symbol_id', 'target_symbol_id', 'target_reference', 'span_id'],
     identityColumns: ['id'],
   },
   {
@@ -928,6 +945,16 @@ function assertArchiveRelationships(
   }
   for (const [index, row] of (rowsByTable.get('knowledge_source_spans') ?? []).entries()) {
     assertReferenceExists('knowledge_source_spans', index, 'source_version_id', row.source_version_id, 'knowledge_source_versions', sourceVersionIds);
+  }
+  for (const table of ['knowledge_analysis_coverage', 'knowledge_deferred_relationships'] as const) {
+    for (const [index, row] of (rowsByTable.get(table) ?? []).entries()) {
+      assertReferenceExists(table, index, 'source_version_id', row.source_version_id, 'knowledge_source_versions', sourceVersionIds);
+    }
+  }
+  for (const [index, row] of (rowsByTable.get('knowledge_deferred_relationships') ?? []).entries()) {
+    if (row.span_id !== undefined && row.span_id !== null) {
+      assertReferenceExists('knowledge_deferred_relationships', index, 'span_id', row.span_id, 'knowledge_source_spans', sourceSpanIds);
+    }
   }
   for (const [index, row] of (rowsByTable.get('knowledge_extractions') ?? []).entries()) {
     assertReferenceExists('knowledge_extractions', index, 'source_version_id', row.source_version_id, 'knowledge_source_versions', sourceVersionIds);
@@ -1756,8 +1783,18 @@ function buildImportPlan(db: Database.Database, archive: KnowledgeArchive, optio
   const rowsByTable = new Map<ArchiveTableName, Record<string, unknown>[]>();
   const archiveTables = new Map<string, { sha256: string; rowCount: number }>();
   let totalRows = 0;
+  const coverageDeclared = validation.block?.requiredFeatures.includes(ANALYSIS_COVERAGE_FEATURE) ?? false;
   for (const schema of TABLE_SCHEMAS) {
-    const rows = parseTableRows(archive, schema, warnings);
+    const coverageTable = COVERAGE_TABLES.has(schema.name);
+    const absentCoverageTable = coverageTable && archive.files[`data/${schema.name}.json`] === undefined;
+    if (absentCoverageTable && coverageDeclared) {
+      throw importRejected(`table ${schema.name} is required by the ${ANALYSIS_COVERAGE_FEATURE} feature declaration.`);
+    }
+    // Archives written before analysis coverage existed legitimately omit these tables.
+    const rows = absentCoverageTable ? [] : parseTableRows(archive, schema, warnings);
+    if (coverageTable && rows.length > 0 && !coverageDeclared) {
+      throw importRejected(`table ${schema.name} requires the ${ANALYSIS_COVERAGE_FEATURE} feature declaration.`);
+    }
     if (schema.name === KNOWLEDGE_ARCHIVE_SETTINGS_TABLE && rows.some(isHostSettingRow)) {
       const position = rows.findIndex(isHostSettingRow) + 1;
       throw importRejected(`table ${schema.name} row ${position} contains a host-local setting.`);

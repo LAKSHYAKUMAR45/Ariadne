@@ -531,6 +531,72 @@ export function applyKnowledgeJobResultSchemaMigration(db: Database.Database): v
 }
 
 /**
+ * Creates the analyzer coverage tables (global migration 13, knowledge revision 9). Both are additive: sources without
+ * a coverage row read as `legacy_unknown`. The span reference is a deferred check because SQLite would otherwise try
+ * to null the NOT NULL `project_id` half of the composite key when a span is removed.
+ */
+export function applyKnowledgeAnalysisCoverageMigration(db: Database.Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS knowledge_analysis_coverage (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL,
+      source_version_id TEXT NOT NULL,
+      status TEXT NOT NULL,
+      analyzer_id TEXT,
+      analyzer_version TEXT,
+      generated_code INTEGER NOT NULL DEFAULT 0,
+      generated_reason TEXT,
+      unsupported_reason TEXT,
+      supported_features_json TEXT NOT NULL,
+      missing_features_json TEXT NOT NULL,
+      diagnostics_json TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      CHECK (status IN ('supported', 'partial', 'unsupported', 'failed')),
+      CHECK (generated_code IN (0, 1)),
+      CHECK (unsupported_reason IS NULL OR unsupported_reason IN (
+        'no_analyzer', 'unknown_format', 'adapter_missing', 'binary_or_non_text',
+        'size_limit_exceeded', 'policy_rejected', 'parser_failed'
+      )),
+      UNIQUE (project_id, source_version_id),
+      FOREIGN KEY (project_id, source_version_id)
+        REFERENCES knowledge_source_versions(project_id, id) ON DELETE CASCADE
+    );
+    CREATE TABLE IF NOT EXISTS knowledge_deferred_relationships (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL,
+      source_version_id TEXT NOT NULL,
+      relationship_type TEXT NOT NULL,
+      source_symbol_id TEXT,
+      target_symbol_id TEXT,
+      target_reference TEXT,
+      resolution_kind TEXT NOT NULL,
+      evidence_kind TEXT NOT NULL,
+      confidence REAL NOT NULL,
+      span_id TEXT,
+      metadata_json TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      CHECK (resolution_kind IN (
+        'dynamic_runtime', 'generated_stub', 'external_reference', 'ambiguous_alias', 'suppressed_policy'
+      )),
+      CHECK (evidence_kind IN (
+        'syntax', 'manifest', 'generated_marker', 'naming', 'comment', 'import_side_effect'
+      )),
+      CHECK (confidence >= 0 AND confidence <= 1),
+      UNIQUE (project_id, source_version_id, id),
+      FOREIGN KEY (project_id, source_version_id)
+        REFERENCES knowledge_source_versions(project_id, id) ON DELETE CASCADE,
+      FOREIGN KEY (project_id, span_id)
+        REFERENCES knowledge_source_spans(project_id, id)
+        ON DELETE NO ACTION
+        DEFERRABLE INITIALLY DEFERRED
+    );
+    CREATE INDEX IF NOT EXISTS idx_knowledge_deferred_relationships_version
+      ON knowledge_deferred_relationships(project_id, source_version_id);
+  `);
+}
+
+/**
  * Creates the additive knowledge schema atomically. It is idempotent so it
  * can be called safely by the shared migration runner on every database open.
  */
@@ -543,5 +609,6 @@ export function applyKnowledgeMigrations(db: Database.Database): void {
     applyKnowledgeReviewDeduplicationMigration(db);
     applyKnowledgeSearchIndexMigration(db);
     applyKnowledgeJobResultSchemaMigration(db);
+    applyKnowledgeAnalysisCoverageMigration(db);
   })();
 }

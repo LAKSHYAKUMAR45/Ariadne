@@ -124,6 +124,17 @@ describe('KnowledgeQueue', () => {
       warnings: [],
     };
 
+    const coverageOnly = {
+      resultKind: 'coverage_only',
+      processingMode: 'deterministic',
+      coverageStatus: 'unsupported',
+      unsupportedReason: 'no_analyzer',
+      analyzerId: null,
+      analyzerVersion: null,
+      extractionId: null,
+      warnings: [{ code: 'coverage_no_analyzer', message: 'No analyzer.' }],
+    } as const;
+
     function completeWithRawResult(resultJson: string | null, mode: string | null, version: number | null, status = 'completed') {
       const job = queue.enqueue({ projectId: 'project_1', jobKind: 'extract', payload: {} });
       db.prepare(
@@ -163,6 +174,36 @@ describe('KnowledgeQueue', () => {
       expect(queue.get(job.id)!.resultState).toBe('current');
     });
 
+    it('writes and reads back a coverage_only result as a completed deterministic job', () => {
+      const job = queue.enqueue({ projectId: 'project_1', jobKind: 'analyze', payload: {} });
+      queue.claim('project_1', 'worker-a');
+      const completed = queue.complete(job.id, 'worker-a', { ...coverageOnly, warnings: [...coverageOnly.warnings] });
+
+      const persisted = db
+        .prepare('SELECT status, result_json, result_processing_mode, result_schema_version FROM knowledge_jobs WHERE id = ?')
+        .get(job.id) as { status: string; result_json: string; result_processing_mode: string; result_schema_version: number };
+      expect(persisted).toMatchObject({ status: 'completed', result_processing_mode: 'deterministic', result_schema_version: 1 });
+      expect(JSON.parse(persisted.result_json)).toEqual(coverageOnly);
+      expect(completed.resultState).toBe('current');
+      expect(completed.result).toEqual({ ...coverageOnly, warnings: [...coverageOnly.warnings], legacyState: 'current' });
+      expect(queue.get(job.id)?.result).toEqual(completed.result);
+    });
+
+    it('bounds and redacts coverage_only warnings and refuses a malformed coverage_only write', () => {
+      const job = queue.enqueue({ projectId: 'project_1', jobKind: 'analyze', payload: {} });
+      queue.claim('project_1', 'worker-a');
+      expect(() =>
+        queue.complete(job.id, 'worker-a', { ...coverageOnly, unsupportedReason: 'nope' as never, warnings: [] }),
+      ).toThrow(/unsupportedReason/);
+      const completed = queue.complete(job.id, 'worker-a', {
+        ...coverageOnly,
+        warnings: Array.from({ length: 30 }, (_, index) => ({ code: `c${index}`, message: `token=sk-abcdefghijklmnopqrstuvwxyz0123456789 ${'m'.repeat(900)}` })),
+      });
+      const stored = completed.result!;
+      expect(stored.warnings.length).toBeLessThanOrEqual(8);
+      expect(JSON.stringify(stored)).not.toContain('sk-abcdefghijklmnopqrstuvwxyz0123456789');
+    });
+
     it('reads a legacy result with NULL result_schema_version as an analyzed legacy_payload', () => {
       const record = completeWithRawResult(JSON.stringify(analyzed), 'deterministic', null);
       expect(record.resultSchemaVersion).toBeNull();
@@ -174,7 +215,13 @@ describe('KnowledgeQueue', () => {
       ['unparseable JSON', '{not json', 'deterministic', null],
       ['a legacy shape missing required fields', JSON.stringify({ processingMode: 'deterministic' }), 'deterministic', null],
       ['a version 1 envelope without resultKind', JSON.stringify(analyzed), 'deterministic', 1],
-      ['a version 1 envelope with an unsupported resultKind', JSON.stringify({ ...analyzed, resultKind: 'coverage_only' }), 'deterministic', 1],
+      ['a version 1 envelope with an unsupported resultKind', JSON.stringify({ ...analyzed, resultKind: 'future_kind' }), 'deterministic', 1],
+      ['a coverage_only envelope carrying analyzed fields', JSON.stringify({ ...analyzed, resultKind: 'coverage_only' }), 'deterministic', 1],
+      ['a coverage_only envelope without an unsupportedReason', JSON.stringify({ ...coverageOnly, unsupportedReason: undefined }), 'deterministic', 1],
+      ['a coverage_only envelope with an unknown unsupportedReason', JSON.stringify({ ...coverageOnly, unsupportedReason: 'other' }), 'deterministic', 1],
+      ['a coverage_only envelope with an enriched processing mode', JSON.stringify({ ...coverageOnly, processingMode: 'enriched' }), 'enriched', 1],
+      ['a coverage_only envelope with a non-unsupported coverageStatus', JSON.stringify({ ...coverageOnly, coverageStatus: 'partial' }), 'deterministic', 1],
+      ['a legacy NULL-version payload claiming coverage_only', JSON.stringify(coverageOnly), 'deterministic', null],
       ['an unknown future schema version', JSON.stringify({ ...analyzed, resultKind: 'analyzed' }), 'deterministic', 99],
       ['a valid result stored with unknown processing mode', JSON.stringify(analyzed), 'unknown', null],
     ])('maps %s to legacy_unknown without throwing', (_label, json, mode, version) => {

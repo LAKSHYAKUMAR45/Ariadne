@@ -116,6 +116,10 @@ function spanId(sourceVersionId: string, span: KnowledgeSourceSpan): string {
   return createKnowledgeId('source-span', spanSeed(sourceVersionId, span));
 }
 
+export function knowledgeSourceSpanId(sourceVersionId: string, span: KnowledgeSourceSpan): string {
+  return spanId(sourceVersionId, span);
+}
+
 function extractionId(
   projectId: string,
   sourceVersionId: string,

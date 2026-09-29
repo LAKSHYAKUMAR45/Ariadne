@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import type { AnalyzerCoverageSummary } from './analyzers/AnalyzerCoverage.js';
 
 export interface KnowledgeSourcePosition {
   offset: number;
@@ -93,6 +94,40 @@ export interface ExtractionDiagnostic {
   span?: KnowledgeSourceSpan | null;
 }
 
+export const DEFERRED_RESOLUTION_KINDS = [
+  'dynamic_runtime',
+  'generated_stub',
+  'external_reference',
+  'ambiguous_alias',
+  'suppressed_policy',
+] as const;
+
+export const DEFERRED_EVIDENCE_KINDS = [
+  'syntax',
+  'manifest',
+  'generated_marker',
+  'naming',
+  'comment',
+  'import_side_effect',
+] as const;
+
+export type DeferredRelationshipResolutionKind = (typeof DEFERRED_RESOLUTION_KINDS)[number];
+export type DeferredRelationshipEvidenceKind = (typeof DEFERRED_EVIDENCE_KINDS)[number];
+
+/** A relationship preserved as evidence but deliberately not materialized as a graph edge. */
+export interface DeferredRelationshipCandidate {
+  id: string;
+  type: ExtractedRelationshipType;
+  sourceSymbolId?: string | null;
+  targetSymbolId?: string | null;
+  targetReference?: string | null;
+  resolutionKind: DeferredRelationshipResolutionKind;
+  evidenceKind: DeferredRelationshipEvidenceKind;
+  confidence: number;
+  span?: KnowledgeSourceSpan | null;
+  metadata?: ExtractedMetadata | null;
+}
+
 export interface DeterministicExtraction {
   analyzerId: string;
   analyzerVersion: string;
@@ -104,6 +139,9 @@ export interface DeterministicExtraction {
   relationships: ExtractedRelationship[];
   links: ExtractedLink[];
   diagnostics: ExtractionDiagnostic[];
+  /** Additive and never persisted in the extraction JSON; the worker stores it in the coverage tables. */
+  coverage?: AnalyzerCoverageSummary;
+  deferredRelationships?: DeferredRelationshipCandidate[];
 }
 
 const SYMBOL_KINDS = new Set<ExtractedSymbolKind>([
@@ -131,6 +169,19 @@ const RELATIONSHIP_TYPES = new Set<ExtractedRelationshipType>([
 ]);
 
 const DIAGNOSTIC_SEVERITIES = new Set<ExtractionDiagnosticSeverity>(['info', 'warning', 'error']);
+
+export function isExtractedRelationshipType(value: unknown): value is ExtractedRelationshipType {
+  return typeof value === 'string' && RELATIONSHIP_TYPES.has(value as ExtractedRelationshipType);
+}
+
+/** Validates a span using the same rules as extraction spans; returns null when it is malformed. */
+export function tryValidateSourceSpan(value: unknown): KnowledgeSourceSpan | null {
+  try {
+    return validateSpan(value, 'span');
+  } catch {
+    return null;
+  }
+}
 
 function expectObject(value: unknown, label: string): Record<string, unknown> {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {

@@ -955,6 +955,307 @@ describe('KnowledgeWorker', () => {
     ]);
   });
 
+  describe('analyzer coverage', () => {
+    const SPAN = { startOffset: 0, endOffset: 4, startLine: 1, startColumn: 1, endLine: 1, endColumn: 5 };
+
+    function enqueueAnalyze(sourceVersionId: string) {
+      return queue.enqueue({
+        projectId: PROJECT_A,
+        jobKind: 'analyze',
+        sourceVersionId,
+        payload: { sourceVersionId },
+      });
+    }
+
+    function coverageRow(sourceVersionId: string) {
+      return db
+        .prepare('SELECT * FROM knowledge_analysis_coverage WHERE project_id = ? AND source_version_id = ?')
+        .get(PROJECT_A, sourceVersionId) as Record<string, unknown> | undefined;
+    }
+
+    function registerBinarySource(sourcePath: string, bytes: Buffer): TestSource {
+      const contentPath = `sources/files/${sourcePath.replace(/[^a-z0-9]+/gi, '-').toLowerCase()}.bin`;
+      const absolutePath = join(workspaceRootFor(PROJECT_A), '.ariadne', 'knowledge', contentPath);
+      mkdirSync(dirname(absolutePath), { recursive: true });
+      writeFileSync(absolutePath, bytes);
+      const source = sourceStore.register({
+        projectId: PROJECT_A,
+        kind: 'file',
+        path: sourcePath,
+        contentHash: sha256Bytes(bytes),
+        contentPath,
+        mimeType: 'application/octet-stream',
+      });
+      const version = sourceStore.listVersions(PROJECT_A, source.id)[0]!;
+      return { sourceId: source.id, sourceVersionId: version.id, contentPath };
+    }
+
+    function sha256Bytes(bytes: Buffer): string {
+      return createHash('sha256').update(bytes).digest('hex');
+    }
+
+    it('completes an unsupported source as coverage_only without extraction, page, or graph rows', async () => {
+      const ruby = registerSource(PROJECT_A, 'scripts/deploy.rb', 'puts "deploy"\n', 'application/x-ruby');
+      const job = enqueueAnalyze(ruby.sourceVersionId);
+
+      const worker = new KnowledgeWorker(db, { workerId: 'worker-coverage-only', now: () => CREATED_AT });
+      const result = await worker.runOnce(PROJECT_A);
+
+      expect(result).toMatchObject({ claimed: 1, completed: 1, failed: 0, cancelled: 0, unsupportedCoverageCount: 1 });
+      expect(result.warnings).toEqual([
+        expect.objectContaining({ jobId: job.id, code: 'coverage_no_analyzer' }),
+      ]);
+      expect(queue.get(job.id)).toMatchObject({
+        status: 'completed',
+        failureCode: null,
+        resultSchemaVersion: 1,
+        resultState: 'current',
+        result: {
+          resultKind: 'coverage_only',
+          processingMode: 'deterministic',
+          coverageStatus: 'unsupported',
+          unsupportedReason: 'no_analyzer',
+          analyzerId: null,
+          analyzerVersion: null,
+          extractionId: null,
+        },
+      });
+      expect(
+        db.prepare('SELECT result_processing_mode AS mode, result_schema_version AS version FROM knowledge_jobs WHERE id = ?').get(job.id),
+      ).toEqual({ mode: 'deterministic', version: 1 });
+      expect(coverageRow(ruby.sourceVersionId)).toMatchObject({
+        status: 'unsupported',
+        unsupported_reason: 'no_analyzer',
+        analyzer_id: null,
+        analyzer_version: null,
+      });
+      expect(countsForProject(PROJECT_A)).toEqual({
+        extractions: { count: 0 },
+        nodes: { count: 0 },
+        edges: { count: 0 },
+        pages: { count: 0 },
+        pageVersions: { count: 0 },
+        reviews: { count: 0 },
+        insights: { count: 0 },
+      });
+      expect(queue.listProgressEvents(job.id).map((event) => event.stage)).toEqual(['loading', 'coverage', 'completed']);
+    });
+
+    it('writes a metadata_only search index row so unsupported files stay findable by path', async () => {
+      const ruby = registerSource(PROJECT_A, 'scripts/deploy.rb', 'puts "deploy"\n', 'application/x-ruby');
+      enqueueAnalyze(ruby.sourceVersionId);
+      await new KnowledgeWorker(db, { workerId: 'worker-metadata', now: () => CREATED_AT }).runOnce(PROJECT_A);
+
+      expect(
+        db
+          .prepare('SELECT coverage, status, extraction_id FROM knowledge_search_indexes WHERE project_id = ? AND source_version_id = ?')
+          .get(PROJECT_A, ruby.sourceVersionId),
+      ).toEqual({ coverage: 'metadata_only', status: 'active', extraction_id: null });
+      expect(searchKnowledge('deploy.rb', { db, projectId: PROJECT_A, mode: 'sources' })[0]).toMatchObject({
+        kind: 'source',
+        title: 'scripts/deploy.rb',
+      });
+    });
+
+    it('records non-UTF-8 content as binary_or_non_text coverage instead of failing the job', async () => {
+      const blob = registerBinarySource('assets/blob.bin', Buffer.from([0xff, 0xfe, 0x00, 0x80, 0x81]));
+      const job = enqueueAnalyze(blob.sourceVersionId);
+      const result = await new KnowledgeWorker(db, { workerId: 'worker-binary', now: () => CREATED_AT }).runOnce(PROJECT_A);
+
+      expect(result).toMatchObject({ completed: 1, failed: 0, unsupportedCoverageCount: 1 });
+      expect(queue.get(job.id)?.result).toMatchObject({ resultKind: 'coverage_only', unsupportedReason: 'binary_or_non_text' });
+      expect(coverageRow(blob.sourceVersionId)).toMatchObject({ status: 'unsupported', unsupported_reason: 'binary_or_non_text' });
+      expect(db.prepare('SELECT coverage FROM knowledge_search_indexes WHERE source_version_id = ?').get(blob.sourceVersionId)).toEqual({
+        coverage: 'metadata_only',
+      });
+    });
+
+    it('does not put source content or the private path in coverage rows or job results', async () => {
+      const ruby = registerSource(PROJECT_A, 'scripts/secret-deploy.rb', 'API_TOKEN = "sk-abcdefghijklmnopqrstuvwxyz0123456789"\n', 'application/x-ruby');
+      const job = enqueueAnalyze(ruby.sourceVersionId);
+      await new KnowledgeWorker(db, { workerId: 'worker-privacy', now: () => CREATED_AT }).runOnce(PROJECT_A);
+
+      const serialized = JSON.stringify([coverageRow(ruby.sourceVersionId), queue.get(job.id)?.result]);
+      expect(serialized).not.toContain('sk-abcdefghijklmnopqrstuvwxyz0123456789');
+      expect(serialized).not.toContain(workspaceRootFor(PROJECT_A));
+      expect(serialized).not.toContain('secret-deploy');
+    });
+
+    it('still fails unsupported job kinds with unsupported_source and writes no coverage', async () => {
+      const python = registerSource(PROJECT_A, 'src/kind.py', 'print("hi")\n');
+      const job = queue.enqueue({
+        projectId: PROJECT_A,
+        jobKind: 'summarize',
+        sourceVersionId: python.sourceVersionId,
+        payload: { sourceVersionId: python.sourceVersionId },
+      });
+      const result = await new KnowledgeWorker(db, { workerId: 'worker-kind', now: () => CREATED_AT }).runOnce(PROJECT_A);
+
+      expect(result).toMatchObject({ completed: 0, failed: 1, unsupportedCoverageCount: 0 });
+      expect(queue.get(job.id)).toMatchObject({ status: 'failed', failureCode: 'unsupported_source' });
+      expect(coverageRow(python.sourceVersionId)).toBeUndefined();
+    });
+
+    it('records supported coverage for a normal analysis without changing warnings or graph output', async () => {
+      const python = registerSource(PROJECT_A, 'src/plain.py', 'class Plain:\n    def run(self):\n        return 1\n');
+      const job = enqueueAnalyze(python.sourceVersionId);
+      const result = await new KnowledgeWorker(db, { workerId: 'worker-supported', now: () => CREATED_AT }).runOnce(PROJECT_A);
+
+      expect(result).toMatchObject({ completed: 1, failed: 0, unsupportedCoverageCount: 0, warnings: [] });
+      expect(queue.get(job.id)?.result).toMatchObject({ resultKind: 'analyzed', coverageStatus: 'supported', warnings: [] });
+      expect(coverageRow(python.sourceVersionId)).toMatchObject({
+        status: 'supported',
+        analyzer_id: 'python-lezer',
+        generated_code: 0,
+        unsupported_reason: null,
+      });
+      expect(db.prepare('SELECT COUNT(*) AS count FROM knowledge_graph_nodes WHERE project_id = ?').get(PROJECT_A)).toEqual({ count: 3 });
+    });
+
+    it('keeps generated-code detection advisory: extraction, pages, and graph still complete', async () => {
+      const python = registerSource(PROJECT_A, 'src/gen.py', '# @generated by codegen\nclass Generated:\n    pass\n');
+      const job = enqueueAnalyze(python.sourceVersionId);
+      const result = await new KnowledgeWorker(db, { workerId: 'worker-generated', now: () => CREATED_AT }).runOnce(PROJECT_A);
+
+      expect(result).toMatchObject({ completed: 1, failed: 0 });
+      expect(queue.get(job.id)?.result).toMatchObject({ resultKind: 'analyzed', coverageStatus: 'supported' });
+      expect(coverageRow(python.sourceVersionId)).toMatchObject({
+        status: 'supported',
+        generated_code: 1,
+        generated_reason: 'generated_marker',
+      });
+      expect(String(coverageRow(python.sourceVersionId)?.diagnostics_json)).toContain('coverage_generated_code_detected');
+      expect(db.prepare('SELECT COUNT(*) AS count FROM knowledge_extractions WHERE project_id = ?').get(PROJECT_A)).toEqual({ count: 1 });
+      expect(pageStore.listPages(PROJECT_A, 'source')).toHaveLength(1);
+    });
+
+    it('persists partial coverage and deferred relationships without adding graph nodes or edges', async () => {
+      const baseline = registerSource(PROJECT_A, 'src/base.txt', 'baseline text');
+      const dynamic = registerSource(PROJECT_A, 'src/dynamic.txt', 'dynamic text');
+      const analyzer = new StubAnalyzer('dynamic-analyzer', '1.0.0', true, async (input) => {
+        const extraction = createExtraction(input);
+        if (input.sourceVersionId !== dynamic.sourceVersionId) return extraction;
+        return {
+          ...extraction,
+          coverage: {
+            status: 'partial',
+            analyzerId: 'dynamic-analyzer',
+            analyzerVersion: '1.0.0',
+            generatedCode: false,
+            generatedReason: null,
+            supportedFeatures: ['static_calls'],
+            missingFeatures: ['dynamic_dispatch'],
+            warnings: [],
+          },
+          deferredRelationships: [
+            {
+              id: 'deferred_1',
+              type: 'calls',
+              sourceSymbolId: 'module_1',
+              targetReference: 'getattr(obj, name)',
+              resolutionKind: 'dynamic_runtime',
+              evidenceKind: 'syntax',
+              confidence: 0.3,
+              span: SPAN,
+            },
+          ],
+        } satisfies DeterministicExtraction;
+      });
+      const worker = new KnowledgeWorker(db, { workerId: 'worker-partial', now: () => CREATED_AT }, { analyzers: { require: () => analyzer } });
+      const baseJob = enqueueAnalyze(baseline.sourceVersionId);
+      await worker.runOnce(PROJECT_A);
+      expect(queue.get(baseJob.id)?.result).toMatchObject({ coverageStatus: 'supported' });
+
+      const job = enqueueAnalyze(dynamic.sourceVersionId);
+      const result = await worker.runOnce(PROJECT_A);
+
+      expect(result).toMatchObject({ completed: 1, failed: 0, unsupportedCoverageCount: 0 });
+      expect(result.warnings.map((warning) => warning.code)).toContain('coverage_partial_dynamic_relationships');
+      expect(queue.get(job.id)?.result).toMatchObject({
+        resultKind: 'analyzed',
+        coverageStatus: 'partial',
+        warnings: expect.arrayContaining([expect.objectContaining({ code: 'coverage_partial_dynamic_relationships' })]),
+      });
+      expect(coverageRow(dynamic.sourceVersionId)).toMatchObject({ status: 'partial', analyzer_id: 'dynamic-analyzer' });
+      expect(JSON.parse(String(coverageRow(dynamic.sourceVersionId)?.missing_features_json))).toEqual(['dynamic_dispatch']);
+      expect(
+        db.prepare('SELECT resolution_kind, relationship_type, target_reference FROM knowledge_deferred_relationships WHERE source_version_id = ?').all(dynamic.sourceVersionId),
+      ).toEqual([{ resolution_kind: 'dynamic_runtime', relationship_type: 'calls', target_reference: 'getattr(obj, name)' }]);
+      const nodesForDynamic = db
+        .prepare('SELECT COUNT(*) AS count FROM knowledge_graph_nodes WHERE project_id = ? AND source_id = ?')
+        .get(PROJECT_A, dynamic.sourceId) as { count: number };
+      const nodesForBaseline = db
+        .prepare('SELECT COUNT(*) AS count FROM knowledge_graph_nodes WHERE project_id = ? AND source_id = ?')
+        .get(PROJECT_A, baseline.sourceId) as { count: number };
+      expect(nodesForDynamic).toEqual(nodesForBaseline);
+      expect(db.prepare('SELECT COUNT(*) AS count FROM knowledge_graph_edges WHERE project_id = ?').get(PROJECT_A)).toEqual({ count: 0 });
+    });
+
+    it('treats an analyzer exception as failed coverage and still fails the job', async () => {
+      const python = registerSource(PROJECT_A, 'src/boom.py', 'print("boom secret-content")\n');
+      const job = enqueueAnalyze(python.sourceVersionId);
+      const boom = new StubAnalyzer('boom-analyzer', '2.0.0', true, async () => {
+        throw new Error('parse blew up near secret-content');
+      });
+      const result = await new KnowledgeWorker(db, { workerId: 'worker-failed', now: () => CREATED_AT }, { analyzers: { require: () => boom } }).runOnce(PROJECT_A);
+
+      expect(result).toMatchObject({ completed: 0, failed: 1, unsupportedCoverageCount: 0 });
+      expect(queue.get(job.id)).toMatchObject({ status: 'failed', failureCode: 'analyzer_failed', result: null });
+      expect(coverageRow(python.sourceVersionId)).toMatchObject({
+        status: 'failed',
+        analyzer_id: 'boom-analyzer',
+        unsupported_reason: 'parser_failed',
+      });
+      expect(JSON.stringify(coverageRow(python.sourceVersionId))).not.toContain('secret-content');
+      expect(countsForProject(PROJECT_A).extractions).toEqual({ count: 0 });
+    });
+
+    it('upserts a single coverage row when the same source version is reanalyzed', async () => {
+      const python = registerSource(PROJECT_A, 'src/again.py', 'x = 1\n');
+      const job = enqueueAnalyze(python.sourceVersionId);
+      const worker = new KnowledgeWorker(db, { workerId: 'worker-again', now: () => CREATED_AT });
+      await worker.runOnce(PROJECT_A);
+      const firstId = coverageRow(python.sourceVersionId)?.id;
+
+      db.prepare(
+        `UPDATE knowledge_jobs
+         SET status = 'queued', completed_at = NULL, result_json = NULL, result_processing_mode = NULL,
+             result_schema_version = NULL, worker_id = NULL, lease_expires_at = NULL
+         WHERE id = ?`,
+      ).run(job.id);
+      await worker.runOnce(PROJECT_A);
+
+      expect(db.prepare('SELECT COUNT(*) AS count FROM knowledge_analysis_coverage').get()).toEqual({ count: 1 });
+      expect(coverageRow(python.sourceVersionId)?.id).toBe(firstId);
+    });
+
+    it('resolves through an injected registry that only implements resolve()', async () => {
+      const ruby = registerSource(PROJECT_A, 'scripts/x.rb', 'puts 1\n', 'application/x-ruby');
+      const job = enqueueAnalyze(ruby.sourceVersionId);
+      const registry = {
+        resolve: () => ({
+          kind: 'unsupported' as const,
+          coverage: {
+            status: 'unsupported' as const,
+            analyzerId: null,
+            analyzerVersion: null,
+            generatedCode: false,
+            generatedReason: null,
+            supportedFeatures: [],
+            missingFeatures: [],
+            warnings: [],
+            unsupportedReason: 'policy_rejected' as const,
+          },
+        }),
+        require: () => {
+          throw new Error('require must not be used when resolve exists');
+        },
+      };
+      await new KnowledgeWorker(db, { workerId: 'worker-resolve', now: () => CREATED_AT }, { analyzers: registry }).runOnce(PROJECT_A);
+      expect(queue.get(job.id)?.result).toMatchObject({ resultKind: 'coverage_only', unsupportedReason: 'policy_rejected' });
+    });
+  });
+
   function createWorkspaceRoot(projectId: string): string {
     const workspaceRoot = mkdtempSync(join(process.cwd(), `.knowledge-worker-${projectId}-`));
     workspaceRoots.push(workspaceRoot);
@@ -980,7 +1281,7 @@ describe('KnowledgeWorker', () => {
     writeFileSync(absolutePath, content, 'utf8');
   }
 
-  function registerSource(projectId: string, sourcePath: string, content: string): TestSource {
+  function registerSource(projectId: string, sourcePath: string, content: string, mimeType?: string): TestSource {
     const slug = sourcePath.replace(/[^a-z0-9]+/gi, '-').toLowerCase();
     const contentPath = `sources/files/${slug}.txt`;
     writeStoredContent(projectId, contentPath, content);
@@ -990,7 +1291,7 @@ describe('KnowledgeWorker', () => {
       path: sourcePath,
       content,
       contentPath,
-      mimeType: sourcePath.endsWith('.py') ? 'text/x-python' : 'text/plain',
+      mimeType: mimeType ?? (sourcePath.endsWith('.py') ? 'text/x-python' : 'text/plain'),
     });
     const version = sourceStore.listVersions(projectId, source.id)[0]!;
     return {

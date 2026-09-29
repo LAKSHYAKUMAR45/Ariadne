@@ -4,6 +4,7 @@ import {
   applyKnowledgeGraphMetadataMigration,
   applyKnowledgeQueueMigration,
   applyKnowledgeReviewDeduplicationMigration,
+  applyKnowledgeAnalysisCoverageMigration,
   applyKnowledgeJobResultSchemaMigration,
   applyKnowledgeSearchIndexMigration,
   applyKnowledgeSchemaV2Migration,
@@ -201,6 +202,11 @@ export const MIGRATIONS: Migration[] = [
     version: 12,
     description: 'Add knowledge job result schema version for versioned analyzed job-result envelopes',
     up: (db) => applyKnowledgeJobResultSchemaMigration(db),
+  },
+  {
+    version: 13,
+    description: 'Add knowledge analysis coverage and deferred relationship tables',
+    up: (db) => applyKnowledgeAnalysisCoverageMigration(db),
   },
 ];
 

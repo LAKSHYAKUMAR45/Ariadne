@@ -11,6 +11,7 @@ import {
   KnowledgeQueue,
   type KnowledgeJobRecord,
   type KnowledgeAnalyzedJobResult,
+  type KnowledgeCoverageOnlyJobResult,
   type KnowledgeJobResult,
   type KnowledgeJobResultWarning,
   type KnowledgeTerminalProgressInput,
@@ -29,7 +30,23 @@ import { KnowledgeGraphMaterializer } from './KnowledgeGraphMaterializer.js';
 import { KnowledgeSearchIndex } from './KnowledgeSearchIndex.js';
 import { buildDeterministicPagePayload, type DeterministicPageBuildInput } from './DeterministicPageBuilder.js';
 import { KnowledgeGraph } from './graph/KnowledgeGraph.js';
-import { AnalyzerRegistry, createDefaultAnalyzerRegistry, type DeterministicAnalyzer } from './analyzers/index.js';
+import {
+  AnalyzerRegistry,
+  createDefaultAnalyzerRegistry,
+  type AnalyzerResolution,
+  type DeterministicAnalyzer,
+} from './analyzers/index.js';
+import {
+  boundCoverageText,
+  classifyUnsupportedSource,
+  detectGeneratedCode,
+  generatedCodeDiagnostic,
+  supportedAnalyzerCoverage,
+  unsupportedCoverage,
+  type AnalyzerCoverageSummary,
+} from './analyzers/AnalyzerCoverage.js';
+import { KnowledgeAnalysisCoverageStore } from './KnowledgeAnalysisCoverageStore.js';
+import type { ExtractionDiagnostic } from './KnowledgeExtraction.js';
 
 const DEFAULT_MAX_SOURCE_BYTES = 2 * 1024 * 1024;
 const DEFAULT_WATCH_POLL_MS = 1_000;
@@ -79,6 +96,8 @@ export interface KnowledgeWorkerRunResult {
   completed: number;
   failed: number;
   cancelled: number;
+  /** Completions that were coverage-only because the source is unsupported; also counted in `completed`. */
+  unsupportedCoverageCount: number;
   warnings: KnowledgeWorkerWarning[];
 }
 
@@ -136,7 +155,8 @@ export interface KnowledgeWorkerDependencies {
   sourceLoader?: {
     load(input: { projectId: string; sourceVersionId: string; maxBytes?: number }): LoadedKnowledgeSourceVersion;
   };
-  analyzers?: Pick<AnalyzerRegistry, 'require'>;
+  analyzers?: Pick<AnalyzerRegistry, 'require'> & Partial<Pick<AnalyzerRegistry, 'resolve'>>;
+  coverageStore?: Pick<KnowledgeAnalysisCoverageStore, 'upsert' | 'replaceDeferredRelationships'>;
   extractionStore?: Pick<KnowledgeExtractionStore, 'save'>;
   searchIndex?: Pick<KnowledgeSearchIndex, 'replaceForSourceVersion'>;
   graphMaterializer?: Pick<KnowledgeGraphMaterializer, 'materialize'>;
@@ -250,6 +270,64 @@ function summarizeDiagnostics(extraction: DeterministicExtraction): KnowledgeJob
   ];
 }
 
+function coverageWarnings(coverage: AnalyzerCoverageSummary): KnowledgeJobResultWarning[] {
+  return coverage.warnings
+    .filter((diagnostic) => diagnostic.severity !== 'info')
+    .map((diagnostic) => ({ code: diagnostic.code, message: diagnostic.message }));
+}
+
+const DYNAMIC_RESOLUTION_KINDS = new Set(['dynamic_runtime', 'generated_stub']);
+
+/**
+ * Combines the registry resolution, analyzer-reported coverage, advisory generated-code detection, and preserved
+ * deferred relationships into the final coverage. Generated code never changes the status.
+ */
+function buildAnalyzedCoverage(
+  resolved: AnalyzerCoverageSummary,
+  extraction: DeterministicExtraction,
+  loaded: LoadedKnowledgeSourceVersion,
+  deferred: { stored: number; dropped: number },
+): AnalyzerCoverageSummary {
+  const reported = extraction.coverage;
+  const hasDynamicRelationships =
+    deferred.stored > 0 &&
+    (extraction.deferredRelationships ?? []).some((candidate) => DYNAMIC_RESOLUTION_KINDS.has(candidate.resolutionKind));
+  const partial = reported?.status === 'partial' || hasDynamicRelationships;
+  const generated = detectGeneratedCode({ sourcePath: loaded.sourcePath, content: loaded.content });
+  const generatedCode = resolved.generatedCode || generated.generated || reported?.generatedCode === true;
+  const generatedReason = resolved.generatedReason ?? generated.reason ?? reported?.generatedReason ?? null;
+  const missingFeatures = [...(reported?.missingFeatures ?? resolved.missingFeatures)];
+  if (hasDynamicRelationships && reported === undefined) {
+    missingFeatures.push('dynamic_relationships');
+  }
+  const warnings: ExtractionDiagnostic[] = [...resolved.warnings, ...(reported?.warnings ?? [])];
+  if (generatedCode) {
+    warnings.push(generatedCodeDiagnostic(generatedReason ?? 'unspecified'));
+  }
+  if (partial) {
+    warnings.push({
+      code: 'coverage_partial_dynamic_relationships',
+      message: boundCoverageText(
+        deferred.stored === 0 && deferred.dropped === 0
+          ? 'Analyzer reported partial coverage of dynamic or generated relationships.'
+          : `Kept ${deferred.stored} deferred relationship${deferred.stored === 1 ? '' : 's'}` +
+              `${deferred.dropped > 0 ? ` (${deferred.dropped} dropped by limits or validation)` : ''}; none became graph edges.`,
+      ),
+      severity: 'warning',
+    });
+  }
+  return {
+    status: partial ? 'partial' : 'supported',
+    analyzerId: resolved.analyzerId ?? extraction.analyzerId,
+    analyzerVersion: resolved.analyzerVersion ?? extraction.analyzerVersion,
+    generatedCode,
+    generatedReason: generatedCode ? generatedReason : null,
+    supportedFeatures: [...(reported?.supportedFeatures ?? resolved.supportedFeatures)],
+    missingFeatures,
+    warnings,
+  };
+}
+
 function uniqueWarnings(warnings: readonly KnowledgeJobResultWarning[]): KnowledgeJobResultWarning[] {
   const deduped = new Map<string, KnowledgeJobResultWarning>();
   for (const warning of warnings) {
@@ -336,7 +414,8 @@ export function knowledgeWorkerFailure(error: unknown): {
 export class KnowledgeWorker {
   private readonly queue: KnowledgeQueue;
   private readonly sourceLoader: KnowledgeSourceLoader;
-  private readonly analyzers: Pick<AnalyzerRegistry, 'require'>;
+  private readonly analyzers: NonNullable<KnowledgeWorkerDependencies['analyzers']>;
+  private readonly coverageStore: NonNullable<KnowledgeWorkerDependencies['coverageStore']>;
   private readonly extractionStore: Pick<KnowledgeExtractionStore, 'save'>;
   private readonly searchIndex: Pick<KnowledgeSearchIndex, 'replaceForSourceVersion'>;
   private readonly graphMaterializer: Pick<KnowledgeGraphMaterializer, 'materialize'>;
@@ -366,6 +445,7 @@ export class KnowledgeWorker {
         load: (input) => loadKnowledgeSourceVersion(this.db, input),
       };
     this.analyzers = dependencies.analyzers ?? createDefaultAnalyzerRegistry();
+    this.coverageStore = dependencies.coverageStore ?? new KnowledgeAnalysisCoverageStore(db, { now: this.now });
     this.extractionStore = dependencies.extractionStore ?? new KnowledgeExtractionStore(db);
     this.searchIndex = dependencies.searchIndex ?? new KnowledgeSearchIndex(db, { now: this.now });
     this.graphMaterializer =
@@ -387,6 +467,7 @@ export class KnowledgeWorker {
     let completed = 0;
     let failed = 0;
     let cancelled = 0;
+    let unsupportedCoverageCount = 0;
 
     while (!this.signal?.aborted) {
       const recovered = this.queue.recoverExpiredKnowledgeJobsSummary(scopedProjectId);
@@ -401,6 +482,9 @@ export class KnowledgeWorker {
         warnings.push(...this.runWarnings(result));
         if (result.status === 'completed') {
           completed += 1;
+          if (result.result?.resultKind === 'coverage_only') {
+            unsupportedCoverageCount += 1;
+          }
         } else if (result.status === 'failed') {
           failed += 1;
         } else if (result.status === 'cancelled') {
@@ -426,6 +510,7 @@ export class KnowledgeWorker {
       completed,
       failed,
       cancelled,
+      unsupportedCoverageCount,
       warnings,
     };
   }
@@ -492,20 +577,37 @@ export class KnowledgeWorker {
     }
 
     const sourceVersionId = this.resolveSourceVersionId(job);
-    const loaded = this.sourceLoader.load({
-      projectId,
-      sourceVersionId,
-      maxBytes: this.maxSourceBytes,
-    });
+    let loaded: LoadedKnowledgeSourceVersion;
+    try {
+      loaded = this.sourceLoader.load({
+        projectId,
+        sourceVersionId,
+        maxBytes: this.maxSourceBytes,
+      });
+    } catch (error) {
+      if (error instanceof KnowledgeSourceVersionLoadError && error.code === 'unsupported_source') {
+        return this.completeUnsupportedSource(
+          job,
+          projectId,
+          leaseMonitor,
+          sourceVersionId,
+          unsupportedCoverage('binary_or_non_text', this.loadSourceSelection(projectId, sourceVersionId)),
+        );
+      }
+      throw error;
+    }
     this.guardDurableStage(job.id, projectId, leaseMonitor);
+    const resolution = this.resolveAnalyzer(loaded);
+    if (resolution.kind === 'unsupported') {
+      return this.completeUnsupportedSource(job, projectId, leaseMonitor, sourceVersionId, resolution.coverage);
+    }
     this.queue.recordProgress(job.id, 'loading', 1, 6, {
       sourceVersionId: loaded.sourceVersionId,
       sourcePath: loaded.sourcePath ?? loaded.contentPath,
     });
     this.guardDurableStage(job.id, projectId, leaseMonitor);
 
-    const analyzer = this.requireAnalyzer(loaded);
-    const extraction = await this.analyzeSource(analyzer, loaded);
+    const extraction = await this.analyzeSource(resolution.analyzer, loaded, projectId);
     this.guardDurableStage(job.id, projectId, leaseMonitor);
     this.queue.recordProgress(job.id, 'analyzing', 2, 6, {
       analyzerId: extraction.analyzerId,
@@ -514,7 +616,7 @@ export class KnowledgeWorker {
     });
     this.guardDurableStage(job.id, projectId, leaseMonitor);
 
-    const savedExtraction = this.persistExtraction(projectId, extraction);
+    const { saved: savedExtraction, coverage } = this.persistExtraction(projectId, loaded, resolution.coverage, extraction);
     this.guardDurableStage(job.id, projectId, leaseMonitor);
     this.queue.recordProgress(job.id, 'persisting', 3, 6, {
       extractionId: savedExtraction.id,
@@ -565,6 +667,7 @@ export class KnowledgeWorker {
     this.guardDurableStage(job.id, projectId, leaseMonitor);
     const warnings = uniqueWarnings([
       ...summarizeDiagnostics(extraction),
+      ...(coverage.status === 'partial' ? coverageWarnings(coverage) : []),
       ...enrichmentWarnings,
     ]);
     const processingMode: KnowledgeJobResult['processingMode'] =
@@ -580,6 +683,7 @@ export class KnowledgeWorker {
       pageVersionIds: generation.pages.map((page) => page.id).slice(0, MAX_PAGE_VERSION_IDS),
       graphNodeCount: graphResult.nodeIds.length,
       graphEdgeCount: graphResult.edgeIds.length,
+      coverageStatus: coverage.status === 'partial' ? 'partial' : 'supported',
       warnings,
     };
     const completionProgress: KnowledgeTerminalProgressInput = {
@@ -692,21 +796,79 @@ export class KnowledgeWorker {
     throw new KnowledgeSourceVersionLoadError('source_version_missing', `Knowledge source version missing for job ${job.id}`);
   }
 
-  private requireAnalyzer(loaded: LoadedKnowledgeSourceVersion): DeterministicAnalyzer {
-    try {
-      return this.analyzers.require({
-        sourceKind: loaded.sourceKind,
-        sourcePath: loaded.sourcePath,
-        mimeType: loaded.mimeType,
-      });
-    } catch (error) {
-      throw new KnowledgeWorkerUnsupportedJobError(loaded.mimeType ?? loaded.sourcePath ?? loaded.sourceKind);
+  private resolveAnalyzer(loaded: LoadedKnowledgeSourceVersion): AnalyzerResolution {
+    const selection = { sourceKind: loaded.sourceKind, sourcePath: loaded.sourcePath, mimeType: loaded.mimeType };
+    if (this.analyzers.resolve) {
+      return this.analyzers.resolve(selection);
     }
+    try {
+      const analyzer = this.analyzers.require(selection);
+      return { kind: 'supported', analyzer, coverage: supportedAnalyzerCoverage(analyzer, selection) };
+    } catch {
+      return { kind: 'unsupported', coverage: unsupportedCoverage(classifyUnsupportedSource(selection), selection) };
+    }
+  }
+
+  private loadSourceSelection(
+    projectId: string,
+    sourceVersionId: string,
+  ): { sourcePath: string | null; mimeType: string | null } {
+    const row = this.db
+      .prepare(
+        `SELECT s.source_path AS sourcePath, v.mime_type AS mimeType
+         FROM knowledge_source_versions v
+         JOIN knowledge_sources s ON s.project_id = v.project_id AND s.id = v.source_id
+         WHERE v.project_id = ? AND v.id = ?`,
+      )
+      .get(projectId, sourceVersionId) as { sourcePath: string | null; mimeType: string | null } | undefined;
+    return row ?? { sourcePath: null, mimeType: null };
+  }
+
+  private completeUnsupportedSource(
+    job: KnowledgeJobRecord,
+    projectId: string,
+    leaseMonitor: LeaseMonitor,
+    sourceVersionId: string,
+    coverage: AnalyzerCoverageSummary,
+  ): KnowledgeJobRecord {
+    const unsupportedReason = coverage.unsupportedReason ?? 'no_analyzer';
+    this.guardDurableStage(job.id, projectId, leaseMonitor);
+    this.queue.recordProgress(job.id, 'loading', 1, 3, { sourceVersionId });
+    this.guardDurableStage(job.id, projectId, leaseMonitor);
+    try {
+      this.db.transaction(() => {
+        this.coverageStore.upsert({ projectId, sourceVersionId, coverage });
+        this.searchIndex.replaceForSourceVersion({ projectId, sourceVersionId, coverage: 'metadata_only' });
+      })();
+    } catch (error) {
+      throw new KnowledgeWorkerStageError('extraction_persist_failed', asErrorMessage(error), { cause: error });
+    }
+    this.guardDurableStage(job.id, projectId, leaseMonitor);
+    this.queue.recordProgress(job.id, 'coverage', 2, 3, { sourceVersionId, unsupportedReason });
+    this.guardDurableStage(job.id, projectId, leaseMonitor);
+    const warnings = uniqueWarnings(coverageWarnings(coverage));
+    const result: KnowledgeCoverageOnlyJobResult = {
+      resultKind: 'coverage_only',
+      processingMode: 'deterministic',
+      coverageStatus: 'unsupported',
+      unsupportedReason,
+      analyzerId: null,
+      analyzerVersion: null,
+      extractionId: null,
+      warnings,
+    };
+    return this.completeOwnedJob(job.id, projectId, leaseMonitor, result, {
+      stage: 'completed',
+      completedUnits: 3,
+      totalUnits: 3,
+      detail: { warningCount: warnings.length, processingMode: 'deterministic', coverageStatus: 'unsupported' },
+    });
   }
 
   private async analyzeSource(
     analyzer: DeterministicAnalyzer,
     loaded: LoadedKnowledgeSourceVersion,
+    projectId: string,
   ): Promise<DeterministicExtraction> {
     try {
       return await analyzer.analyze({
@@ -717,11 +879,34 @@ export class KnowledgeWorker {
         content: loaded.content,
       });
     } catch (error) {
+      this.recordFailedCoverage(projectId, loaded, analyzer);
       throw new KnowledgeWorkerStageError('analyzer_failed', asErrorMessage(error), { cause: error });
     }
   }
 
-  private persistExtraction(projectId: string, extraction: DeterministicExtraction) {
+  /** Best effort: the job is already failing, so a coverage write problem must not mask the analyzer failure. */
+  private recordFailedCoverage(projectId: string, loaded: LoadedKnowledgeSourceVersion, analyzer: DeterministicAnalyzer): void {
+    try {
+      this.coverageStore.upsert({
+        projectId,
+        sourceVersionId: loaded.sourceVersionId,
+        coverage: unsupportedCoverage('parser_failed', loaded, {
+          status: 'failed',
+          analyzerId: analyzer.id,
+          analyzerVersion: analyzer.version,
+        }),
+      });
+    } catch {
+      // intentionally ignored; see method comment
+    }
+  }
+
+  private persistExtraction(
+    projectId: string,
+    loaded: LoadedKnowledgeSourceVersion,
+    resolved: AnalyzerCoverageSummary,
+    extraction: DeterministicExtraction,
+  ) {
     try {
       return this.db.transaction(() => {
         const saved = this.extractionStore.save({
@@ -736,7 +921,14 @@ export class KnowledgeWorker {
           coverage: 'extraction',
           extractionId: saved.id,
         });
-        return saved;
+        const deferred = this.coverageStore.replaceDeferredRelationships({
+          projectId,
+          sourceVersionId: extraction.sourceVersionId,
+          candidates: extraction.deferredRelationships ?? [],
+        });
+        const coverage = buildAnalyzedCoverage(resolved, extraction, loaded, deferred);
+        this.coverageStore.upsert({ projectId, sourceVersionId: extraction.sourceVersionId, coverage });
+        return { saved, coverage };
       })();
     } catch (error) {
       throw new KnowledgeWorkerStageError('extraction_persist_failed', asErrorMessage(error), { cause: error });

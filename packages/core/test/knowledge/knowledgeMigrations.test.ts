@@ -6,6 +6,7 @@ import { openDatabase } from '../../src/db.js';
 import {
   applyKnowledgeMigrations,
   applyKnowledgeJobResultSchemaMigration,
+  applyKnowledgeAnalysisCoverageMigration,
   applyKnowledgeSearchIndexMigration,
   applyKnowledgeReviewDeduplicationMigration,
   KNOWLEDGE_SCHEMA_VERSION,
@@ -96,7 +97,7 @@ describe('knowledge schema migrations', () => {
 
     expect(tableNames(db)).toEqual(expect.arrayContaining(KNOWLEDGE_TABLES));
     expect(indexNames(db)).toEqual(expect.arrayContaining(REQUIRED_INDEXES));
-    expect(KNOWLEDGE_SCHEMA_VERSION).toBe(8);
+    expect(KNOWLEDGE_SCHEMA_VERSION).toBe(9);
     expect(columns(db, 'knowledge_jobs')).toContain('result_schema_version');
     expect(columns(db, 'knowledge_extractions')).toEqual(
       expect.arrayContaining([
@@ -740,7 +741,7 @@ describe('knowledge job result schema migration (global version 12, knowledge re
   it('registers version 12 after the search index migration', () => {
     const migration = MIGRATIONS.find((entry) => entry.version === 12);
     expect(migration?.description).toMatch(/result schema version/i);
-    expect(MIGRATIONS.map((entry) => entry.version).filter((version) => version >= 11)).toEqual([11, 12]);
+    expect(MIGRATIONS.map((entry) => entry.version).filter((version) => version >= 11)).toEqual([11, 12, 13]);
   });
 
   it('adds a nullable integer column on a fresh database without touching other jobs columns', () => {
@@ -786,7 +787,7 @@ describe('knowledge job result schema migration (global version 12, knowledge re
       result_schema_version: null,
     });
     expect(upgraded.prepare(`SELECT sql FROM sqlite_master WHERE name = 'idx_knowledge_jobs_project_completed_mode'`).get()).toEqual(before);
-    expect(Number((upgraded.prepare(`SELECT value FROM schema_meta WHERE key = 'schema_version'`).get() as { value: string }).value)).toBe(12);
+    expect(Number((upgraded.prepare(`SELECT value FROM schema_meta WHERE key = 'schema_version'`).get() as { value: string }).value)).toBe(13);
     upgraded.close();
 
     const reopened = openDatabase(databasePath);
@@ -805,5 +806,107 @@ describe('knowledge job result schema migration (global version 12, knowledge re
     const rootPageAfter = (db.prepare(`SELECT rootpage FROM sqlite_master WHERE name = 'knowledge_jobs'`).get() as { rootpage: number }).rootpage;
     expect(rootPageAfter).toBe(rootPageBefore);
     db.close();
+  });
+});
+
+describe('knowledge analysis coverage migration (global version 13, knowledge revision 9)', () => {
+  function seedSourceVersion(db: Database.Database): void {
+    db.prepare(
+      `INSERT INTO knowledge_projects (id, workspace_root, name, status, created_at, updated_at)
+       VALUES ('project_1', 'workspace', 'Wiki', 'active', 'now', 'now')`,
+    ).run();
+    db.prepare(
+      `INSERT INTO knowledge_sources (id, project_id, source_kind, source_path, status, created_at, updated_at)
+       VALUES ('source_1', 'project_1', 'file', 'a.rb', 'active', 'now', 'now')`,
+    ).run();
+    db.prepare(
+      `INSERT INTO knowledge_source_versions (id, project_id, source_id, version_number, content_hash, content_path, byte_length, created_at)
+       VALUES ('version_1', 'project_1', 'source_1', 1, 'hash', 'sources/a.txt', 1, 'now')`,
+    ).run();
+  }
+
+  it('registers version 13 after the job result migration', () => {
+    const migration = MIGRATIONS.find((entry) => entry.version === 13);
+    expect(migration?.description).toMatch(/analysis coverage/i);
+    expect(MIGRATIONS.map((entry) => entry.version).filter((version) => version >= 11)).toEqual([11, 12, 13]);
+  });
+
+  it('creates both tables with the specified columns and constraints on a fresh database', () => {
+    const db = openDatabase(':memory:');
+    expect(columns(db, 'knowledge_analysis_coverage')).toEqual([
+      'id', 'project_id', 'source_version_id', 'status', 'analyzer_id', 'analyzer_version', 'generated_code',
+      'generated_reason', 'unsupported_reason', 'supported_features_json', 'missing_features_json',
+      'diagnostics_json', 'created_at', 'updated_at',
+    ]);
+    expect(columns(db, 'knowledge_deferred_relationships')).toEqual([
+      'id', 'project_id', 'source_version_id', 'relationship_type', 'source_symbol_id', 'target_symbol_id',
+      'target_reference', 'resolution_kind', 'evidence_kind', 'confidence', 'span_id', 'metadata_json', 'created_at',
+    ]);
+    seedSourceVersion(db);
+    const insertCoverage = (id: string, status: string) =>
+      db.prepare(
+        `INSERT INTO knowledge_analysis_coverage
+         (id, project_id, source_version_id, status, supported_features_json, missing_features_json, diagnostics_json, created_at, updated_at)
+         VALUES (?, 'project_1', 'version_1', ?, '[]', '[]', '[]', 'now', 'now')`,
+      ).run(id, status);
+    expect(() => insertCoverage('c_bad', 'bogus')).toThrow(/CHECK/);
+    insertCoverage('c1', 'unsupported');
+    expect(() => insertCoverage('c2', 'supported')).toThrow(/UNIQUE/);
+    const insertDeferred = (id: string, kind: string) =>
+      db.prepare(
+        `INSERT INTO knowledge_deferred_relationships
+         (id, project_id, source_version_id, relationship_type, target_reference, resolution_kind, evidence_kind, confidence, metadata_json, created_at)
+         VALUES (?, 'project_1', 'version_1', 'calls', 'x', ?, 'syntax', 0.5, '{}', 'now')`,
+      ).run(id, kind);
+    expect(() => insertDeferred('d_bad', 'made_up')).toThrow(/CHECK/);
+    insertDeferred('d1', 'dynamic_runtime');
+    db.prepare(`DELETE FROM knowledge_source_versions WHERE id = 'version_1'`).run();
+    expect(db.prepare('SELECT COUNT(*) AS count FROM knowledge_analysis_coverage').get()).toEqual({ count: 0 });
+    expect(db.prepare('SELECT COUNT(*) AS count FROM knowledge_deferred_relationships').get()).toEqual({ count: 0 });
+    db.close();
+  });
+
+  it('lets a span referenced by a deferred relationship be removed with its source version', () => {
+    const db = openDatabase(':memory:');
+    seedSourceVersion(db);
+    db.prepare(
+      `INSERT INTO knowledge_source_spans (id, project_id, source_version_id, start_offset, end_offset, created_at)
+       VALUES ('span_1', 'project_1', 'version_1', 0, 1, 'now')`,
+    ).run();
+    db.prepare(
+      `INSERT INTO knowledge_deferred_relationships
+       (id, project_id, source_version_id, relationship_type, target_reference, resolution_kind, evidence_kind, confidence, span_id, metadata_json, created_at)
+       VALUES ('d1', 'project_1', 'version_1', 'calls', 'x', 'dynamic_runtime', 'syntax', 0.5, 'span_1', '{}', 'now')`,
+    ).run();
+    expect(() => db.prepare(`DELETE FROM knowledge_projects WHERE id = 'project_1'`).run()).not.toThrow();
+    expect(db.prepare('SELECT COUNT(*) AS count FROM knowledge_deferred_relationships').get()).toEqual({ count: 0 });
+    db.close();
+  });
+
+  it('upgrades a version-12 database in place, treats existing sources as coverage-less, and reopens idempotently', () => {
+    const directory = mkdtempSync(join(process.cwd(), '.test-knowledge-coverage-migration-'));
+    temporaryDirectories.push(directory);
+    const databasePath = join(directory, 'state.db');
+
+    const first = openDatabase(databasePath);
+    seedSourceVersion(first);
+    first.exec('DROP TABLE knowledge_deferred_relationships; DROP TABLE knowledge_analysis_coverage;');
+    first.prepare(`UPDATE schema_meta SET value = '12' WHERE key = 'schema_version'`).run();
+    first.close();
+
+    const upgraded = openDatabase(databasePath);
+    expect(tableNames(upgraded)).toEqual(
+      expect.arrayContaining(['knowledge_analysis_coverage', 'knowledge_deferred_relationships']),
+    );
+    expect(upgraded.prepare('SELECT COUNT(*) AS count FROM knowledge_analysis_coverage').get()).toEqual({ count: 0 });
+    expect(upgraded.prepare(`SELECT COUNT(*) AS count FROM knowledge_source_versions`).get()).toEqual({ count: 1 });
+    expect(Number((upgraded.prepare(`SELECT value FROM schema_meta WHERE key = 'schema_version'`).get() as { value: string }).value)).toBe(13);
+    upgraded.close();
+
+    const reopened = openDatabase(databasePath);
+    applyKnowledgeAnalysisCoverageMigration(reopened);
+    applyKnowledgeMigrations(reopened);
+    expect(tableNames(reopened).filter((name) => name === 'knowledge_analysis_coverage')).toHaveLength(1);
+    reopened.close();
   });
 });

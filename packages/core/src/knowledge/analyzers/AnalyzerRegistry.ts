@@ -1,6 +1,12 @@
 import path from 'node:path';
 import type { DeterministicExtraction } from '../KnowledgeExtraction.js';
 import type { KnowledgeSourceKind } from '../KnowledgeTypes.js';
+import {
+  classifyUnsupportedSource,
+  supportedAnalyzerCoverage,
+  unsupportedCoverage,
+  type AnalyzerCoverageSummary,
+} from './AnalyzerCoverage.js';
 import { JavaScriptAnalyzer } from './JavaScriptAnalyzer.js';
 import { MarkdownAnalyzer } from './MarkdownAnalyzer.js';
 import { PythonAnalyzer } from './PythonAnalyzer.js';
@@ -24,6 +30,17 @@ export interface DeterministicAnalyzer {
   analyze(input: AnalyzerInput): Promise<DeterministicExtraction>;
 }
 
+export type AnalyzerResolution =
+  | {
+      kind: 'supported';
+      analyzer: DeterministicAnalyzer;
+      coverage: AnalyzerCoverageSummary;
+    }
+  | {
+      kind: 'unsupported';
+      coverage: AnalyzerCoverageSummary;
+    };
+
 function describeInput(input: AnalyzerSelectionInput): string {
   const mime = input.mimeType?.trim() || 'unknown MIME';
   const extension = input.sourcePath ? path.extname(input.sourcePath).toLowerCase() || 'unknown extension' : 'unknown extension';
@@ -40,12 +57,22 @@ export class AnalyzerRegistry {
     this.analyzers.push(analyzer);
   }
 
-  public require(input: AnalyzerSelectionInput): DeterministicAnalyzer {
+  /** Deterministic, non-throwing selection that reports why a source is or is not analyzable. */
+  public resolve(input: AnalyzerSelectionInput): AnalyzerResolution {
     const analyzer = this.analyzers.find((candidate) => candidate.supports(input));
     if (!analyzer) {
+      return { kind: 'unsupported', coverage: unsupportedCoverage(classifyUnsupportedSource(input), input) };
+    }
+    return { kind: 'supported', analyzer, coverage: supportedAnalyzerCoverage(analyzer, input) };
+  }
+
+  /** Legacy path: throws for unsupported inputs. Prefer `resolve` for coverage-aware callers. */
+  public require(input: AnalyzerSelectionInput): DeterministicAnalyzer {
+    const resolution = this.resolve(input);
+    if (resolution.kind === 'unsupported') {
       throw new Error(`No deterministic analyzer registered for ${describeInput(input)}`);
     }
-    return analyzer;
+    return resolution.analyzer;
   }
 }
 

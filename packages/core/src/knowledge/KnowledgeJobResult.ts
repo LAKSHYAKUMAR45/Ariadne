@@ -1,3 +1,5 @@
+import { ANALYZER_UNSUPPORTED_REASONS, type AnalyzerUnsupportedReason } from './analyzers/AnalyzerCoverage.js';
+
 export type KnowledgeJobResultLegacyState = 'current' | 'legacy_payload' | 'legacy_unknown';
 
 export interface KnowledgeJobResultWarning {
@@ -24,19 +26,27 @@ export interface KnowledgeAnalyzedJobResult extends KnowledgeJobResultBase {
 }
 
 /**
- * Reserved union member: the analyzer-coverage slice defines, writes, and
- * parses the `coverage_only` variant. Until then readers treat it as unknown.
+ * An unsupported source completes without an analyzer or extraction. The coverage row keyed by source version is
+ * authoritative; this payload is a pointer plus bounded warnings, so no coverage ID is embedded.
  */
-export type KnowledgeCoverageOnlyJobResult = never;
+export interface KnowledgeCoverageOnlyJobResult extends KnowledgeJobResultBase {
+  resultKind: 'coverage_only';
+  processingMode: 'deterministic';
+  coverageStatus: 'unsupported';
+  unsupportedReason: AnalyzerUnsupportedReason;
+  analyzerId: null;
+  analyzerVersion: null;
+  extractionId: null;
+}
 
 export type KnowledgeJobResult = KnowledgeAnalyzedJobResult | KnowledgeCoverageOnlyJobResult;
 
 export type KnowledgeJobProcessingMode = KnowledgeJobResultBase['processingMode'] | 'unknown';
 
 /** Writer input: the envelope discriminator is optional so existing callers stay compatible. */
-export type KnowledgeJobResultInput = Omit<KnowledgeAnalyzedJobResult, 'resultKind'> & {
-  resultKind?: 'analyzed';
-};
+export type KnowledgeJobResultInput =
+  | (Omit<KnowledgeAnalyzedJobResult, 'resultKind'> & { resultKind?: 'analyzed' })
+  | KnowledgeCoverageOnlyJobResult;
 
 export const KNOWLEDGE_JOB_RESULT_SCHEMA_VERSION = 1;
 
@@ -63,6 +73,19 @@ function requireNonNegativeInteger(value: unknown, label: string): number {
   return value as number;
 }
 
+function validateWarnings(value: unknown): KnowledgeJobResultWarning[] {
+  if (!Array.isArray(value)) {
+    throw new Error('Knowledge queue result warnings must be an array');
+  }
+  return value.map((warning) => {
+    if (!isRecord(warning)) throw new Error('Knowledge queue result warning must be an object');
+    return {
+      code: requireNonEmptyString(warning.code, 'result warning code'),
+      message: requireNonEmptyString(warning.message, 'result warning message'),
+    };
+  });
+}
+
 /**
  * Validates an analyzed result. `requireResultKind` is true for versioned
  * envelopes; legacy payloads have no discriminator and are read as analyzed.
@@ -82,9 +105,6 @@ export function validateAnalyzedJobResult(
   if (!Array.isArray(value.pageVersionIds)) {
     throw new Error('Knowledge queue result pageVersionIds must be an array');
   }
-  if (!Array.isArray(value.warnings)) {
-    throw new Error('Knowledge queue result warnings must be an array');
-  }
   const coverageStatus = value.coverageStatus;
   if (coverageStatus !== undefined && coverageStatus !== 'supported' && coverageStatus !== 'partial') {
     throw new Error('Knowledge queue result coverageStatus must be supported or partial');
@@ -98,15 +118,44 @@ export function validateAnalyzedJobResult(
     pageVersionIds: value.pageVersionIds.map((item) => requireNonEmptyString(item, 'result pageVersionId')),
     graphNodeCount: requireNonNegativeInteger(value.graphNodeCount, 'result graphNodeCount'),
     graphEdgeCount: requireNonNegativeInteger(value.graphEdgeCount, 'result graphEdgeCount'),
-    warnings: value.warnings.map((warning) => {
-      if (!isRecord(warning)) throw new Error('Knowledge queue result warning must be an object');
-      return {
-        code: requireNonEmptyString(warning.code, 'result warning code'),
-        message: requireNonEmptyString(warning.message, 'result warning message'),
-      };
-    }),
+    warnings: validateWarnings(value.warnings),
     ...(coverageStatus !== undefined ? { coverageStatus } : {}),
   };
+}
+
+export function validateCoverageOnlyJobResult(value: unknown): KnowledgeCoverageOnlyJobResult {
+  if (!isRecord(value)) throw new Error('Knowledge queue result must be an object');
+  if (value.resultKind !== 'coverage_only') {
+    throw new Error('Knowledge queue result resultKind must be coverage_only');
+  }
+  if (value.processingMode !== 'deterministic') {
+    throw new Error('Knowledge queue coverage_only result processingMode must be deterministic');
+  }
+  if (value.coverageStatus !== 'unsupported') {
+    throw new Error('Knowledge queue coverage_only result coverageStatus must be unsupported');
+  }
+  if (!ANALYZER_UNSUPPORTED_REASONS.includes(value.unsupportedReason as AnalyzerUnsupportedReason)) {
+    throw new Error('Knowledge queue coverage_only result unsupportedReason must be a known reason');
+  }
+  if (value.analyzerId !== null || value.analyzerVersion !== null || value.extractionId !== null) {
+    throw new Error('Knowledge queue coverage_only result must not carry analyzer or extraction identity');
+  }
+  return {
+    resultKind: 'coverage_only',
+    processingMode: 'deterministic',
+    coverageStatus: 'unsupported',
+    unsupportedReason: value.unsupportedReason as AnalyzerUnsupportedReason,
+    analyzerId: null,
+    analyzerVersion: null,
+    extractionId: null,
+    warnings: validateWarnings(value.warnings),
+  };
+}
+
+/** Validates a versioned (schema version 1) envelope, dispatching on `resultKind`. */
+export function validateVersionedJobResult(value: unknown): KnowledgeJobResult {
+  if (isRecord(value) && value.resultKind === 'coverage_only') return validateCoverageOnlyJobResult(value);
+  return validateAnalyzedJobResult(value, { requireResultKind: true });
 }
 
 const UNKNOWN: ParsedKnowledgeJobResult = { result: null, legacyState: 'legacy_unknown' };
@@ -129,9 +178,11 @@ export function parseStoredKnowledgeJobResult(
   if (schemaVersion !== null && schemaVersion !== KNOWLEDGE_JOB_RESULT_SCHEMA_VERSION) return UNKNOWN;
   try {
     const legacyState = schemaVersion === null ? 'legacy_payload' : 'current';
-    const result = validateAnalyzedJobResult(JSON.parse(resultJson) as unknown, {
-      requireResultKind: schemaVersion !== null,
-    });
+    const parsedJson = JSON.parse(resultJson) as unknown;
+    const result =
+      schemaVersion === null
+        ? validateAnalyzedJobResult(parsedJson, { requireResultKind: false })
+        : validateVersionedJobResult(parsedJson);
     return { result: { ...result, legacyState }, legacyState };
   } catch {
     return UNKNOWN;

@@ -1340,11 +1340,113 @@ See [[graph|the graph]].
         importKnowledgeProject(database(), withCompatibility(v2, { requiredFeatures: ['knowledge-future-feature-v9'] }), importOptions()),
       ).toThrow(/required feature/i);
       expect(() =>
-        importKnowledgeProject(database(), withCompatibility(v2, { requiredFeatures: ['knowledge-analysis-coverage-v1'] }), importOptions()),
-      ).toThrow(/required feature/i);
-      expect(() =>
         importKnowledgeProject(database(), withCompatibility(v2, { minimumReaderArchiveVersion: 3 }), importOptions()),
       ).toThrow(/newer reader/i);
+    });
+
+    describe('analysis coverage tables', () => {
+      const COVERAGE_TABLES = ['knowledge_analysis_coverage', 'knowledge_deferred_relationships'] as const;
+
+      function seedCoverage(db: ReturnType<typeof openDatabase>, projectId: string): void {
+        db.prepare(
+          `INSERT INTO knowledge_analysis_coverage
+           (id, project_id, source_version_id, status, analyzer_id, analyzer_version, generated_code, generated_reason,
+            unsupported_reason, supported_features_json, missing_features_json, diagnostics_json, created_at, updated_at)
+           VALUES (?, ?, ?, 'partial', 'typescript', '1', 1, 'generated_header', NULL, '["symbols"]', '["dynamic"]',
+                   '[{"code":"coverage_partial_dynamic_relationships","severity":"warning","message":"partial"}]', ?, ?)`,
+        ).run('coverage_1', projectId, 'source_version_1', '2026-01-01', '2026-01-01');
+        db.prepare(
+          `INSERT INTO knowledge_deferred_relationships
+           (id, project_id, source_version_id, relationship_type, source_symbol_id, target_symbol_id, target_reference,
+            resolution_kind, evidence_kind, confidence, span_id, metadata_json, created_at)
+           VALUES (?, ?, ?, 'calls', NULL, NULL, 'dynamic()', 'dynamic_runtime', 'syntax', 0.5, ?, '{}', ?)`,
+        ).run('deferred_1', projectId, 'source_version_1', 'source_span_1', '2026-01-01');
+      }
+
+      it('round-trips coverage and deferred rows through a version 2 archive that declares the feature', () => {
+        const source = database();
+        const { projectId } = seed(source);
+        seedCoverage(source, projectId);
+        const archive = exportKnowledgeProject(source, { projectId, generatedAt: '2026-01-02' });
+        expect(archive.manifest.archiveVersion).toBe(2);
+        expect(compatibilityOf(archive).requiredFeatures).toEqual(['knowledge-analysis-coverage-v1']);
+        for (const table of COVERAGE_TABLES) expect(archive.files[`data/${table}.json`]).toBeDefined();
+
+        const target = database();
+        importKnowledgeProject(target, archive, importOptions());
+        expect(target.prepare('SELECT id, status, generated_code, unsupported_reason FROM knowledge_analysis_coverage').all()).toEqual([
+          { id: 'coverage_1', status: 'partial', generated_code: 1, unsupported_reason: null },
+        ]);
+        expect(target.prepare('SELECT id, span_id, resolution_kind FROM knowledge_deferred_relationships').all()).toEqual([
+          { id: 'deferred_1', span_id: 'source_span_1', resolution_kind: 'dynamic_runtime' },
+        ]);
+      });
+
+      it('fails closed for an explicit version 1 export of a project with coverage rows', () => {
+        const db = database();
+        const { projectId } = seed(db);
+        seedCoverage(db, projectId);
+        expect(() => exportKnowledgeProject(db, { projectId, manifestVersion: 1 })).toThrow(/manifest_version_incompatible/);
+      });
+
+      it.each(COVERAGE_TABLES)('rejects a declared coverage feature when %s is missing', (table) => {
+        const db = database();
+        const { projectId } = seed(db);
+        seedCoverage(db, projectId);
+        const archive = exportKnowledgeProject(db, { projectId, generatedAt: '2026-01-02' });
+        const path = `data/${table}.json`;
+        const stripped = withCompatibility(removeArchiveFile(archive, path), {
+          tableFingerprints: compatibilityOf(archive).tableFingerprints.filter((entry) => entry.table !== table),
+        });
+        expect(() => importKnowledgeProject(database(), stripped, importOptions())).toThrow(/knowledge-analysis-coverage-v1|required/i);
+      });
+
+      it('imports older archives that lack the coverage tables', () => {
+        const db = database();
+        const { projectId } = seed(db);
+        let archive = exportV2(db, projectId);
+        for (const table of COVERAGE_TABLES) {
+          archive = withCompatibility(removeArchiveFile(archive, `data/${table}.json`), {
+            tableFingerprints: compatibilityOf(archive).tableFingerprints.filter((entry) => entry.table !== table),
+          });
+        }
+        const target = database();
+        importKnowledgeProject(target, archive, importOptions());
+        expect(target.prepare('SELECT COUNT(*) AS count FROM knowledge_analysis_coverage').get()).toEqual({ count: 0 });
+        expect(target.prepare('SELECT COUNT(*) AS count FROM knowledge_sources').get()).toEqual({ count: 1 });
+      });
+
+      it('rejects coverage rows that reference unknown source versions or spans', () => {
+        const db = database();
+        const { projectId } = seed(db);
+        seedCoverage(db, projectId);
+        const archive = exportKnowledgeProject(db, { projectId, generatedAt: '2026-01-02' });
+        const badCoverage = rewriteV2TableRows(
+          archive,
+          'knowledge_analysis_coverage',
+          tableRows(archive, 'knowledge_analysis_coverage').map((row) => ({ ...row, source_version_id: 'missing_version' })),
+        );
+        expect(() => importKnowledgeProject(database(), badCoverage, importOptions())).toThrow(/reference/i);
+        const badDeferred = rewriteV2TableRows(
+          archive,
+          'knowledge_deferred_relationships',
+          tableRows(archive, 'knowledge_deferred_relationships').map((row) => ({ ...row, span_id: 'missing_span' })),
+        );
+        expect(() => importKnowledgeProject(database(), badDeferred, importOptions())).toThrow(/reference/i);
+      });
+
+      it('rejects coverage rows with an invalid status', () => {
+        const db = database();
+        const { projectId } = seed(db);
+        seedCoverage(db, projectId);
+        const archive = exportKnowledgeProject(db, { projectId, generatedAt: '2026-01-02' });
+        const tampered = rewriteV2TableRows(
+          archive,
+          'knowledge_analysis_coverage',
+          tableRows(archive, 'knowledge_analysis_coverage').map((row) => ({ ...row, status: 'bogus' })),
+        );
+        expect(() => importKnowledgeProject(database(), tampered, importOptions())).toThrow();
+      });
     });
 
     it('warns about unknown optional features unless the caller accepts them', () => {

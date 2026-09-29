@@ -105,6 +105,7 @@ export type {
   ExtractedRelationshipType,
   ExtractedSection,
   ExtractedSymbol,
+  DeferredRelationshipCandidate,
   ExtractedSymbolKind,
   ExtractionDiagnostic,
   ExtractionDiagnosticSeverity,
@@ -120,7 +121,31 @@ export {
   PythonAnalyzer,
   TextAnalyzer,
 } from './knowledge/analyzers/index.js';
-export type { AnalyzerInput, AnalyzerSelectionInput, DeterministicAnalyzer } from './knowledge/analyzers/index.js';
+export {
+  ANALYZER_COVERAGE_DIAGNOSTIC_CODES,
+  ANALYZER_COVERAGE_STATUSES,
+  ANALYZER_UNSUPPORTED_REASONS,
+  classifyUnsupportedSource,
+  coverageFromOptionalIngest,
+  detectGeneratedCode,
+} from './knowledge/analyzers/index.js';
+export type {
+  AnalyzerCoverageDiagnosticCode,
+  AnalyzerCoverageStatus,
+  AnalyzerCoverageSummary,
+  AnalyzerInput,
+  AnalyzerResolution,
+  AnalyzerSelectionInput,
+  AnalyzerUnsupportedReason,
+  DeterministicAnalyzer,
+  OptionalIngestOutcome,
+} from './knowledge/analyzers/index.js';
+export { KnowledgeAnalysisCoverageStore, MAX_DEFERRED_RELATIONSHIPS_PER_SOURCE } from './knowledge/KnowledgeAnalysisCoverageStore.js';
+export type {
+  KnowledgeAnalysisCoverageRecord,
+  KnowledgeAnalysisCoverageSummaryCounts,
+  KnowledgeDeferredRelationshipRecord,
+} from './knowledge/KnowledgeAnalysisCoverageStore.js';
 export type {
   KnowledgeExtractionRecord,
   KnowledgeExtractionSectionRecord,
