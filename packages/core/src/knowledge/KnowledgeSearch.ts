@@ -11,9 +11,10 @@ import {
   deriveExtractionSearchData,
   type ExtractionSearchData,
   type PersistedSpanRow,
+  type SearchableField,
   type SearchIndexCandidate,
 } from './KnowledgeSearchIndex.js';
-import type { KnowledgeCitationContext } from './KnowledgeCitationContext.js';
+import { deriveCitationContext, type KnowledgeCitationContext, type KnowledgeCitationFieldKind } from './KnowledgeCitationContext.js';
 import type {
   KnowledgePageId,
   KnowledgePageType,
@@ -535,9 +536,16 @@ function parseExtractionSearchData(db: Database.Database, row: SourceSearchRow):
   });
 }
 
-function sourceCitationFromMatch(row: SourceSearchRow, span: PersistedSpanRow | null): KnowledgeSearchCitation {
+// Carries the matched field kind to context derivation without widening the public result shape.
+const citationFieldKinds = new WeakMap<KnowledgeSearchCitation, KnowledgeCitationFieldKind>();
+
+function sourceCitationFromMatch(
+  row: SourceSearchRow,
+  span: PersistedSpanRow | null,
+  fieldKind: SearchableField['kind'] | null,
+): KnowledgeSearchCitation {
   const path = row.source_path ?? row.content_path;
-  return {
+  const citation: KnowledgeSearchCitation = {
     pageId: null,
     sourceId: row.id as KnowledgeSourceId,
     path: path ? redactLines(path) : null,
@@ -556,6 +564,8 @@ function sourceCitationFromMatch(row: SourceSearchRow, span: PersistedSpanRow | 
             label: span.label ? redactLines(span.label) : span.label,
           },
   };
+  if (fieldKind === 'symbol' || fieldKind === 'section') citationFieldKinds.set(citation, fieldKind);
+  return citation;
 }
 
 function withGraphExpansions(result: KnowledgeSearchResult, options: KnowledgeSearchOptions): KnowledgeSearchResult {
@@ -662,7 +672,7 @@ function scoreSourceDocument(
         ? buildBoundedSnippet(bestMatch.field.text, query)
         : buildBoundedSnippet(redactLines(row.content_path ?? row.source_url ?? row.source_path ?? ''), query),
       score,
-      citations: [citationMatch ? sourceCitationFromMatch(row, citationMatch.field.span) : sourceCitation(row)],
+      citations: [citationMatch ? sourceCitationFromMatch(row, citationMatch.field.span, citationMatch.field.kind) : sourceCitation(row)],
       graphExpansions: [],
       metadata: {
         kind: row.source_kind,
@@ -985,7 +995,19 @@ export function searchKnowledge(query: string, options: KnowledgeSearchOptions):
 
   return dedupeResults(resultSets.flat())
     .sort(sortResults)
-    .slice(0, Math.min(MAX_RESULT_CANDIDATES, options.limit ?? DEFAULT_LIMIT));
+    .slice(0, Math.min(MAX_RESULT_CANDIDATES, options.limit ?? DEFAULT_LIMIT))
+    .map((result) => withCitationContext(result, options));
+}
+
+function withCitationContext(result: KnowledgeSearchResult, options: KnowledgeSearchOptions): KnowledgeSearchResult {
+  if (result.citations.length === 0) return result;
+  return {
+    ...result,
+    citations: result.citations.map((citation) => ({
+      ...citation,
+      context: deriveCitationContext(options.db, options.projectId, citation, citationFieldKinds.get(citation)),
+    })),
+  };
 }
 
 function resultBudgetText(result: KnowledgeSearchResult): string {

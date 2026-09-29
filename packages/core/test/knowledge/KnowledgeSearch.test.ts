@@ -96,8 +96,124 @@ describe('searchKnowledge', () => {
         path: 'docs/auth.md',
         url: null,
         span: { id: spanId, startOffset: 0, endOffset: 11, label: 'heading' },
+        context: {
+          sourceVersionId: sourceVersion.id,
+          sourceSpanId: spanId,
+          fieldKind: 'page_provenance',
+          fieldLabel: 'heading',
+          matchKind: 'page_provenance',
+          snippetPolicy: 'reference_only',
+          startLineWindow: null,
+          endLineWindow: null,
+          legacyState: 'current',
+        },
       },
     ]);
+  });
+
+  it('adds reference-only citation context for exact span, metadata-only, and span-less page citations', () => {
+    const exact = sourceStore.register({
+      projectId: PROJECT_ID,
+      kind: 'file',
+      path: 'src/context_exact.ts',
+      content: 'export function contextualizeCitation() {}\n',
+      format: 'typescript',
+    });
+    const exactVersion = sourceStore.listVersions(PROJECT_ID, exact.id)[0];
+    extractionStore.save({
+      projectId: PROJECT_ID,
+      extraction: {
+        analyzerId: 'typescript-lezer',
+        analyzerVersion: '1',
+        sourceVersionId: exactVersion.id,
+        title: 'context exact',
+        summary: 'Context exact source.',
+        sections: [],
+        symbols: [
+          {
+            id: 'symbol:1',
+            kind: 'function',
+            name: 'contextualizeCitation',
+            qualifiedName: 'ctx.contextualizeCitation',
+            span: { startOffset: 16, endOffset: 37, startLine: 1, startColumn: 17, endLine: 1, endColumn: 38 },
+            confidence: 1,
+          },
+        ],
+        relationships: [],
+        links: [],
+        diagnostics: [],
+      },
+    });
+    const metadataOnly = sourceStore.register({
+      projectId: PROJECT_ID,
+      kind: 'file',
+      path: 'docs/context-metadata-only.md',
+      content: 'unrelated body',
+      format: 'markdown',
+    });
+    const pageVersion = sourceStore.listVersions(PROJECT_ID, metadataOnly.id)[0];
+    const page = pageStore.createPageVersion({
+      projectId: PROJECT_ID,
+      type: 'concept',
+      title: 'Spanless provenance page',
+      slug: 'spanless-provenance-page',
+      content: 'Generated page content',
+      summary: 'Page with source provenance but no span.',
+      sourceVersionIds: [pageVersion.id],
+    });
+
+    const exactResults = searchKnowledge('contextualizeCitation', { db, projectId: PROJECT_ID, mode: 'sources' });
+    const metadataResults = searchKnowledge('context metadata only', { db, projectId: PROJECT_ID, mode: 'sources' });
+    const pageResults = searchKnowledge('spanless provenance', { db, projectId: PROJECT_ID, mode: 'knowledge' });
+
+    expect(exactResults[0]?.citations[0]?.context).toEqual({
+      sourceVersionId: exactVersion.id,
+      sourceSpanId: exactResults[0]?.citations[0]?.span?.id,
+      fieldKind: 'symbol',
+      fieldLabel: exactResults[0]?.citations[0]?.span?.label ?? null,
+      matchKind: 'exact_span',
+      snippetPolicy: 'reference_only',
+      startLineWindow: 1,
+      endLineWindow: 1,
+      legacyState: 'current',
+    });
+    expect(metadataResults[0]?.id).toBe(metadataOnly.id);
+    expect(metadataResults[0]?.citations[0]?.context).toEqual({
+      sourceVersionId: null,
+      sourceSpanId: null,
+      fieldKind: 'path_metadata',
+      fieldLabel: null,
+      matchKind: 'metadata_only',
+      snippetPolicy: 'reference_only',
+      startLineWindow: null,
+      endLineWindow: null,
+      legacyState: 'current',
+    });
+    expect(pageResults[0]?.id).toBe(page.pageId);
+    expect(pageResults[0]?.citations[0]?.context).toMatchObject({
+      sourceSpanId: null,
+      matchKind: 'page_provenance',
+      snippetPolicy: 'reference_only',
+      legacyState: 'current',
+    });
+    for (const result of [...exactResults, ...metadataResults, ...pageResults]) {
+      for (const citation of result.citations) {
+        expect(Object.keys(citation.context ?? {}).sort()).toEqual(
+          [
+            'endLineWindow',
+            'fieldKind',
+            'fieldLabel',
+            'legacyState',
+            'matchKind',
+            'snippetPolicy',
+            'sourceSpanId',
+            'sourceVersionId',
+            'startLineWindow',
+          ].sort(),
+        );
+        expect(citation.context?.snippetPolicy).toBe('reference_only');
+      }
+    }
   });
 
   it('searches source records without returning generated pages in read-sources-only mode', () => {
@@ -135,6 +251,7 @@ describe('searchKnowledge', () => {
         path: 'docs/secrets-policy.md',
         url: null,
         span: null,
+        context: expect.objectContaining({ matchKind: 'metadata_only', snippetPolicy: 'reference_only' }),
       },
     ]);
   });
@@ -1402,6 +1519,17 @@ describe('searchKnowledge with the materialized search index', () => {
     expect(index.getStatus(PROJECT_ID).unindexedCount).toBe(0);
 
     expect(snapshot()).toEqual(legacy);
+  });
+
+  it('derives identical citation context from the indexed and fallback paths', () => {
+    const contexts = () => QUERIES.flatMap((query) => run(query).flatMap((result) => result.citations.map((citation) => citation.context)));
+    const legacy = contexts();
+    expect(legacy.some((context) => context?.matchKind === 'exact_span')).toBe(true);
+    expect(legacy.every((context) => context?.snippetPolicy === 'reference_only')).toBe(true);
+
+    index.rebuildProject(PROJECT_ID);
+
+    expect(contexts()).toEqual(legacy);
   });
 
   it('serves results from the index rather than re-parsing persisted extraction JSON', () => {

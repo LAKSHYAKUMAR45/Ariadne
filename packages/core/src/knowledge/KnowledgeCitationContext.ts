@@ -197,11 +197,15 @@ function indexedFieldKind(db: Database.Database, projectId: string, spanId: stri
   return row?.field_kind ?? 'section';
 }
 
-/** Derives reference-only context for a citation produced by current search, verifying persisted spans. */
+/**
+ * Derives reference-only context for a citation produced by current search, verifying persisted spans.
+ * Search passes the matched field kind so the result does not depend on whether an index exists.
+ */
 export function deriveCitationContext(
   db: Database.Database,
   projectId: string,
   citation: KnowledgeSearchCitation,
+  fieldKindHint?: KnowledgeCitationFieldKind,
 ): KnowledgeCitationContext {
   const pageBacked = citation.pageId !== null;
   const base: KnowledgeCitationContext = {
@@ -235,7 +239,7 @@ export function deriveCitationContext(
     ...base,
     sourceVersionId: row.source_version_id,
     sourceSpanId: span.id,
-    fieldKind: pageBacked ? 'page_provenance' : indexedFieldKind(db, projectId, span.id),
+    fieldKind: pageBacked ? 'page_provenance' : fieldKindHint ?? indexedFieldKind(db, projectId, span.id),
     matchKind: pageBacked ? 'page_provenance' : 'exact_span',
     startLineWindow: span.startLine ?? null,
     endLineWindow: span.endLine ?? null,
