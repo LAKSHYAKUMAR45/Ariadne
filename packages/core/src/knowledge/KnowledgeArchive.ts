@@ -132,6 +132,8 @@ const TABLES = [
   'knowledge_graph_nodes',
   'knowledge_graph_edges',
   'knowledge_graph_snapshots',
+  'knowledge_graph_reports',
+  'knowledge_graph_ambiguities',
   'knowledge_communities',
   'knowledge_insights',
   'knowledge_jobs',
@@ -408,6 +410,18 @@ const TABLE_SCHEMAS: readonly ArchiveTableSchema[] = [
   {
     name: 'knowledge_graph_snapshots',
     columns: ['id', 'project_id', 'snapshot_number', 'content_hash', 'content_path', 'created_at'],
+    identityColumns: ['id'],
+  },
+  {
+    name: 'knowledge_graph_reports',
+    columns: ['id', 'project_id', 'graph_snapshot_id', 'report_json', 'created_at'],
+    optionalColumns: ['graph_snapshot_id'],
+    identityColumns: ['id'],
+  },
+  {
+    name: 'knowledge_graph_ambiguities',
+    columns: ['id', 'project_id', 'graph_snapshot_id', 'source_version_id', 'source_node_id', 'target_node_id', 'ambiguity_kind', 'severity', 'detail_json', 'created_at'],
+    optionalColumns: ['graph_snapshot_id', 'source_version_id', 'source_node_id', 'target_node_id'],
     identityColumns: ['id'],
   },
   {
@@ -823,6 +837,25 @@ function rowsById(rows: readonly Record<string, unknown>[], table: ArchiveTableN
   return ids;
 }
 
+const MAX_GRAPH_REPORT_JSON_BYTES = 65_536;
+const MAX_GRAPH_AMBIGUITY_JSON_BYTES = 8_192;
+
+function assertBoundedJsonObject(table: ArchiveTableName, rowIndex: number, column: string, value: unknown, maxBytes: number): void {
+  const label = `table ${table} row ${rowIndex + 1} column ${column}`;
+  if (typeof value !== 'string' || Buffer.byteLength(value, 'utf8') > maxBytes) {
+    throw importRejected(`${label} must be a JSON object of at most ${maxBytes} bytes.`);
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    throw importRejected(`${label} must contain valid JSON.`);
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    throw importRejected(`${label} must be a JSON object.`);
+  }
+}
+
 function assertReferenceExists(
   table: ArchiveTableName,
   rowIndex: number,
@@ -1013,6 +1046,19 @@ function assertArchiveRelationships(
   for (const [index, row] of (rowsByTable.get('knowledge_graph_edges') ?? []).entries()) {
     assertReferenceExists('knowledge_graph_edges', index, 'source_node_id', row.source_node_id, 'knowledge_graph_nodes', graphNodeIds);
     assertReferenceExists('knowledge_graph_edges', index, 'target_node_id', row.target_node_id, 'knowledge_graph_nodes', graphNodeIds);
+  }
+  for (const table of ['knowledge_graph_reports', 'knowledge_graph_ambiguities'] as const) {
+    for (const [index, row] of (rowsByTable.get(table) ?? []).entries()) {
+      if (row.graph_snapshot_id !== undefined && row.graph_snapshot_id !== null) {
+        assertReferenceExists(table, index, 'graph_snapshot_id', row.graph_snapshot_id, 'knowledge_graph_snapshots', snapshotIds);
+      }
+    }
+  }
+  for (const [index, row] of (rowsByTable.get('knowledge_graph_reports') ?? []).entries()) {
+    assertBoundedJsonObject('knowledge_graph_reports', index, 'report_json', row.report_json, MAX_GRAPH_REPORT_JSON_BYTES);
+  }
+  for (const [index, row] of (rowsByTable.get('knowledge_graph_ambiguities') ?? []).entries()) {
+    assertBoundedJsonObject('knowledge_graph_ambiguities', index, 'detail_json', row.detail_json, MAX_GRAPH_AMBIGUITY_JSON_BYTES);
   }
   for (const [index, row] of (rowsByTable.get('knowledge_communities') ?? []).entries()) {
     assertReferenceExists('knowledge_communities', index, 'graph_snapshot_id', row.graph_snapshot_id, 'knowledge_graph_snapshots', snapshotIds);

@@ -93,7 +93,7 @@ interface KnowledgeArchiveFeatureDefinition {
 const FEATURES: ReadonlyMap<string, KnowledgeArchiveFeatureDefinition> = new Map([
   ['knowledge-analysis-coverage-v1', { kind: 'required', implemented: true }],
   [KNOWLEDGE_ARCHIVE_FEATURE_CHAT_PAYLOAD_V2, { kind: 'required', implemented: true }],
-  ['knowledge-graph-reports-v1', { kind: 'optional', implemented: false }],
+  ['knowledge-graph-reports-v1', { kind: 'optional', implemented: true }],
   ['knowledge-semantic-summaries-v1', { kind: 'optional', implemented: false }],
 ]);
 
@@ -267,6 +267,11 @@ export function isImplementedRequiredFeature(feature: string): boolean {
   return definition?.kind === 'required' && definition.implemented;
 }
 
+export function isImplementedOptionalFeature(feature: string): boolean {
+  const definition = FEATURES.get(feature);
+  return definition?.kind === 'optional' && definition.implemented;
+}
+
 export function featuresForTables(tables: Iterable<string>): { required: string[]; optional: string[] } {
   const requiredFeatures = new Set<string>();
   const optionalFeatures = new Set<string>();
@@ -426,7 +431,7 @@ export function assessManifestCompatibility(
     }
   }
   for (const feature of block.optionalFeatures) {
-    if (!policy?.acceptedOptionalFeatures?.has(feature)) {
+    if (!isImplementedOptionalFeature(feature) && !policy?.acceptedOptionalFeatures?.has(feature)) {
       warnings.push({ code: 'optional_feature_ignored', message: `Optional archive feature ${feature} is not applied by this reader.` });
     }
   }

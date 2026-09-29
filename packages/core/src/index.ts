@@ -146,6 +146,25 @@ export type {
   KnowledgeAnalysisCoverageSummaryCounts,
   KnowledgeDeferredRelationshipRecord,
 } from './knowledge/KnowledgeAnalysisCoverageStore.js';
+export {
+  KnowledgeGraphReporter,
+  MAX_AMBIGUITY_CANDIDATES,
+  MAX_GRAPH_AMBIGUITIES_PER_REPORT,
+} from './knowledge/KnowledgeGraphReporting.js';
+export {
+  GRAPH_AMBIGUITY_KINDS,
+  GRAPH_AMBIGUITY_SEVERITIES,
+  GRAPH_COMPLETENESS_WARNING_CODES,
+} from './knowledge/KnowledgeGraphReportTypes.js';
+export type {
+  BuildKnowledgeGraphReportInput,
+  GraphCompletenessWarning,
+  KnowledgeGraphAmbiguity,
+  KnowledgeGraphAmbiguityKind,
+  KnowledgeGraphAmbiguitySeverity,
+  KnowledgeGraphCompletenessReport,
+  KnowledgeGraphReportingService,
+} from './knowledge/KnowledgeGraphReportTypes.js';
 export type {
   KnowledgeExtractionRecord,
   KnowledgeExtractionSectionRecord,

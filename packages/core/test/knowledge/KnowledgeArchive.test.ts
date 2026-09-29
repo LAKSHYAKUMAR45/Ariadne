@@ -1247,10 +1247,10 @@ See [[graph|the graph]].
       const { projectId } = seed(db);
       const content = '[{"id":"report_1"}]\n';
       const base = exportV2(db, projectId);
-      const archive = withCompatibility(addArchiveFile(base, 'data/knowledge_graph_reports.json', content), {
+      const archive = withCompatibility(addArchiveFile(base, 'data/knowledge_semantic_summaries.json', content), {
         tableFingerprints: [
           ...compatibilityOf(base).tableFingerprints,
-          { table: 'knowledge_graph_reports', sha256: sha256(content), rowCount: 1 },
+          { table: 'knowledge_semantic_summaries', sha256: sha256(content), rowCount: 1 },
         ],
       });
       const target = database();
@@ -1264,11 +1264,11 @@ See [[graph|the graph]].
       const { projectId } = seed(db);
       const content = '[{"id":"report_1"}]\n';
       const base = exportV2(db, projectId);
-      const withFile = addArchiveFile(base, 'data/knowledge_graph_reports.json', content);
+      const withFile = addArchiveFile(base, 'data/knowledge_semantic_summaries.json', content);
       const tampered = withCompatibility(withFile, {
         tableFingerprints: [
           ...compatibilityOf(base).tableFingerprints,
-          { table: 'knowledge_graph_reports', sha256: sha256('[]\n'), rowCount: 1 },
+          { table: 'knowledge_semantic_summaries', sha256: sha256('[]\n'), rowCount: 1 },
         ],
       });
       expect(() => importKnowledgeProject(database(), tampered, importOptions())).toThrow(/fingerprint mismatch/i);
@@ -1449,10 +1449,149 @@ See [[graph|the graph]].
       });
     });
 
+    describe('graph report tables', () => {
+      const SNAPSHOT_CONTENT = '{"nodes":[],"edges":[]}';
+      const REPORT_TABLES = ['knowledge_graph_reports', 'knowledge_graph_ambiguities'] as const;
+      const REPORT_JSON = JSON.stringify({
+        projectId: 'project_archive',
+        snapshotId: 'graph_snapshot_1',
+        createdAt: '2026-01-01',
+        sources: { activeCount: 1, coveredCount: 1, partialCount: 0, unsupportedCount: 0, legacyUnknownCount: 0 },
+        relationships: { materializedCount: 0, deferredCount: 0, unresolvedCount: 0, downgradedCount: 0, ambiguousCount: 0 },
+        provenance: { edgeWithProvenanceCount: 0, edgeMissingProvenanceCount: 0 },
+        warnings: [],
+      });
+
+      function seedReports(db: ReturnType<typeof openDatabase>, projectId: string, workspaceRoot: string): void {
+        writeWorkspaceFile(workspaceRoot, '.ariadne/knowledge/graph/snapshot-1.json', SNAPSHOT_CONTENT);
+        db.prepare(
+          `INSERT INTO knowledge_graph_snapshots (id, project_id, snapshot_number, content_hash, content_path, created_at)
+           VALUES ('graph_snapshot_1', ?, 1, ?, 'graph/snapshot-1.json', '2026-01-01')`,
+        ).run(projectId, sha256(SNAPSHOT_CONTENT));
+        db.prepare(
+          `INSERT INTO knowledge_graph_reports (id, project_id, graph_snapshot_id, report_json, created_at)
+           VALUES ('report_snapshot', ?, 'graph_snapshot_1', ?, '2026-01-01'), ('report_live', ?, NULL, ?, '2026-01-01')`,
+        ).run(projectId, REPORT_JSON, projectId, REPORT_JSON);
+        db.prepare(
+          `INSERT INTO knowledge_graph_ambiguities
+           (id, project_id, graph_snapshot_id, source_version_id, source_node_id, target_node_id, ambiguity_kind, severity,
+            detail_json, created_at)
+           VALUES ('ambiguity_1', ?, 'graph_snapshot_1', 'source_version_1', NULL, NULL, 'provenance_missing', 'warning',
+                   '{"message":"missing"}', '2026-01-01'),
+                  ('ambiguity_live', ?, NULL, NULL, NULL, NULL, 'multiple_candidate_targets', 'review',
+                   '{"message":"two candidates","candidateNodeIds":["a","b"]}', '2026-01-01')`,
+        ).run(projectId, projectId);
+      }
+
+      it('round-trips reports and ambiguities as optional data and stays version 1 by default', () => {
+        const source = database();
+        const { projectId, workspaceRoot } = seed(source);
+        seedReports(source, projectId, workspaceRoot);
+        const archive = exportKnowledgeProject(source, { projectId, generatedAt: '2026-01-02' });
+        expect(archive.manifest.archiveVersion).toBe(1);
+        const v2 = exportV2(source, projectId);
+        expect(compatibilityOf(v2).optionalFeatures).toEqual(['knowledge-graph-reports-v1']);
+        expect(compatibilityOf(v2).requiredFeatures).not.toContain('knowledge-graph-reports-v1');
+        const names = Object.keys(archive.files);
+        expect(names.indexOf('data/knowledge_graph_reports.json')).toBeGreaterThan(-1);
+
+        for (const candidate of [archive, v2]) {
+          const target = database();
+          const result = importKnowledgeProject(target, candidate, importOptions());
+          expect(result.warnings.map((warning) => warning.code)).not.toContain('optional_feature_ignored');
+          expect(result.warnings.map((warning) => warning.code)).not.toContain('optional_table_unsupported');
+          expect(target.prepare('SELECT id, graph_snapshot_id FROM knowledge_graph_reports ORDER BY id').all()).toEqual([
+            { id: 'report_live', graph_snapshot_id: null },
+            { id: 'report_snapshot', graph_snapshot_id: 'graph_snapshot_1' },
+          ]);
+          expect(target.prepare('SELECT id, severity FROM knowledge_graph_ambiguities ORDER BY id').all()).toEqual([
+            { id: 'ambiguity_1', severity: 'warning' },
+            { id: 'ambiguity_live', severity: 'review' },
+          ]);
+        }
+      });
+
+      it('imports an archive that omits the report tables with a warning and reads reports as not computed', () => {
+        const db = database();
+        const { projectId, workspaceRoot } = seed(db);
+        seedReports(db, projectId, workspaceRoot);
+        let archive = exportV2(db, projectId);
+        for (const table of REPORT_TABLES) {
+          archive = withCompatibility(removeArchiveFile(archive, `data/${table}.json`), {
+            tableFingerprints: compatibilityOf(archive).tableFingerprints.filter((entry) => entry.table !== table),
+          });
+        }
+        const target = database();
+        const result = importKnowledgeProject(target, archive, importOptions());
+        expect(result.warnings).toContainEqual(expect.objectContaining({ code: 'optional_table_absent' }));
+        expect(target.prepare('SELECT COUNT(*) AS count FROM knowledge_graph_reports').get()).toEqual({ count: 0 });
+        expect(target.prepare('SELECT COUNT(*) AS count FROM knowledge_pages').get()).not.toEqual({ count: 0 });
+      });
+
+      it('replaces existing reports on replaceExisting import and leaves no orphans', () => {
+        const source = database();
+        const { projectId, workspaceRoot } = seed(source);
+        seedReports(source, projectId, workspaceRoot);
+        const archive = exportKnowledgeProject(source, { projectId, generatedAt: '2026-01-02' });
+        const target = database();
+        const targetRoot = createWorkspaceRoot('.knowledge-archive-replace-');
+        importKnowledgeProject(target, archive, importOptions({ workspaceRoot: targetRoot }));
+        target.prepare(
+          `INSERT INTO knowledge_graph_reports (id, project_id, graph_snapshot_id, report_json, created_at)
+           VALUES ('stale_live', ?, NULL, '{}', 'now')`,
+        ).run(projectId);
+        importKnowledgeProject(target, archive, importOptions({ workspaceRoot: targetRoot, replaceExisting: true }));
+        expect(target.prepare('SELECT id FROM knowledge_graph_reports ORDER BY id').all()).toEqual([
+          { id: 'report_live' },
+          { id: 'report_snapshot' },
+        ]);
+      });
+
+      it('rejects report rows that reference a snapshot outside the archive', () => {
+        const db = database();
+        const { projectId, workspaceRoot } = seed(db);
+        seedReports(db, projectId, workspaceRoot);
+        const archive = exportKnowledgeProject(db, { projectId, generatedAt: '2026-01-02' });
+        for (const table of REPORT_TABLES) {
+          const tampered = rewriteTableRows(
+            archive,
+            table,
+            tableRows(archive, table).map((row) => (row.graph_snapshot_id ? { ...row, graph_snapshot_id: 'missing_snapshot' } : row)),
+          );
+          expect(() => importKnowledgeProject(database(), tampered, importOptions())).toThrow(/reference/i);
+        }
+      });
+
+      it('rejects rows owned by another project and malformed report payloads', () => {
+        const db = database();
+        const { projectId, workspaceRoot } = seed(db);
+        seedReports(db, projectId, workspaceRoot);
+        const archive = exportKnowledgeProject(db, { projectId, generatedAt: '2026-01-02' });
+        const foreign = rewriteTableRows(
+          archive,
+          'knowledge_graph_reports',
+          tableRows(archive, 'knowledge_graph_reports').map((row) => ({ ...row, project_id: 'other_project' })),
+        );
+        expect(() => importKnowledgeProject(database(), foreign, importOptions())).toThrow(/project/i);
+        const malformed = rewriteTableRows(
+          archive,
+          'knowledge_graph_reports',
+          tableRows(archive, 'knowledge_graph_reports').map((row) => ({ ...row, report_json: '[1,2,3]' })),
+        );
+        expect(() => importKnowledgeProject(database(), malformed, importOptions())).toThrow(/report_json/i);
+        const badKind = rewriteTableRows(
+          archive,
+          'knowledge_graph_ambiguities',
+          tableRows(archive, 'knowledge_graph_ambiguities').map((row) => ({ ...row, ambiguity_kind: 'made_up' })),
+        );
+        expect(() => importKnowledgeProject(database(), badKind, importOptions())).toThrow();
+      });
+    });
+
     it('warns about unknown optional features unless the caller accepts them', () => {
       const db = database();
       const { projectId } = seed(db);
-      const archive = withCompatibility(exportV2(db, projectId), { optionalFeatures: ['knowledge-graph-reports-v1'] });
+      const archive = withCompatibility(exportV2(db, projectId), { optionalFeatures: ['knowledge-semantic-summaries-v1'] });
 
       const warned = importKnowledgeProject(database(), archive, importOptions());
       expect(warned.warnings).toContainEqual(expect.objectContaining({ code: 'optional_feature_ignored' }));
@@ -1462,7 +1601,7 @@ See [[graph|the graph]].
         importOptions({
           compatibilityPolicy: {
             maxSupportedArchiveVersion: 2,
-            acceptedOptionalFeatures: new Set(['knowledge-graph-reports-v1']),
+            acceptedOptionalFeatures: new Set(['knowledge-semantic-summaries-v1']),
           },
         }),
       );

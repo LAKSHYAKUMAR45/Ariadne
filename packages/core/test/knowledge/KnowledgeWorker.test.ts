@@ -17,6 +17,7 @@ import { KnowledgeSearchIndex } from '../../src/knowledge/KnowledgeSearchIndex.j
 import { KnowledgeSourceStore } from '../../src/knowledge/KnowledgeSourceStore.js';
 import { KnowledgeWorker, type KnowledgeEnrichmentService } from '../../src/knowledge/KnowledgeWorker.js';
 import { KnowledgeGraph } from '../../src/knowledge/graph/KnowledgeGraph.js';
+import { KnowledgeGraphReporter } from '../../src/knowledge/KnowledgeGraphReporting.js';
 import { createDefaultAnalyzerRegistry, type AnalyzerInput, type AnalyzerSelectionInput, type DeterministicAnalyzer } from '../../src/knowledge/analyzers/index.js';
 
 const PROJECT_A = 'project_a';
@@ -1292,6 +1293,103 @@ describe('KnowledgeWorker', () => {
       };
       await new KnowledgeWorker(db, { workerId: 'worker-resolve', now: () => CREATED_AT }, { analyzers: registry }).runOnce(PROJECT_A);
       expect(queue.get(job.id)?.result).toMatchObject({ resultKind: 'coverage_only', unsupportedReason: 'policy_rejected' });
+    });
+  });
+
+  describe('graph completeness reports', () => {
+    function enqueueAnalyze(sourceVersionId: string) {
+      return queue.enqueue({
+        projectId: PROJECT_A,
+        jobKind: 'analyze',
+        sourceVersionId,
+        payload: { sourceVersionId },
+      });
+    }
+
+    it('recomputes the project graph report after a run completes jobs, without touching other projects', async () => {
+      const python = registerSource(PROJECT_A, 'src/report.py', 'class Reported:\n    def go(self):\n        return 1\n');
+      const ruby = registerSource(PROJECT_A, 'scripts/report.rb', 'puts "x"\n', 'application/x-ruby');
+      enqueueAnalyze(python.sourceVersionId);
+      enqueueAnalyze(ruby.sourceVersionId);
+      registerSource(PROJECT_B, 'src/other.py', 'x = 1\n');
+
+      const result = await new KnowledgeWorker(db, { workerId: 'worker-report', now: () => CREATED_AT }).runOnce(PROJECT_A);
+
+      expect(result).toMatchObject({ completed: 2, failed: 0 });
+      expect(result.warnings.map((warning) => warning.code)).toEqual(['coverage_no_analyzer']);
+      const report = new KnowledgeGraphReporter(db).getCompletenessReport(PROJECT_A);
+      expect(report).toMatchObject({
+        sources: { activeCount: 2, coveredCount: 1, unsupportedCount: 1, legacyUnknownCount: 0 },
+        relationships: { materializedCount: 2 },
+      });
+      expect(report?.warnings.map((warning) => warning.code)).toEqual(['partial_source_coverage']);
+      expect(new KnowledgeGraphReporter(db).getCompletenessReport(PROJECT_B)).toBeNull();
+    });
+
+    it('preserves alias-ambiguous relationships as deferred evidence and reports them for review', async () => {
+      const source = registerSource(PROJECT_A, 'src/alias.txt', 'alias text');
+      const span = { startOffset: 0, endOffset: 4, startLine: 1, startColumn: 1, endLine: 1, endColumn: 5 };
+      const analyzer = new StubAnalyzer('alias-analyzer', '1.0.0', true, async (input) => ({
+        ...createExtraction(input),
+        symbols: [
+          { id: 'module_1', kind: 'module', name: 'alias', qualifiedName: 'alias', confidence: 1, span },
+          { id: 'fn_a', kind: 'function', name: 'dup', qualifiedName: 'alias.a.dup', confidence: 1, span: { ...span, startOffset: 5, endOffset: 9 } },
+          { id: 'fn_b', kind: 'function', name: 'dup', qualifiedName: 'alias.b.dup', confidence: 1, span: { ...span, startOffset: 10, endOffset: 14 } },
+        ],
+        relationships: [
+          { id: 'rel_1', type: 'calls', sourceSymbolId: 'module_1', targetReference: 'dup', confidence: 0.7, span },
+        ],
+      }));
+      enqueueAnalyze(source.sourceVersionId);
+      const worker = new KnowledgeWorker(db, { workerId: 'worker-alias', now: () => CREATED_AT }, { analyzers: { require: () => analyzer } });
+
+      await worker.runOnce(PROJECT_A);
+
+      expect(db.prepare('SELECT COUNT(*) AS count FROM knowledge_graph_edges WHERE project_id = ?').get(PROJECT_A)).toEqual({ count: 0 });
+      expect(
+        db
+          .prepare('SELECT relationship_type, resolution_kind, evidence_kind FROM knowledge_deferred_relationships WHERE project_id = ?')
+          .all(PROJECT_A),
+      ).toEqual([{ relationship_type: 'calls', resolution_kind: 'ambiguous_alias', evidence_kind: 'naming' }]);
+      const reporter = new KnowledgeGraphReporter(db);
+      expect(reporter.getCompletenessReport(PROJECT_A)?.relationships).toMatchObject({ deferredCount: 1, ambiguousCount: 1 });
+      expect(reporter.listAmbiguities(PROJECT_A)).toEqual([
+        expect.objectContaining({ ambiguityKind: 'multiple_candidate_targets', severity: 'review', candidateNodeIds: expect.any(Array) }),
+      ]);
+      expect(reporter.listAmbiguities(PROJECT_A)[0]?.candidateNodeIds).toHaveLength(2);
+
+      await worker.runOnce(PROJECT_A);
+      enqueueAnalyze(source.sourceVersionId);
+      await worker.runOnce(PROJECT_A);
+      expect(db.prepare('SELECT COUNT(*) AS count FROM knowledge_deferred_relationships WHERE project_id = ?').get(PROJECT_A)).toEqual({ count: 1 });
+    });
+
+    it('does not compute a report when no job completed', async () => {
+      registerSource(PROJECT_A, 'src/idle.py', 'x = 1\n');
+      await new KnowledgeWorker(db, { workerId: 'worker-idle', now: () => CREATED_AT }).runOnce(PROJECT_A);
+      expect(db.prepare('SELECT COUNT(*) AS count FROM knowledge_graph_reports').get()).toEqual({ count: 0 });
+    });
+
+    it('keeps the job completed and surfaces a warning when report generation fails', async () => {
+      const python = registerSource(PROJECT_A, 'src/failing-report.py', 'x = 1\n');
+      const job = enqueueAnalyze(python.sourceVersionId);
+      const graphReporter = {
+        buildCompletenessReport: () => {
+          throw new Error('report store unavailable');
+        },
+      };
+
+      const result = await new KnowledgeWorker(
+        db,
+        { workerId: 'worker-report-failure', now: () => CREATED_AT },
+        { graphReporter },
+      ).runOnce(PROJECT_A);
+
+      expect(result).toMatchObject({ completed: 1, failed: 0 });
+      expect(queue.get(job.id)?.status).toBe('completed');
+      expect(result.warnings).toContainEqual(
+        expect.objectContaining({ jobId: job.id, code: 'graph_report_failed', message: expect.stringContaining('report store unavailable') }),
+      );
     });
   });
 

@@ -597,6 +597,51 @@ export function applyKnowledgeAnalysisCoverageMigration(db: Database.Database): 
 }
 
 /**
+ * Creates the optional graph completeness report and ambiguity tables (global migration 14, knowledge revision 10).
+ * Both are recomputable from persisted graph and coverage state. The direct project reference keeps rows that have no
+ * snapshot (on-demand reports) from being orphaned when a project is deleted or replaced.
+ */
+export function applyKnowledgeGraphReportMigration(db: Database.Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS knowledge_graph_reports (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL REFERENCES knowledge_projects(id) ON DELETE CASCADE,
+      graph_snapshot_id TEXT,
+      report_json TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      CHECK (json_valid(report_json)),
+      FOREIGN KEY (project_id, graph_snapshot_id)
+        REFERENCES knowledge_graph_snapshots(project_id, id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_knowledge_graph_reports_project_snapshot
+      ON knowledge_graph_reports(project_id, graph_snapshot_id);
+    CREATE TABLE IF NOT EXISTS knowledge_graph_ambiguities (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL REFERENCES knowledge_projects(id) ON DELETE CASCADE,
+      graph_snapshot_id TEXT,
+      source_version_id TEXT,
+      source_node_id TEXT,
+      target_node_id TEXT,
+      ambiguity_kind TEXT NOT NULL,
+      severity TEXT NOT NULL,
+      detail_json TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      CHECK (ambiguity_kind IN (
+        'multiple_candidate_targets', 'downgraded_relation_type', 'external_reference_unresolved',
+        'generated_relationship_deferred', 'legacy_metadata_omitted', 'provenance_missing'
+      )),
+      CHECK (severity IN ('info', 'warning', 'review')),
+      CHECK (json_valid(detail_json)),
+      UNIQUE (project_id, graph_snapshot_id, id),
+      FOREIGN KEY (project_id, graph_snapshot_id)
+        REFERENCES knowledge_graph_snapshots(project_id, id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_knowledge_graph_ambiguities_project_snapshot
+      ON knowledge_graph_ambiguities(project_id, graph_snapshot_id);
+  `);
+}
+
+/**
  * Creates the additive knowledge schema atomically. It is idempotent so it
  * can be called safely by the shared migration runner on every database open.
  */
@@ -610,5 +655,6 @@ export function applyKnowledgeMigrations(db: Database.Database): void {
     applyKnowledgeSearchIndexMigration(db);
     applyKnowledgeJobResultSchemaMigration(db);
     applyKnowledgeAnalysisCoverageMigration(db);
+    applyKnowledgeGraphReportMigration(db);
   })();
 }

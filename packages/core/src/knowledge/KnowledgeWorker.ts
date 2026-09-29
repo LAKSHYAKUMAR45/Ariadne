@@ -27,6 +27,7 @@ import {
   type DeterministicExtraction,
 } from './KnowledgeExtractionStore.js';
 import { KnowledgeGraphMaterializer } from './KnowledgeGraphMaterializer.js';
+import { KnowledgeGraphReporter, type KnowledgeGraphReportingService } from './KnowledgeGraphReporting.js';
 import { KnowledgeSearchIndex } from './KnowledgeSearchIndex.js';
 import { buildDeterministicPagePayload, type DeterministicPageBuildInput } from './DeterministicPageBuilder.js';
 import { KnowledgeGraph } from './graph/KnowledgeGraph.js';
@@ -46,7 +47,7 @@ import {
   type AnalyzerCoverageSummary,
 } from './analyzers/AnalyzerCoverage.js';
 import { KnowledgeAnalysisCoverageStore } from './KnowledgeAnalysisCoverageStore.js';
-import type { ExtractionDiagnostic } from './KnowledgeExtraction.js';
+import type { DeferredRelationshipCandidate, ExtractionDiagnostic } from './KnowledgeExtraction.js';
 
 const DEFAULT_MAX_SOURCE_BYTES = 2 * 1024 * 1024;
 const DEFAULT_WATCH_POLL_MS = 1_000;
@@ -156,10 +157,13 @@ export interface KnowledgeWorkerDependencies {
     load(input: { projectId: string; sourceVersionId: string; maxBytes?: number }): LoadedKnowledgeSourceVersion;
   };
   analyzers?: Pick<AnalyzerRegistry, 'require'> & Partial<Pick<AnalyzerRegistry, 'resolve'>>;
-  coverageStore?: Pick<KnowledgeAnalysisCoverageStore, 'upsert' | 'replaceDeferredRelationships'>;
+  coverageStore?: Pick<KnowledgeAnalysisCoverageStore, 'upsert' | 'replaceDeferredRelationships'> &
+    Partial<Pick<KnowledgeAnalysisCoverageStore, 'appendDeferredRelationships'>>;
   extractionStore?: Pick<KnowledgeExtractionStore, 'save'>;
   searchIndex?: Pick<KnowledgeSearchIndex, 'replaceForSourceVersion'>;
   graphMaterializer?: Pick<KnowledgeGraphMaterializer, 'materialize'>;
+  /** Optional derived report; a failure here is reported as a run warning and never fails a job. */
+  graphReporter?: Pick<KnowledgeGraphReportingService, 'buildCompletenessReport'>;
   generator?: Pick<KnowledgeGeneratorService, 'runKnowledgeGeneration'>;
   pageBuilder?: (input: DeterministicPageBuildInput) => KnowledgeGenerationPayload;
 }
@@ -419,6 +423,7 @@ export class KnowledgeWorker {
   private readonly extractionStore: Pick<KnowledgeExtractionStore, 'save'>;
   private readonly searchIndex: Pick<KnowledgeSearchIndex, 'replaceForSourceVersion'>;
   private readonly graphMaterializer: Pick<KnowledgeGraphMaterializer, 'materialize'>;
+  private readonly graphReporter: Pick<KnowledgeGraphReportingService, 'buildCompletenessReport'>;
   private readonly generator: Pick<KnowledgeGeneratorService, 'runKnowledgeGeneration'>;
   private readonly pageBuilder: (input: DeterministicPageBuildInput) => KnowledgeGenerationPayload;
   private readonly maxSourceBytes: number;
@@ -450,6 +455,7 @@ export class KnowledgeWorker {
     this.searchIndex = dependencies.searchIndex ?? new KnowledgeSearchIndex(db, { now: this.now });
     this.graphMaterializer =
       dependencies.graphMaterializer ?? new KnowledgeGraphMaterializer(new KnowledgeGraph(db));
+    this.graphReporter = dependencies.graphReporter ?? new KnowledgeGraphReporter(db, { now: this.now });
     this.generator =
       dependencies.generator ??
       new KnowledgeGeneratorService(db, {
@@ -468,6 +474,7 @@ export class KnowledgeWorker {
     let failed = 0;
     let cancelled = 0;
     let unsupportedCoverageCount = 0;
+    let lastCompletedJobId: string | null = null;
 
     while (!this.signal?.aborted) {
       const recovered = this.queue.recoverExpiredKnowledgeJobsSummary(scopedProjectId);
@@ -482,6 +489,7 @@ export class KnowledgeWorker {
         warnings.push(...this.runWarnings(result));
         if (result.status === 'completed') {
           completed += 1;
+          lastCompletedJobId = result.id;
           if (result.result?.resultKind === 'coverage_only') {
             unsupportedCoverageCount += 1;
           }
@@ -504,6 +512,10 @@ export class KnowledgeWorker {
       }
     }
 
+    if (lastCompletedJobId !== null) {
+      this.refreshGraphReport(scopedProjectId, lastCompletedJobId, warnings);
+    }
+
     return {
       projectId: scopedProjectId,
       claimed,
@@ -513,6 +525,19 @@ export class KnowledgeWorker {
       unsupportedCoverageCount,
       warnings,
     };
+  }
+
+  /** The report is derived and recomputable, so a failure is surfaced as a warning instead of failing completed work. */
+  private refreshGraphReport(projectId: string, jobId: string, warnings: KnowledgeWorkerWarning[]): void {
+    try {
+      this.graphReporter.buildCompletenessReport({ projectId });
+    } catch (error) {
+      warnings.push({
+        jobId,
+        code: 'graph_report_failed',
+        message: `Graph completeness report was not updated: ${asErrorMessage(error)}`,
+      });
+    }
   }
 
   public async runWatch(projectId: string, options: { pollMs?: number } = {}): Promise<void> {
@@ -639,6 +664,7 @@ export class KnowledgeWorker {
     this.guardDurableStage(job.id, projectId, leaseMonitor);
 
     const graphResult = this.materializeGraph(loaded, extraction);
+    this.recordAmbiguousRelationships(projectId, loaded, graphResult.ambiguousRelationships);
     this.guardDurableStage(job.id, projectId, leaseMonitor);
     this.queue.recordProgress(job.id, 'graph', 4, 6, {
       nodeCount: graphResult.nodeIds.length,
@@ -917,6 +943,20 @@ export class KnowledgeWorker {
           analyzerVersion: analyzer.version,
         }),
       });
+    } catch {
+      // intentionally ignored; see method comment
+    }
+  }
+
+  /** Alias ambiguity is evidence for the graph report; losing it must not fail an otherwise complete analysis. */
+  private recordAmbiguousRelationships(
+    projectId: string,
+    loaded: LoadedKnowledgeSourceVersion,
+    candidates: readonly DeferredRelationshipCandidate[],
+  ): void {
+    if (candidates.length === 0 || this.coverageStore.appendDeferredRelationships === undefined) return;
+    try {
+      this.coverageStore.appendDeferredRelationships({ projectId, sourceVersionId: loaded.sourceVersionId, candidates });
     } catch {
       // intentionally ignored; see method comment
     }

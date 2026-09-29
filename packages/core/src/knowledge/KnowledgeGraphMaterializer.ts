@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { createKnowledgeId } from './KnowledgeIds.js';
 import type {
+  DeferredRelationshipCandidate,
   DeterministicExtraction,
   ExtractedMetadata,
   ExtractedRelationship,
@@ -18,6 +19,8 @@ export interface KnowledgeGraphMaterializationResult {
   nodeIds: string[];
   edgeIds: string[];
   unresolvedRelationships: number;
+  /** Relationships whose target alias matched several local symbols; deferred evidence, never graph edges. */
+  ambiguousRelationships: DeferredRelationshipCandidate[];
 }
 
 interface MaterializedSymbol {
@@ -170,6 +173,20 @@ function registerAlias(index: Map<string, KnowledgeGraphNodeId | null>, alias: s
   if (existing !== nodeId) index.set(trimmed, null);
 }
 
+function ambiguousCandidate(relationship: ExtractedRelationship): DeferredRelationshipCandidate {
+  return {
+    id: relationship.id,
+    type: relationship.type,
+    sourceSymbolId: relationship.sourceSymbolId ?? relationship.fromId ?? null,
+    targetReference: relationship.targetReference?.trim() ?? null,
+    resolutionKind: 'ambiguous_alias',
+    evidenceKind: 'naming',
+    confidence: relationship.confidence,
+    span: relationship.span ?? null,
+    metadata: { origin: 'graph_materialization' },
+  };
+}
+
 export class KnowledgeGraphMaterializer {
   constructor(private readonly graph: KnowledgeGraph) {}
 
@@ -232,14 +249,17 @@ export class KnowledgeGraphMaterializer {
         .sort((left, right) => left.localeCompare(right));
       const aggregatedEdges = new Map<string, AggregatedEdge>();
       let unresolvedRelationships = 0;
+      const ambiguousRelationships: DeferredRelationshipCandidate[] = [];
 
       const relationships = [...input.extraction.relationships].sort(relationshipOrder);
       const moduleNodeId = this.uniqueModuleNodeId(materializedSymbols);
       for (const relationship of relationships) {
         const sourceNodeId = this.resolveSourceNodeId(relationship, materializedSymbols, moduleNodeId);
-        const targetNodeId = this.resolveTargetNodeId(projectId, relationship, materializedSymbols, aliases);
+        const target = this.resolveTargetNodeId(projectId, relationship, materializedSymbols, aliases);
+        const targetNodeId = target.nodeId;
         if (!sourceNodeId || !targetNodeId) {
           unresolvedRelationships += 1;
+          if (sourceNodeId && target.ambiguous) ambiguousRelationships.push(ambiguousCandidate(relationship));
           continue;
         }
         const key = `${sourceNodeId}::${targetNodeId}::${relationship.type}`;
@@ -299,6 +319,7 @@ export class KnowledgeGraphMaterializer {
         nodeIds,
         edgeIds,
         unresolvedRelationships,
+        ambiguousRelationships,
       };
     });
   }
@@ -328,19 +349,19 @@ export class KnowledgeGraphMaterializer {
     relationship: ExtractedRelationship,
     materializedSymbols: ReadonlyMap<string, MaterializedSymbol>,
     aliases: ReadonlyMap<string, KnowledgeGraphNodeId | null>,
-  ): KnowledgeGraphNodeId | null {
+  ): { nodeId: KnowledgeGraphNodeId | null; ambiguous: boolean } {
     const explicitTargetId = relationship.targetSymbolId ?? relationship.toId ?? null;
-    if (explicitTargetId) return materializedSymbols.get(explicitTargetId)?.nodeId ?? null;
+    if (explicitTargetId) return { nodeId: materializedSymbols.get(explicitTargetId)?.nodeId ?? null, ambiguous: false };
     const reference = relationship.targetReference?.trim();
-    if (!reference) return null;
+    if (!reference) return { nodeId: null, ambiguous: false };
     for (const candidate of [reference, unqualifiedImportReference(reference)]) {
       if (!candidate) continue;
       const local = aliases.get(candidate);
-      if (local !== undefined) return local;
+      if (local !== undefined) return { nodeId: local, ambiguous: local === null };
       if (!isProjectResolvableReference(candidate)) continue;
       const existing = this.graph.findUniqueGraphNodeId(projectId, candidate, { sourceKind: 'deterministic_symbol' });
-      if (existing) return existing;
+      if (existing) return { nodeId: existing, ambiguous: false };
     }
-    return null;
+    return { nodeId: null, ambiguous: false };
   }
 }

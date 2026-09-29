@@ -292,24 +292,58 @@ export class KnowledgeAnalysisCoverageStore {
     sourceVersionId: string;
     candidates: readonly DeferredRelationshipCandidate[];
   }): { stored: number; dropped: number } {
+    return this.writeDeferredRelationships(input, 'replace');
+  }
+
+  /**
+   * Adds candidates next to the ones already stored for a source version, for example alias ambiguity found while
+   * materializing the graph. Candidates that are already stored are left untouched; the per-source limit still applies.
+   */
+  public appendDeferredRelationships(input: {
+    projectId: string;
+    sourceVersionId: string;
+    candidates: readonly DeferredRelationshipCandidate[];
+  }): { stored: number; dropped: number } {
+    return this.writeDeferredRelationships(input, 'append');
+  }
+
+  private writeDeferredRelationships(
+    input: { projectId: string; sourceVersionId: string; candidates: readonly DeferredRelationshipCandidate[] },
+    mode: 'replace' | 'append',
+  ): { stored: number; dropped: number } {
     const { projectId, sourceVersionId } = input;
     return this.db.transaction(() => {
       this.requireSourceVersion(projectId, sourceVersionId);
+      const existingIds = new Set<string>();
+      if (mode === 'append') {
+        const rows = this.db
+          .prepare('SELECT id FROM knowledge_deferred_relationships WHERE project_id = ? AND source_version_id = ?')
+          .all(projectId, sourceVersionId) as Array<{ id: string }>;
+        for (const row of rows) existingIds.add(row.id);
+      }
       const seen = new Set<string>();
       const accepted: NormalizedCandidate[] = [];
       let dropped = 0;
       for (const raw of input.candidates) {
         const candidate = normalizeCandidate(raw);
-        if (candidate === null || seen.has(candidate.id) || accepted.length >= MAX_DEFERRED_RELATIONSHIPS_PER_SOURCE) {
+        const storedId = candidate === null ? null : createKnowledgeId('deferred', `${projectId}:${sourceVersionId}:${candidate.id}`);
+        if (candidate === null || seen.has(candidate.id)) {
           dropped += 1;
           continue;
         }
         seen.add(candidate.id);
+        if (storedId !== null && existingIds.has(storedId)) continue;
+        if (existingIds.size + accepted.length >= MAX_DEFERRED_RELATIONSHIPS_PER_SOURCE) {
+          dropped += 1;
+          continue;
+        }
         accepted.push(candidate);
       }
-      this.db
-        .prepare('DELETE FROM knowledge_deferred_relationships WHERE project_id = ? AND source_version_id = ?')
-        .run(projectId, sourceVersionId);
+      if (mode === 'replace') {
+        this.db
+          .prepare('DELETE FROM knowledge_deferred_relationships WHERE project_id = ? AND source_version_id = ?')
+          .run(projectId, sourceVersionId);
+      }
       const insertSpan = this.db.prepare(
         `INSERT OR IGNORE INTO knowledge_source_spans
          (id, project_id, source_version_id, start_offset, end_offset, start_line, start_column, end_line, end_column, label, created_at)

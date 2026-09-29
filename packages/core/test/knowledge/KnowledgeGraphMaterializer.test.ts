@@ -305,6 +305,7 @@ describe('KnowledgeGraphMaterializer', () => {
       nodeIds: expectedNodeIds,
       edgeIds: expectedEdgeIds,
       unresolvedRelationships: 1,
+      ambiguousRelationships: [],
     });
     expect(second).toEqual(first);
 
@@ -651,5 +652,54 @@ describe('KnowledgeGraphMaterializer', () => {
     expect(result.unresolvedRelationships).toBe(1);
     expect(graph.listGraphEdges('project-1')).toEqual([]);
     expect(graph.listGraphNodes('project-2')).toHaveLength(1);
+  });
+  it('reports alias-ambiguous relationships as deferred candidates without creating edges or nodes', () => {
+    const { db, graph } = createGraph();
+    databases.push(db);
+    const materializer = new KnowledgeGraphMaterializer(graph);
+    const base = extraction();
+    const span = (start: number) => ({ startOffset: start, endOffset: start + 5, startLine: 30, startColumn: 1, endLine: 30, endColumn: 6 });
+
+    const result = materializer.materialize({
+      projectId: 'project-1',
+      sourceId: 'source-1',
+      sourceVersionId: 'source-version-1',
+      extraction: {
+        ...base,
+        symbols: [
+          ...base.symbols,
+          { id: 'symbol:function:dup-a', kind: 'function', name: 'dup', qualifiedName: 'src/a.dup', span: span(300), confidence: 1 },
+          { id: 'symbol:function:dup-b', kind: 'function', name: 'dup', qualifiedName: 'src/b.dup', span: span(400), confidence: 1 },
+        ],
+        relationships: [
+          {
+            id: 'relationship:ambiguous',
+            type: 'calls',
+            sourceSymbolId: 'symbol:method:run',
+            targetReference: 'dup',
+            span: span(310),
+            confidence: 0.6,
+          },
+          { id: 'relationship:missing', type: 'calls', sourceSymbolId: 'symbol:method:run', targetReference: 'nowhere.at.all', confidence: 0.6 },
+        ],
+      },
+    });
+
+    expect(result.unresolvedRelationships).toBe(2);
+    expect(result.edgeIds).toEqual([]);
+    expect(result.ambiguousRelationships).toEqual([
+      {
+        id: 'relationship:ambiguous',
+        type: 'calls',
+        sourceSymbolId: 'symbol:method:run',
+        targetReference: 'dup',
+        resolutionKind: 'ambiguous_alias',
+        evidenceKind: 'naming',
+        confidence: 0.6,
+        span: span(310),
+        metadata: { origin: 'graph_materialization' },
+      },
+    ]);
+    expect(graph.listGraphNodes('project-1').map((node) => node.label)).not.toContain('nowhere.at.all');
   });
 });

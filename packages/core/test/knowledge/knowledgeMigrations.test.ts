@@ -7,6 +7,7 @@ import {
   applyKnowledgeMigrations,
   applyKnowledgeJobResultSchemaMigration,
   applyKnowledgeAnalysisCoverageMigration,
+  applyKnowledgeGraphReportMigration,
   applyKnowledgeSearchIndexMigration,
   applyKnowledgeReviewDeduplicationMigration,
   KNOWLEDGE_SCHEMA_VERSION,
@@ -97,7 +98,7 @@ describe('knowledge schema migrations', () => {
 
     expect(tableNames(db)).toEqual(expect.arrayContaining(KNOWLEDGE_TABLES));
     expect(indexNames(db)).toEqual(expect.arrayContaining(REQUIRED_INDEXES));
-    expect(KNOWLEDGE_SCHEMA_VERSION).toBe(9);
+    expect(KNOWLEDGE_SCHEMA_VERSION).toBe(10);
     expect(columns(db, 'knowledge_jobs')).toContain('result_schema_version');
     expect(columns(db, 'knowledge_extractions')).toEqual(
       expect.arrayContaining([
@@ -741,7 +742,7 @@ describe('knowledge job result schema migration (global version 12, knowledge re
   it('registers version 12 after the search index migration', () => {
     const migration = MIGRATIONS.find((entry) => entry.version === 12);
     expect(migration?.description).toMatch(/result schema version/i);
-    expect(MIGRATIONS.map((entry) => entry.version).filter((version) => version >= 11)).toEqual([11, 12, 13]);
+    expect(MIGRATIONS.map((entry) => entry.version).filter((version) => version >= 11)).toEqual([11, 12, 13, 14]);
   });
 
   it('adds a nullable integer column on a fresh database without touching other jobs columns', () => {
@@ -787,7 +788,7 @@ describe('knowledge job result schema migration (global version 12, knowledge re
       result_schema_version: null,
     });
     expect(upgraded.prepare(`SELECT sql FROM sqlite_master WHERE name = 'idx_knowledge_jobs_project_completed_mode'`).get()).toEqual(before);
-    expect(Number((upgraded.prepare(`SELECT value FROM schema_meta WHERE key = 'schema_version'`).get() as { value: string }).value)).toBe(13);
+    expect(Number((upgraded.prepare(`SELECT value FROM schema_meta WHERE key = 'schema_version'`).get() as { value: string }).value)).toBe(14);
     upgraded.close();
 
     const reopened = openDatabase(databasePath);
@@ -828,7 +829,7 @@ describe('knowledge analysis coverage migration (global version 13, knowledge re
   it('registers version 13 after the job result migration', () => {
     const migration = MIGRATIONS.find((entry) => entry.version === 13);
     expect(migration?.description).toMatch(/analysis coverage/i);
-    expect(MIGRATIONS.map((entry) => entry.version).filter((version) => version >= 11)).toEqual([11, 12, 13]);
+    expect(MIGRATIONS.map((entry) => entry.version).filter((version) => version >= 11)).toEqual([11, 12, 13, 14]);
   });
 
   it('creates both tables with the specified columns and constraints on a fresh database', () => {
@@ -900,13 +901,98 @@ describe('knowledge analysis coverage migration (global version 13, knowledge re
     );
     expect(upgraded.prepare('SELECT COUNT(*) AS count FROM knowledge_analysis_coverage').get()).toEqual({ count: 0 });
     expect(upgraded.prepare(`SELECT COUNT(*) AS count FROM knowledge_source_versions`).get()).toEqual({ count: 1 });
-    expect(Number((upgraded.prepare(`SELECT value FROM schema_meta WHERE key = 'schema_version'`).get() as { value: string }).value)).toBe(13);
+    expect(Number((upgraded.prepare(`SELECT value FROM schema_meta WHERE key = 'schema_version'`).get() as { value: string }).value)).toBe(14);
     upgraded.close();
 
     const reopened = openDatabase(databasePath);
     applyKnowledgeAnalysisCoverageMigration(reopened);
     applyKnowledgeMigrations(reopened);
     expect(tableNames(reopened).filter((name) => name === 'knowledge_analysis_coverage')).toHaveLength(1);
+    reopened.close();
+  });
+});
+
+describe('knowledge graph report migration (global version 14, knowledge revision 10)', () => {
+  function seedProject(db: Database.Database): void {
+    db.prepare(
+      `INSERT INTO knowledge_projects (id, workspace_root, name, status, created_at, updated_at)
+       VALUES ('project_1', 'workspace', 'Wiki', 'active', 'now', 'now')`,
+    ).run();
+    db.prepare(
+      `INSERT INTO knowledge_graph_snapshots (id, project_id, snapshot_number, content_hash, content_path, created_at)
+       VALUES ('snapshot_1', 'project_1', 1, 'hash', 'graph/1.json', 'now')`,
+    ).run();
+  }
+
+  it('registers version 14 after the analysis coverage migration', () => {
+    const migration = MIGRATIONS.find((entry) => entry.version === 14);
+    expect(migration?.description).toMatch(/graph (completeness|report)/i);
+    expect(MIGRATIONS.map((entry) => entry.version).filter((version) => version >= 13)).toEqual([13, 14]);
+  });
+
+  it('creates both tables with the specified columns and constraints on a fresh database', () => {
+    const db = openDatabase(':memory:');
+    expect(columns(db, 'knowledge_graph_reports')).toEqual([
+      'id', 'project_id', 'graph_snapshot_id', 'report_json', 'created_at',
+    ]);
+    expect(columns(db, 'knowledge_graph_ambiguities')).toEqual([
+      'id', 'project_id', 'graph_snapshot_id', 'source_version_id', 'source_node_id', 'target_node_id',
+      'ambiguity_kind', 'severity', 'detail_json', 'created_at',
+    ]);
+    seedProject(db);
+    const insertAmbiguity = (id: string, kind: string, severity: string, snapshot: string | null) =>
+      db.prepare(
+        `INSERT INTO knowledge_graph_ambiguities
+         (id, project_id, graph_snapshot_id, ambiguity_kind, severity, detail_json, created_at)
+         VALUES (?, 'project_1', ?, ?, ?, '{}', 'now')`,
+      ).run(id, snapshot, kind, severity);
+    expect(() => insertAmbiguity('a_bad_kind', 'made_up', 'info', 'snapshot_1')).toThrow(/CHECK/);
+    expect(() => insertAmbiguity('a_bad_severity', 'provenance_missing', 'loud', 'snapshot_1')).toThrow(/CHECK/);
+    expect(() => insertAmbiguity('a_orphan', 'provenance_missing', 'info', 'snapshot_missing')).toThrow(/FOREIGN KEY/);
+    insertAmbiguity('a1', 'provenance_missing', 'info', 'snapshot_1');
+    insertAmbiguity('a_live', 'multiple_candidate_targets', 'review', null);
+    expect(() =>
+      db.prepare(
+        `INSERT INTO knowledge_graph_reports (id, project_id, graph_snapshot_id, report_json, created_at)
+         VALUES ('r_bad', 'project_1', NULL, 'not json', 'now')`,
+      ).run(),
+    ).toThrow(/CHECK/);
+    db.prepare(
+      `INSERT INTO knowledge_graph_reports (id, project_id, graph_snapshot_id, report_json, created_at)
+       VALUES ('r_live', 'project_1', NULL, '{}', 'now'), ('r_snap', 'project_1', 'snapshot_1', '{}', 'now')`,
+    ).run();
+    db.prepare(`DELETE FROM knowledge_graph_snapshots WHERE id = 'snapshot_1'`).run();
+    expect(db.prepare('SELECT COUNT(*) AS count FROM knowledge_graph_ambiguities').get()).toEqual({ count: 1 });
+    expect(db.prepare('SELECT COUNT(*) AS count FROM knowledge_graph_reports').get()).toEqual({ count: 1 });
+    db.prepare(`DELETE FROM knowledge_projects WHERE id = 'project_1'`).run();
+    expect(db.prepare('SELECT COUNT(*) AS count FROM knowledge_graph_ambiguities').get()).toEqual({ count: 0 });
+    expect(db.prepare('SELECT COUNT(*) AS count FROM knowledge_graph_reports').get()).toEqual({ count: 0 });
+    db.close();
+  });
+
+  it('opens a version-13 database without the tables until migrations run, then upgrades idempotently', () => {
+    const directory = mkdtempSync(join(process.cwd(), '.test-knowledge-graph-report-migration-'));
+    temporaryDirectories.push(directory);
+    const databasePath = join(directory, 'state.db');
+
+    const first = openDatabase(databasePath);
+    seedProject(first);
+    first.exec('DROP TABLE knowledge_graph_ambiguities; DROP TABLE knowledge_graph_reports;');
+    first.prepare(`UPDATE schema_meta SET value = '13' WHERE key = 'schema_version'`).run();
+    expect(tableNames(first)).not.toContain('knowledge_graph_reports');
+    first.close();
+
+    const upgraded = openDatabase(databasePath);
+    expect(tableNames(upgraded)).toEqual(expect.arrayContaining(['knowledge_graph_reports', 'knowledge_graph_ambiguities']));
+    expect(upgraded.prepare('SELECT COUNT(*) AS count FROM knowledge_graph_reports').get()).toEqual({ count: 0 });
+    expect(upgraded.prepare('SELECT COUNT(*) AS count FROM knowledge_graph_snapshots').get()).toEqual({ count: 1 });
+    expect(Number((upgraded.prepare(`SELECT value FROM schema_meta WHERE key = 'schema_version'`).get() as { value: string }).value)).toBe(14);
+    upgraded.close();
+
+    const reopened = openDatabase(databasePath);
+    applyKnowledgeGraphReportMigration(reopened);
+    applyKnowledgeMigrations(reopened);
+    expect(tableNames(reopened).filter((name) => name === 'knowledge_graph_reports')).toHaveLength(1);
     reopened.close();
   });
 });

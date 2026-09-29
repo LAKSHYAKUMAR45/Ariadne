@@ -5,6 +5,7 @@ import {
   applyKnowledgeQueueMigration,
   applyKnowledgeReviewDeduplicationMigration,
   applyKnowledgeAnalysisCoverageMigration,
+  applyKnowledgeGraphReportMigration,
   applyKnowledgeJobResultSchemaMigration,
   applyKnowledgeSearchIndexMigration,
   applyKnowledgeSchemaV2Migration,
@@ -207,6 +208,11 @@ export const MIGRATIONS: Migration[] = [
     version: 13,
     description: 'Add knowledge analysis coverage and deferred relationship tables',
     up: (db) => applyKnowledgeAnalysisCoverageMigration(db),
+  },
+  {
+    version: 14,
+    description: 'Add knowledge graph completeness report and ambiguity tables',
+    up: (db) => applyKnowledgeGraphReportMigration(db),
   },
 ];
 

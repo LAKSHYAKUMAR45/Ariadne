@@ -221,4 +221,31 @@ describe('KnowledgeAnalysisCoverageStore', () => {
     });
     expect(store.summarize('project_b')).toMatchObject({ legacyUnknown: 1, partial: 0 });
   });
+  it('appends deferred candidates without replacing analyzer candidates, deduplicating and honoring the limit', () => {
+    store.replaceDeferredRelationships({ projectId: 'project_a', sourceVersionId: 'version_project_a', candidates: [candidate('analyzer_1')] });
+    const first = store.appendDeferredRelationships({
+      projectId: 'project_a',
+      sourceVersionId: 'version_project_a',
+      candidates: [candidate('appended_1', { resolutionKind: 'ambiguous_alias' }), candidate('analyzer_1')],
+    });
+    expect(first).toEqual({ stored: 1, dropped: 0 });
+    const repeated = store.appendDeferredRelationships({
+      projectId: 'project_a',
+      sourceVersionId: 'version_project_a',
+      candidates: [candidate('appended_1', { resolutionKind: 'ambiguous_alias' })],
+    });
+    expect(repeated).toEqual({ stored: 0, dropped: 0 });
+    expect(store.listDeferredRelationships('project_a', 'version_project_a')).toHaveLength(2);
+
+    const overflow = store.appendDeferredRelationships({
+      projectId: 'project_a',
+      sourceVersionId: 'version_project_a',
+      candidates: Array.from({ length: MAX_DEFERRED_RELATIONSHIPS_PER_SOURCE }, (_, index) => candidate(`extra_${index}`)),
+    });
+    expect(overflow.stored).toBe(MAX_DEFERRED_RELATIONSHIPS_PER_SOURCE - 2);
+    expect(overflow.dropped).toBe(2);
+    expect(() =>
+      store.appendDeferredRelationships({ projectId: 'project_b', sourceVersionId: 'version_project_a', candidates: [candidate('x')] }),
+    ).toThrow(/not found in project/);
+  });
 });
