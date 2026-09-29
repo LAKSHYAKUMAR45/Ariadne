@@ -78,6 +78,8 @@ describe('createAriadneMcpServer', () => {
           'knowledge_source_list',
           'knowledge_source_register',
           'knowledge_task_from_insight',
+          'knowledge_worker_run_once',
+          'knowledge_worker_status',
           'sync_push',
           'sync_pull',
           'sync_list_remote',

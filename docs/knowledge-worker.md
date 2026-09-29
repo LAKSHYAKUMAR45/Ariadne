@@ -67,6 +67,21 @@ Provider enrichment is optional and warning-only. A provider timeout, unsafe
 host, missing env var, or invalid provider response must not roll back a
 successful deterministic run.
 
+## Synthetic worker acceptance
+
+The core test suite includes an offline regression over original, minimal
+Python fixtures shaped around task-manager patterns. It runs the real worker,
+then reports `questionCount`, `top1PathHits`, `top3PathHits`,
+`spanCitationHits`, and `typedGraphEvidenceHits`. The acceptance requires ten
+questions, at least eight top-three path hits, ten span citations, at least
+eight typed graph evidence hits, and no jobs left queued or running.
+
+Run it with:
+
+```bash
+pnpm --filter @ariadne-dev/core exec vitest run test/knowledge/KnowledgeWorker.naas.test.ts
+```
+
 ## Status output
 
 `knowledge worker status` reports bounded project-local metadata only:

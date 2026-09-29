@@ -1,5 +1,6 @@
 import { ResourceTemplate } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import path from 'node:path';
 import { z } from 'zod';
 import {
   KnowledgeGraph,
@@ -7,6 +8,7 @@ import {
   KnowledgeProjectStore,
   KnowledgeQueue,
   KnowledgeSourceStore,
+  KnowledgeWorker,
   buildKnowledgeManifest,
   buildKnowledgeSearchContext,
   createKnowledgeReview,
@@ -20,6 +22,7 @@ import {
   resolveKnowledgeReview,
   searchKnowledge,
   writeKnowledgeManifest,
+  redact,
   type KnowledgePageType,
   type KnowledgeReviewAction,
   type KnowledgeSearchMode,
@@ -71,6 +74,18 @@ function project(db: ReturnType<typeof openDatabase>, projectId: string) {
   return result;
 }
 
+function workspaceProject(
+  db: ReturnType<typeof openDatabase>,
+  workspaceRoot: string,
+  projectId: string,
+) {
+  const result = project(db, projectId);
+  if (path.resolve(result.workspaceRoot) !== path.resolve(workspaceRoot)) {
+    throw new Error(`Knowledge project does not belong to this workspace: ${projectId}`);
+  }
+  return result;
+}
+
 function page(db: ReturnType<typeof openDatabase>, projectId: string, pageId: string) {
   const result = getCurrentPage(db, requiredText(projectId, 'project ID'), requiredText(pageId, 'page ID') as never);
   if (!result) throw new Error(`Knowledge page not found: ${pageId}`);
@@ -88,7 +103,54 @@ function jsonResult(value: unknown): { content: Array<{ type: 'text'; text: stri
 }
 
 function errorResult(err: unknown): { content: Array<{ type: 'text'; text: string }>; isError: true } {
-  return { content: [{ type: 'text', text: err instanceof Error ? err.message : String(err) }], isError: true };
+  return { content: [{ type: 'text', text: redact(err instanceof Error ? err.message : String(err)) }], isError: true };
+}
+
+function workerSummary(db: ReturnType<typeof openDatabase>, projectId: string): {
+  queued: number;
+  running: number;
+  failed: number;
+  oldestQueuedAt: string | null;
+  activeWorkerCount: number;
+  deterministicCompleted: number;
+  enrichedCompleted: number;
+} {
+  const queueStatus = new KnowledgeQueue(db).getQueueStatus(projectId);
+  const row = db.prepare(
+    `SELECT
+       MIN(CASE WHEN status = 'queued' THEN requested_at END) AS oldest_queued_at,
+       COUNT(DISTINCT CASE
+         WHEN status = 'running'
+          AND worker_id IS NOT NULL
+          AND lease_expires_at IS NOT NULL
+          AND lease_expires_at > @now
+         THEN worker_id
+       END) AS active_worker_count,
+       SUM(CASE
+         WHEN status = 'completed' AND result_processing_mode = 'deterministic'
+         THEN 1 ELSE 0
+       END) AS deterministic_completed,
+       SUM(CASE
+         WHEN status = 'completed' AND result_processing_mode = 'enriched'
+         THEN 1 ELSE 0
+       END) AS enriched_completed
+     FROM knowledge_jobs
+     WHERE project_id = @projectId`,
+  ).get({ projectId, now: new Date().toISOString() }) as {
+    oldest_queued_at: string | null;
+    active_worker_count: number | null;
+    deterministic_completed: number | null;
+    enriched_completed: number | null;
+  };
+  return {
+    queued: queueStatus.queuedCount,
+    running: queueStatus.runningCount,
+    failed: queueStatus.failedCount,
+    oldestQueuedAt: row.oldest_queued_at,
+    activeWorkerCount: row.active_worker_count ?? 0,
+    deterministicCompleted: row.deterministic_completed ?? 0,
+    enrichedCompleted: row.enriched_completed ?? 0,
+  };
 }
 
 export function registerKnowledgeTools(server: McpServer, context: KnowledgeMcpContext): void {
@@ -304,6 +366,49 @@ export function registerKnowledgeTools(server: McpServer, context: KnowledgeMcpC
         }
         const result = queue.cancel(args.jobId);
         return jsonResult(envelope(result, [{ kind: 'job', id: result.id }]));
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    'knowledge_worker_status',
+    {
+      title: 'Get knowledge worker status',
+      description: 'Returns bounded, read-only worker and queue status for one knowledge project.',
+      inputSchema: { projectId: z.string().min(1) },
+    },
+    async (args) => {
+      try {
+        const current = workspaceProject(db, workspaceRoot, args.projectId);
+        return jsonResult(envelope(workerSummary(db, current.id), [{ kind: 'project', id: current.id }]));
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    'knowledge_worker_run_once',
+    {
+      title: 'Run knowledge worker once',
+      description: 'Processes the requested project queue until empty, then exits. Set confirm=true to authorize.',
+      inputSchema: {
+        projectId: z.string().min(1),
+        workerId: z.string().min(1).optional(),
+        confirm: z.boolean().optional(),
+      },
+    },
+    async (args) => {
+      try {
+        requireWrite(args.confirm);
+        const current = workspaceProject(db, workspaceRoot, args.projectId);
+        const worker = new KnowledgeWorker(db, {
+          workerId: args.workerId ?? `mcp-${process.pid}`,
+        });
+        const result = await worker.runOnce(current.id);
+        return jsonResult(envelope(result, [{ kind: 'project', id: current.id }]));
       } catch (err) {
         return errorResult(err);
       }

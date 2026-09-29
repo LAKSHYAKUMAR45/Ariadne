@@ -20,6 +20,7 @@ import type {
   KnowledgeReviewAction,
   KnowledgeReviewStatus,
   KnowledgeSearchResult,
+  KnowledgeWorkerSummary,
   LogEntry,
   LogsResponse,
   MemberMutationResponse,
@@ -59,6 +60,10 @@ function isFiniteNumber(value: unknown): value is number {
 
 function isInteger(value: unknown): value is number {
   return isFiniteNumber(value) && Number.isInteger(value);
+}
+
+function isNonNegativeInteger(value: unknown): value is number {
+  return isInteger(value) && value >= 0;
 }
 
 function isNullableString(value: unknown): value is string | null {
@@ -392,7 +397,21 @@ function isKnowledgeProjectSummary(value: unknown): value is KnowledgeProjectSum
     isInteger(value.sourceCount) &&
     isInteger(value.pageCount) &&
     isInteger(value.pendingReviewCount) &&
+    isKnowledgeWorkerSummary(value.worker) &&
     isTimestamp(value.updatedAt)
+  );
+}
+
+function isKnowledgeWorkerSummary(value: unknown): value is KnowledgeWorkerSummary {
+  return (
+    isRecord(value) &&
+    isNonNegativeInteger(value.queued) &&
+    isNonNegativeInteger(value.running) &&
+    isNonNegativeInteger(value.failed) &&
+    (value.oldestQueuedAt === null || isTimestamp(value.oldestQueuedAt)) &&
+    isNonNegativeInteger(value.activeWorkerCount) &&
+    isNonNegativeInteger(value.deterministicCompleted) &&
+    isNonNegativeInteger(value.enrichedCompleted)
   );
 }
 

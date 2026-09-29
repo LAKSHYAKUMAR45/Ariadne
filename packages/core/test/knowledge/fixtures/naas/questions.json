@@ -1,0 +1,62 @@
+[
+  {
+    "id": "fabric-interface",
+    "query": "add_fabric_interface device fabric interface",
+    "expectedPaths": ["task-managers/device.py"],
+    "expectedSymbols": ["JCNRDevice", "add_fabric_interface"]
+  },
+  {
+    "id": "gnmi-endpoint",
+    "query": "build_gnmi_endpoint endpoint target flags",
+    "expectedPaths": ["task-managers/gnmi.py"],
+    "expectedSymbols": ["GnmiFlags", "build_gnmi_endpoint"]
+  },
+  {
+    "id": "topology-construction",
+    "query": "construct_topology topology links",
+    "expectedPaths": ["task-managers/topology.py"],
+    "expectedSymbols": ["JCNRTopology", "construct_topology"]
+  },
+  {
+    "id": "hbr-credentials",
+    "query": "HbrCredentials open_hbr_session username password",
+    "expectedPaths": ["task-managers/remote_access.py"],
+    "expectedSymbols": ["HbrCredentials", "open_hbr_session"]
+  },
+  {
+    "id": "ssh-jump-host",
+    "query": "select_ssh_jump_host SSH jump host HBR",
+    "expectedPaths": ["task-managers/remote_access.py"],
+    "expectedSymbols": ["HbrSession", "select_ssh_jump_host"]
+  },
+  {
+    "id": "configlet-cleanup-retry",
+    "query": "apply_configlet retry cleanup configlet",
+    "expectedPaths": ["task-managers/configlet.py"],
+    "expectedSymbols": ["ConfigletManager", "apply_configlet", "cleanup_configlet"]
+  },
+  {
+    "id": "deployment-verification",
+    "query": "verify_installation uninstall_deployment install verification",
+    "expectedPaths": ["task-managers/deployment.py"],
+    "expectedSymbols": ["DeploymentVerifier", "verify_installation", "uninstall_deployment"]
+  },
+  {
+    "id": "use-case-failure-teardown",
+    "query": "load_use_case failure tear_down loader",
+    "expectedPaths": ["task-managers/use_case.py"],
+    "expectedSymbols": ["UseCaseLoader", "load_use_case", "tear_down"]
+  },
+  {
+    "id": "pytest-bootstrap-defaults",
+    "query": "pytest_addoption pytest_configure bootstrap defaults",
+    "expectedPaths": ["task-managers/pytest_bootstrap.py"],
+    "expectedSymbols": ["pytest_addoption", "pytest_configure"]
+  },
+  {
+    "id": "configlet-retry-limit",
+    "query": "apply_configlet retry attempts maximum",
+    "expectedPaths": ["task-managers/configlet.py"],
+    "expectedSymbols": ["ConfigletManager", "apply_configlet"]
+  }
+]

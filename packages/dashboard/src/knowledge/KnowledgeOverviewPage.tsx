@@ -16,6 +16,22 @@ function formatTimestamp(value: string): string {
   }).format(new Date(value));
 }
 
+function formatQueueAge(value: string | null): string {
+  if (value === null) {
+    return 'No queued work';
+  }
+  const ageMinutes = Math.max(0, Math.floor((Date.now() - Date.parse(value)) / 60_000));
+  if (ageMinutes < 60) {
+    return `${ageMinutes} minute${ageMinutes === 1 ? '' : 's'}`;
+  }
+  const ageHours = Math.floor(ageMinutes / 60);
+  if (ageHours < 24) {
+    return `${ageHours} hour${ageHours === 1 ? '' : 's'}`;
+  }
+  const ageDays = Math.floor(ageHours / 24);
+  return `${ageDays} day${ageDays === 1 ? '' : 's'}`;
+}
+
 export function KnowledgeOverviewPage() {
   const { api } = useAuth();
   const [projects, setProjects] = useState<KnowledgeProjectSummary[]>([]);
@@ -57,6 +73,32 @@ export function KnowledgeOverviewPage() {
   const sourceCount = projects.reduce((total, project) => total + project.sourceCount, 0);
   const pageCount = projects.reduce((total, project) => total + project.pageCount, 0);
   const pendingReviewCount = projects.reduce((total, project) => total + project.pendingReviewCount, 0);
+  const worker = projects.reduce(
+    (summary, project) => ({
+      queued: summary.queued + project.worker.queued,
+      running: summary.running + project.worker.running,
+      failed: summary.failed + project.worker.failed,
+      oldestQueuedAt:
+        summary.oldestQueuedAt === null || (
+          project.worker.oldestQueuedAt !== null &&
+          Date.parse(project.worker.oldestQueuedAt) < Date.parse(summary.oldestQueuedAt)
+        )
+          ? project.worker.oldestQueuedAt
+          : summary.oldestQueuedAt,
+      activeWorkerCount: summary.activeWorkerCount + project.worker.activeWorkerCount,
+      deterministicCompleted: summary.deterministicCompleted + project.worker.deterministicCompleted,
+      enrichedCompleted: summary.enrichedCompleted + project.worker.enrichedCompleted,
+    }),
+    {
+      queued: 0,
+      running: 0,
+      failed: 0,
+      oldestQueuedAt: null as string | null,
+      activeWorkerCount: 0,
+      deterministicCompleted: 0,
+      enrichedCompleted: 0,
+    },
+  );
 
   return (
     <div className="page-stack">
@@ -95,6 +137,20 @@ export function KnowledgeOverviewPage() {
             <span>Pending reviews</span>
             <strong className="metric-value">{pendingReviewCount}</strong>
           </article>
+        </section>
+        <section className="panel data-panel" aria-label="Knowledge worker status">
+          <div className="table-heading">
+            <strong>Worker status</strong>
+            <span>Oldest queued: {formatQueueAge(worker.oldestQueuedAt)}</span>
+          </div>
+          <dl className="knowledge-metrics">
+            <div className="metric-panel"><dt>Queued</dt><dd className="metric-value">{worker.queued}</dd></div>
+            <div className="metric-panel"><dt>Running</dt><dd className="metric-value">{worker.running}</dd></div>
+            <div className="metric-panel"><dt>Failed</dt><dd className="metric-value">{worker.failed}</dd></div>
+            <div className="metric-panel"><dt>Active workers</dt><dd className="metric-value">{worker.activeWorkerCount}</dd></div>
+            <div className="metric-panel"><dt>Deterministic</dt><dd className="metric-value">{worker.deterministicCompleted}</dd></div>
+            <div className="metric-panel"><dt>Enriched</dt><dd className="metric-value">{worker.enrichedCompleted}</dd></div>
+          </dl>
         </section>
         <section className="panel data-panel">
           <div className="table-heading">

@@ -3,8 +3,16 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import { execFileSync } from 'node:child_process';
+import { KnowledgeProjectStore, KnowledgeQueue, openDatabase } from '@ariadne-dev/core';
 
 vi.mock('node:child_process', () => ({ execFileSync: vi.fn() }));
+
+const panelMocks = vi.hoisted(() => ({
+  openAriadnePanel: vi.fn(),
+  refreshAriadnePanel: vi.fn(),
+}));
+
+vi.mock('../src/webview/panel.js', () => panelMocks);
 
 // Minimal fake of the `vscode` module surface this extension touches, so we
 // can exercise extension.ts's error-handling paths without a real extension
@@ -14,6 +22,7 @@ let registeredCommands: Array<{ command: string; handler: (...args: unknown[]) =
 let registeredTreeProviders: Array<{ viewId: string }>;
 let registeredWebviewViewProviders: Array<{ viewId: string; provider: unknown }>;
 let quickPickChoice: unknown;
+let warningChoice: unknown;
 
 vi.mock('vscode', () => {
   class ThemeIcon {
@@ -73,7 +82,7 @@ vi.mock('vscode', () => {
         return { dispose: () => {} };
       },
       onDidChangeActiveTextEditor: () => ({ dispose: () => {} }),
-      showWarningMessage: vi.fn(),
+      showWarningMessage: vi.fn(() => Promise.resolve(warningChoice)),
       showErrorMessage: vi.fn(),
       showInformationMessage: vi.fn(),
       showQuickPick: vi.fn(() => Promise.resolve(quickPickChoice)),
@@ -234,6 +243,9 @@ describe('chat participant error handling', () => {
 
   it('ariadne.syncPull does nothing if the quick pick is dismissed', async () => {
     quickPickChoice = undefined;
+    warningChoice = undefined;
+    panelMocks.openAriadnePanel.mockReset();
+    panelMocks.refreshAriadnePanel.mockReset();
     await registeredCommands.find((entry) => entry.command === 'ariadne.syncPull')?.handler();
     expect(execFileSync).not.toHaveBeenCalled();
   });
@@ -242,11 +254,13 @@ describe('chat participant error handling', () => {
     const vscode = await import('vscode');
     vi.mocked(execFileSync).mockImplementation(() => {
       const err = new Error('Command failed') as Error & { stderr?: string };
-      err.stderr = 'Not logged in.';
+      err.stderr = 'Not logged in. token=super-secret-value';
       throw err;
     });
     await registeredCommands.find((entry) => entry.command === 'ariadne.syncListRemote')?.handler();
     expect(vi.mocked(vscode.window.showErrorMessage)).toHaveBeenCalledWith(expect.stringContaining('Not logged in'));
+    expect(vi.mocked(vscode.window.showErrorMessage).mock.calls.flat().join(' ')).not.toContain('super-secret-value');
+    expect(outputLines.join('\n')).not.toContain('super-secret-value');
   });
 
   it('registers the Ariadne panel command and no longer registers the tree provider', async () => {
@@ -276,4 +290,73 @@ describe('chat participant error handling', () => {
   it('registers the Ariadne Activity Bar launcher provider', () => {
     expect(registeredWebviewViewProviders.map((entry) => entry.viewId)).toContain('ariadne.launcherView');
   });
+
+  it('registers a confirmed run-once command that processes the active knowledge project and refreshes the panel', async () => {
+    const db = openDatabase(path.join(tmpDir, '.ariadne', 'state.db'));
+    const project = new KnowledgeProjectStore(db).create({
+      name: 'Workspace knowledge',
+      workspaceRoot: tmpDir,
+    });
+    new KnowledgeQueue(db).enqueue({ projectId: project.id, jobKind: 'unsupported', payload: {} });
+    db.close();
+    warningChoice = 'Run once';
+
+    await registeredCommands.find((entry) => entry.command === 'ariadne.knowledgeWorkerRunOnce')?.handler();
+
+    const reopened = openDatabase(path.join(tmpDir, '.ariadne', 'state.db'));
+    expect(new KnowledgeQueue(reopened).getQueueStatus(project.id)).toEqual(expect.objectContaining({
+      queuedCount: 0,
+      failedCount: 1,
+    }));
+    reopened.close();
+    expect(panelMocks.refreshAriadnePanel).toHaveBeenCalled();
+    const vscode = await import('vscode');
+    expect(vi.mocked(vscode.window.showWarningMessage)).toHaveBeenCalledWith(
+      expect.stringContaining('Workspace knowledge'),
+      { modal: true },
+      'Run once',
+    );
+    expect(vi.mocked(vscode.window.showInformationMessage)).toHaveBeenCalledWith(
+      expect.stringMatching(/completed 0.*failed 1/i),
+    );
+  });
+
+  it('contributes the run-once command to the command palette', () => {
+    const packageJson = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8')) as {
+      contributes?: { commands?: Array<{ command: string; title: string }> };
+    };
+
+    expect(packageJson.contributes?.commands).toContainEqual({
+      command: 'ariadne.knowledgeWorkerRunOnce',
+      title: 'Ariadne: Run Knowledge Worker Once',
+    });
+  });
+
+  it('ignores active projects belonging to another workspace', async () => {
+    const db = openDatabase(path.join(tmpDir, '.ariadne', 'state.db'));
+    const projects = new KnowledgeProjectStore(db);
+    const selected = projects.create({ name: 'Current workspace', workspaceRoot: tmpDir });
+    const createdAt = new Date(Date.now() + 60_000).toISOString();
+    db.prepare(
+      `INSERT INTO knowledge_projects
+       (id, workspace_root, name, status, created_at, updated_at)
+       VALUES (?, ?, ?, 'active', ?, ?)`,
+    ).run('foreign-project', path.join(tmpDir, 'foreign'), 'Foreign workspace', createdAt, createdAt);
+    new KnowledgeQueue(db).enqueue({ projectId: selected.id, jobKind: 'unsupported', payload: {} });
+    db.close();
+    warningChoice = 'Run once';
+
+    await registeredCommands.find((entry) => entry.command === 'ariadne.knowledgeWorkerRunOnce')?.handler();
+
+    const vscode = await import('vscode');
+    expect(vi.mocked(vscode.window.showWarningMessage)).toHaveBeenCalledWith(
+      expect.stringContaining('Current workspace'),
+      { modal: true },
+      'Run once',
+    );
+    const reopened = openDatabase(path.join(tmpDir, '.ariadne', 'state.db'));
+    expect(new KnowledgeQueue(reopened).getQueueStatus(selected.id).failedCount).toBe(1);
+    reopened.close();
+  });
+
 });

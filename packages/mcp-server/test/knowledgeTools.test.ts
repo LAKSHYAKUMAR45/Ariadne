@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
-import { openDatabase, TaskStore } from '@ariadne-dev/core';
+import { KnowledgeQueue, openDatabase, TaskStore } from '@ariadne-dev/core';
 import { createAriadneMcpServer } from '../src/server.js';
 
 interface ToolResult {
@@ -25,6 +25,111 @@ function cleanup(state: ReturnType<typeof setup>): void {
 }
 
 describe('knowledge MCP tools', () => {
+  it('reports bounded project-scoped worker status without mutating the queue or exposing watch mode', async () => {
+    const state = setup();
+    try {
+      const projectId = JSON.parse(
+        (await state.tools.knowledge_project_create.handler({ name: 'Wiki', confirm: true })).content[0].text,
+      ).data.id as string;
+      const queue = new KnowledgeQueue(state.db, { now: () => '2026-09-28T12:00:00.000Z' });
+      queue.enqueue({ projectId, jobKind: 'unsupported', payload: {} });
+      const changesBeforeStatus = state.db.prepare('SELECT total_changes() AS total').get() as { total: number };
+
+      const status = await state.tools.knowledge_worker_status.handler({ projectId });
+
+      expect(status.isError).toBeUndefined();
+      expect(JSON.parse(status.content[0].text)).toEqual({
+        data: {
+          queued: 1,
+          running: 0,
+          failed: 0,
+          oldestQueuedAt: '2026-09-28T12:00:00.000Z',
+          activeWorkerCount: 0,
+          deterministicCompleted: 0,
+          enrichedCompleted: 0,
+        },
+        citations: [{ kind: 'project', id: projectId }],
+      });
+      expect(state.db.prepare('SELECT total_changes() AS total').get()).toEqual(changesBeforeStatus);
+      expect(state.tools.knowledge_worker_watch).toBeUndefined();
+    } finally {
+      cleanup(state);
+    }
+  });
+
+  it('requires confirmation and runs knowledge work only for the requested project', async () => {
+    const state = setup();
+    try {
+      const projectA = JSON.parse(
+        (await state.tools.knowledge_project_create.handler({ name: 'Project A', confirm: true })).content[0].text,
+      ).data.id as string;
+      const projectB = 'project-b';
+      const createdAt = new Date().toISOString();
+      state.db.prepare(
+        `INSERT INTO knowledge_projects
+         (id, workspace_root, name, status, created_at, updated_at)
+         VALUES (?, ?, ?, 'active', ?, ?)`,
+      ).run(projectB, '/workspace-b', 'Project B', createdAt, createdAt);
+      const queue = new KnowledgeQueue(state.db);
+      const jobA = queue.enqueue({ projectId: projectA, jobKind: 'unsupported', payload: {} });
+      const jobB = queue.enqueue({ projectId: projectB, jobKind: 'unsupported', payload: {} });
+
+      const rejected = await state.tools.knowledge_worker_run_once.handler({ projectId: projectA });
+      expect(rejected.isError).toBe(true);
+      expect(rejected.content[0].text).toMatch(/confirm=true/);
+      expect(queue.get(jobA.id)?.status).toBe('queued');
+
+      const completed = await state.tools.knowledge_worker_run_once.handler({ projectId: projectA, confirm: true });
+      expect(completed.isError).toBeUndefined();
+      expect(JSON.parse(completed.content[0].text).data).toEqual(expect.objectContaining({
+        projectId: projectA,
+        claimed: 1,
+        failed: 1,
+      }));
+      expect(queue.get(jobA.id)?.status).toBe('failed');
+      expect(queue.get(jobB.id)?.status).toBe('queued');
+    } finally {
+      cleanup(state);
+    }
+  });
+
+  it('redacts secrets from worker tool errors', async () => {
+    const state = setup();
+    try {
+      const secretProjectId = 'sk-proj-abcdefghijklmnopqrstuvwxyz';
+      const result = await state.tools.knowledge_worker_status.handler({ projectId: secretProjectId });
+
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).not.toContain(secretProjectId);
+      expect(result.content[0].text).toMatch(/\*{3}|\[REDACTED\]/);
+    } finally {
+      cleanup(state);
+    }
+  });
+
+  it('rejects worker operations for projects bound to another workspace', async () => {
+    const state = setup();
+    try {
+      const projectId = 'project-foreign-workspace';
+      const createdAt = new Date().toISOString();
+      state.db.prepare(
+        `INSERT INTO knowledge_projects
+         (id, workspace_root, name, status, created_at, updated_at)
+         VALUES (?, ?, ?, 'active', ?, ?)`,
+      ).run(projectId, path.join(state.root, 'other-workspace'), 'Foreign project', createdAt, createdAt);
+
+      const status = await state.tools.knowledge_worker_status.handler({ projectId });
+      const run = await state.tools.knowledge_worker_run_once.handler({ projectId, confirm: true });
+
+      expect(status.isError).toBe(true);
+      expect(status.content[0].text).toMatch(/workspace/i);
+      expect(run.isError).toBe(true);
+      expect(run.content[0].text).toMatch(/workspace/i);
+    } finally {
+      cleanup(state);
+    }
+  });
+
   it('requires explicit authorization for mutations and returns typed citations', async () => {
     const state = setup();
     try {

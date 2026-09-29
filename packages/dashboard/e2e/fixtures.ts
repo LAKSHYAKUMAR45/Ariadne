@@ -899,6 +899,15 @@ async function handleAdminRequest(route: Route, state: FixtureState): Promise<vo
         sourceCount: 4,
         pageCount: 8,
         pendingReviewCount: state.knowledgeReviews.filter((review) => review.status === 'pending').length,
+        worker: {
+          queued: 3,
+          running: 1,
+          failed: 2,
+          oldestQueuedAt: isoAt(-20),
+          activeWorkerCount: 1,
+          deterministicCompleted: 7,
+          enrichedCompleted: 2,
+        },
         updatedAt: isoAt(-5),
       }],
     });

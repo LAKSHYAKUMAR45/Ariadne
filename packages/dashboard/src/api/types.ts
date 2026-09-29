@@ -299,6 +299,16 @@ export interface AuditResponse {
 
 export type KnowledgeProjectStatus = 'active' | 'archived';
 
+export interface KnowledgeWorkerSummary {
+  queued: number;
+  running: number;
+  failed: number;
+  oldestQueuedAt: string | null;
+  activeWorkerCount: number;
+  deterministicCompleted: number;
+  enrichedCompleted: number;
+}
+
 export interface KnowledgeProjectSummary {
   id: string;
   name: string;
@@ -307,6 +317,7 @@ export interface KnowledgeProjectSummary {
   sourceCount: number;
   pageCount: number;
   pendingReviewCount: number;
+  worker: KnowledgeWorkerSummary;
   updatedAt: string;
 }
 

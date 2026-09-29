@@ -129,6 +129,10 @@
         "title": "Ariadne: Show Knowledge Queue"
       },
       {
+        "command": "ariadne.knowledgeWorkerRunOnce",
+        "title": "Ariadne: Run Knowledge Worker Once"
+      },
+      {
         "command": "ariadne.knowledgeReviewAccept",
         "title": "Ariadne: Accept Knowledge Review"
       },

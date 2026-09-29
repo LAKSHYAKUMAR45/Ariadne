@@ -32,11 +32,23 @@ const projects = {
     sourceCount: 4,
     pageCount: 8,
     pendingReviewCount: 1,
+    worker: {
+      queued: 3,
+      running: 1,
+      failed: 2,
+      oldestQueuedAt: new Date(Date.now() - 15 * 60_000).toISOString(),
+      activeWorkerCount: 1,
+      deterministicCompleted: 7,
+      enrichedCompleted: 2,
+    },
     updatedAt: '2026-09-24T12:00:00.000Z',
   }],
 };
 
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => {
+  vi.useRealTimers();
+  vi.unstubAllGlobals();
+});
 
 describe('knowledge dashboard pages', () => {
   it('renders project-scoped overview metrics and empty boundaries', async () => {
@@ -51,6 +63,44 @@ describe('knowledge dashboard pages', () => {
     expect(await screen.findByText('Task and source knowledge')).toBeVisible();
     expect(screen.getByLabelText('Knowledge totals')).toHaveTextContent('Sources4');
     expect(screen.getByText('Pending reviews')).toBeVisible();
+    expect(screen.getByLabelText('Knowledge worker status')).toHaveTextContent('Queued3');
+    expect(screen.getByLabelText('Knowledge worker status')).toHaveTextContent('Running1');
+    expect(screen.getByLabelText('Knowledge worker status')).toHaveTextContent('Failed2');
+    expect(screen.getByLabelText('Knowledge worker status')).toHaveTextContent('Active workers1');
+    expect(screen.getByLabelText('Knowledge worker status')).toHaveTextContent('Deterministic7');
+    expect(screen.getByLabelText('Knowledge worker status')).toHaveTextContent('Enriched2');
+    expect(screen.getByLabelText('Knowledge worker status')).toHaveTextContent(/minute/);
+    expect(screen.queryByLabelText(/provider secret/i)).not.toBeInTheDocument();
+  });
+
+  it('selects the chronologically oldest queued timestamp across timezone offsets', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.setSystemTime(new Date('2026-09-28T08:00:00Z'));
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === '/api/v1/admin/session') return Promise.resolve(json(session));
+      if (url === '/api/v1/admin/knowledge/projects') {
+        return Promise.resolve(json({
+          projects: [
+            {
+              ...projects.projects[0],
+              id: 'project-offset',
+              worker: { ...projects.projects[0].worker, oldestQueuedAt: '2026-09-28T00:00:00-07:00' },
+            },
+            {
+              ...projects.projects[0],
+              id: 'project-zulu',
+              worker: { ...projects.projects[0].worker, oldestQueuedAt: '2026-09-28T06:00:00Z' },
+            },
+          ],
+        }));
+      }
+      return Promise.resolve(new Response(null, { status: 404 }));
+    }));
+
+    renderWithProvider(<KnowledgeOverviewPage />);
+
+    expect(await screen.findByLabelText('Knowledge worker status')).toHaveTextContent('Oldest queued: 2 hours');
   });
 
   it('shows loading and explicit API errors for project reads', async () => {
@@ -64,6 +114,24 @@ describe('knowledge dashboard pages', () => {
 
     renderWithProvider(<KnowledgeOverviewPage />);
     expect(await screen.findByRole('alert')).toHaveTextContent('Knowledge storage unavailable.');
+  });
+
+  it('rejects negative worker counters from the API', async () => {
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      if (String(input) === '/api/v1/admin/session') return Promise.resolve(json(session));
+      if (String(input) === '/api/v1/admin/knowledge/projects') {
+        return Promise.resolve(json({
+          projects: [{
+            ...projects.projects[0],
+            worker: { ...projects.projects[0].worker, queued: -1 },
+          }],
+        }));
+      }
+      return Promise.resolve(new Response(null, { status: 404 }));
+    }));
+
+    renderWithProvider(<KnowledgeOverviewPage />);
+    expect(await screen.findByRole('alert')).toHaveTextContent(/invalid response/i);
   });
 
   it('keeps searches inside the selected project and renders citations', async () => {

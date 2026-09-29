@@ -14,6 +14,11 @@ test('navigates knowledge views, renders citations, and resolves a review', asyn
   await harness.navigate('Knowledge');
   await expect(page.getByText('Ariadne workspace')).toBeVisible();
   await expect(page.getByLabel('Knowledge totals')).toContainText('Sources');
+  await expect(page.getByLabel('Knowledge worker status')).toContainText('Queued3');
+  await expect(page.getByLabel('Knowledge worker status')).toContainText('Active workers1');
+  await expect(page.getByLabel('Knowledge worker status')).toContainText('Deterministic7');
+  await expect(page.getByLabel('Knowledge worker status')).toContainText('Enriched2');
+  await expect(page.getByLabel(/provider secret/i)).toHaveCount(0);
 
   await harness.navigate('Search');
   await page.getByLabel('Search knowledge').fill('queue');

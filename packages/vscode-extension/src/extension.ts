@@ -10,11 +10,19 @@ import {
   promptSelectWorkspaceFolder,
   resolveWorkspaceRoot,
 } from './workspace.js';
-import { setCurrentTaskId as setCurrentTaskInWorkspace, DEFAULT_TOKEN_BUDGET, buildContext } from '@ariadne-dev/core';
+import {
+  KnowledgeProjectStore,
+  KnowledgeWorker,
+  openDatabase,
+  stateDbPath,
+  setCurrentTaskId as setCurrentTaskInWorkspace,
+  DEFAULT_TOKEN_BUDGET,
+  buildContext,
+} from '@ariadne-dev/core';
 import { handleChatCommand, progressMessageFor, formatStatusBarItem } from './commands.js';
 import { closeAllStores, closeStore } from './storeCache.js';
 import { registerPassiveCapture } from './passiveCapture.js';
-import { findWorkspaceRoot } from '@ariadne-dev/core';
+import { findWorkspaceRoot, redact } from '@ariadne-dev/core';
 import { syncPush, syncPull, syncListRemote } from './syncCommands.js';
 import { openAriadnePanel, refreshAriadnePanel } from './webview/panel.js';
 import { registerAriadneLauncherView, refreshAriadneLauncherView } from './webview/launcherView.js';
@@ -25,8 +33,9 @@ let statusBarItem: vscode.StatusBarItem | undefined;
 
 function logError(context: string, err: unknown): string {
   const message = err instanceof Error ? (err.stack ?? err.message) : String(err);
-  output.appendLine(`[${new Date().toISOString()}] ${context}: ${message}`);
-  return err instanceof Error ? err.message : String(err);
+  const safeMessage = redact(message);
+  output.appendLine(`[${new Date().toISOString()}] ${context}: ${safeMessage}`);
+  return redact(err instanceof Error ? err.message : String(err));
 }
 
 /**
@@ -177,6 +186,49 @@ export function activate(context: vscode.ExtensionContext): void {
       }),
     );
   }
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('ariadne.knowledgeWorkerRunOnce', async () => {
+      const workspaceRoot = resolveWorkspaceRoot();
+      if (!workspaceRoot) {
+        void vscode.window.showWarningMessage('Ariadne: open a folder/workspace first.');
+        return;
+      }
+
+      let db: ReturnType<typeof openDatabase> | undefined;
+      try {
+        db = openDatabase(stateDbPath(workspaceRoot));
+        const project = new KnowledgeProjectStore(db)
+          .list({ status: 'active' })
+          .find((candidate) => path.resolve(candidate.workspaceRoot) === path.resolve(workspaceRoot));
+        if (!project) {
+          void vscode.window.showInformationMessage('Ariadne: no active knowledge project is configured for this workspace.');
+          return;
+        }
+        const confirmation = await vscode.window.showWarningMessage(
+          `Run the knowledge worker once for "${project.name}"? It will process only this project's queued work and then stop.`,
+          { modal: true },
+          'Run once',
+        );
+        if (confirmation !== 'Run once') {
+          return;
+        }
+
+        const result = await new KnowledgeWorker(db, {
+          workerId: `vscode-${process.pid}`,
+        }).runOnce(project.id);
+        refreshAll();
+        void vscode.window.showInformationMessage(
+          `Ariadne knowledge worker: completed ${result.completed}, failed ${result.failed}, cancelled ${result.cancelled}.`,
+        );
+      } catch (err) {
+        const message = logError('ariadne.knowledgeWorkerRunOnce', err);
+        void vscode.window.showErrorMessage(`Ariadne: knowledge worker failed — ${message}`);
+      } finally {
+        db?.close();
+      }
+    }),
+  );
 
   registerAriadneLauncherView(context, {
     getCurrentTask: () => {
