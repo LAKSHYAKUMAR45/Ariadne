@@ -42,7 +42,7 @@ export interface ExportKnowledgeProjectOptions {
 export interface ImportKnowledgeProjectOptions {
   replaceExisting?: boolean;
   expectedProjectId?: string;
-  workspaceRoot: string;
+  workspaceRoot?: string;
 }
 
 export interface ImportResult {
@@ -1490,7 +1490,6 @@ function buildImportPlan(db: Database.Database, archive: KnowledgeArchive, optio
   validateArchive(archive);
 
   const projectId = requireNonEmptyArchiveText(archive.manifest.projectId, 'archive project ID');
-  const workspaceRoot = path.resolve(requireNonEmptyArchiveText(options.workspaceRoot, 'workspace root'));
   if (options.expectedProjectId !== undefined && options.expectedProjectId !== projectId) {
     throw new Error('Knowledge archive import target does not match the archive project ID.');
   }
@@ -1505,6 +1504,14 @@ function buildImportPlan(db: Database.Database, archive: KnowledgeArchive, optio
   if (requireNonEmptyArchiveText(projectRecord.id, 'project.json id') !== projectId) {
     throw importRejected('project.json must describe the same project as the manifest.');
   }
+  const existingWorkspaceRoot = existingProjectWorkspaceRoot(db, projectId);
+  const archiveWorkspaceRoot =
+    typeof projectRecord.workspace_root === 'string' && projectRecord.workspace_root !== REDACTED_WORKSPACE_ROOT
+      ? projectRecord.workspace_root
+      : undefined;
+  const workspaceRoot = path.resolve(
+    requireNonEmptyArchiveText(options.workspaceRoot ?? existingWorkspaceRoot ?? archiveWorkspaceRoot, 'workspace root'),
+  );
 
   const rowsByTable = new Map<ArchiveTableName, Record<string, unknown>[]>();
   let totalRows = 0;
@@ -1527,7 +1534,6 @@ function buildImportPlan(db: Database.Database, archive: KnowledgeArchive, optio
   if (existing && !options.replaceExisting) {
     throw new Error(`Knowledge project already exists: ${projectId}`);
   }
-  const existingWorkspaceRoot = existingProjectWorkspaceRoot(db, projectId);
   if (existing && options.replaceExisting && existingWorkspaceRoot && existingWorkspaceRoot !== workspaceRoot) {
     throw new Error('Knowledge archive replace target exists in a different workspace root.');
   }

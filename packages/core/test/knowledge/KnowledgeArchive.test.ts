@@ -16,7 +16,6 @@ describe('KnowledgeArchive', () => {
     for (const database of databases.splice(0)) database.close();
     for (const directory of directories.splice(0)) rmSync(directory, { recursive: true, force: true });
   });
-
   function database() {
     const db = openDatabase(':memory:');
     databases.push(db);
@@ -743,6 +742,7 @@ See [[graph|the graph]].
       workspaceRoot: imported.workspaceRoot,
       name: 'Old import target',
     });
+
     const untouchedProject = new KnowledgeProjectStore(target).create({
       id: 'project_unrelated' as never,
       workspaceRoot: '/workspace/unrelated',
@@ -757,6 +757,24 @@ See [[graph|the graph]].
     });
     expect(target.prepare('SELECT name FROM knowledge_projects WHERE id = ?').get(untouchedProject.id)).toEqual({
       name: 'Unrelated project',
+    });
+  });
+
+  it('preserves the legacy import call shape when replacing an existing project', () => {
+    const source = database();
+    const { projectId } = seed(source);
+    const archive = exportKnowledgeProject(source, { projectId });
+    const target = database();
+    const workspaceRoot = importOptions().workspaceRoot;
+    new KnowledgeProjectStore(target).create({
+      id: projectId as never,
+      workspaceRoot,
+      name: 'Old import target',
+    });
+
+    expect(importKnowledgeProject(target, archive, { replaceExisting: true })).toMatchObject({ projectId });
+    expect(target.prepare('SELECT workspace_root FROM knowledge_projects WHERE id = ?').get(projectId)).toEqual({
+      workspace_root: workspaceRoot,
     });
   });
 

@@ -153,8 +153,8 @@ ariadne knowledge task-from-insight <insight-id> --project <project-id>
 ariadne knowledge research <project-id> "<query>"
 ariadne knowledge chat create <project-id>
 ariadne knowledge chat list <project-id>
-ariadne knowledge chat history <conversation-id>
-ariadne knowledge chat send <conversation-id> "<message>"
+ariadne knowledge chat history <project-id> <conversation-id>
+ariadne knowledge chat send <project-id> <conversation-id> "<message>"
 
 # Optional provider profiles for worker enrichment / local validation
 ariadne knowledge provider add <project-id> <profile-name> --kind openai-compatible --endpoint <url> --model <model> --capabilities <csv> [--timeout-ms <n>] [--api-key-env <name>]
