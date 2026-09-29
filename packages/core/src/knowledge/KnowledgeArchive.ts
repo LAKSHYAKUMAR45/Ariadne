@@ -33,6 +33,7 @@ import {
   type KnowledgeArchiveWarning,
 } from './KnowledgeArchiveCompatibility.js';
 import { KNOWLEDGE_HOST_SETTING_PREFIX, KNOWLEDGE_SCHEMA_VERSION } from './knowledgeSchema.js';
+import { parseCitationContext } from './KnowledgeCitationContext.js';
 import { renderKnowledgePage } from './KnowledgeRenderer.js';
 
 export { KNOWLEDGE_ARCHIVE_PRESERVED_TABLE_COLUMNS, KNOWLEDGE_ARCHIVE_TABLE_REGISTRY };
@@ -406,8 +407,8 @@ const TABLE_SCHEMAS: readonly ArchiveTableSchema[] = [
   },
   {
     name: 'knowledge_jobs',
-    columns: ['id', 'project_id', 'job_kind', 'source_version_id', 'status', 'payload_json', 'result_json', 'result_processing_mode', 'requested_at', 'started_at', 'completed_at', 'failure_code', 'failure_message', 'retry_count', 'max_retries', 'worker_id', 'lease_expires_at'],
-    optionalColumns: ['source_version_id', 'result_json', 'result_processing_mode', 'started_at', 'completed_at', 'failure_code', 'failure_message', 'worker_id', 'lease_expires_at'],
+    columns: ['id', 'project_id', 'job_kind', 'source_version_id', 'status', 'payload_json', 'result_json', 'result_processing_mode', 'result_schema_version', 'requested_at', 'started_at', 'completed_at', 'failure_code', 'failure_message', 'retry_count', 'max_retries', 'worker_id', 'lease_expires_at'],
+    optionalColumns: ['source_version_id', 'result_json', 'result_processing_mode', 'result_schema_version', 'started_at', 'completed_at', 'failure_code', 'failure_message', 'worker_id', 'lease_expires_at'],
     identityColumns: ['id'],
   },
   {
@@ -1151,6 +1152,18 @@ function resolveExportArtifactAbsolutePath(
   return absolutePath;
 }
 
+function assertArchiveCitationContext(value: unknown, context: string): void {
+  let parsed;
+  try {
+    parsed = parseCitationContext(value);
+  } catch (error) {
+    throw importRejected(`${context} has an invalid citation context: ${error instanceof Error ? error.message : 'invalid'}.`);
+  }
+  if (parsed.snippetPolicy !== 'reference_only') {
+    throw importRejected(`${context} citation context snippetPolicy must be reference_only.`);
+  }
+}
+
 function assertArchiveMessagePayload(content: Uint8Array, context: string): void {
   let parsed: unknown;
   try {
@@ -1163,6 +1176,12 @@ function assertArchiveMessagePayload(content: Uint8Array, context: string): void
   }
   if (typeof parsed.content !== 'string') {
     throw importRejected(`${context} field content must be a string.`);
+  }
+  if (parsed.schemaVersion !== undefined && parsed.schemaVersion !== 2) {
+    throw importRejected(`${context} field schemaVersion must be absent or 2.`);
+  }
+  if (parsed.synthesis !== undefined && parsed.synthesis !== null && !isPlainObject(parsed.synthesis)) {
+    throw importRejected(`${context} field synthesis must be a plain object or null.`);
   }
   if (!Array.isArray(parsed.citations)) {
     throw importRejected(`${context} field citations must be an array.`);
@@ -1189,6 +1208,9 @@ function assertArchiveMessagePayload(content: Uint8Array, context: string): void
           throw importRejected(`${context} citation ${index + 1} span ${key} must be an integer.`);
         }
       }
+    }
+    if (citation.context !== undefined) {
+      assertArchiveCitationContext(citation.context, `${context} citation ${index + 1}`);
     }
   }
   if (parsed.retrievalMode !== null && parsed.retrievalMode !== undefined) {

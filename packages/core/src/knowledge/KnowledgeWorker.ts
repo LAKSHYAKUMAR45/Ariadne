@@ -10,6 +10,7 @@ import {
 import {
   KnowledgeQueue,
   type KnowledgeJobRecord,
+  type KnowledgeAnalyzedJobResult,
   type KnowledgeJobResult,
   type KnowledgeJobResultWarning,
   type KnowledgeTerminalProgressInput,
@@ -570,7 +571,8 @@ export class KnowledgeWorker {
       enrichment.enriched && enrichmentWarnings.every((warning) => warning.code !== 'enrichment_failed')
         ? 'enriched'
         : 'deterministic';
-    const result: KnowledgeJobResult = {
+    const result: KnowledgeAnalyzedJobResult = {
+      resultKind: 'analyzed',
       processingMode,
       analyzerId: extraction.analyzerId,
       analyzerVersion: extraction.analyzerVersion,

@@ -342,6 +342,11 @@ export type {
   EnqueueKnowledgeJobInput,
   KnowledgeJobRecord,
   KnowledgeJobResult,
+  KnowledgeAnalyzedJobResult,
+  KnowledgeCoverageOnlyJobResult,
+  KnowledgeJobResultBase,
+  KnowledgeJobResultInput,
+  KnowledgeJobResultLegacyState,
   KnowledgeQueueStatus,
   KnowledgeProgressEvent,
   KnowledgeQueueOptions,
@@ -618,6 +623,22 @@ export type {
   SaveKnowledgeChatMessageToPageInput,
   StreamKnowledgeChatInput,
 } from './knowledge/KnowledgeChat.js';
+export {
+  deriveCitationContext,
+  legacyCitationContext,
+  parseCitationContext,
+  toPersistedCitationContext,
+} from './knowledge/KnowledgeCitationContext.js';
+export type {
+  CitationContextOptions,
+  KnowledgeCitationContext,
+  KnowledgeCitationFieldKind,
+  KnowledgeCitationLegacyState,
+  KnowledgeCitationMatchKind,
+  KnowledgeCitationSnippetPolicy,
+} from './knowledge/KnowledgeCitationContext.js';
+export { parseMessagePayload, serializeMessagePayload } from './knowledge/KnowledgeChatPayload.js';
+export type { MessagePayloadV2, PersistedKnowledgeSynthesis } from './knowledge/KnowledgeChatPayload.js';
 export {
   KnowledgeResearchService,
   ResearchConfirmationRequiredError,

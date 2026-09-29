@@ -164,7 +164,38 @@ function parseSourceVersionIds(db: Database.Database, versionId: string): string
   ).map((row) => row.source_version_id);
 }
 
+function resolveExactSourceSpanId(
+  db: Database.Database,
+  input: CreatePageVersionInput,
+  reference: KnowledgeProvenanceRef,
+  sourceSpanId: string,
+): string | null {
+  const row = db
+    .prepare(
+      `SELECT span.id
+       FROM knowledge_source_spans span
+       JOIN knowledge_source_versions version
+         ON version.project_id = span.project_id
+        AND version.id = span.source_version_id
+       WHERE span.project_id = @projectId
+         AND span.id = @spanId
+         AND version.source_id = @sourceId
+         AND (@sourceVersionId IS NULL OR span.source_version_id = @sourceVersionId)`,
+    )
+    .get({
+      projectId: input.projectId,
+      spanId: sourceSpanId,
+      sourceId: reference.id,
+      sourceVersionId: reference.sourceVersionId ?? null,
+    }) as { id: string } | undefined;
+  return row?.id ?? null;
+}
+
 function resolveSourceSpanId(db: Database.Database, input: CreatePageVersionInput, reference: KnowledgeProvenanceRef): string | null {
+  if (reference.kind === 'source' && reference.sourceSpanId) {
+    const exact = resolveExactSourceSpanId(db, input, reference, reference.sourceSpanId);
+    if (exact !== null) return exact;
+  }
   if (
     reference.kind !== 'source' ||
     !reference.sourceVersionId ||
@@ -301,11 +332,18 @@ export class KnowledgePageStore {
          (id, project_id, page_version_id, source_kind, source_id, source_span_id, confidence, created_at)
          VALUES (@id, @projectId, @versionId, @kind, @sourceId, @sourceSpanId, @confidence, @createdAt)`,
       );
+      const insertedProvenanceIds = new Set<string>();
       for (const reference of input.provenance ?? []) {
         validateConfidence(reference.confidence);
         const sourceSpanId = resolveSourceSpanId(this.db, input, reference);
+        const provenanceId = createKnowledgeId(
+          'provenance',
+          `${versionId}:${reference.kind}:${reference.id}${sourceSpanId === null ? '' : `:${sourceSpanId}`}`,
+        );
+        if (insertedProvenanceIds.has(provenanceId)) continue;
+        insertedProvenanceIds.add(provenanceId);
         insertProvenance.run({
-          id: createKnowledgeId('provenance', `${versionId}:${reference.kind}:${reference.id}`),
+          id: provenanceId,
           projectId: input.projectId,
           versionId,
           kind: reference.kind,

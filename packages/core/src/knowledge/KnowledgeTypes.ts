@@ -81,6 +81,8 @@ export interface KnowledgeProvenanceRef {
   id: string;
   path?: string;
   sourceVersionId?: string;
+  /** Exact persisted span to reuse; validated against the source and project before it is stored. */
+  sourceSpanId?: string;
   startOffset?: number;
   endOffset?: number;
   startLine?: number;

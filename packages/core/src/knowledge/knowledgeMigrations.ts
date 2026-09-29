@@ -521,6 +521,16 @@ function backfillSearchIndexTokens(db: Database.Database): void {
 }
 
 /**
+ * Adds `knowledge_jobs.result_schema_version` (global migration 12, knowledge revision 8). NULL marks legacy result
+ * payloads. The table is never recreated: this is a guarded, additive column.
+ */
+export function applyKnowledgeJobResultSchemaMigration(db: Database.Database): void {
+  if (!hasColumn(db, 'knowledge_jobs', 'result_schema_version')) {
+    db.exec('ALTER TABLE knowledge_jobs ADD COLUMN result_schema_version INTEGER');
+  }
+}
+
+/**
  * Creates the additive knowledge schema atomically. It is idempotent so it
  * can be called safely by the shared migration runner on every database open.
  */
@@ -532,5 +542,6 @@ export function applyKnowledgeMigrations(db: Database.Database): void {
     applyKnowledgeGraphMetadataMigration(db);
     applyKnowledgeReviewDeduplicationMigration(db);
     applyKnowledgeSearchIndexMigration(db);
+    applyKnowledgeJobResultSchemaMigration(db);
   })();
 }

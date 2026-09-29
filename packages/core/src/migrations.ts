@@ -4,6 +4,7 @@ import {
   applyKnowledgeGraphMetadataMigration,
   applyKnowledgeQueueMigration,
   applyKnowledgeReviewDeduplicationMigration,
+  applyKnowledgeJobResultSchemaMigration,
   applyKnowledgeSearchIndexMigration,
   applyKnowledgeSchemaV2Migration,
 } from './knowledge/knowledgeMigrations.js';
@@ -195,6 +196,11 @@ export const MIGRATIONS: Migration[] = [
     version: 11,
     description: 'Add derived deterministic search index tables for knowledge sources',
     up: (db) => applyKnowledgeSearchIndexMigration(db),
+  },
+  {
+    version: 12,
+    description: 'Add knowledge job result schema version for versioned analyzed job-result envelopes',
+    up: (db) => applyKnowledgeJobResultSchemaMigration(db),
   },
 ];
 

@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { openDatabase } from '../../src/db.js';
 import {
   applyKnowledgeMigrations,
+  applyKnowledgeJobResultSchemaMigration,
   applyKnowledgeSearchIndexMigration,
   applyKnowledgeReviewDeduplicationMigration,
   KNOWLEDGE_SCHEMA_VERSION,
@@ -95,7 +96,8 @@ describe('knowledge schema migrations', () => {
 
     expect(tableNames(db)).toEqual(expect.arrayContaining(KNOWLEDGE_TABLES));
     expect(indexNames(db)).toEqual(expect.arrayContaining(REQUIRED_INDEXES));
-    expect(KNOWLEDGE_SCHEMA_VERSION).toBe(7);
+    expect(KNOWLEDGE_SCHEMA_VERSION).toBe(8);
+    expect(columns(db, 'knowledge_jobs')).toContain('result_schema_version');
     expect(columns(db, 'knowledge_extractions')).toEqual(
       expect.arrayContaining([
         'analyzer_id',
@@ -731,5 +733,77 @@ describe('knowledge search index migration (global version 11, knowledge revisio
       ),
     ).toEqual(['.md', 'a.m', 'alp', 'ha.', 'lph', 'pha'].sort());
     upgraded.close();
+  });
+});
+
+describe('knowledge job result schema migration (global version 12, knowledge revision 8)', () => {
+  it('registers version 12 after the search index migration', () => {
+    const migration = MIGRATIONS.find((entry) => entry.version === 12);
+    expect(migration?.description).toMatch(/result schema version/i);
+    expect(MIGRATIONS.map((entry) => entry.version).filter((version) => version >= 11)).toEqual([11, 12]);
+  });
+
+  it('adds a nullable integer column on a fresh database without touching other jobs columns', () => {
+    const db = openDatabase(':memory:');
+    const info = db.prepare('PRAGMA table_info(knowledge_jobs)').all() as Array<{
+      name: string;
+      type: string;
+      notnull: number;
+      dflt_value: string | null;
+    }>;
+    expect(info.find((column) => column.name === 'result_schema_version')).toMatchObject({
+      type: 'INTEGER',
+      notnull: 0,
+      dflt_value: null,
+    });
+    db.close();
+  });
+
+  it('upgrades a version-11 database in place, keeps rows with NULL versions, and reopens idempotently', () => {
+    const directory = mkdtempSync(join(process.cwd(), '.test-knowledge-result-version-migration-'));
+    temporaryDirectories.push(directory);
+    const databasePath = join(directory, 'state.db');
+
+    const first = openDatabase(databasePath);
+    first.prepare(
+      `INSERT INTO knowledge_projects (id, workspace_root, name, status, created_at, updated_at)
+       VALUES ('project_1', 'workspace', 'Wiki', 'active', 'now', 'now')`,
+    ).run();
+    first.prepare(
+      `INSERT INTO knowledge_jobs
+       (id, project_id, job_kind, status, payload_json, requested_at, retry_count, max_retries, result_json, result_processing_mode)
+       VALUES ('job_legacy', 'project_1', 'extract', 'completed', '{}', 'now', 0, 3, '{"processingMode":"deterministic"}', 'deterministic')`,
+    ).run();
+    const before = first.prepare(`SELECT sql FROM sqlite_master WHERE name = 'idx_knowledge_jobs_project_completed_mode'`).get();
+    first.exec('ALTER TABLE knowledge_jobs DROP COLUMN result_schema_version');
+    first.prepare(`UPDATE schema_meta SET value = '11' WHERE key = 'schema_version'`).run();
+    first.close();
+
+    const upgraded = openDatabase(databasePath);
+    expect(columns(upgraded, 'knowledge_jobs')).toContain('result_schema_version');
+    expect(upgraded.prepare(`SELECT result_processing_mode, result_schema_version FROM knowledge_jobs WHERE id = 'job_legacy'`).get()).toEqual({
+      result_processing_mode: 'deterministic',
+      result_schema_version: null,
+    });
+    expect(upgraded.prepare(`SELECT sql FROM sqlite_master WHERE name = 'idx_knowledge_jobs_project_completed_mode'`).get()).toEqual(before);
+    expect(Number((upgraded.prepare(`SELECT value FROM schema_meta WHERE key = 'schema_version'`).get() as { value: string }).value)).toBe(12);
+    upgraded.close();
+
+    const reopened = openDatabase(databasePath);
+    expect(columns(reopened, 'knowledge_jobs').filter((name) => name === 'result_schema_version')).toHaveLength(1);
+    applyKnowledgeJobResultSchemaMigration(reopened);
+    applyKnowledgeMigrations(reopened);
+    expect(columns(reopened, 'knowledge_jobs').filter((name) => name === 'result_schema_version')).toHaveLength(1);
+    reopened.close();
+  });
+
+  it('does not recreate knowledge_jobs when the column is added', () => {
+    const db = openDatabase(':memory:');
+    db.exec('ALTER TABLE knowledge_jobs DROP COLUMN result_schema_version');
+    const rootPageBefore = (db.prepare(`SELECT rootpage FROM sqlite_master WHERE name = 'knowledge_jobs'`).get() as { rootpage: number }).rootpage;
+    applyKnowledgeJobResultSchemaMigration(db);
+    const rootPageAfter = (db.prepare(`SELECT rootpage FROM sqlite_master WHERE name = 'knowledge_jobs'`).get() as { rootpage: number }).rootpage;
+    expect(rootPageAfter).toBe(rootPageBefore);
+    db.close();
   });
 });

@@ -2,6 +2,8 @@ import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import type Database from 'better-sqlite3';
 import { createKnowledgeId, normalizeKnowledgePath } from './KnowledgeIds.js';
+import { deriveCitationContext, tryParseCitationContext } from './KnowledgeCitationContext.js';
+import { parseMessagePayload, serializeMessagePayload, type MessagePayloadV2 } from './KnowledgeChatPayload.js';
 import {
   buildKnowledgeSearchContext,
   searchKnowledge,
@@ -146,24 +148,11 @@ interface MessageRow {
   created_at: string;
 }
 
-interface MessagePayload {
-  content: string;
-  citations: KnowledgeSearchCitation[];
-  retrievalMode: KnowledgeSearchMode | null;
-}
-
 interface ProjectRow {
   workspace_root: string;
 }
 
 const DEFAULT_HISTORY_LIMIT = 50;
-const ALLOWED_KNOWLEDGE_SEARCH_MODES = new Set<KnowledgeSearchMode>([
-  'knowledge',
-  'sources',
-  'tasks',
-  'hybrid',
-  'read-sources-only',
-]);
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -193,57 +182,6 @@ function rowToConversation(row: ConversationRow): KnowledgeConversationRecord {
 
 function conversationRelativePath(conversationId: string, messageId: string): string {
   return `conversations/${conversationId}/${messageId}.json`;
-}
-
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && Object.getPrototypeOf(value) === Object.prototype;
-}
-
-function parseMessagePayload(raw: string): MessagePayload {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw) as unknown;
-  } catch {
-    throw new Error('Knowledge chat payload must contain valid JSON');
-  }
-  if (!isPlainObject(parsed)) {
-    throw new Error('Knowledge chat payload must be a plain object');
-  }
-  if (typeof parsed.content !== 'string') {
-    throw new Error('Knowledge chat payload content must be a string');
-  }
-  if (!Array.isArray(parsed.citations)) {
-    throw new Error('Knowledge chat payload citations must be an array');
-  }
-  for (const [index, citation] of parsed.citations.entries()) {
-    if (!isPlainObject(citation)) {
-      throw new Error(`Knowledge chat payload citation ${index + 1} must be a plain object`);
-    }
-    for (const key of ['pageId', 'sourceId', 'path', 'url'] as const) {
-      const value = citation[key];
-      if (value !== null && value !== undefined && typeof value !== 'string') {
-        throw new Error(`Knowledge chat payload citation ${index + 1} field ${key} must be a string or null`);
-      }
-    }
-    if (citation.span !== null && citation.span !== undefined) {
-      if (!isPlainObject(citation.span)) {
-        throw new Error(`Knowledge chat payload citation ${index + 1} span must be a plain object or null`);
-      }
-      if (typeof citation.span.id !== 'string') {
-        throw new Error(`Knowledge chat payload citation ${index + 1} span id must be a string`);
-      }
-    }
-  }
-  if (parsed.retrievalMode !== null && parsed.retrievalMode !== undefined) {
-    if (typeof parsed.retrievalMode !== 'string' || !ALLOWED_KNOWLEDGE_SEARCH_MODES.has(parsed.retrievalMode as KnowledgeSearchMode)) {
-      throw new Error('Knowledge chat payload retrievalMode must be a supported search mode or null');
-    }
-  }
-  return {
-    content: parsed.content,
-    citations: parsed.citations as KnowledgeSearchCitation[],
-    retrievalMode: (parsed.retrievalMode ?? null) as KnowledgeSearchMode | null,
-  };
 }
 
 /**
@@ -432,13 +370,7 @@ export class KnowledgeChatService {
     const message = this.getMessage(input.projectId, input.messageId);
     const workspaceRoot = this.workspaceRoot(message.projectId);
 
-    const provenance: KnowledgeProvenanceRef[] = message.citations
-      .filter((citation) => citation.sourceId !== null)
-      .map((citation) => ({
-        kind: 'source',
-        id: citation.sourceId as string,
-        path: citation.path ?? undefined,
-      }));
+    const provenance = citationProvenance(message.citations);
 
     const contentPath = pageContentPath(input.type, input.slug);
     const outputRoot = this.knowledgeOutputRoot(workspaceRoot);
@@ -521,7 +453,9 @@ export class KnowledgeChatService {
       }
 
       const searchContext = buildKnowledgeSearchContext(searchResults, { tokenBudget: params.tokenBudget });
-      const citations = dedupeCitations(searchContext.results.flatMap((result) => result.citations));
+      const citations = dedupeCitations(searchContext.results.flatMap((result) => result.citations)).map((citation) =>
+        this.citationWithContext(conversation.projectId, citation),
+      );
 
       let providerId: string;
       try {
@@ -672,9 +606,10 @@ export class KnowledgeChatService {
     },
   ): KnowledgeChatMessageRecord {
     const relativePath = conversationRelativePath(input.conversationId, input.id);
+    const citations = input.citations.map((citation) => this.citationWithContext(input.projectId, citation));
     this.writePayload(workspaceRoot, relativePath, {
       content: input.content,
-      citations: input.citations,
+      citations,
       retrievalMode: input.retrievalMode,
     });
     this.db
@@ -696,7 +631,7 @@ export class KnowledgeChatService {
       conversationId: input.conversationId,
       role: input.role,
       content: input.content,
-      citations: input.citations,
+      citations,
       retrievalMode: input.retrievalMode,
       createdAt: input.createdAt,
     };
@@ -716,13 +651,22 @@ export class KnowledgeChatService {
     };
   }
 
-  private writePayload(workspaceRoot: string, relativePath: string, payload: MessagePayload): void {
-    const absolutePath = resolveConversationPayloadPath(workspaceRoot, relativePath);
-    mkdirSync(path.dirname(absolutePath), { recursive: true });
-    writeFileSync(absolutePath, JSON.stringify(payload), { encoding: 'utf8', flag: 'w' });
+  private citationWithContext(projectId: string, citation: KnowledgeSearchCitation): KnowledgeSearchCitation {
+    if (tryParseCitationContext(citation.context) !== null) return citation;
+    return { ...citation, context: deriveCitationContext(this.db, projectId, citation) };
   }
 
-  private readPayload(workspaceRoot: string, relativePath: string): MessagePayload {
+  private writePayload(
+    workspaceRoot: string,
+    relativePath: string,
+    payload: Pick<MessagePayloadV2, 'content' | 'citations' | 'retrievalMode'>,
+  ): void {
+    const absolutePath = resolveConversationPayloadPath(workspaceRoot, relativePath);
+    mkdirSync(path.dirname(absolutePath), { recursive: true });
+    writeFileSync(absolutePath, serializeMessagePayload(payload), { encoding: 'utf8', flag: 'w' });
+  }
+
+  private readPayload(workspaceRoot: string, relativePath: string): MessagePayloadV2 {
     const raw = readFileSync(resolveConversationPayloadPath(workspaceRoot, relativePath), 'utf8');
     return parseMessagePayload(raw);
   }
@@ -741,6 +685,49 @@ export class KnowledgeChatService {
       this.deleteMessageRow(workspaceRoot, row);
     }
   }
+}
+
+/**
+ * Resolves the strongest persisted provenance per citation: an exact span id,
+ * then source version plus coordinates, then source-only. Duplicates collapse.
+ */
+function citationProvenance(citations: readonly KnowledgeSearchCitation[]): KnowledgeProvenanceRef[] {
+  const seen = new Set<string>();
+  const provenance: KnowledgeProvenanceRef[] = [];
+  for (const citation of citations) {
+    if (citation.sourceId === null) continue;
+    const context = tryParseCitationContext(citation.context);
+    const span = citation.span;
+    const reference: KnowledgeProvenanceRef = {
+      kind: 'source',
+      id: citation.sourceId,
+      path: citation.path ?? undefined,
+      ...(context?.sourceSpanId ? { sourceSpanId: context.sourceSpanId } : {}),
+      ...(context?.sourceVersionId ? { sourceVersionId: context.sourceVersionId } : {}),
+      ...(context?.sourceVersionId && span
+        ? {
+            startOffset: span.startOffset,
+            endOffset: span.endOffset,
+            ...(span.startLine !== undefined ? { startLine: span.startLine } : {}),
+            ...(span.startColumn !== undefined ? { startColumn: span.startColumn } : {}),
+            ...(span.endLine !== undefined ? { endLine: span.endLine } : {}),
+            ...(span.endColumn !== undefined ? { endColumn: span.endColumn } : {}),
+            ...(span.label ? { label: span.label } : {}),
+          }
+        : {}),
+    };
+    const key = [
+      reference.id,
+      reference.sourceSpanId ?? '',
+      reference.sourceVersionId ?? '',
+      reference.startOffset ?? '',
+      reference.endOffset ?? '',
+    ].join('\0');
+    if (seen.has(key)) continue;
+    seen.add(key);
+    provenance.push(reference);
+  }
+  return provenance;
 }
 
 function pageContentPath(type: string, slug: string): string {

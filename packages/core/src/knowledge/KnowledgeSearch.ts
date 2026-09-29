@@ -13,6 +13,7 @@ import {
   type PersistedSpanRow,
   type SearchIndexCandidate,
 } from './KnowledgeSearchIndex.js';
+import type { KnowledgeCitationContext } from './KnowledgeCitationContext.js';
 import type {
   KnowledgePageId,
   KnowledgePageType,
@@ -39,6 +40,8 @@ export interface KnowledgeSearchCitation {
     endColumn?: number;
     label: string | null;
   } | null;
+  /** Additive, reference-only context; absent on citations produced before context was persisted. */
+  context?: KnowledgeCitationContext;
 }
 
 export interface KnowledgeSearchGraphExpansion {

@@ -1,7 +1,28 @@
 import type Database from 'better-sqlite3';
 import { redact, redactLines } from '../Redactor.js';
 import { createKnowledgeId } from './KnowledgeIds.js';
+import {
+  KNOWLEDGE_JOB_RESULT_SCHEMA_VERSION,
+  parseStoredKnowledgeJobResult,
+  validateAnalyzedJobResult,
+  type KnowledgeAnalyzedJobResult,
+  type KnowledgeJobProcessingMode,
+  type KnowledgeJobResult,
+  type KnowledgeJobResultInput,
+  type KnowledgeJobResultLegacyState,
+} from './KnowledgeJobResult.js';
 import type { KnowledgeJobId, KnowledgeJobStatus } from './KnowledgeTypes.js';
+
+export type {
+  KnowledgeAnalyzedJobResult,
+  KnowledgeCoverageOnlyJobResult,
+  KnowledgeJobProcessingMode,
+  KnowledgeJobResult,
+  KnowledgeJobResultBase,
+  KnowledgeJobResultInput,
+  KnowledgeJobResultLegacyState,
+  KnowledgeJobResultWarning,
+} from './KnowledgeJobResult.js';
 
 export interface EnqueueKnowledgeJobInput {
   projectId: string;
@@ -28,24 +49,10 @@ export interface KnowledgeJobRecord {
   workerId: string | null;
   leaseExpiresAt: string | null;
   result: KnowledgeJobResult | null;
-}
-
-export interface KnowledgeJobResultWarning {
-  code: string;
-  message: string;
-}
-
-export type KnowledgeJobProcessingMode = KnowledgeJobResult['processingMode'] | 'unknown';
-
-export interface KnowledgeJobResult {
-  processingMode: 'deterministic' | 'enriched';
-  analyzerId: string;
-  analyzerVersion: string;
-  extractionId: string;
-  pageVersionIds: string[];
-  graphNodeCount: number;
-  graphEdgeCount: number;
-  warnings: KnowledgeJobResultWarning[];
+  /** `knowledge_jobs.result_schema_version`: null for legacy rows, 1 for the versioned envelope. */
+  resultSchemaVersion: number | null;
+  /** Explicit compatibility state; null when the job has no completed result to interpret. */
+  resultState: KnowledgeJobResultLegacyState | null;
 }
 
 export interface KnowledgeQueueStatus {
@@ -96,6 +103,7 @@ interface JobRow {
   payload_json: string;
   result_json: string | null;
   result_processing_mode: KnowledgeJobProcessingMode | null;
+  result_schema_version?: number | null;
   requested_at: string;
   started_at: string | null;
   completed_at: string | null;
@@ -140,64 +148,8 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-function requireNonEmptyString(value: unknown, label: string): string {
-  if (typeof value !== 'string' || value.trim().length === 0) {
-    throw new Error(`Knowledge queue ${label} must be a non-empty string`);
-  }
-  return value;
-}
-
-function requireNonNegativeInteger(value: unknown, label: string): number {
-  if (!Number.isInteger(value) || (value as number) < 0) {
-    throw new Error(`Knowledge queue ${label} must be a non-negative integer`);
-  }
-  return value as number;
-}
-
-function validateKnowledgeJobResult(value: unknown): KnowledgeJobResult {
-  if (!isRecord(value)) throw new Error('Knowledge queue result must be an object');
-  const processingMode = value.processingMode;
-  if (processingMode !== 'deterministic' && processingMode !== 'enriched') {
-    throw new Error('Knowledge queue result processingMode must be deterministic or enriched');
-  }
-  if (!Array.isArray(value.pageVersionIds)) {
-    throw new Error('Knowledge queue result pageVersionIds must be an array');
-  }
-  if (!Array.isArray(value.warnings)) {
-    throw new Error('Knowledge queue result warnings must be an array');
-  }
-  return {
-    processingMode,
-    analyzerId: requireNonEmptyString(value.analyzerId, 'result analyzerId'),
-    analyzerVersion: requireNonEmptyString(value.analyzerVersion, 'result analyzerVersion'),
-    extractionId: requireNonEmptyString(value.extractionId, 'result extractionId'),
-    pageVersionIds: value.pageVersionIds.map((item) => requireNonEmptyString(item, 'result pageVersionId')),
-    graphNodeCount: requireNonNegativeInteger(value.graphNodeCount, 'result graphNodeCount'),
-    graphEdgeCount: requireNonNegativeInteger(value.graphEdgeCount, 'result graphEdgeCount'),
-    warnings: value.warnings.map((warning) => {
-      if (!isRecord(warning)) throw new Error('Knowledge queue result warning must be an object');
-      return {
-        code: requireNonEmptyString(warning.code, 'result warning code'),
-        message: requireNonEmptyString(warning.message, 'result warning message'),
-      };
-    }),
-  };
-}
-
-function parseResult(value: string | null, processingMode: KnowledgeJobProcessingMode | null): KnowledgeJobResult | null {
-  if (value === null) return null;
-  try {
-    return validateKnowledgeJobResult(JSON.parse(value) as unknown);
-  } catch (error: unknown) {
-    if (processingMode === 'unknown') {
-      return null;
-    }
-    throw new Error('Knowledge queue stored result is malformed', { cause: error });
-  }
-}
-
-function sanitizePersistedResult(result: KnowledgeJobResult): KnowledgeJobResult {
-  const validated = validateKnowledgeJobResult(result);
+function sanitizePersistedResult(result: KnowledgeJobResultInput): KnowledgeAnalyzedJobResult {
+  const validated = validateAnalyzedJobResult({ resultKind: 'analyzed', ...result });
   return {
     ...validated,
     pageVersionIds: validated.pageVersionIds.slice(0, MAX_PROGRESS_ARRAY_ITEMS),
@@ -269,6 +221,12 @@ function sanitizeProgressDetail(detail: Record<string, unknown>): Record<string,
 }
 
 function rowToJob(row: JobRow): KnowledgeJobRecord {
+  const parsed = parseStoredKnowledgeJobResult(
+    row.result_json,
+    row.result_schema_version ?? null,
+    row.result_processing_mode,
+    row.status,
+  );
   return {
     id: row.id as KnowledgeJobId,
     projectId: row.project_id,
@@ -285,7 +243,9 @@ function rowToJob(row: JobRow): KnowledgeJobRecord {
     maxRetries: row.max_retries,
     workerId: row.worker_id,
     leaseExpiresAt: row.lease_expires_at,
-    result: parseResult(row.result_json, row.result_processing_mode),
+    result: parsed.result,
+    resultSchemaVersion: row.result_schema_version ?? null,
+    resultState: parsed.legacyState,
   };
 }
 
@@ -424,7 +384,7 @@ export class KnowledgeQueue {
   public complete(
     jobId: string,
     workerId: string,
-    result?: KnowledgeJobResult,
+    result?: KnowledgeJobResultInput,
     options: { progress?: KnowledgeTerminalProgressInput } = {},
   ): KnowledgeJobRecord {
     const persistedResult = result === undefined ? null : sanitizePersistedResult(result);
@@ -434,7 +394,8 @@ export class KnowledgeQueue {
         .prepare(
           `UPDATE knowledge_jobs
            SET status = 'completed', completed_at = @now, worker_id = NULL, lease_expires_at = NULL,
-               result_json = @resultJson, result_processing_mode = @resultProcessingMode
+               result_json = @resultJson, result_processing_mode = @resultProcessingMode,
+               result_schema_version = @resultSchemaVersion
            WHERE id = @id
              AND status = 'running'
              AND worker_id = @workerId
@@ -451,6 +412,7 @@ export class KnowledgeQueue {
           now,
           resultJson: persistedResult === null ? null : JSON.stringify(persistedResult),
           resultProcessingMode: persistedResult?.processingMode ?? 'unknown',
+          resultSchemaVersion: persistedResult === null ? null : KNOWLEDGE_JOB_RESULT_SCHEMA_VERSION,
         });
       if (completion.changes !== 1) {
         throw new KnowledgeQueueTransitionError(

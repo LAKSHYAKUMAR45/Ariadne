@@ -284,6 +284,319 @@ describe('KnowledgeChatService', () => {
     expect(page.provenance).toEqual([{ kind: 'source', id: 'source_1', confidence: 1 }]);
   });
 
+  describe('citation context and payload versions', () => {
+    const SPAN = { id: 'span_1', startOffset: 0, endOffset: 12, startLine: 1, startColumn: 1, endLine: 2, endColumn: 5, label: 'Setup' };
+    const CITATION = { pageId: null, sourceId: 'source_1', path: 'docs/setup-guide.md', url: null, span: SPAN };
+
+    function seedSpan(db: ReturnType<typeof openDatabase>): void {
+      db.prepare(
+        `INSERT INTO knowledge_source_spans
+         (id, project_id, source_version_id, start_offset, end_offset, start_line, start_column, end_line, end_column, label, created_at)
+         VALUES ('span_1', 'project_1', 'source_version_1', 0, 12, 1, 1, 2, 5, 'Setup', ?)`,
+      ).run(CREATED_AT);
+    }
+
+    function insertMessage(
+      db: ReturnType<typeof openDatabase>,
+      workspaceRoot: string,
+      payload: Record<string, unknown>,
+      role: 'user' | 'assistant' = 'assistant',
+      id = 'message_1',
+    ): string {
+      db.prepare(
+        `INSERT OR IGNORE INTO knowledge_conversations (id, project_id, title, created_at, updated_at)
+         VALUES ('conversation_1', 'project_1', 'Seeded', ?, ?)`,
+      ).run(CREATED_AT, CREATED_AT);
+      const relative = `conversations/conversation_1/${id}.json`;
+      mkdirSync(join(workspaceRoot, 'conversations', 'conversation_1'), { recursive: true });
+      writeFileSync(join(workspaceRoot, relative), JSON.stringify(payload), 'utf8');
+      db.prepare(
+        `INSERT INTO knowledge_messages (id, project_id, conversation_id, role, content_path, created_at)
+         VALUES (?, 'project_1', 'conversation_1', ?, ?, ?)`,
+      ).run(id, role, relative, CREATED_AT);
+      return id;
+    }
+
+    function savedSpanIds(db: ReturnType<typeof openDatabase>): Array<string | null> {
+      return (
+        db.prepare('SELECT source_span_id FROM knowledge_page_provenance ORDER BY rowid').all() as Array<{ source_span_id: string | null }>
+      ).map((row) => row.source_span_id);
+    }
+
+    it('writes V2 payloads with reference-only context and no synthesis slot', async () => {
+      const { db, workspaceRoot } = createDatabase();
+      seedSource(db);
+      const service = new KnowledgeChatService(db, registryWithChatProvider(), chunkProvider(['answer']));
+      const conversation = service.createConversation({ projectId: 'project_1' });
+      const events = await collect(
+        service.streamKnowledgeChat({ projectId: 'project_1', conversationId: conversation.id, query: 'setup guide', mode: 'sources' }),
+      );
+      const done = events.find((event) => event.type === 'done') as Extract<KnowledgeChatEvent, { type: 'done' }>;
+      const citationEvent = events.find((event) => event.type === 'citation') as Extract<KnowledgeChatEvent, { type: 'citation' }>;
+
+      const raw = readFileSync(join(workspaceRoot, 'conversations', conversation.id, `${done.messageId}.json`), 'utf8');
+      const payload = JSON.parse(raw) as { schemaVersion: number; citations: Array<{ context: Record<string, unknown> }>; synthesis?: unknown };
+      expect(payload.schemaVersion).toBe(2);
+      expect(payload).not.toHaveProperty('synthesis');
+      expect(payload.citations[0]?.context).toMatchObject({
+        sourceSpanId: null,
+        matchKind: 'metadata_only',
+        snippetPolicy: 'reference_only',
+        legacyState: 'current',
+      });
+      expect(citationEvent.citation.context).toEqual(payload.citations[0]?.context);
+      expect(done.message.citations[0]?.context?.legacyState).toBe('current');
+
+      const userPayload = JSON.parse(
+        readFileSync(join(workspaceRoot, 'conversations', conversation.id, `${service.listMessages('project_1', conversation.id)[0]!.id}.json`), 'utf8'),
+      ) as { schemaVersion: number };
+      expect(userPayload.schemaVersion).toBe(2);
+    });
+
+    it('persists span-backed citations with the verified source version and never raw excerpts', async () => {
+      const { db, workspaceRoot } = createDatabase();
+      seedSource(db);
+      seedSpan(db);
+      const spanCitation = { ...CITATION, excerpt: 'SECRET SOURCE TEXT' };
+      const service = new KnowledgeChatService(db, registryWithChatProvider(), chunkProvider(['answer']));
+      const conversation = service.createConversation({ projectId: 'project_1' });
+      // Provider search results are internal; exercise the persistence boundary directly.
+      const written = (service as unknown as {
+        writeMessage: (root: string, input: Record<string, unknown>) => { citations: Array<{ context?: Record<string, unknown> }> };
+      }).writeMessage(workspaceRoot, {
+        id: 'message_direct',
+        projectId: 'project_1',
+        conversationId: conversation.id,
+        role: 'assistant',
+        content: 'answer',
+        citations: [spanCitation],
+        retrievalMode: 'sources',
+        createdAt: CREATED_AT,
+      });
+      const raw = readFileSync(join(workspaceRoot, 'conversations', conversation.id, 'message_direct.json'), 'utf8');
+      expect(raw).not.toContain('SECRET SOURCE TEXT');
+      expect(written.citations[0]?.context).toMatchObject({
+        sourceVersionId: 'source_version_1',
+        sourceSpanId: 'span_1',
+        matchKind: 'exact_span',
+        snippetPolicy: 'reference_only',
+        startLineWindow: 1,
+        endLineWindow: 2,
+      });
+    });
+
+    it('coerces an ephemeral snippet policy to reference_only when persisting', () => {
+      const { db, workspaceRoot } = createDatabase();
+      seedSource(db);
+      seedSpan(db);
+      const service = new KnowledgeChatService(db, registryWithChatProvider(), chunkProvider(['answer']));
+      const conversation = service.createConversation({ projectId: 'project_1' });
+      (service as unknown as { writeMessage: (root: string, input: Record<string, unknown>) => unknown }).writeMessage(workspaceRoot, {
+        id: 'message_eph',
+        projectId: 'project_1',
+        conversationId: conversation.id,
+        role: 'assistant',
+        content: 'answer',
+        citations: [
+          {
+            ...CITATION,
+            context: {
+              sourceVersionId: 'source_version_1',
+              sourceSpanId: 'span_1',
+              fieldKind: 'section',
+              fieldLabel: 'Setup',
+              matchKind: 'exact_span',
+              snippetPolicy: 'ephemeral_redacted',
+              startLineWindow: 1,
+              endLineWindow: 2,
+              legacyState: 'current',
+            },
+          },
+        ],
+        retrievalMode: null,
+        createdAt: CREATED_AT,
+      });
+      const payload = JSON.parse(readFileSync(join(workspaceRoot, 'conversations', conversation.id, 'message_eph.json'), 'utf8')) as {
+        citations: Array<{ context: { snippetPolicy: string } }>;
+      };
+      expect(payload.citations[0]?.context.snippetPolicy).toBe('reference_only');
+    });
+
+    it('reads legacy payloads without schemaVersion as legacy_payload and does not rewrite them', () => {
+      const { db, workspaceRoot } = createDatabase();
+      seedSource(db);
+      const service = new KnowledgeChatService(db, registryWithChatProvider(), chunkProvider(['unused']));
+      const legacy = { content: 'old answer', citations: [CITATION], retrievalMode: 'sources' };
+      insertMessage(db, workspaceRoot, legacy);
+
+      const message = service.getMessage('project_1', 'message_1');
+      expect(message.citations[0]?.context).toMatchObject({
+        legacyState: 'legacy_payload',
+        matchKind: 'legacy_unknown',
+        sourceSpanId: 'span_1',
+        sourceVersionId: null,
+      });
+      expect(JSON.parse(readFileSync(join(workspaceRoot, 'conversations', 'conversation_1', 'message_1.json'), 'utf8'))).toEqual(legacy);
+    });
+
+    it('marks malformed context in a V2 payload as legacy_unknown instead of failing the read', () => {
+      const { db, workspaceRoot } = createDatabase();
+      seedSource(db);
+      const service = new KnowledgeChatService(db, registryWithChatProvider(), chunkProvider(['unused']));
+      insertMessage(db, workspaceRoot, {
+        schemaVersion: 2,
+        content: 'answer',
+        citations: [{ ...CITATION, context: { matchKind: 'bogus', excerpt: 'leak' } }],
+        retrievalMode: null,
+      });
+      const [message] = [service.getMessage('project_1', 'message_1')];
+      expect(message.citations[0]?.context).toMatchObject({ legacyState: 'legacy_unknown', matchKind: 'legacy_unknown' });
+      expect(JSON.stringify(message)).not.toContain('leak');
+    });
+
+    it('regenerates from a legacy user payload', async () => {
+      const { db, workspaceRoot } = createDatabase();
+      seedSource(db);
+      const service = new KnowledgeChatService(db, registryWithChatProvider(), chunkProvider(['fresh']));
+      insertMessage(db, workspaceRoot, { content: 'setup guide', citations: [], retrievalMode: 'sources' }, 'user', 'message_user');
+      insertMessage(db, workspaceRoot, { content: 'old', citations: [], retrievalMode: 'sources' }, 'assistant', 'message_assistant');
+      const events = await collect(service.regenerateKnowledgeChat({ projectId: 'project_1', messageId: 'message_assistant' }));
+      expect(events[0]).toMatchObject({ type: 'meta', retrievalMode: 'sources' });
+      expect(events[events.length - 1]).toMatchObject({ type: 'done' });
+    });
+
+    it('reuses context.sourceSpanId when saving a message to a page', () => {
+      const { db, workspaceRoot } = createDatabase();
+      seedSource(db);
+      seedSpan(db);
+      const service = new KnowledgeChatService(db, registryWithChatProvider(), chunkProvider(['unused']));
+      insertMessage(db, workspaceRoot, {
+        schemaVersion: 2,
+        content: 'Setup instructions',
+        citations: [
+          {
+            ...CITATION,
+            span: { ...SPAN, startOffset: 999, endOffset: 1000 },
+            context: {
+              sourceVersionId: 'source_version_1',
+              sourceSpanId: 'span_1',
+              fieldKind: 'section',
+              fieldLabel: 'Setup',
+              matchKind: 'exact_span',
+              snippetPolicy: 'reference_only',
+              startLineWindow: 1,
+              endLineWindow: 2,
+              legacyState: 'current',
+            },
+          },
+        ],
+        retrievalMode: 'sources',
+      });
+
+      const page = service.saveMessageToPage({ projectId: 'project_1', messageId: 'message_1', type: 'synthesis', title: 'Setup', slug: 'setup' });
+      expect(savedSpanIds(db)).toEqual(['span_1']);
+      expect(page.provenance).toEqual([
+        expect.objectContaining({ kind: 'source', id: 'source_1', sourceVersionId: 'source_version_1', startOffset: 0, endOffset: 12 }),
+      ]);
+    });
+
+    it('falls back to source version plus coordinates, then to source-only provenance', () => {
+      const { db, workspaceRoot } = createDatabase();
+      seedSource(db);
+      seedSpan(db);
+      const service = new KnowledgeChatService(db, registryWithChatProvider(), chunkProvider(['unused']));
+      const coordinateContext = {
+        sourceVersionId: 'source_version_1',
+        sourceSpanId: null,
+        fieldKind: 'section',
+        fieldLabel: 'Setup',
+        matchKind: 'exact_span',
+        snippetPolicy: 'reference_only',
+        startLineWindow: 1,
+        endLineWindow: 2,
+        legacyState: 'current',
+      };
+      insertMessage(db, workspaceRoot, {
+        schemaVersion: 2,
+        content: 'By coordinates',
+        citations: [{ ...CITATION, context: coordinateContext }],
+        retrievalMode: null,
+      });
+      service.saveMessageToPage({ projectId: 'project_1', messageId: 'message_1', type: 'synthesis', title: 'Coords', slug: 'coords' });
+      expect(savedSpanIds(db)).toEqual(['span_1']);
+
+      insertMessage(db, workspaceRoot, { content: 'Legacy only', citations: [{ ...CITATION, span: null }], retrievalMode: null }, 'assistant', 'message_2');
+      service.saveMessageToPage({ projectId: 'project_1', messageId: 'message_2', type: 'synthesis', title: 'Legacy', slug: 'legacy' });
+      expect(savedSpanIds(db)).toEqual(['span_1', null]);
+    });
+
+    it('does not reuse a span id that belongs to another source or project', () => {
+      const { db, workspaceRoot } = createDatabase();
+      seedSource(db);
+      seedSpan(db);
+      const service = new KnowledgeChatService(db, registryWithChatProvider(), chunkProvider(['unused']));
+      insertMessage(db, workspaceRoot, {
+        schemaVersion: 2,
+        content: 'Mismatched',
+        citations: [
+          {
+            ...CITATION,
+            sourceId: 'source_other',
+            span: null,
+            context: {
+              sourceVersionId: null,
+              sourceSpanId: 'span_1',
+              fieldKind: 'section',
+              fieldLabel: null,
+              matchKind: 'exact_span',
+              snippetPolicy: 'reference_only',
+              startLineWindow: null,
+              endLineWindow: null,
+              legacyState: 'current',
+            },
+          },
+        ],
+        retrievalMode: null,
+      });
+      service.saveMessageToPage({ projectId: 'project_1', messageId: 'message_1', type: 'synthesis', title: 'Mismatch', slug: 'mismatch' });
+      expect(savedSpanIds(db)).toEqual([null]);
+    });
+
+    it('keeps distinct spans of the same source as separate provenance rows', () => {
+      const { db, workspaceRoot } = createDatabase();
+      seedSource(db);
+      seedSpan(db);
+      db.prepare(
+        `INSERT INTO knowledge_source_spans (id, project_id, source_version_id, start_offset, end_offset, start_line, start_column, end_line, end_column, label, created_at)
+         VALUES ('span_2', 'project_1', 'source_version_1', 20, 30, 4, 1, 5, 1, 'Install', ?)`,
+      ).run(CREATED_AT);
+      const service = new KnowledgeChatService(db, registryWithChatProvider(), chunkProvider(['unused']));
+      const context = (spanId: string) => ({
+        sourceVersionId: 'source_version_1',
+        sourceSpanId: spanId,
+        fieldKind: 'section',
+        fieldLabel: null,
+        matchKind: 'exact_span',
+        snippetPolicy: 'reference_only',
+        startLineWindow: null,
+        endLineWindow: null,
+        legacyState: 'current',
+      });
+      insertMessage(db, workspaceRoot, {
+        schemaVersion: 2,
+        content: 'Two spans',
+        citations: [
+          { ...CITATION, context: context('span_1') },
+          { ...CITATION, span: { ...SPAN, id: 'span_2', startOffset: 20, endOffset: 30 }, context: context('span_2') },
+          { ...CITATION, context: context('span_1') },
+        ],
+        retrievalMode: null,
+      });
+      service.saveMessageToPage({ projectId: 'project_1', messageId: 'message_1', type: 'synthesis', title: 'Two', slug: 'two' });
+      expect(savedSpanIds(db)).toEqual(['span_1', 'span_2']);
+    });
+  });
+
   it('rejects unsafe page paths when saving chat output', async () => {
     const { db } = createDatabase();
     const service = new KnowledgeChatService(db, registryWithChatProvider(), chunkProvider(['answer']));

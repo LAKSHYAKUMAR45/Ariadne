@@ -112,6 +112,95 @@ describe('KnowledgeQueue', () => {
     expect(persisted.result_processing_mode).toBe('unknown');
   });
 
+  describe('versioned analyzed job results', () => {
+    const analyzed = {
+      processingMode: 'deterministic' as const,
+      analyzerId: 'python-detector',
+      analyzerVersion: '1.0.0',
+      extractionId: 'extraction_1',
+      pageVersionIds: ['page-version_1'],
+      graphNodeCount: 4,
+      graphEdgeCount: 2,
+      warnings: [],
+    };
+
+    function completeWithRawResult(resultJson: string | null, mode: string | null, version: number | null, status = 'completed') {
+      const job = queue.enqueue({ projectId: 'project_1', jobKind: 'extract', payload: {} });
+      db.prepare(
+        `UPDATE knowledge_jobs
+         SET status = ?, completed_at = ?, result_json = ?, result_processing_mode = ?, result_schema_version = ?
+         WHERE id = ?`,
+      ).run(status, '2026-01-01T00:00:00.000Z', resultJson, mode, version, job.id);
+      return queue.get(job.id)!;
+    }
+
+    it('writes result_schema_version 1 with an analyzed envelope and reads it back as current', () => {
+      const job = queue.enqueue({ projectId: 'project_1', jobKind: 'extract', payload: {} });
+      queue.claim('project_1', 'worker-a');
+      const completed = queue.complete(job.id, 'worker-a', analyzed);
+
+      const persisted = db
+        .prepare('SELECT result_json, result_schema_version FROM knowledge_jobs WHERE id = ?')
+        .get(job.id) as { result_json: string; result_schema_version: number };
+      expect(persisted.result_schema_version).toBe(1);
+      expect(JSON.parse(persisted.result_json)).toMatchObject({ resultKind: 'analyzed', analyzerId: 'python-detector' });
+      expect(JSON.parse(persisted.result_json)).not.toHaveProperty('legacyState');
+      expect(completed.resultSchemaVersion).toBe(1);
+      expect(completed.resultState).toBe('current');
+      expect(completed.result).toMatchObject({ resultKind: 'analyzed', legacyState: 'current', extractionId: 'extraction_1' });
+      expect(queue.get(job.id)?.result).toEqual(completed.result);
+    });
+
+    it('still accepts an explicit analyzed resultKind and ignores a caller-supplied legacyState when persisting', () => {
+      const job = queue.enqueue({ projectId: 'project_1', jobKind: 'extract', payload: {} });
+      queue.claim('project_1', 'worker-a');
+      queue.complete(job.id, 'worker-a', { ...analyzed, resultKind: 'analyzed', legacyState: 'legacy_unknown', coverageStatus: 'partial' });
+      const stored = JSON.parse(
+        (db.prepare('SELECT result_json FROM knowledge_jobs WHERE id = ?').get(job.id) as { result_json: string }).result_json,
+      );
+      expect(stored).toMatchObject({ resultKind: 'analyzed', coverageStatus: 'partial' });
+      expect(stored).not.toHaveProperty('legacyState');
+      expect(queue.get(job.id)!.resultState).toBe('current');
+    });
+
+    it('reads a legacy result with NULL result_schema_version as an analyzed legacy_payload', () => {
+      const record = completeWithRawResult(JSON.stringify(analyzed), 'deterministic', null);
+      expect(record.resultSchemaVersion).toBeNull();
+      expect(record.resultState).toBe('legacy_payload');
+      expect(record.result).toMatchObject({ resultKind: 'analyzed', legacyState: 'legacy_payload', analyzerId: 'python-detector' });
+    });
+
+    it.each([
+      ['unparseable JSON', '{not json', 'deterministic', null],
+      ['a legacy shape missing required fields', JSON.stringify({ processingMode: 'deterministic' }), 'deterministic', null],
+      ['a version 1 envelope without resultKind', JSON.stringify(analyzed), 'deterministic', 1],
+      ['a version 1 envelope with an unsupported resultKind', JSON.stringify({ ...analyzed, resultKind: 'coverage_only' }), 'deterministic', 1],
+      ['an unknown future schema version', JSON.stringify({ ...analyzed, resultKind: 'analyzed' }), 'deterministic', 99],
+      ['a valid result stored with unknown processing mode', JSON.stringify(analyzed), 'unknown', null],
+    ])('maps %s to legacy_unknown without throwing', (_label, json, mode, version) => {
+      const record = completeWithRawResult(json, mode, version);
+      expect(record.result).toBeNull();
+      expect(record.resultState).toBe('legacy_unknown');
+    });
+
+    it('reports legacy_unknown for completed jobs without a result and null for other statuses', () => {
+      expect(completeWithRawResult(null, 'unknown', null).resultState).toBe('legacy_unknown');
+      expect(completeWithRawResult(null, null, null, 'failed').resultState).toBeNull();
+      expect(queue.enqueue({ projectId: 'project_1', jobKind: 'extract', payload: {} }).resultState).toBeNull();
+    });
+
+    it('keeps completing without result metadata as unknown mode and no schema version', () => {
+      const job = queue.enqueue({ projectId: 'project_1', jobKind: 'extract', payload: {} });
+      queue.claim('project_1', 'worker-a');
+      const completed = queue.complete(job.id, 'worker-a');
+      const persisted = db
+        .prepare('SELECT result_processing_mode, result_schema_version FROM knowledge_jobs WHERE id = ?')
+        .get(job.id) as { result_processing_mode: string; result_schema_version: number | null };
+      expect(persisted).toEqual({ result_processing_mode: 'unknown', result_schema_version: null });
+      expect(completed.resultState).toBe('legacy_unknown');
+    });
+  });
+
   it('rejects invalid transitions and enforces worker ownership', () => {
     const job = queue.enqueue({ projectId: 'project_1', jobKind: 'build', payload: {} });
 

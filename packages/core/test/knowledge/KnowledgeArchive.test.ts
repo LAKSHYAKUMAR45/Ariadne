@@ -697,6 +697,113 @@ See [[graph|the graph]].
     );
   });
 
+  describe('citation context and job result versions', () => {
+    const CONTEXT = {
+      sourceVersionId: 'source_version_1',
+      sourceSpanId: 'source_span_1',
+      fieldKind: 'section',
+      fieldLabel: 'SQLite',
+      matchKind: 'exact_span',
+      snippetPolicy: 'reference_only',
+      startLineWindow: 1,
+      endLineWindow: 1,
+      legacyState: 'current',
+    };
+    const CITATION = {
+      pageId: null,
+      sourceId: 'source_1',
+      path: 'docs/sqlite.md',
+      url: null,
+      span: { id: 'source_span_1', startOffset: 0, endOffset: 8, label: 'SQLite' },
+    };
+
+    function v2Payload(citation: Record<string, unknown>, extra: Record<string, unknown> = {}): string {
+      return JSON.stringify({ schemaVersion: 2, content: 'Answer', citations: [citation], retrievalMode: 'sources', ...extra });
+    }
+
+    it('round-trips result_schema_version and imports rows that lack the column as NULL', () => {
+      const source = database();
+      const { projectId } = seed(source);
+      source.prepare(`UPDATE knowledge_jobs SET result_schema_version = 1 WHERE id = 'job_1'`).run();
+      const archive = exportKnowledgeProject(source, { projectId });
+      const rows = JSON.parse(String(archive.files['data/knowledge_jobs.json'])) as Array<Record<string, unknown>>;
+      expect(rows.find((row) => row.id === 'job_1')?.result_schema_version).toBe(1);
+
+      const target = database();
+      importKnowledgeProject(target, archive, importOptions());
+      expect(target.prepare(`SELECT result_schema_version AS version FROM knowledge_jobs WHERE id = 'job_1'`).get()).toEqual({
+        version: 1,
+      });
+
+      const legacyRows = rows.map(({ result_schema_version: _omitted, ...row }) => row);
+      const legacyTarget = database();
+      importKnowledgeProject(legacyTarget, rewriteTableRows(archive, 'knowledge_jobs', legacyRows), importOptions());
+      expect(
+        legacyTarget.prepare(`SELECT result_schema_version AS version FROM knowledge_jobs WHERE id = 'job_1'`).get(),
+      ).toEqual({ version: null });
+    });
+
+    it('rejects a non-integer result_schema_version', () => {
+      const source = database();
+      const { projectId } = seed(source);
+      const archive = exportKnowledgeProject(source, { projectId });
+      const rows = JSON.parse(String(archive.files['data/knowledge_jobs.json'])) as Array<Record<string, unknown>>;
+      const invalid = rewriteTableRows(archive, 'knowledge_jobs', rows.map((row) => ({ ...row, result_schema_version: 'one' })));
+      expect(() => importKnowledgeProject(database(), invalid, importOptions())).toThrow(/result_schema_version must be a finite integer/i);
+    });
+
+    it('round-trips mixed legacy and V2 citation-context payloads without inventing span ids', () => {
+      const source = database();
+      const { projectId, workspaceRoot } = seed(source);
+      writeWorkspaceFile(workspaceRoot, 'conversations/conversation_1/message_1.json', JSON.stringify({ content: 'Legacy', citations: [CITATION], retrievalMode: 'sources' }));
+      writeWorkspaceFile(workspaceRoot, 'conversations/conversation_1/message_2.json', v2Payload({ ...CITATION, context: CONTEXT }));
+      source.prepare(
+        `INSERT INTO knowledge_messages (id, project_id, conversation_id, role, content_path, created_at)
+         VALUES ('message_2', ?, 'conversation_1', 'assistant', 'conversations/conversation_1/message_2.json', '2026-01-02')`,
+      ).run(projectId);
+
+      const archive = exportKnowledgeProject(source, { projectId });
+      expect(archive.manifest.compatibility?.requiredFeatures).toEqual(['knowledge-chat-payload-v2']);
+      const imported = importOptions();
+      importKnowledgeProject(database(), archive, imported);
+      const legacy = JSON.parse(readFileSync(join(imported.workspaceRoot, 'conversations/conversation_1/message_1.json'), 'utf8'));
+      const current = JSON.parse(readFileSync(join(imported.workspaceRoot, 'conversations/conversation_1/message_2.json'), 'utf8'));
+      expect(legacy.citations[0]).not.toHaveProperty('context');
+      expect(current.citations[0].context).toEqual(CONTEXT);
+    });
+
+    it.each([
+      ['excerpt text in context', { ...CONTEXT, excerpt: 'raw source text' }, /citation context/i],
+      ['an ephemeral snippet policy', { ...CONTEXT, snippetPolicy: 'ephemeral_redacted' }, /reference_only/i],
+      ['an unknown match kind', { ...CONTEXT, matchKind: 'fuzzy' }, /citation context/i],
+    ])('rejects imported V2 payloads with %s', (_label, context, message) => {
+      const source = database();
+      const { projectId } = seedWithV2PayloadForContext(source);
+      const archive = exportKnowledgeProject(source, { projectId });
+      const invalid = rewriteArchiveFile(archive, 'conversations/conversation_1/message_1.json', v2Payload({ ...CITATION, context }));
+      expect(() => importKnowledgeProject(database(), invalid, importOptions())).toThrow(message);
+    });
+
+    it('rejects unsupported payload schema versions and non-object synthesis slots', () => {
+      const source = database();
+      const { projectId } = seedWithV2PayloadForContext(source);
+      const archive = exportKnowledgeProject(source, { projectId });
+      const path = 'conversations/conversation_1/message_1.json';
+      expect(() =>
+        importKnowledgeProject(database(), rewriteArchiveFile(archive, path, JSON.stringify({ schemaVersion: 3, content: 'x', citations: [] })), importOptions()),
+      ).toThrow(/schemaVersion/i);
+      expect(() =>
+        importKnowledgeProject(database(), rewriteArchiveFile(archive, path, v2Payload(CITATION, { synthesis: 'x' })), importOptions()),
+      ).toThrow(/synthesis/i);
+    });
+
+    function seedWithV2PayloadForContext(db: ReturnType<typeof openDatabase>) {
+      const seeded = seed(db);
+      writeWorkspaceFile(seeded.workspaceRoot, 'conversations/conversation_1/message_1.json', v2Payload({ ...CITATION, context: CONTEXT }));
+      return seeded;
+    }
+  });
+
   it('rejects imported conversation payload paths when conversations/ traverses a symlink', () => {
     const source = database();
     const { projectId } = seed(source);
