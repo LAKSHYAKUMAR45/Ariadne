@@ -380,4 +380,37 @@ describe('KnowledgeReconciliation', () => {
     const afterNewest = context.reconciliation.reconcileChangedSource(source.id);
     expect(afterNewest.stalePageIds).toEqual([pageOnA.pageId]);
   });
+
+  it('falls back to the highest version for legacy sources with a NULL current_hash', () => {
+    const context = createContext();
+    databases.push(context.db);
+    const register = (content: string) =>
+      context.sources.register({ projectId: 'project-1', kind: 'file', path: 'docs/legacy.md', content });
+    const source = register('A');
+    register('B');
+    const [versionA, versionB] = context.sources.listVersions('project-1', source.id);
+    context.db.prepare('UPDATE knowledge_sources SET current_hash = NULL WHERE id = ?').run(source.id);
+    const pageOnA = context.pages.createPageVersion({
+      projectId: 'project-1',
+      type: 'source',
+      title: 'Legacy A',
+      slug: 'legacy-a',
+      content: 'A content',
+      sourceVersionIds: [versionA!.id],
+      provenance: [{ kind: 'source', id: source.id, confidence: 1 }],
+    });
+    context.pages.createPageVersion({
+      projectId: 'project-1',
+      type: 'source',
+      title: 'Legacy B',
+      slug: 'legacy-b',
+      content: 'B content',
+      sourceVersionIds: [versionB!.id],
+      provenance: [{ kind: 'source', id: source.id, confidence: 1 }],
+    });
+
+    const result = context.reconciliation.reconcileChangedSource(source.id);
+
+    expect(result.stalePageIds).toEqual([pageOnA.pageId]);
+  });
 });

@@ -123,4 +123,16 @@ describe('KnowledgeSourceStore', () => {
     expect(store.currentVersion('project_1', source.id)?.versionNumber).toBe(1);
     expect(store.listVersions('project_1', source.id)).toHaveLength(2);
   });
+  it.each([
+    ['NULL', null],
+    ['unmatched', 'sha256:legacy-unmatched'],
+  ])('falls back to the highest version when current_hash is %s', (_label, hash) => {
+    const source = store.register({ projectId: 'project_1', kind: 'file', path: 'docs/legacy.md', content: 'one' });
+    store.register({ projectId: 'project_1', kind: 'file', path: 'docs/legacy.md', content: 'two' });
+    const versions = store.listVersions('project_1', source.id);
+    db.prepare('UPDATE knowledge_sources SET current_hash = ? WHERE id = ?').run(hash, source.id);
+
+    expect(store.currentVersion('project_1', source.id)).toEqual(versions[1]);
+    expect(store.currentVersion('project_2', source.id)).toBeNull();
+  });
 });

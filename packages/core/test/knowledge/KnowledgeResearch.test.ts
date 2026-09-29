@@ -102,6 +102,7 @@ describe('KnowledgeResearchService', () => {
       pageStore,
       queue,
     });
+    const enqueue = vi.spyOn(queue, 'enqueue');
     let runNumber = 0;
     const run = async (projectId: string) => {
       const request = service.createResearchRequest({ projectId, query: `flip ${(runNumber += 1)}` });
@@ -118,8 +119,8 @@ describe('KnowledgeResearchService', () => {
     expect(versions).toHaveLength(2);
     expect(sourceStore.currentVersion(PROJECT_ID, third.sources[0]!.id)?.id).toBe(versionA.id);
     expect(third.synthesisPage.sourceVersionIds).toEqual([versionA.id]);
-    const jobVersionIds = queue.list(PROJECT_ID).map((job) => job.sourceVersionId).sort();
-    expect(jobVersionIds).toEqual(versions.map((version) => version.id).sort());
+    expect(enqueue).toHaveBeenCalledTimes(3);
+    expect(enqueue.mock.calls[2]![0].sourceVersionId).toBe(versionA.id);
   });
 
   it('binds research ingestion to the newest version and keeps projects isolated', async () => {

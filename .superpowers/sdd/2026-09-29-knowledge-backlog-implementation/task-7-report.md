@@ -74,3 +74,21 @@ After A→B→A, the source's `current_hash` points at reused version A, but two
 ### Concerns
 - `KnowledgePageStore.createPageVersion` returns an older duplicate-content version without making it current, so a synthesis page whose content reverts (same query) still resolves to the newer page version. This is a separate page-store behavior and was left unchanged; the research test uses distinct queries.
 - Pre-existing uncommitted `progress.md` change was left untouched.
+
+## Re-review fix 2: queue-binding regression and legacy current-version fallback
+
+### Fix
+- `KnowledgeSourceStore.currentVersion` now falls back to the highest version number when `current_hash` is NULL or matches no version (legacy/imported rows), mirroring `currentSourceVersionNumberSql` used by search/index/graph paths. A matching hash still wins (A→B→A), and the query stays scoped by `project_id`. Reconciliation, research and freshness therefore no longer throw for such rows.
+- The A→B→A research test previously asserted the final queue job set, which is deduplicated per version and so passed even with `.at(-1)`. It now spies on `queue.enqueue` and asserts the third call's `sourceVersionId === versionA.id`.
+
+### Tests (RED first)
+- `KnowledgeResearch.test.ts`: enqueue spy asserts 3 calls, third bound to version A. Verified by mutation: reverting `ingestResults` to `listVersions(...).at(-1)` makes it fail (expected version B id to be version A id).
+- `KnowledgeSourceStore.test.ts`: `currentVersion` falls back to highest version for NULL and unmatched `current_hash`; other project returns null (failed before the fix).
+- `KnowledgeReconciliation.test.ts`: NULL `current_hash` legacy source reconciles (stales the page on the older version) instead of throwing (failed before the fix).
+
+### Output
+- `packages/core`: `tsc --noEmit` clean; vitest 75 files / 932 tests passed.
+- `packages/cli`: `tsc --noEmit` clean; vitest 12 files / 133 tests passed.
+
+### Concerns
+- Pre-existing uncommitted `progress.md` change in the search-evaluation SDD dir was left untouched.

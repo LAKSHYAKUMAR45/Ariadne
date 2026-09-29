@@ -189,15 +189,22 @@ export class KnowledgeSourceStore {
     return rows.map(rowToVersion);
   }
 
-  /** The version whose content hash is the source's current hash; may be older than the highest version number. */
+  /**
+   * The version whose content hash is the source's current hash (may be older than the highest version number).
+   * Legacy/imported sources with a NULL or unmatched current hash fall back to the highest version, mirroring
+   * `currentSourceVersionNumberSql`.
+   */
   public currentVersion(projectId: string, sourceId: KnowledgeSourceId): KnowledgeSourceVersionRecord | null {
     const row = this.db
       .prepare(
         `SELECT v.* FROM knowledge_source_versions v
-         JOIN knowledge_sources s ON s.project_id = v.project_id AND s.id = v.source_id AND s.current_hash = v.content_hash
-         WHERE v.project_id = ? AND v.source_id = ?`,
+         WHERE v.project_id = @projectId AND v.source_id = @sourceId
+         ORDER BY (v.content_hash = (SELECT s.current_hash FROM knowledge_sources s
+                                      WHERE s.project_id = @projectId AND s.id = @sourceId)) DESC,
+                  v.version_number DESC
+         LIMIT 1`,
       )
-      .get(projectId, sourceId) as VersionRow | undefined;
+      .get({ projectId, sourceId }) as VersionRow | undefined;
     return row ? rowToVersion(row) : null;
   }
 
