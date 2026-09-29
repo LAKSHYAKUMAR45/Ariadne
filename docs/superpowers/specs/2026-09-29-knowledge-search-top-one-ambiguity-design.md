@@ -152,6 +152,10 @@ share valid deployment/readiness evidence. Instead:
   equivalent under the comparator;
 - ambiguity is limited to the first cluster of near-equal candidates, not the
   entire tail of the ranking;
+- the scan covers every candidate inside the leader's score band, skipping
+  weaker in-band candidates that lack the leader's exact-symbol or term
+  coverage rather than stopping at them; alternatives are counted before the
+  caller's result `limit` is applied, over the bounded retained candidate pool;
 - ambiguity never suppresses a better exact-symbol or better span-backed match.
 
 This makes top-one quality more honest without weakening current top-three/span

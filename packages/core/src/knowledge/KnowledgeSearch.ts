@@ -700,13 +700,15 @@ function annotateTopOneConfidence(query: string, results: RankedKnowledgeSearchR
   let sharedRole = false;
   for (const candidate of results.slice(1)) {
     const features = ambiguityFeatures.get(candidate);
-    const inCluster =
-      features !== undefined &&
-      features.rankClass === topFeatures.rankClass &&
-      features.exactSymbolHits >= topFeatures.exactSymbolHits &&
-      features.distinctTermCoverage >= topFeatures.distinctTermCoverage &&
-      topFeatures.score - features.score <= topFeatures.score * AMBIGUITY_SCORE_BAND;
-    if (!inCluster) break;
+    if (!features) break;
+    const outOfBand =
+      features.rankClass !== topFeatures.rankClass ||
+      topFeatures.score - features.score > topFeatures.score * AMBIGUITY_SCORE_BAND;
+    if (outOfBand) break;
+    // A weaker in-band candidate is skipped, not a boundary: later equivalent candidates can still compete.
+    if (features.exactSymbolHits < topFeatures.exactSymbolHits || features.distinctTermCoverage < topFeatures.distinctTermCoverage) {
+      continue;
+    }
     alternatives += 1;
     sharedRole ||= topFeatures.structuralRoles !== '' && features.structuralRoles === topFeatures.structuralRoles;
     if (alternatives === MAX_AMBIGUITY_ALTERNATIVES) break;

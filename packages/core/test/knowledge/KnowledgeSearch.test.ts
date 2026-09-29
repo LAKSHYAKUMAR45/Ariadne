@@ -1596,6 +1596,24 @@ describe('searchKnowledge top-one confidence and ambiguity', () => {
     expect(results[0]).toMatchObject({ searchConfidence: 'ambiguous', ambiguityReason: 'near_tie', ambiguityAlternatives: 1 });
   });
 
+  it('keeps scanning past a weaker in-band candidate to find a later equivalent alternative', () => {
+    // Many entries-only sources lower the weight of "entries", keeping the partial match inside the score band.
+    for (let index = 0; index < 50; index += 1) addSource(`src/filler${index}.py`, { text: 'entries' });
+    addSource('src/leader_reconcile.py', { text: 'reconcile ledger entries' });
+    addSource('src/loader/partial.py', { text: 'ledger' });
+    addSource('src/later_ledger.py', { text: 'reconcile ledger entries' });
+
+    const results = search('reconcile ledger entries loader');
+
+    expect(results.slice(0, 3).map((result) => result.title)).toEqual([
+      'src/leader_reconcile.py',
+      'src/loader/partial.py',
+      'src/later_ledger.py',
+    ]);
+    expect(results[2].score).toBeGreaterThanOrEqual(results[0].score * 0.95);
+    expect(results[0]).toMatchObject({ searchConfidence: 'ambiguous', ambiguityReason: 'insufficient_intent', ambiguityAlternatives: 1 });
+  });
+
   it('marks near-equal candidates that share a structural role as shared_role', () => {
     addSource('src/usecases/alpha_deploy.py', { text: 'deployment readiness checks' });
     addSource('src/usecases/beta_deploy.py', { text: 'deployment readiness checks' });
