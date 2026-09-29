@@ -3,6 +3,8 @@ import { openDatabase } from '../../src/db.js';
 import { applyKnowledgeMigrations } from '../../src/knowledge/knowledgeMigrations.js';
 import { KnowledgeSourceStore } from '../../src/knowledge/KnowledgeSourceStore.js';
 import {
+  KNOWLEDGE_ACCEPTANCE_THRESHOLDS,
+  evaluateKnowledgeAcceptanceGate,
   hasKnowledgeTypedGraphEvidence,
   parseKnowledgeAccuracyCorpus,
   scoreKnowledgeAccuracy,
@@ -28,30 +30,69 @@ describe('parseKnowledgeAccuracyCorpus', () => {
     ).not.toThrow();
   });
 
-  it('rejects duplicate ids, empty prompts, and empty expected paths', () => {
-    expect(() =>
-      parseKnowledgeAccuracyCorpus({
-        corpusVersion: 'naas-v1',
-        questions: [
-          {
-            id: 'q1',
-            prompt: '',
-            expectedPaths: [],
-            expectedSymbols: [],
-            required: true,
-          },
-          {
-            id: 'q1',
-            prompt: 'duplicate',
-            expectedPaths: ['x.py'],
-            expectedSymbols: [],
-            required: true,
-          },
-        ],
-      }),
-    ).toThrow(/questions|prompt|expectedPaths|duplicate/i);
+  const validQuestion = {
+    id: 'q1',
+    prompt: 'find the loader',
+    expectedPaths: ['task-managers/use_case.py'],
+    expectedSymbols: ['UseCaseLoader'],
+    required: true,
+  };
+
+  it('preserves corpus order and ids', () => {
+    const corpus = parseKnowledgeAccuracyCorpus({
+      corpusVersion: 'naas-v1',
+      questions: [
+        { ...validQuestion, id: 'z-last' },
+        { ...validQuestion, id: 'a-first' },
+      ],
+    });
+
+    expect(corpus.questions.map(({ id }) => id)).toEqual(['z-last', 'a-first']);
+  });
+
+  it.each([
+    ['missing corpusVersion', { questions: [validQuestion] }, /corpusVersion must be a string/],
+    ['empty corpusVersion', { corpusVersion: '  ', questions: [validQuestion] }, /corpusVersion must be a non-empty string/],
+    ['non-array questions', { corpusVersion: 'naas-v1', questions: {} }, /questions must be an array/],
+    [
+      'duplicate ids',
+      { corpusVersion: 'naas-v1', questions: [validQuestion, { ...validQuestion, prompt: 'other' }] },
+      /duplicate question id "q1"/,
+    ],
+    [
+      'empty prompt',
+      { corpusVersion: 'naas-v1', questions: [{ ...validQuestion, prompt: '' }] },
+      /questions\[0\]\.prompt must be a non-empty string/,
+    ],
+    [
+      'empty expectedPaths',
+      { corpusVersion: 'naas-v1', questions: [{ ...validQuestion, expectedPaths: [] }] },
+      /questions\[0\]\.expectedPaths must contain at least 1 item/,
+    ],
+    [
+      'non-boolean required',
+      { corpusVersion: 'naas-v1', questions: [{ ...validQuestion, required: 'yes' }] },
+      /questions\[0\]\.required must be a boolean/,
+    ],
+    [
+      'legacy query-only entry',
+      { corpusVersion: 'naas-v1', questions: [{ query: 'find the loader' }] },
+      /questions\[0\]\.id must be a string/,
+    ],
+  ])('rejects %s', (_name, input, message) => {
+    expect(() => parseKnowledgeAccuracyCorpus(input)).toThrow(message);
   });
 });
+
+// Real search results carry extra fields the scorer must ignore.
+function searchResultWithSnippet(
+  title: string,
+  span: unknown,
+  snippet: string,
+): KnowledgeAccuracySearchResult {
+  const result = { title, citations: [{ span }], snippet };
+  return result;
+}
 
 describe('scoreKnowledgeAccuracy', () => {
   const corpus: KnowledgeAccuracyCorpus = {
@@ -106,18 +147,14 @@ describe('scoreKnowledgeAccuracy', () => {
       prompt: 'q1',
       expectedPaths: ['a.py', 'b.py'],
       returnedPaths: [],
-      missing: ['top1', 'top3', 'spanCitation', 'typedGraphEvidence'],
+      missing: ['top3', 'spanCitation', 'typedGraphEvidence'],
     });
   });
 
   it('does not expose source contents in failures', () => {
     const report = scoreKnowledgeAccuracy(
       corpus,
-      () => [{
-        title: 'secret.py',
-        citations: [{ span: null }],
-        snippet: 'must not be serialized',
-      }],
+      () => [searchResultWithSnippet('secret.py', null, 'must not be serialized')],
       () => false,
     );
 
@@ -146,15 +183,10 @@ describe('scoreKnowledgeAccuracy', () => {
   });
 
   it('serializes identical inputs deterministically across repeated runs', () => {
-    const search = () =>
-      [
-        {
-          title: 'b.py',
-          citations: [{ span: { startOffset: 3 } }],
-          snippet: 'should stay out of reports',
-        },
-        { title: 'a.py', citations: [{ span: null }] },
-      ] satisfies readonly KnowledgeAccuracySearchResult[];
+    const search = (): readonly KnowledgeAccuracySearchResult[] => [
+      searchResultWithSnippet('b.py', { startOffset: 3 }, 'should stay out of reports'),
+      { title: 'a.py', citations: [{ span: null }] },
+    ];
 
     const first = JSON.stringify(scoreKnowledgeAccuracy(corpus, search, () => false));
     const second = JSON.stringify(scoreKnowledgeAccuracy(corpus, search, () => false));
@@ -190,6 +222,111 @@ describe('scoreKnowledgeAccuracy', () => {
       top3PathHits: 1,
       spanCitationHits: 0,
       typedGraphEvidenceHits: 0,
+    });
+  });
+
+  it('treats an expected path at rank four as a top-three miss', () => {
+    const results: KnowledgeAccuracySearchResult[] = ['x.py', 'y.py', 'z.py', 'a.py']
+      .map((title) => ({ title, citations: [{ span: { startOffset: 1 } }] }));
+    const report = scoreKnowledgeAccuracy(
+      { corpusVersion: 'naas-v1', questions: [corpus.questions[0]!] },
+      () => results,
+      () => true,
+    );
+
+    expect(report).toMatchObject({ top1PathHits: 0, top3PathHits: 0, spanCitationHits: 1 });
+    expect(report.failures).toHaveLength(1);
+    expect(report.failures[0]!.missing).toEqual(['top3']);
+    expect(report.failures[0]!.returnedPaths).toEqual(['x.py', 'y.py', 'z.py', 'a.py']);
+  });
+
+  it('does not count a span on a non-expected result as a span citation', () => {
+    const report = scoreKnowledgeAccuracy(
+      { corpusVersion: 'naas-v1', questions: [corpus.questions[0]!] },
+      () => [
+        { title: 'a.py', citations: [{ span: null }] },
+        { title: 'other.py', citations: [{ span: { startOffset: 1 } }] },
+      ],
+      () => true,
+    );
+
+    expect(report).toMatchObject({ top1PathHits: 1, top3PathHits: 1, spanCitationHits: 0 });
+    expect(report.failures.map(({ missing }) => missing)).toEqual([['spanCitation']]);
+  });
+
+  it('does not mutate search results or corpus while scoring', () => {
+    const results: KnowledgeAccuracySearchResult[] = [
+      { title: 'a.py', citations: [{ span: { startOffset: 1 } }] },
+    ];
+    const originalResults = structuredClone(results);
+    const originalCorpus = structuredClone(corpus);
+
+    scoreKnowledgeAccuracy(corpus, () => results, () => true);
+
+    expect(results).toEqual(originalResults);
+    expect(corpus).toEqual(originalCorpus);
+  });
+
+  describe('acceptance gate', () => {
+    const tenQuestions = (): KnowledgeAccuracyCorpus => ({
+      corpusVersion: 'naas-v1',
+      questions: Array.from({ length: 10 }, (_, index) => ({
+        id: `q${index}`,
+        prompt: `q${index}`,
+        expectedPaths: [`f${index}.py`],
+        expectedSymbols: ['Sym'],
+        required: true,
+      })),
+    });
+
+    it('declares the approved thresholds as data', () => {
+      expect(KNOWLEDGE_ACCEPTANCE_THRESHOLDS).toEqual({
+        questionCount: 10,
+        top3PathHits: 8,
+        spanCitationHits: 10,
+        typedGraphEvidenceHits: 8,
+      });
+    });
+
+    it('passes when top-one misses but every declared threshold is met', () => {
+      const report = scoreKnowledgeAccuracy(
+        tenQuestions(),
+        (prompt) => {
+          const index = prompt.slice(1);
+          return [
+            { title: 'decoy.py', citations: [{ span: null }] },
+            { title: `f${index}.py`, citations: [{ span: { startOffset: 1 } }] },
+          ];
+        },
+        () => true,
+      );
+
+      expect(report.top1PathHits).toBe(0);
+      expect(report.top3PathHits).toBe(10);
+      expect(report.failures).toEqual([]);
+      expect(evaluateKnowledgeAcceptanceGate(report)).toEqual([]);
+    });
+
+    it('reports each violated threshold', () => {
+      const report = scoreKnowledgeAccuracy(
+        tenQuestions(),
+        (prompt) => (prompt === 'q0' || prompt === 'q1' || prompt === 'q2'
+          ? []
+          : [{ title: `f${prompt.slice(1)}.py`, citations: [{ span: { startOffset: 1 } }] }]),
+        () => false,
+      );
+
+      expect(evaluateKnowledgeAcceptanceGate(report)).toEqual([
+        expect.stringMatching(/top3PathHits 7 < 8/),
+        expect.stringMatching(/spanCitationHits 7 < 10/),
+        expect.stringMatching(/typedGraphEvidenceHits 0 < 8/),
+      ]);
+    });
+
+    it('rejects a corpus whose size differs from the declared question count', () => {
+      const report = scoreKnowledgeAccuracy(corpus, () => [], () => false);
+
+      expect(evaluateKnowledgeAcceptanceGate(report)[0]).toMatch(/questionCount 2 !== 10/);
     });
   });
 

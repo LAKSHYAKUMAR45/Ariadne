@@ -325,7 +325,7 @@ code or claiming a new real-NAAS run.
 - `top3PathHits>=8`
 - `spanCitationHits=10`
 - `typedGraphEvidenceHits>=8`
-- `failures=[]`
+- `gate violations=[]` (top-one reported, not gated)
 
 ### Validation commands
 

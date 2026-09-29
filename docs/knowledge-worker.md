@@ -88,7 +88,9 @@ The synthetic worker report always uses this JSON shape:
 - `top3PathHits`
 - `spanCitationHits`
 - `typedGraphEvidenceHits`
-- `failures[]`, where each failure contains only:
+- `failures[]`, one entry per required question that misses a gated criterion
+  (top-three path, span citation, or typed graph evidence). A top-one miss
+  alone never records a failure. Each failure contains only:
   - `id`
   - `prompt`
   - `expectedPaths`
@@ -107,6 +109,12 @@ The synthetic acceptance requires:
 - `spanCitationHits === 10`
 - `typedGraphEvidenceHits >= 8`
 - no jobs left queued or running
+
+These thresholds are declared as `KNOWLEDGE_ACCEPTANCE_THRESHOLDS` in
+`packages/core/test/knowledge/KnowledgeSearchEvaluator.ts` and enforced by
+`evaluateKnowledgeAcceptanceGate`. `top1PathHits` is reported for optimization
+only and is not gated; `failures` may therefore be non-empty (or top-one may
+miss) while the acceptance gate still passes.
 
 The real NAAS scorer remains a separate read-only local validation step. It is
 not part of CI, does not call providers, and should only read existing local

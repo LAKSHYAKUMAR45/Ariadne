@@ -29,7 +29,7 @@ The synthetic acceptance thresholds were met:
 - `top3PathHits>=8`
 - `spanCitationHits=10`
 - `typedGraphEvidenceHits>=8`
-- `failures=[]`
+- gate violations `[]` via `evaluateKnowledgeAcceptanceGate` (top-one is reported, not gated)
 
 The acceptance test also confirmed:
 
@@ -85,4 +85,47 @@ Documentation consistency check: PASS
 
 $ git diff --check
 (no output)
+```
+
+## Final-review fix wave
+
+Findings addressed:
+
+1. **Top-one gated by accident (High).** The scorer no longer lists `top1` in a
+   failure's `missing`, so a top-one miss never records a failure and
+   `failures=[]` is no longer the acceptance criterion. Thresholds are now
+   data: `KNOWLEDGE_ACCEPTANCE_THRESHOLDS` (`questionCount=10`,
+   `top3PathHits>=8`, `spanCitationHits=10`, `typedGraphEvidenceHits>=8`)
+   with `evaluateKnowledgeAcceptanceGate(report, thresholds?)` returning
+   violation strings. The synthetic acceptance test asserts the thresholds
+   explicitly plus an empty gate. Regression added: top-one misses on all ten
+   questions while every declared threshold passes.
+   Docs/spec/plan/task-10 report/offline-plan progress text updated to drop the
+   implied `failures=[]` requirement.
+2. **Test coverage (Medium).** Independent `it.each` malformed-corpus cases
+   (missing/empty `corpusVersion`, non-array `questions`, duplicate ids, empty
+   prompt, empty `expectedPaths`, non-boolean `required`, legacy query-only
+   entry) with specific error regexes; order/id preservation; rank-4 top-3 miss;
+   span on non-expected result; input immutability; gate violation reporting.
+   The `satisfies`+`snippet` TypeScript error was fixed by constructing results
+   through a typed helper. A scratch `tsc --noEmit` over the three changed test
+   files is clean.
+
+Providerless/offline; no production search code changed; no NAAS or remote
+access.
+
+### Covering test output
+
+```text
+$ pnpm --filter @ariadne-dev/core run test:knowledge:evaluation
+ ✓ test/knowledge/KnowledgeSearchEvaluator.test.ts (24 tests)
+ ✓ test/knowledge/KnowledgeWorker.naas.test.ts (1 test)
+ Test Files  2 passed (2)
+      Tests  25 passed (25)
+
+$ cd packages/core && pnpm exec vitest run test/knowledge
+ Test Files  48 passed (48)
+      Tests  368 passed (368)
+
+$ pnpm exec tsc -p tsconfig.json --noEmit   # clean
 ```

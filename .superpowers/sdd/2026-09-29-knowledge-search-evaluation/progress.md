@@ -26,3 +26,6 @@ Task 4: fix round 1/5 (1 addressed, 0 open; commit 64ae9d07eed9b3d08e195238048f5
 Task 4: complete (commits c2b9758..64ae9d0, review clean after 1 fix round)
 Task 5: complete (regression gate green; synthetic acceptance thresholds met)
 Task 5: Ruling: the first review inspected `/home/lkumar/Ariadne` rather than the isolated feature worktree and reported missing files that are tracked at the feature HEAD; rerun the review with absolute feature-worktree artifacts. Cost if wrong: a real Task 5 defect could be missed, so acceptance is not complete until the corrected review passes.
+Task 5: fix round 1/5 (1 addressed, 0 open; commit b2c2fea780ab55d097bbaee6b73a6dc047daedbd)
+Task 5: complete (commits 64ae9d0..b2c2fea, review clean after 1 fix round)
+Final review ruling: the approved spec governs the conflicting plan text; top-one is diagnostic only, while top-three/span/typed-graph thresholds are the acceptance gate. Cost if wrong: accepting the stricter gate would reject the recorded real NAAS result and make future ranking improvements impossible under the intended contract.

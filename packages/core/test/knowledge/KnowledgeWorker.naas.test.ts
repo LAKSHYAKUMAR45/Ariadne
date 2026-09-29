@@ -9,6 +9,8 @@ import { searchKnowledge } from '../../src/knowledge/KnowledgeSearch.js';
 import { KnowledgeSourceStore } from '../../src/knowledge/KnowledgeSourceStore.js';
 import { KnowledgeWorker } from '../../src/knowledge/KnowledgeWorker.js';
 import {
+  KNOWLEDGE_ACCEPTANCE_THRESHOLDS,
+  evaluateKnowledgeAcceptanceGate,
   hasKnowledgeTypedGraphEvidence,
   parseKnowledgeAccuracyCorpus,
   scoreKnowledgeAccuracy,
@@ -103,10 +105,17 @@ describe('KnowledgeWorker synthetic NAAS-shaped acceptance', () => {
     ]);
     expect(report.corpusVersion).toBe('naas-v1');
     expect(report.questionCount).toBe(10);
+    expect(KNOWLEDGE_ACCEPTANCE_THRESHOLDS).toEqual({
+      questionCount: 10,
+      top3PathHits: 8,
+      spanCitationHits: 10,
+      typedGraphEvidenceHits: 8,
+    });
     expect(report.top3PathHits).toBeGreaterThanOrEqual(8);
     expect(report.spanCitationHits).toBe(10);
     expect(report.typedGraphEvidenceHits).toBeGreaterThanOrEqual(8);
-    expect(report.failures).toEqual([]);
+    expect(evaluateKnowledgeAcceptanceGate(report)).toEqual([]);
+    // top1PathHits is reported for optimization only and is not gated.
     expect(JSON.stringify(report)).not.toContain('config.task_manager_defaults');
 
     const remainingJobs = db.prepare(

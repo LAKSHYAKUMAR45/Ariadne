@@ -36,6 +36,21 @@ export interface KnowledgeAccuracySearchResult {
   citations: ReadonlyArray<{ span: unknown }>;
 }
 
+export interface KnowledgeAcceptanceThresholds {
+  questionCount: number;
+  top3PathHits: number;
+  spanCitationHits: number;
+  typedGraphEvidenceHits: number;
+}
+
+// Top-one is reported by the scorer but is intentionally not a gated criterion.
+export const KNOWLEDGE_ACCEPTANCE_THRESHOLDS: Readonly<KnowledgeAcceptanceThresholds> = Object.freeze({
+  questionCount: 10,
+  top3PathHits: 8,
+  spanCitationHits: 10,
+  typedGraphEvidenceHits: 8,
+});
+
 interface ProjectedKnowledgeAccuracyResult {
   title: string;
   hasSpanCitation: boolean;
@@ -222,8 +237,8 @@ export function scoreKnowledgeAccuracy(
     if (spanCitation) spanCitationHits += 1;
     if (typedGraphEvidence) typedGraphEvidenceHits += 1;
 
+    // Top-one is diagnostic only, so a top-one miss never records a failure.
     const missing = [
-      top1 ? null : 'top1',
       top3 ? null : 'top3',
       spanCitation ? null : 'spanCitation',
       typedGraphEvidence ? null : 'typedGraphEvidence',
@@ -249,4 +264,20 @@ export function scoreKnowledgeAccuracy(
     typedGraphEvidenceHits,
     failures,
   };
+}
+
+export function evaluateKnowledgeAcceptanceGate(
+  report: KnowledgeAccuracyReport,
+  thresholds: Readonly<KnowledgeAcceptanceThresholds> = KNOWLEDGE_ACCEPTANCE_THRESHOLDS,
+): string[] {
+  const violations: string[] = [];
+  if (report.questionCount !== thresholds.questionCount) {
+    violations.push(`questionCount ${report.questionCount} !== ${thresholds.questionCount}`);
+  }
+  for (const metric of ['top3PathHits', 'spanCitationHits', 'typedGraphEvidenceHits'] as const) {
+    if (report[metric] < thresholds[metric]) {
+      violations.push(`${metric} ${report[metric]} < ${thresholds[metric]}`);
+    }
+  }
+  return violations;
 }

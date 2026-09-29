@@ -79,7 +79,9 @@ hidden in scorer logic. The initial synthetic gate remains:
 - 10/10 exact-span citation hits;
 - at least 8/10 typed-graph evidence hits.
 
-Top-one is reported as an optimization metric but is not the acceptance gate.
+Top-one is reported as an optimization metric but is not the acceptance gate:
+it never appears in a failure's `missing` list, and the gate is evaluated
+against the declared thresholds rather than by requiring `failures` to be empty.
 
 ## Failure handling and safety
 

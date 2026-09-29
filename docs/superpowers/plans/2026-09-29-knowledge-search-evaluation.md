@@ -217,14 +217,15 @@ labels in deterministic order:
 
 ```ts
 const missing = [
-  top1 ? null : 'top1',
   top3 ? null : 'top3',
   spanCitation ? null : 'spanCitation',
   typedGraph ? null : 'typedGraphEvidence',
 ].filter((value): value is string => value !== null);
 ```
 
-Only `required: true` questions affect threshold counters and failures;
+Top-one is diagnostic only: it is counted in `top1PathHits` but never appears
+in `missing` and never records a failure. Only `required: true` questions
+affect threshold counters and failures;
 `questionCount` reports the full corpus size.
 
 - [ ] **Step 4: Run the scoring tests**
@@ -258,7 +259,6 @@ new parser/scorer imports, but initially assert the new `corpusVersion` field:
 
 ```ts
 expect(report.corpusVersion).toBe('naas-v1');
-expect(report.failures).toEqual([]);
 ```
 
 Run the synthetic acceptance test. Expected: FAIL because the current local
@@ -292,15 +292,16 @@ and terminal-job assertions in the integration test.
 
 - [ ] **Step 3: Preserve and strengthen threshold assertions**
 
-Assert the report shape, corpus version, empty failures, and existing
-thresholds:
+Assert the report shape, corpus version, and existing thresholds through the
+declared `KNOWLEDGE_ACCEPTANCE_THRESHOLDS` and `evaluateKnowledgeAcceptanceGate`
+(not `failures=[]`, which would implicitly gate every metric):
 
 ```ts
 expect(report.questionCount).toBe(10);
 expect(report.top3PathHits).toBeGreaterThanOrEqual(8);
 expect(report.spanCitationHits).toBe(10);
 expect(report.typedGraphEvidenceHits).toBeGreaterThanOrEqual(8);
-expect(report.failures).toEqual([]);
+expect(evaluateKnowledgeAcceptanceGate(report)).toEqual([]);
 ```
 
 Do not add a top-one threshold.
@@ -437,7 +438,7 @@ questionCount=10
 top3PathHits>=8
 spanCitationHits=10
 typedGraphEvidenceHits>=8
-failures=[]
+gate violations=[] (top-one reported, not gated)
 ```
 
 Do not run the real NAAS worker or mutate `/home/lkumar/atom`.
