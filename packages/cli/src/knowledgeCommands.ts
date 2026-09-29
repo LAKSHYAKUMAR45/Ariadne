@@ -29,6 +29,11 @@ import {
   createKnowledgeId,
   normalizeKnowledgePath,
   KnowledgeWorker,
+  KnowledgeWorkerPool,
+  KnowledgeHostSettingsStore,
+  KnowledgeWorkerSettingsStore,
+  resolveKnowledgeWorkerConcurrency,
+  validateKnowledgeWorkerConcurrency,
   KnowledgeProviderProfileStore,
   OpenAICompatibleProvider,
   OpenAICompatibleEnrichmentService,
@@ -44,6 +49,7 @@ import type {
   KnowledgeProviderCapability,
   KnowledgeProviderProfile,
   OpenAICompatibleHostPolicy,
+  ResolvedKnowledgeWorkerConcurrency,
 } from '@ariadne-dev/core';
 import { findWorkspaceRoot, stateDbPath } from './workspace.js';
 
@@ -67,6 +73,7 @@ interface CliWorkerOptions {
 
 interface CliWorkerStatus {
   projectId: string;
+  concurrency: ResolvedKnowledgeWorkerConcurrency | null;
   queue: {
     queuedCount: number;
     runningCount: number;
@@ -212,6 +219,11 @@ function parseCsv(value: string | undefined): string[] | undefined {
     .filter((entry) => entry.length > 0);
 }
 
+/** Commander parser that keeps malformed input as NaN so range validation rejects it instead of truncating it. */
+function parseStrictInteger(value: string): number {
+  return /^-?\d+$/.test(value.trim()) ? Number(value.trim()) : Number.NaN;
+}
+
 function requirePositiveInteger(value: number | undefined, label: string): number | undefined {
   if (value === undefined) {
     return undefined;
@@ -314,6 +326,18 @@ export function createCliKnowledgeWorker(
       }),
     },
   );
+}
+
+export function createCliKnowledgeWorkerPool(
+  db: KnowledgeDb,
+  projectId: string,
+  options: CliWorkerOptions,
+): KnowledgeWorkerPool {
+  return new KnowledgeWorkerPool(db, {
+    baseWorkerId: options.workerId,
+    signal: options.signal,
+    createWorker: ({ workerId, signal }) => createCliKnowledgeWorker(db, projectId, { workerId, signal }),
+  });
 }
 
 export function buildCliWorkerStatus(db: KnowledgeDb, projectId: string): CliWorkerStatus {
@@ -443,10 +467,24 @@ export function buildCliWorkerStatus(db: KnowledgeDb, projectId: string): CliWor
     });
   }
 
+  let concurrency: ResolvedKnowledgeWorkerConcurrency | null = null;
+  try {
+    concurrency = resolveKnowledgeWorkerConcurrency(
+      new KnowledgeWorkerSettingsStore(new KnowledgeHostSettingsStore(db)),
+      scopedProjectId,
+    );
+  } catch {
+    statusWarnings.push({
+      code: 'worker_concurrency_invalid',
+      message: 'The stored host worker concurrency setting is invalid; runs will fail until it is reset or overridden.',
+    });
+  }
+
   const providerStore = new KnowledgeProviderProfileStore(db);
   const listedProviders = providerStore.listWithDiagnostics(scopedProjectId);
   return {
     projectId: scopedProjectId,
+    concurrency,
     queue: {
       queuedCount: queueStatus.queuedCount,
       runningCount: queueStatus.runningCount,
@@ -854,7 +892,7 @@ export function registerKnowledgeCommands(program: Command): void {
     .option('--once', 'Drain currently eligible jobs and exit')
     .option('--watch', 'Keep polling for new jobs until interrupted')
     .option('--poll-ms <n>', 'Watch-mode poll interval in milliseconds', (value) => parseInt(value, 10))
-    .option('--concurrency <n>', 'Worker concurrency (currently only 1 is supported)', (value) => parseInt(value, 10))
+    .option('--concurrency <n>', 'Worker slots for this run, 1-8 (default: host setting, else 1)', parseStrictInteger)
     .option('--worker <id>', 'Worker id (default: cli-<pid>)')
     .option('--json', 'Output JSON (supported only with --once)')
     .action(async (
@@ -865,17 +903,16 @@ export function registerKnowledgeCommands(program: Command): void {
         if (opts.once === opts.watch) {
           throw new Error('Knowledge worker run requires exactly one of --once or --watch');
         }
-        const concurrency = requirePositiveInteger(opts.concurrency, 'Knowledge worker concurrency') ?? 1;
-        if (concurrency !== 1) {
-          throw new Error('Knowledge worker concurrency values above 1 are not supported by this CLI yet');
-        }
+        const concurrency = opts.concurrency === undefined ? undefined : validateKnowledgeWorkerConcurrency(opts.concurrency);
         if (opts.watch && opts.json) {
           throw new Error('Knowledge worker --watch does not support --json because it must preserve a single JSON envelope');
         }
 
         const workerId = opts.worker?.trim() || `cli-${process.pid}`;
         if (opts.once) {
-          return withKnowledgeDb((db) => createCliKnowledgeWorker(db, projectId, { workerId }).runOnce(projectId));
+          return withKnowledgeDb((db) =>
+            createCliKnowledgeWorkerPool(db, projectId, { workerId }).runOnce(projectId, { concurrency }),
+          );
         }
 
         const pollMs = requirePositiveInteger(opts.pollMs, 'Knowledge worker poll interval') ?? 1_000;
@@ -886,7 +923,9 @@ export function registerKnowledgeCommands(program: Command): void {
         process.on('SIGINT', handleSignal);
         process.on('SIGTERM', handleSignal);
         try {
-          await withKnowledgeDb((db) => createCliKnowledgeWorker(db, projectId, { workerId, signal: controller.signal }).runWatch(projectId, { pollMs }));
+          await withKnowledgeDb((db) =>
+            createCliKnowledgeWorkerPool(db, projectId, { workerId, signal: controller.signal }).runWatch(projectId, { concurrency, pollMs }),
+          );
           return { projectId, workerId, mode: 'watch', stopped: true };
         } finally {
           process.off('SIGINT', handleSignal);
@@ -895,7 +934,7 @@ export function registerKnowledgeCommands(program: Command): void {
       }, (result) => {
         if ('claimed' in result) {
           console.log(
-            `Worker ${opts.worker ?? `cli-${process.pid}`} processed project ${result.projectId}: claimed ${result.claimed}, completed ${result.completed}, failed ${result.failed}, cancelled ${result.cancelled}.`,
+            `Worker ${opts.worker ?? `cli-${process.pid}`} processed project ${result.projectId} with ${result.concurrency} slot${result.concurrency === 1 ? '' : 's'}: claimed ${result.claimed}, completed ${result.completed}, failed ${result.failed}, cancelled ${result.cancelled}.`,
           );
           if (result.warnings.length > 0) {
             console.log(`Warnings: ${result.warnings.length}`);
@@ -903,6 +942,37 @@ export function registerKnowledgeCommands(program: Command): void {
           return;
         }
         console.log(`Worker ${result.workerId} stopped watching project ${result.projectId}.`);
+      });
+    });
+
+  worker
+    .command('concurrency <project-id>')
+    .description('Show, set, or reset this host\'s worker concurrency for a project (1-8, host-local, never exported)')
+    .option('--set <n>', 'Store a concurrency between 1 and 8', parseStrictInteger)
+    .option('--reset', 'Remove the stored value so the default of 1 applies')
+    .option('--json', 'Output JSON')
+    .action(async (projectId: string, opts: { set?: number; reset?: boolean; json?: boolean }) => {
+      await runKnowledgeAction(opts, () => {
+        if (opts.set !== undefined && opts.reset) {
+          throw new Error('Knowledge worker concurrency accepts either --set or --reset, not both');
+        }
+        const requested = opts.set === undefined ? undefined : validateKnowledgeWorkerConcurrency(opts.set);
+        return withKnowledgeDb((db) => {
+          const scopedProjectId = projectId.trim();
+          if (!new KnowledgeProjectStore(db).get(scopedProjectId)) {
+            throw new Error(`Knowledge project not found: ${scopedProjectId}`);
+          }
+          const workerSettings = new KnowledgeWorkerSettingsStore(new KnowledgeHostSettingsStore(db));
+          if (requested !== undefined) {
+            workerSettings.setConcurrency(scopedProjectId, requested);
+          } else if (opts.reset) {
+            workerSettings.clearConcurrency(scopedProjectId);
+          }
+          const resolved = resolveKnowledgeWorkerConcurrency(workerSettings, scopedProjectId);
+          return { projectId: scopedProjectId, value: resolved.value, source: resolved.source };
+        });
+      }, (result) => {
+        console.log(`Worker concurrency for project ${result.projectId}: ${result.value} (${result.source}).`);
       });
     });
 
@@ -917,6 +987,7 @@ export function registerKnowledgeCommands(program: Command): void {
             [
               `Queue: ${status.queue.queuedCount} queued, ${status.queue.runningCount} running (${status.activeWorkers.runningCount} with active leases), ${status.queue.completedCount} completed, ${status.queue.failedCount} failed, ${status.queue.cancelledCount} cancelled.`,
               `Workers: ${status.activeWorkers.workerCount} active.`,
+              status.concurrency ? `Concurrency: ${status.concurrency.value} (${status.concurrency.source}).` : 'Concurrency: invalid stored setting.',
               `Completions: ${status.completions.deterministic} deterministic, ${status.completions.enriched} enriched, ${status.completions.unknown} unknown.`,
             ].join(' '),
           );

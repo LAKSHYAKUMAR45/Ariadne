@@ -956,6 +956,123 @@ describe('KnowledgeWorker', () => {
     ]);
   });
 
+  describe('runOne', () => {
+    function enqueueAnalyze(sourceVersionId: string, projectId = PROJECT_A) {
+      return queue.enqueue({ projectId, jobKind: 'analyze', sourceVersionId, payload: { sourceVersionId } });
+    }
+
+    it('reports idle without claiming when the requested project has no queued work', async () => {
+      const other = registerSource(PROJECT_B, 'src/b.py', 'print("b")\n');
+      const jobB = enqueueAnalyze(other.sourceVersionId, PROJECT_B);
+      const worker = new KnowledgeWorker(db, { workerId: 'worker-idle', now: () => CREATED_AT });
+
+      await expect(worker.runOne(PROJECT_A)).resolves.toEqual({
+        claimedJobId: null,
+        status: 'idle',
+        warnings: [],
+        unsupportedCoverage: false,
+      });
+      expect(queue.get(jobB.id)?.status).toBe('queued');
+    });
+
+    it('processes exactly one job per step and reports its terminal status', async () => {
+      const first = registerSource(PROJECT_A, 'src/one.py', 'print("one")\n');
+      const second = registerSource(PROJECT_A, 'src/two.py', 'print("two")\n');
+      const jobOne = enqueueAnalyze(first.sourceVersionId);
+      const jobTwo = enqueueAnalyze(second.sourceVersionId);
+      const worker = new KnowledgeWorker(db, { workerId: 'worker-step', now: () => CREATED_AT });
+
+      const step = await worker.runOne(PROJECT_A);
+
+      expect(step).toMatchObject({ status: 'completed', unsupportedCoverage: false });
+      const claimedId = step.claimedJobId!;
+      const untouchedId = claimedId === jobOne.id ? jobTwo.id : jobOne.id;
+      expect([jobOne.id, jobTwo.id]).toContain(claimedId);
+      expect(queue.get(claimedId)?.status).toBe('completed');
+      expect(queue.get(untouchedId)?.status).toBe('queued');
+    });
+
+    it('reports failed and cancelled steps from the owning worker', async () => {
+      const failing = registerSource(PROJECT_A, 'src/fail.py', 'print("fail")\n');
+      const failedJob = enqueueAnalyze(failing.sourceVersionId);
+      const generator = {
+        async runKnowledgeGeneration() {
+          throw new Error('generation failed');
+        },
+      } as unknown as KnowledgeGeneratorService;
+      const failingWorker = new KnowledgeWorker(db, { workerId: 'worker-step-fail', now: () => CREATED_AT }, { generator });
+
+      await expect(failingWorker.runOne(PROJECT_A)).resolves.toMatchObject({ claimedJobId: failedJob.id, status: 'failed' });
+
+      const cancelling = registerSource(PROJECT_A, 'src/cancel-step.py', 'print("cancel")\n');
+      const cancelledJob = enqueueAnalyze(cancelling.sourceVersionId);
+      const controller = new AbortController();
+      const realMaterializer = new KnowledgeGraphMaterializer(new KnowledgeGraph(db));
+      const cancellingWorker = new KnowledgeWorker(
+        db,
+        { workerId: 'worker-step-cancel', now: () => CREATED_AT, signal: controller.signal },
+        {
+          graphMaterializer: {
+            materialize(input) {
+              const result = realMaterializer.materialize(input);
+              controller.abort();
+              return result;
+            },
+          },
+        },
+      );
+
+      await expect(cancellingWorker.runOne(PROJECT_A)).resolves.toMatchObject({ claimedJobId: cancelledJob.id, status: 'cancelled' });
+      await expect(cancellingWorker.runOne(PROJECT_A)).resolves.toMatchObject({ claimedJobId: null, status: 'idle' });
+    });
+
+    it('reports lease_lost without counting or terminating a job another owner now holds', async () => {
+      const python = registerSource(PROJECT_A, 'src/lease-step.py', 'print("lease")\n');
+      const job = enqueueAnalyze(python.sourceVersionId);
+      const generator = {
+        async runKnowledgeGeneration() {
+          db.prepare(`UPDATE knowledge_jobs SET worker_id = 'worker-other', lease_expires_at = ? WHERE id = ?`).run(
+            '2026-09-25T00:00:00.001Z',
+            job.id,
+          );
+          throw new Error('generation failed after ownership drift');
+        },
+      } as unknown as KnowledgeGeneratorService;
+      const worker = new KnowledgeWorker(db, { workerId: 'worker-step-lease', now: () => CREATED_AT }, { generator });
+
+      await expect(worker.runOne(PROJECT_A)).resolves.toMatchObject({ claimedJobId: job.id, status: 'lease_lost' });
+      expect(queue.get(job.id)).toMatchObject({ status: 'running', workerId: 'worker-other' });
+    });
+
+    it('does not claim after the signal aborted', async () => {
+      const python = registerSource(PROJECT_A, 'src/aborted.py', 'print("aborted")\n');
+      const job = enqueueAnalyze(python.sourceVersionId);
+      const controller = new AbortController();
+      controller.abort();
+      const worker = new KnowledgeWorker(db, { workerId: 'worker-aborted', now: () => CREATED_AT, signal: controller.signal });
+
+      await expect(worker.runOne(PROJECT_A)).resolves.toMatchObject({ claimedJobId: null, status: 'idle' });
+      expect(queue.get(job.id)?.status).toBe('queued');
+    });
+
+    it('keeps runOnce result fields and counts unchanged when it drains through runOne', async () => {
+      const first = registerSource(PROJECT_A, 'src/a1.py', 'print("a1")\n');
+      const second = registerSource(PROJECT_A, 'src/a2.py', 'print("a2")\n');
+      const unsupported = registerSource(PROJECT_A, 'scripts/a3.rb', 'puts "x"\n', 'application/x-ruby');
+      enqueueAnalyze(first.sourceVersionId);
+      enqueueAnalyze(second.sourceVersionId);
+      enqueueAnalyze(unsupported.sourceVersionId);
+      const worker = new KnowledgeWorker(db, { workerId: 'worker-compat', now: () => CREATED_AT });
+
+      const result = await worker.runOnce(PROJECT_A);
+
+      expect(Object.keys(result).sort()).toEqual(
+        ['cancelled', 'claimed', 'completed', 'failed', 'projectId', 'unsupportedCoverageCount', 'warnings'].sort(),
+      );
+      expect(result).toMatchObject({ claimed: 3, completed: 3, failed: 0, cancelled: 0, unsupportedCoverageCount: 1 });
+    });
+  });
+
   describe('analyzer coverage', () => {
     const SPAN = { startOffset: 0, endOffset: 4, startLine: 1, startColumn: 1, endLine: 1, endColumn: 5 };
 

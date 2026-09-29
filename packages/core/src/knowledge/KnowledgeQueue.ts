@@ -384,6 +384,7 @@ export class KnowledgeQueue {
     if (!workerId.trim()) throw new Error('Knowledge queue worker ID must not be empty');
     const now = this.now();
     const leaseExpiresAt = new Date(Date.parse(now) + this.leaseDurationMs).toISOString();
+    // IMMEDIATE takes the write lock before the SELECT so competing connections wait instead of reading a stale snapshot.
     return this.db.transaction(() => {
       const row = this.db
         .prepare(
@@ -418,7 +419,7 @@ export class KnowledgeQueue {
         )
         .run({ id: row.id, projectId, workerId, leaseExpiresAt, now });
       return result.changes === 1 ? this.get(row.id) : null;
-    })();
+    }).immediate();
   }
 
   public complete(

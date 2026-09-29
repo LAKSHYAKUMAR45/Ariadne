@@ -102,6 +102,14 @@ export interface KnowledgeWorkerRunResult {
   warnings: KnowledgeWorkerWarning[];
 }
 
+export interface KnowledgeWorkerStepResult {
+  claimedJobId: string | null;
+  status: 'idle' | 'completed' | 'failed' | 'cancelled' | 'lease_lost';
+  warnings: KnowledgeWorkerWarning[];
+  /** True when the completed step was coverage-only because the source is unsupported. */
+  unsupportedCoverage: boolean;
+}
+
 export interface KnowledgeEnrichmentReviewInput {
   pageVersionId?: string | null;
   summary: string;
@@ -218,6 +226,10 @@ function boundRedactedMessage(value: string, maxLength: number): string {
   }
   const budget = Math.max(0, maxLength - TRUNCATION_SUFFIX.length);
   return `${redacted.slice(0, budget)}${TRUNCATION_SUFFIX}`;
+}
+
+function idleStep(): KnowledgeWorkerStepResult {
+  return { claimedJobId: null, status: 'idle', warnings: [], unsupportedCoverage: false };
 }
 
 function clampPollMs(pollMs: number | undefined): number {
@@ -466,6 +478,35 @@ export class KnowledgeWorker {
     this.pageBuilder = dependencies.pageBuilder ?? buildDeterministicPagePayload;
   }
 
+  /** Claims and processes at most one job so a pool can schedule steps across independently identified slots. */
+  public async runOne(projectId: string): Promise<KnowledgeWorkerStepResult> {
+    const scopedProjectId = requireNonEmptyString(projectId, 'project ID');
+    if (this.signal?.aborted) {
+      return idleStep();
+    }
+    const claimedJob = this.queue.claim(scopedProjectId, this.workerId);
+    if (!claimedJob) {
+      return idleStep();
+    }
+    try {
+      const result = await this.processOwnedJob(claimedJob, scopedProjectId);
+      const status = result.status === 'completed' || result.status === 'failed' || result.status === 'cancelled'
+        ? result.status
+        : 'lease_lost';
+      return {
+        claimedJobId: claimedJob.id,
+        status,
+        warnings: this.runWarnings(result),
+        unsupportedCoverage: status === 'completed' && result.result?.resultKind === 'coverage_only',
+      };
+    } catch (error) {
+      if (isLeaseLost(error)) {
+        return { claimedJobId: claimedJob.id, status: 'lease_lost', warnings: [], unsupportedCoverage: false };
+      }
+      throw error;
+    }
+  }
+
   public async runOnce(projectId: string): Promise<KnowledgeWorkerRunResult> {
     const scopedProjectId = requireNonEmptyString(projectId, 'project ID');
     const warnings: KnowledgeWorkerWarning[] = [];
@@ -479,36 +520,22 @@ export class KnowledgeWorker {
     while (!this.signal?.aborted) {
       const recovered = this.queue.recoverExpiredKnowledgeJobsSummary(scopedProjectId);
       failed += recovered.failedIds.length;
-      const claimedJob = this.queue.claim(scopedProjectId, this.workerId);
-      if (!claimedJob) {
+      const step = await this.runOne(scopedProjectId);
+      if (step.claimedJobId === null) {
         break;
       }
       claimed += 1;
-      try {
-        const result = await this.processOwnedJob(claimedJob, scopedProjectId);
-        warnings.push(...this.runWarnings(result));
-        if (result.status === 'completed') {
-          completed += 1;
-          lastCompletedJobId = result.id;
-          if (result.result?.resultKind === 'coverage_only') {
-            unsupportedCoverageCount += 1;
-          }
-        } else if (result.status === 'failed') {
-          failed += 1;
-        } else if (result.status === 'cancelled') {
-          cancelled += 1;
+      warnings.push(...step.warnings);
+      if (step.status === 'completed') {
+        completed += 1;
+        lastCompletedJobId = step.claimedJobId;
+        if (step.unsupportedCoverage) {
+          unsupportedCoverageCount += 1;
         }
-      } catch (error) {
-        const current = this.queue.get(claimedJob.id);
-        if (current?.status === 'failed') {
-          failed += 1;
-        } else if (current?.status === 'cancelled') {
-          cancelled += 1;
-        }
-        if (isLeaseLost(error)) {
-          continue;
-        }
-        throw error;
+      } else if (step.status === 'failed') {
+        failed += 1;
+      } else if (step.status === 'cancelled') {
+        cancelled += 1;
       }
     }
 
@@ -525,6 +552,13 @@ export class KnowledgeWorker {
       unsupportedCoverageCount,
       warnings,
     };
+  }
+
+  /** Recomputes the derived project graph report once after a batch of completions; failures surface as warnings. */
+  public refreshProjectGraphReport(projectId: string, lastCompletedJobId: string): KnowledgeWorkerWarning[] {
+    const warnings: KnowledgeWorkerWarning[] = [];
+    this.refreshGraphReport(requireNonEmptyString(projectId, 'project ID'), lastCompletedJobId, warnings);
+    return warnings;
   }
 
   /** The report is derived and recomputable, so a failure is surfaced as a warning instead of failing completed work. */

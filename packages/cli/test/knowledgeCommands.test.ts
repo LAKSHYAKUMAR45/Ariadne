@@ -357,6 +357,175 @@ describe('ariadne knowledge commands', () => {
         });
       });
 
+      function writePythonSources(count: number): void {
+        fs.mkdirSync(path.join(root, 'src'), { recursive: true });
+        for (let index = 0; index < count; index += 1) {
+          fs.writeFileSync(path.join(root, 'src', `module_${index}.py`), `def handler_${index}():\n    return ${index}\n`);
+        }
+      }
+
+      async function ingestSources(projectId: string, count: number): Promise<void> {
+        writePythonSources(count);
+        for (let index = 0; index < count; index += 1) {
+          await run('ingest', 'file', projectId, `src/module_${index}.py`, '--json');
+        }
+        clearConsole();
+      }
+
+      function queuedJobCount(): number {
+        const db = openDatabase(path.join(root, '.ariadne', 'state.db'));
+        try {
+          return (db.prepare("SELECT COUNT(*) AS count FROM knowledge_jobs WHERE status = 'queued'").get() as { count: number }).count;
+        } finally {
+          db.close();
+        }
+      }
+
+      it('drains with bounded --concurrency slots and reports the resolved concurrency', async () => {
+        const projectId = await createProject();
+        await ingestSources(projectId, 4);
+
+        await run('worker', 'run', projectId, '--once', '--concurrency', '3', '--worker', 'cli-test', '--json');
+
+        const data = lastJson().data as {
+          claimed: number;
+          completed: number;
+          concurrency: number;
+          resolvedConcurrency: { value: number; source: string };
+          slots: Array<{ workerId: string; claimed: number }>;
+        };
+        expect(lastJson().ok).toBe(true);
+        expect(data).toMatchObject({ claimed: 4, completed: 4, concurrency: 3, resolvedConcurrency: { value: 3, source: 'override' } });
+        expect(data.slots).toHaveLength(3);
+        expect(new Set(data.slots.map((slot) => slot.workerId)).size).toBe(3);
+        expect(data.slots.every((slot) => slot.workerId.startsWith('cli-test/run_'))).toBe(true);
+        expect(data.slots.reduce((sum, slot) => sum + slot.claimed, 0)).toBe(4);
+      });
+
+      it.each(['0', '9', '1.5', 'abc', '-1', '2x'])('rejects --concurrency=%s before claiming any job', async (value) => {
+        const projectId = await createProject();
+        await ingestSources(projectId, 1);
+
+        await run('worker', 'run', projectId, '--once', `--concurrency=${value}`, '--json');
+
+        expect(lastJson().ok).toBe(false);
+        expect(lastJson().error?.message).toMatch(/concurrency must be an integer between 1 and 8/i);
+        expect(process.exitCode).toBe(1);
+        expect(queuedJobCount()).toBe(1);
+      });
+
+      it('rejects unsafe worker ids before touching the queue', async () => {
+        const projectId = await createProject();
+        await ingestSources(projectId, 1);
+
+        await run('worker', 'run', projectId, '--once', '--worker', 'bad/id with spaces', '--json');
+
+        expect(lastJson().ok).toBe(false);
+        expect(lastJson().error?.message).toMatch(/worker id/i);
+        expect(queuedJobCount()).toBe(1);
+      });
+
+      it('stores a validated host-local concurrency, uses it by default, and lets a flag override it', async () => {
+        const projectId = await createProject();
+        await ingestSources(projectId, 3);
+
+        await run('worker', 'concurrency', projectId, '--json');
+        expect(lastJson().data).toEqual({ projectId, value: 1, source: 'default' });
+
+        clearConsole();
+        resetCommanderOptionState(program);
+        await run('worker', 'concurrency', projectId, '--set', '2', '--json');
+        expect(lastJson().data).toEqual({ projectId, value: 2, source: 'host-setting' });
+
+        clearConsole();
+        resetCommanderOptionState(program);
+        await run('worker', 'run', projectId, '--once', '--json');
+        expect(lastJson().data).toMatchObject({
+          claimed: 3,
+          completed: 3,
+          concurrency: 2,
+          resolvedConcurrency: { value: 2, source: 'host-setting' },
+        });
+
+        clearConsole();
+        resetCommanderOptionState(program);
+        await run('worker', 'status', projectId, '--json');
+        expect(lastJson().data).toMatchObject({ concurrency: { value: 2, source: 'host-setting' } });
+
+        clearConsole();
+        resetCommanderOptionState(program);
+        await run('worker', 'run', projectId, '--once', '--concurrency', '1', '--json');
+        expect(lastJson().data).toMatchObject({ concurrency: 1, resolvedConcurrency: { source: 'override' } });
+
+        clearConsole();
+        resetCommanderOptionState(program);
+        await run('worker', 'concurrency', projectId, '--reset', '--json');
+        expect(lastJson().data).toEqual({ projectId, value: 1, source: 'default' });
+      });
+
+      it.each(['0', '9', '2.5', 'many'])('rejects invalid stored concurrency --set=%s', async (value) => {
+        const projectId = await createProject();
+
+        await run('worker', 'concurrency', projectId, `--set=${value}`, '--json');
+
+        expect(lastJson().ok).toBe(false);
+        expect(lastJson().error?.message).toMatch(/concurrency must be an integer between 1 and 8/i);
+        expect(process.exitCode).toBe(1);
+      });
+
+      it('rejects combining --set and --reset and unknown projects', async () => {
+        const projectId = await createProject();
+
+        await run('worker', 'concurrency', projectId, '--set', '2', '--reset', '--json');
+        expect(lastJson().ok).toBe(false);
+        expect(lastJson().error?.message).toMatch(/--set.*--reset|--reset.*--set/);
+
+        clearConsole();
+        resetCommanderOptionState(program);
+        await run('worker', 'concurrency', 'project_missing', '--set', '2', '--json');
+        expect(lastJson().ok).toBe(false);
+        expect(lastJson().error?.message).toMatch(/project not found/i);
+      });
+
+      it('fails fast without echoing a corrupt stored setting, and still reports status with a warning', async () => {
+        const projectId = await createProject();
+        await ingestSources(projectId, 1);
+        const db = openDatabase(path.join(root, '.ariadne', 'state.db'));
+        try {
+          db.prepare(
+            `INSERT INTO knowledge_settings (id, project_id, setting_key, setting_value, created_at, updated_at)
+             VALUES ('s1', ?, 'host.worker.concurrency', '4096', 'now', 'now')`,
+          ).run(projectId);
+        } finally {
+          db.close();
+        }
+
+        await run('worker', 'run', projectId, '--once', '--json');
+        expect(lastJson().ok).toBe(false);
+        expect(lastJson().error?.message).toMatch(/invalid stored value/i);
+        expect(allConsoleText()).not.toContain('4096');
+        expect(queuedJobCount()).toBe(1);
+
+        clearConsole();
+        resetCommanderOptionState(program);
+        await run('worker', 'status', projectId, '--json');
+        const status = lastJson();
+        expect(status.ok).toBe(true);
+        expect(status.data).toMatchObject({
+          concurrency: null,
+          warnings: expect.arrayContaining([expect.objectContaining({ code: 'worker_concurrency_invalid' })]),
+        });
+        expect(allConsoleText()).not.toContain('4096');
+      });
+
+      it('shows the resolved concurrency in text status', async () => {
+        const projectId = await createProject();
+
+        await run('worker', 'status', projectId);
+
+        expect(allConsoleText()).toContain('Concurrency: 1 (default)');
+      });
+
       it('rejects --watch with --json to preserve the single JSON envelope contract', async () => {
         const projectId = await createProject();
 

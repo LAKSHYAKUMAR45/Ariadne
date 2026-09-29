@@ -15,6 +15,11 @@ import { KNOWLEDGE_SCHEMA_VERSION } from '../../src/knowledge/knowledgeSchema.js
 import { loadKnowledgeSourceVersion } from '../../src/knowledge/KnowledgeSourceVersionLoader.js';
 import { KnowledgePageStore } from '../../src/knowledge/KnowledgePageStore.js';
 import { KnowledgeProjectStore } from '../../src/knowledge/KnowledgeProjectStore.js';
+import {
+  KnowledgeHostSettingsStore,
+  KnowledgeWorkerSettingsStore,
+  resolveKnowledgeWorkerConcurrency,
+} from '../../src/knowledge/KnowledgeHostSettingsStore.js';
 
 describe('KnowledgeArchive', () => {
   const databases: Array<{ close: () => void }> = [];
@@ -1881,6 +1886,27 @@ See [[graph|the graph]].
         expect(target.prepare('SELECT id, result_ref, feedback_count, ambiguity_state FROM knowledge_search_feedback').all()).toEqual([
           { id: 'feedback_1', result_ref: 'ref_1', feedback_count: 4, ambiguity_state: null },
         ]);
+      });
+
+      it('keeps the worker concurrency setting host-local: never exported, defaulted on import, preserved on replace', () => {
+        const source = database();
+        const { projectId } = seed(source);
+        const workerSettings = (db: ReturnType<typeof openDatabase>) => new KnowledgeWorkerSettingsStore(new KnowledgeHostSettingsStore(db));
+        workerSettings(source).setConcurrency(projectId, 6);
+        const archive = exportKnowledgeProject(source, { projectId });
+        expect(Object.values(archive.files).map(String).join('\n')).not.toMatch(/host\.worker|"6"/);
+
+        const fresh = database();
+        importKnowledgeProject(fresh, archive, importOptions());
+        expect(resolveKnowledgeWorkerConcurrency(workerSettings(fresh), projectId)).toEqual({ value: 1, source: 'default' });
+        expect(settingKeys(fresh, projectId).filter((key) => key.startsWith('host.'))).toEqual([]);
+
+        const target = database();
+        const imported = importOptions({ replaceExisting: true });
+        new KnowledgeProjectStore(target).create({ id: projectId as never, workspaceRoot: imported.workspaceRoot, name: 'Old target' });
+        workerSettings(target).setConcurrency(projectId, 3);
+        importKnowledgeProject(target, archive, imported);
+        expect(resolveKnowledgeWorkerConcurrency(workerSettings(target), projectId)).toEqual({ value: 3, source: 'host-setting' });
       });
 
       it('preserves host provider profiles that host.provider.* settings refer to', () => {

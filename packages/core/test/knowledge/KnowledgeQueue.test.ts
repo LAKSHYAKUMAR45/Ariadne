@@ -624,4 +624,86 @@ describe('KnowledgeQueue', () => {
     expect(queue.get(failureJob.id)?.status).toBe('running');
     expect(queue.get(cancellationJob.id)?.status).toBe('running');
   });
+
+  describe('claim across connections', () => {
+    function fileConnections(): { first: Database.Database; second: Database.Database } {
+      const directory = mkdtempSync(join(process.cwd(), '.knowledge-queue-claim-'));
+      temporaryDirectories.push(directory);
+      const first = openDatabase(join(directory, 'queue.db'));
+      applyKnowledgeMigrations(first);
+      const createdAt = new Date().toISOString();
+      first
+        .prepare(
+          `INSERT INTO knowledge_projects (id, workspace_root, name, status, created_at, updated_at)
+           VALUES ('project_1', '/workspace/a', 'A', 'active', ?, ?)`,
+        )
+        .run(createdAt, createdAt);
+      const second = openDatabase(join(directory, 'queue.db'));
+      second.pragma('busy_timeout = 0');
+      return { first, second };
+    }
+
+    it('takes the write lock before selecting so a competing connection can never claim the same row', () => {
+      const { first, second } = fileConnections();
+      try {
+        const now = () => '2026-01-01T00:00:00.000Z';
+        const seeded = new KnowledgeQueue(first, { leaseDurationMs: 1_000, now });
+        const job = seeded.enqueue({ projectId: 'project_1', jobKind: 'extract', payload: {} });
+        const competitor = new KnowledgeQueue(second, { leaseDurationMs: 1_000, now });
+        let competitorBlocked = false;
+        let competitorClaim: string | null = null;
+        const interleaving = new Proxy(first, {
+          get(target, property) {
+            const value = Reflect.get(target, property, target) as unknown;
+            if (property === 'prepare') {
+              return (sql: string) => {
+                if (sql.includes("SET status = 'running'")) {
+                  try {
+                    competitorClaim = competitor.claim('project_1', 'worker-b')?.id ?? null;
+                  } catch {
+                    competitorBlocked = true;
+                  }
+                }
+                return target.prepare(sql);
+              };
+            }
+            return typeof value === 'function' ? value.bind(target) : value;
+          },
+        }) as Database.Database;
+
+        const claimed = new KnowledgeQueue(interleaving, { leaseDurationMs: 1_000, now }).claim('project_1', 'worker-a');
+
+        expect(claimed).toMatchObject({ id: job.id, workerId: 'worker-a', status: 'running' });
+        expect(competitorBlocked).toBe(true);
+        expect(competitorClaim).toBeNull();
+        expect(competitor.claim('project_1', 'worker-b')).toBeNull();
+      } finally {
+        first.close();
+        second.close();
+      }
+    });
+
+    it('hands each queued job to exactly one of two connections that alternate claims', () => {
+      const { first, second } = fileConnections();
+      try {
+        const now = () => '2026-01-01T00:00:00.000Z';
+        const queueA = new KnowledgeQueue(first, { leaseDurationMs: 1_000, now });
+        const queueB = new KnowledgeQueue(second, { leaseDurationMs: 1_000, now });
+        const jobIds = Array.from({ length: 6 }, (_, index) =>
+          queueA.enqueue({ projectId: 'project_1', jobKind: 'extract', sourceVersionId: `version_${index}`, payload: {} }).id,
+        );
+        const claimedIds: string[] = [];
+        for (let turn = 0; turn < 8; turn += 1) {
+          const job = (turn % 2 === 0 ? queueA : queueB).claim('project_1', turn % 2 === 0 ? 'worker-a' : 'worker-b');
+          if (job) claimedIds.push(job.id);
+        }
+
+        expect([...claimedIds].sort()).toEqual([...jobIds].sort());
+        expect(new Set(claimedIds).size).toBe(6);
+      } finally {
+        first.close();
+        second.close();
+      }
+    });
+  });
 });

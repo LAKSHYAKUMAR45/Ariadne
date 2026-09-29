@@ -395,8 +395,31 @@ export type {
   KnowledgeWorkerFailureCode,
   KnowledgeWorkerOptions,
   KnowledgeWorkerRunResult,
+  KnowledgeWorkerStepResult,
   KnowledgeWorkerWarning,
 } from './knowledge/KnowledgeWorker.js';
+export { KnowledgeWorkerPool } from './knowledge/KnowledgeWorkerPool.js';
+export type {
+  KnowledgeWorkerPoolOptions,
+  KnowledgeWorkerPoolRunResult,
+  KnowledgeWorkerSlotFactoryInput,
+  KnowledgeWorkerSlotResult,
+} from './knowledge/KnowledgeWorkerPool.js';
+export {
+  KNOWLEDGE_HOST_SETTING_KEYS,
+  KNOWLEDGE_WORKER_CONCURRENCY_DEFAULT,
+  KNOWLEDGE_WORKER_CONCURRENCY_MAX,
+  KNOWLEDGE_WORKER_CONCURRENCY_MIN,
+  KnowledgeHostSettingsStore,
+  KnowledgeWorkerSettingsStore,
+  resolveKnowledgeWorkerConcurrency,
+  validateKnowledgeWorkerConcurrency,
+} from './knowledge/KnowledgeHostSettingsStore.js';
+export type {
+  KnowledgeHostSettingKey,
+  KnowledgeWorkerSettingsStoreLike,
+  ResolvedKnowledgeWorkerConcurrency,
+} from './knowledge/KnowledgeHostSettingsStore.js';
 export {
   KnowledgeQueue,
   enqueueKnowledgeJob,

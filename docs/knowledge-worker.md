@@ -14,8 +14,9 @@ cloud sync still covers task-memory data only.
 ## Commands
 
 ```bash
-ariadne knowledge worker run <project-id> --once [--concurrency 1] [--worker <id>] [--json]
-ariadne knowledge worker run <project-id> --watch [--poll-ms <n>] [--concurrency 1] [--worker <id>]
+ariadne knowledge worker run <project-id> --once [--concurrency <1-8>] [--worker <id>] [--json]
+ariadne knowledge worker run <project-id> --watch [--poll-ms <n>] [--concurrency <1-8>] [--worker <id>]
+ariadne knowledge worker concurrency <project-id> [--set <1-8> | --reset] [--json]
 ariadne knowledge worker status <project-id> [--json]
 
 ariadne knowledge provider add <project-id> <profile-name> \
@@ -34,9 +35,29 @@ with `SIGINT`/`SIGTERM`; the CLI installs scoped handlers, aborts cleanly, and
 removes those handlers before exit. `--watch` rejects `--json` to preserve the
 single-object JSON contract.
 
-`--concurrency` is currently bounded to `1`. The CLI rejects larger values
-instead of pretending to run multiple workers without a reviewed lease-safe
-multi-worker adapter.
+### Concurrency
+
+A run drains the queue with `1`-`8` parallel worker slots. The value resolves
+as: `--concurrency`, then this host's stored setting, then `1`. Values outside
+`1`-`8`, non-integers, and a corrupt stored value fail before any job is
+claimed; nothing is silently clamped.
+
+`worker concurrency` shows, sets (`--set`), or clears (`--reset`) the stored
+value. It lives in the host-local `host.worker.concurrency` setting, so it is
+per project and per host, and it is never exported, imported, or logged: an
+imported project starts at `1` on the importing host, and `replaceExisting`
+import keeps the local value.
+
+Each slot claims jobs through the same transactional, project-scoped queue
+claim under its own worker ID (`<worker>/run_<id>/slot_<n>`), renews only its
+own leases, and can never complete a job whose lease it lost. Expired leases
+are recovered once at the start of each pass. If a slot crashes, sibling slots
+keep draining and the run then fails; the crashed slot's job is recovered after
+its lease expires. `--worker` must be 1-64 characters of letters, digits, `.`,
+`_`, `:`, `@`, or `-`. `worker status` reports the resolved concurrency and only
+counts unexpired leases as active workers. Slots share one process, so a very
+CPU-heavy job can delay other slots' lease renewals; the default 60 s lease is
+sized for that.
 
 ## Recommended workflow
 
