@@ -7,6 +7,7 @@ import { assertNoSymlinkComponents, isPathWithinRoot } from './KnowledgePathSecu
 import {
   KNOWLEDGE_ARCHIVE_FEATURE_CHAT_PAYLOAD_V2,
   KNOWLEDGE_ARCHIVE_HOST_SETTING_ROW_FILTER,
+  KNOWLEDGE_ARCHIVE_PRESERVED_TABLE_COLUMNS,
   KNOWLEDGE_ARCHIVE_SETTINGS_TABLE,
   KNOWLEDGE_ARCHIVE_TABLE_REGISTRY,
   assertTableFingerprints,
@@ -17,6 +18,7 @@ import {
   getKnowledgeArchiveRegistration,
   importRejected,
   manifestVersionIncompatible,
+  preservedTableColumns,
   rebuildTargetsAfterImport,
   registeredTablesOfClass,
   reviewArchiveDataFiles,
@@ -33,7 +35,7 @@ import {
 import { KNOWLEDGE_HOST_SETTING_PREFIX, KNOWLEDGE_SCHEMA_VERSION } from './knowledgeSchema.js';
 import { renderKnowledgePage } from './KnowledgeRenderer.js';
 
-export { KNOWLEDGE_ARCHIVE_TABLE_REGISTRY };
+export { KNOWLEDGE_ARCHIVE_PRESERVED_TABLE_COLUMNS, KNOWLEDGE_ARCHIVE_TABLE_REGISTRY };
 export type {
   KnowledgeArchiveAuthenticity,
   KnowledgeArchiveAuthenticityResult,
@@ -1702,7 +1704,8 @@ function validateArchive(
 function buildImportPlan(db: Database.Database, archive: KnowledgeArchive, options: ImportKnowledgeProjectOptions): ArchiveImportPlan {
   const validation = validateArchive(archive, options);
   const warnings: KnowledgeArchiveWarning[] = [...validation.warnings, ...validation.authenticity.warnings];
-  warnings.push(...reviewArchiveDataFiles(Object.keys(archive.files), validation.version, SUPPORTED_TABLE_NAMES).warnings);
+  const dataFileReview = reviewArchiveDataFiles(Object.keys(archive.files), validation.version, SUPPORTED_TABLE_NAMES);
+  warnings.push(...dataFileReview.warnings);
 
   const projectId = requireNonEmptyArchiveText(archive.manifest.projectId, 'archive project ID');
   if (options.expectedProjectId !== undefined && options.expectedProjectId !== projectId) {
@@ -1755,7 +1758,13 @@ function buildImportPlan(db: Database.Database, archive: KnowledgeArchive, optio
     rowsByTable.set(schema.name, rows);
   }
   if (validation.block) {
-    assertTableFingerprints(validation.block, archiveTables);
+    const ignoredOptionalTables = new Map(
+      [...dataFileReview.ignoredOptionalTables].map((table) => [
+        table,
+        { sha256: createHash('sha256').update(bytes(archive.files[`data/${table}.json`])).digest('hex') },
+      ]),
+    );
+    assertTableFingerprints(validation.block, archiveTables, ignoredOptionalTables);
   }
   assertArchiveRelationships(rowsByTable, projectId);
   const materializedFiles = buildArchiveMaterializedFiles(archive, rowsByTable, workspaceRoot);
@@ -1798,8 +1807,6 @@ function buildImportPlan(db: Database.Database, archive: KnowledgeArchive, optio
   };
 }
 
-const SQL_COLUMN_PATTERN = /^[a-z_]+$/;
-
 function registeredTableExists(db: Database.Database, table: string): boolean {
   return db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(table) !== undefined;
 }
@@ -1816,13 +1823,21 @@ interface PreservedHostState {
 
 function captureHostState(db: Database.Database, projectId: string): PreservedHostState {
   const settings = db
-    .prepare(`SELECT * FROM ${KNOWLEDGE_ARCHIVE_SETTINGS_TABLE} WHERE project_id = ? AND substr(setting_key, 1, ?) = ?`)
+    .prepare(
+      `SELECT ${preservedTableColumns(KNOWLEDGE_ARCHIVE_SETTINGS_TABLE).join(', ')} FROM ${KNOWLEDGE_ARCHIVE_SETTINGS_TABLE} ` +
+        'WHERE project_id = ? AND substr(setting_key, 1, ?) = ?',
+    )
     .all(projectId, KNOWLEDGE_HOST_SETTING_PREFIX.length, KNOWLEDGE_HOST_SETTING_PREFIX) as Record<string, unknown>[];
   const privateRows = existingRegisteredTables(db, 'privacy-omitted')
     .filter((table) => table !== KNOWLEDGE_ARCHIVE_SETTINGS_TABLE)
-    .map((table) => ({ table, rows: rowsFor(db, table, projectId) }))
+    .map((table) => ({ table, rows: preservedRowsFor(db, table, projectId) }))
     .filter((entry) => entry.rows.length > 0);
   return { settings, privateRows };
+}
+
+function preservedRowsFor(db: Database.Database, table: string, projectId: string): Record<string, unknown>[] {
+  const columns = preservedTableColumns(table);
+  return db.prepare(`SELECT ${columns.join(', ')} FROM ${table} WHERE project_id = ?`).all(projectId) as Record<string, unknown>[];
 }
 
 function clearRebuildableProjectState(db: Database.Database, projectId: string): void {
@@ -1832,11 +1847,10 @@ function clearRebuildableProjectState(db: Database.Database, projectId: string):
 }
 
 function insertPreservedRow(db: Database.Database, table: string, row: Record<string, unknown>): void {
-  const columns = Object.keys(row);
-  if (columns.length === 0 || !columns.every((column) => SQL_COLUMN_PATTERN.test(column))) {
-    throw new Error(`Knowledge archive import could not restore preserved host state for ${table}.`);
-  }
-  db.prepare(`INSERT INTO ${table} (${columns.join(', ')}) VALUES (${columns.map((column) => `@${column}`).join(', ')})`).run(row);
+  const columns = preservedTableColumns(table);
+  db.prepare(`INSERT INTO ${table} (${columns.join(', ')}) VALUES (${columns.map((column) => `@${column}`).join(', ')})`).run(
+    Object.fromEntries(columns.map((column) => [column, row[column] ?? null])),
+  );
 }
 
 function restoreHostState(db: Database.Database, preserved: PreservedHostState, importedSettingIds: ReadonlySet<string>): void {

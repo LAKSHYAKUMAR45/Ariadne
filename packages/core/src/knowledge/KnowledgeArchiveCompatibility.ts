@@ -160,6 +160,63 @@ export const KNOWLEDGE_ARCHIVE_TABLE_REGISTRY: Readonly<Record<string, Knowledge
   knowledge_query_analytics_daily: privacyOmitted('privacy_omitted'),
 });
 
+/**
+ * Explicit columns for every table whose rows `replaceExisting` reads and re-inserts (host-local settings and
+ * privacy-omitted tables). Preserved-row SQL is built only from these lists, never from row keys or `SELECT *`.
+ */
+export const KNOWLEDGE_ARCHIVE_PRESERVED_TABLE_COLUMNS: Readonly<Record<string, readonly string[]>> = Object.freeze({
+  [KNOWLEDGE_ARCHIVE_SETTINGS_TABLE]: Object.freeze(['id', 'project_id', 'setting_key', 'setting_value', 'created_at', 'updated_at']),
+  [KNOWLEDGE_ARCHIVE_PROVIDER_PROFILES_TABLE]: Object.freeze([
+    'id',
+    'project_id',
+    'provider_kind',
+    'profile_name',
+    'configuration_json',
+    'created_at',
+    'updated_at',
+  ]),
+  knowledge_search_feedback: Object.freeze([
+    'id',
+    'project_id',
+    'query_fingerprint',
+    'search_mode',
+    'result_kind',
+    'result_ref',
+    'feedback_kind',
+    'rank_position',
+    'ambiguity_state',
+    'citation_present',
+    'feedback_count',
+    'first_day',
+    'last_day',
+  ]),
+  knowledge_query_analytics_daily: Object.freeze([
+    'id',
+    'project_id',
+    'day',
+    'search_mode',
+    'total_queries',
+    'zero_result_queries',
+    'ambiguous_top_results',
+    'citationless_top_results',
+    'accepted_result_count',
+    'rejected_result_count',
+    'total_result_count',
+    'created_at',
+    'updated_at',
+  ]),
+});
+
+export function preservedTableColumns(table: string): readonly string[] {
+  const columns = Object.hasOwn(KNOWLEDGE_ARCHIVE_PRESERVED_TABLE_COLUMNS, table)
+    ? KNOWLEDGE_ARCHIVE_PRESERVED_TABLE_COLUMNS[table]
+    : undefined;
+  if (!columns) {
+    throw new Error(`Knowledge archive import has no preserved-column allowlist for ${table}.`);
+  }
+  return columns;
+}
+
 const REGISTERED_TABLE_NAMES: readonly string[] = Object.freeze(Object.keys(KNOWLEDGE_ARCHIVE_TABLE_REGISTRY));
 const TABLE_IDENTIFIER_PATTERN = /^knowledge_[a-z_]+$/;
 
@@ -380,6 +437,7 @@ const DATA_FILE_PATTERN = /^data\/([^/]+)\.json$/;
 
 export interface KnowledgeArchiveDataFileReview {
   tables: Set<string>;
+  ignoredOptionalTables: Set<string>;
   warnings: KnowledgeArchiveWarning[];
 }
 
@@ -390,6 +448,7 @@ export function reviewArchiveDataFiles(
   supportedTables: ReadonlySet<string>,
 ): KnowledgeArchiveDataFileReview {
   const tables = new Set<string>();
+  const ignoredOptionalTables = new Set<string>();
   const warnings: KnowledgeArchiveWarning[] = [];
   for (const filePath of filePaths) {
     if (!filePath.startsWith('data/')) continue;
@@ -409,6 +468,7 @@ export function reviewArchiveDataFiles(
       case 'optional':
         if (!supportedTables.has(table)) {
           warnings.push({ code: 'optional_table_unsupported', message: `Optional archive table ${table} is not supported by this reader and was ignored.` });
+          ignoredOptionalTables.add(table);
           continue;
         }
         break;
@@ -420,12 +480,13 @@ export function reviewArchiveDataFiles(
     }
     tables.add(table);
   }
-  return { tables, warnings };
+  return { tables, ignoredOptionalTables, warnings };
 }
 
 export function assertTableFingerprints(
   block: KnowledgeArchiveCompatibilityBlock,
   archiveTables: ReadonlyMap<string, { sha256: string; rowCount: number }>,
+  ignoredOptionalTables: ReadonlyMap<string, { sha256: string }> = new Map(),
 ): void {
   const declared = new Map<string, { sha256: string; rowCount: number }>();
   for (const fingerprint of block.tableFingerprints) {
@@ -443,7 +504,15 @@ export function assertTableFingerprints(
       throw importRejected(`table fingerprint mismatch for ${table}.`);
     }
   }
-  for (const table of declared.keys()) {
+  for (const [table, fingerprint] of declared) {
+    const ignored = ignoredOptionalTables.get(table);
+    if (ignored) {
+      // The reader cannot parse an unsupported table, so only the file hash is verifiable.
+      if (fingerprint.sha256 !== ignored.sha256) {
+        throw importRejected(`table fingerprint mismatch for ${table}.`);
+      }
+      continue;
+    }
     if (!archiveTables.has(table)) {
       throw importRejected(`table fingerprint declared for ${table}, which is not an imported archive table.`);
     }

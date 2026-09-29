@@ -4,6 +4,7 @@ import { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSyn
 import { dirname, join } from 'node:path';
 import { openDatabase } from '../../src/db.js';
 import {
+  KNOWLEDGE_ARCHIVE_PRESERVED_TABLE_COLUMNS,
   KNOWLEDGE_ARCHIVE_TABLES,
   KNOWLEDGE_ARCHIVE_TABLE_REGISTRY,
   exportKnowledgeProject,
@@ -1118,6 +1119,57 @@ See [[graph|the graph]].
       }
     });
 
+    it('keeps an explicit column allowlist for every preserved table', () => {
+      const preserved = Object.entries(KNOWLEDGE_ARCHIVE_TABLE_REGISTRY)
+        .filter(([table, registration]) => registration.class === 'privacy-omitted' || table === 'knowledge_settings')
+        .map(([table]) => table)
+        .sort();
+      expect(Object.keys(KNOWLEDGE_ARCHIVE_PRESERVED_TABLE_COLUMNS).sort()).toEqual(preserved);
+      for (const [table, columns] of Object.entries(KNOWLEDGE_ARCHIVE_PRESERVED_TABLE_COLUMNS)) {
+        expect(table).toMatch(/^knowledge_[a-z_]+$/);
+        expect(columns).toContain('id');
+        expect(columns).toContain('project_id');
+        expect(new Set(columns).size).toBe(columns.length);
+        for (const column of columns) expect(column).toMatch(/^[a-z_]+$/);
+      }
+    });
+
+    it('imports a version 2 archive with a fingerprinted unsupported optional table and warns', () => {
+      const db = database();
+      const { projectId } = seed(db);
+      const content = '[{"id":"report_1"}]\n';
+      const base = exportV2(db, projectId);
+      const archive = withCompatibility(addArchiveFile(base, 'data/knowledge_graph_reports.json', content), {
+        tableFingerprints: [
+          ...compatibilityOf(base).tableFingerprints,
+          { table: 'knowledge_graph_reports', sha256: sha256(content), rowCount: 1 },
+        ],
+      });
+      const target = database();
+      const result = importKnowledgeProject(target, archive, importOptions());
+      expect(result.warnings).toContainEqual(expect.objectContaining({ code: 'optional_table_unsupported' }));
+      expect(target.prepare('SELECT COUNT(*) AS count FROM knowledge_pages WHERE project_id = ?').get(projectId)).not.toEqual({ count: 0 });
+    });
+
+    it('still verifies the fingerprint of an ignored optional table and of imported tables', () => {
+      const db = database();
+      const { projectId } = seed(db);
+      const content = '[{"id":"report_1"}]\n';
+      const base = exportV2(db, projectId);
+      const withFile = addArchiveFile(base, 'data/knowledge_graph_reports.json', content);
+      const tampered = withCompatibility(withFile, {
+        tableFingerprints: [
+          ...compatibilityOf(base).tableFingerprints,
+          { table: 'knowledge_graph_reports', sha256: sha256('[]\n'), rowCount: 1 },
+        ],
+      });
+      expect(() => importKnowledgeProject(database(), tampered, importOptions())).toThrow(/fingerprint mismatch/i);
+      const dropped = withCompatibility(base, {
+        tableFingerprints: compatibilityOf(base).tableFingerprints.filter((fingerprint) => fingerprint.table !== 'knowledge_pages'),
+      });
+      expect(() => importKnowledgeProject(database(), dropped, importOptions())).toThrow(/fingerprint/i);
+    });
+
     it('rejects a version 2 archive that still contains an omitted provider profile table', () => {
       const db = database();
       const { projectId } = seed(db);
@@ -1375,7 +1427,34 @@ See [[graph|the graph]].
           `CREATE TABLE knowledge_query_analytics_daily (
              id TEXT PRIMARY KEY,
              project_id TEXT NOT NULL REFERENCES knowledge_projects(id) ON DELETE CASCADE,
-             payload TEXT NOT NULL
+             day TEXT NOT NULL,
+             search_mode TEXT NOT NULL,
+             total_queries INTEGER NOT NULL,
+             zero_result_queries INTEGER NOT NULL,
+             ambiguous_top_results INTEGER NOT NULL,
+             citationless_top_results INTEGER NOT NULL,
+             accepted_result_count INTEGER NOT NULL,
+             rejected_result_count INTEGER NOT NULL,
+             total_result_count INTEGER NOT NULL,
+             created_at TEXT NOT NULL,
+             updated_at TEXT NOT NULL
+           )`,
+        );
+        db.exec(
+          `CREATE TABLE knowledge_search_feedback (
+             id TEXT PRIMARY KEY,
+             project_id TEXT NOT NULL REFERENCES knowledge_projects(id) ON DELETE CASCADE,
+             query_fingerprint TEXT NOT NULL,
+             search_mode TEXT NOT NULL,
+             result_kind TEXT NOT NULL,
+             result_ref TEXT NOT NULL,
+             feedback_kind TEXT NOT NULL,
+             rank_position INTEGER NOT NULL,
+             ambiguity_state TEXT,
+             citation_present INTEGER NOT NULL,
+             feedback_count INTEGER NOT NULL DEFAULT 1,
+             first_day TEXT NOT NULL,
+             last_day TEXT NOT NULL
            )`,
         );
       }
@@ -1396,7 +1475,12 @@ See [[graph|the graph]].
         target.prepare('INSERT INTO knowledge_search_indexes VALUES (?, ?, ?)').run('idx_1', projectId, 'derived');
         target.prepare('INSERT INTO knowledge_source_freshness VALUES (?, ?, ?)').run('fresh_1', projectId, 'host');
         target.prepare('INSERT INTO knowledge_source_freshness VALUES (?, ?, ?)').run('fresh_other', 'project_unrelated', 'host');
-        target.prepare('INSERT INTO knowledge_query_analytics_daily VALUES (?, ?, ?)').run('analytics_1', projectId, 'counts-only');
+        target
+          .prepare('INSERT INTO knowledge_query_analytics_daily VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+          .run('analytics_1', projectId, '2026-01-01', 'lexical', 5, 1, 0, 2, 3, 1, 9, '2026-01-01', '2026-01-02');
+        target
+          .prepare('INSERT INTO knowledge_search_feedback VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+          .run('feedback_1', projectId, 'fp_1', 'lexical', 'page', 'ref_1', 'accepted', 2, null, 1, 4, '2026-01-01', '2026-01-02');
 
         importKnowledgeProject(target, archive, imported);
 
@@ -1411,8 +1495,11 @@ See [[graph|the graph]].
           count: 0,
         });
         expect(target.prepare('SELECT id FROM knowledge_source_freshness').all()).toEqual([{ id: 'fresh_other' }]);
-        expect(target.prepare('SELECT id, payload FROM knowledge_query_analytics_daily').all()).toEqual([
-          { id: 'analytics_1', payload: 'counts-only' },
+        expect(target.prepare('SELECT id, day, total_queries, total_result_count FROM knowledge_query_analytics_daily').all()).toEqual([
+          { id: 'analytics_1', day: '2026-01-01', total_queries: 5, total_result_count: 9 },
+        ]);
+        expect(target.prepare('SELECT id, result_ref, feedback_count, ambiguity_state FROM knowledge_search_feedback').all()).toEqual([
+          { id: 'feedback_1', result_ref: 'ref_1', feedback_count: 4, ambiguity_state: null },
         ]);
       });
 
