@@ -246,6 +246,7 @@ describe('searchKnowledge', () => {
     expect(lexicalScore('design', [{ text: 'descriptive metadata', weight: 1 }])).toBe(0);
     expect(lexicalScore('allocated routing', [{ text: 'allocate_route', weight: 1 }])).toBeGreaterThanOrEqual(2);
     expect(lexicalScore('task-manager', [{ text: 'TaskManager', weight: 1 }])).toBeGreaterThan(0);
+    expect(lexicalScore('use case', [{ text: 'CloudRouterUsecase', weight: 1 }])).toBeGreaterThan(0);
   });
 
   it('ignores stale pages, handles empty and Unicode queries, and tolerates missing source rows', () => {
@@ -777,6 +778,101 @@ describe('searchKnowledge', () => {
         span: null,
       }),
     ]);
+  });
+
+  it('uses source structure to prefer a task-manager class over a broad workflow section', () => {
+    const taskManagerSource = sourceStore.register({
+      projectId: PROJECT_ID,
+      kind: 'file',
+      path: 'naas/test/Libs/TaskManagers/JCNR/jcnr_config.py',
+      content: 'class TaskManagerConfig:\n    pass\n',
+      format: 'python',
+      mimeType: 'text/x-python',
+    });
+    const taskManagerVersion = sourceStore.listVersions(PROJECT_ID, taskManagerSource.id)[0];
+    extractionStore.save({
+      projectId: PROJECT_ID,
+      extraction: {
+        analyzerId: 'python-lezer',
+        analyzerVersion: '1',
+        sourceVersionId: taskManagerVersion.id,
+        title: 'naas/test/Libs/TaskManagers/JCNR/jcnr_config.py',
+        summary: 'JCNR configuration task manager.',
+        sections: [],
+        symbols: [
+          {
+            id: 'symbol:config',
+            kind: 'class',
+            name: 'TaskManagerConfig',
+            qualifiedName: 'jcnr_config.TaskManagerConfig',
+            span: {
+              startOffset: 0,
+              endOffset: 28,
+              startLine: 1,
+              startColumn: 1,
+              endLine: 2,
+              endColumn: 9,
+            },
+            confidence: 1,
+          },
+        ],
+        relationships: [],
+        links: [],
+        diagnostics: [],
+      },
+    });
+
+    const broadWorkflowSource = sourceStore.register({
+      projectId: PROJECT_ID,
+      kind: 'file',
+      path: 'naas/test/Libs/Workflows/JCNR/solution_resources_workflow.py',
+      content: 'task manager classes configure deployment workflows\n',
+      format: 'python',
+      mimeType: 'text/x-python',
+    });
+    const broadWorkflowVersion = sourceStore.listVersions(PROJECT_ID, broadWorkflowSource.id)[0];
+    extractionStore.save({
+      projectId: PROJECT_ID,
+      extraction: {
+        analyzerId: 'python-lezer',
+        analyzerVersion: '1',
+        sourceVersionId: broadWorkflowVersion.id,
+        title: 'naas/test/Libs/Workflows/JCNR/solution_resources_workflow.py',
+        summary: 'task manager classes configure deployment workflows',
+        sections: [
+          {
+            id: 'section:workflow',
+            kind: 'code',
+            title: 'task manager classes',
+            text: 'task manager classes configure deployment workflows',
+            span: {
+              startOffset: 0,
+              endOffset: 51,
+              startLine: 1,
+              startColumn: 1,
+              endLine: 1,
+              endColumn: 52,
+            },
+            confidence: 1,
+          },
+        ],
+        symbols: [],
+        relationships: [],
+        links: [],
+        diagnostics: [],
+      },
+    });
+
+    const results = searchKnowledge('main task-manager classes', {
+      db,
+      projectId: PROJECT_ID,
+      mode: 'sources',
+    });
+
+    expect(results[0]).toMatchObject({
+      kind: 'source',
+      id: taskManagerSource.id,
+    });
   });
 
   it('redacts extraction-backed snippets before returning source-backed excerpts and exact citations', () => {

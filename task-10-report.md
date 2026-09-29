@@ -277,8 +277,8 @@ project after the generic search improvements in
 `packages/core/src/knowledge/KnowledgeSearch.ts`:
 
 - 5/10 expected paths ranked first
-- 7/10 expected paths ranked in the top three
-- 8/10 expected paths returned with exact persisted source spans
+- 9/10 expected paths ranked in the top three
+- 10/10 expected paths returned with exact persisted source spans
 - 10/10 questions had typed graph evidence
 
 The retrieval and citation thresholds in the implementation plan therefore
@@ -293,7 +293,12 @@ stopwords are ignored, safe identifier tokenization and simple inflections
 match identifier-style text, distinct-term coverage improves multi-concept
 queries, the top five extraction fields determine source relevance, metadata
 contribution is bounded, and project-local inverse-document-frequency
-weighting reduces long-file/common-term dominance. Citation selection prefers
-the strongest persisted-span match when several extraction fields match.
+weighting reduces long-file/common-term dominance. A bounded structural
+reranker now uses symbol kinds and generic path roles (task managers,
+workflows, use cases, loaders, global variables, and pytest conftest files)
+when the query expresses the corresponding concept. Compound `Usecase`
+identifiers are tokenized as “use case” without provider calls or
+question-specific path exceptions. Citation selection prefers the strongest
+persisted-span match when several extraction fields match.
 No question-specific terms, source-path exceptions, or fabricated citations
 were added.

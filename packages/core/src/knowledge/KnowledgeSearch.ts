@@ -3,7 +3,11 @@ import { estimateTokens } from '../ContextBuilder.js';
 import { redactLines } from '../Redactor.js';
 import { searchWorkspace, type SearchResult as WorkspaceSearchResult } from '../Search.js';
 import type { TaskStore } from '../TaskStore.js';
-import { validateDeterministicExtraction, type KnowledgeSourceSpan } from './KnowledgeExtraction.js';
+import {
+  validateDeterministicExtraction,
+  type ExtractedSymbolKind,
+  type KnowledgeSourceSpan,
+} from './KnowledgeExtraction.js';
 import type {
   KnowledgePageId,
   KnowledgePageType,
@@ -142,6 +146,7 @@ interface ExtractionSearchData {
   analyzerId: string | null;
   analyzerVersion: string | null;
   fields: SearchableField[];
+  symbolKinds: ExtractedSymbolKind[];
 }
 
 const DEFAULT_LIMIT = 20;
@@ -188,7 +193,11 @@ function searchTokens(value: string): string[] {
     .toLocaleLowerCase()
     .split(/[^\p{L}\p{N}]+/u)
     .filter(Boolean);
-  return [...new Set(tokens)];
+  return [
+    ...new Set(
+      tokens.flatMap((token) => (token === 'usecase' ? [token, 'use', 'case'] : [token])),
+    ),
+  ];
 }
 
 function terms(query: string): string[] {
@@ -200,6 +209,7 @@ function terms(query: string): string[] {
 
 function termVariants(term: string): string[] {
   const variants = [term];
+  if (term.length > 5 && term.endsWith('sses')) variants.push(term.slice(0, -2));
   if (term.length > 4 && term.endsWith('ies') && term.length - 3 >= 4) variants.push(`${term.slice(0, -3)}y`);
   if (term.length > 4 && term.endsWith('ing') && term.length - 3 >= 4) {
     const stem = term.slice(0, -3);
@@ -210,6 +220,40 @@ function termVariants(term: string): string[] {
   if (term.length > 4 && term.endsWith('ed') && term.length - 2 >= 4) variants.push(term.slice(0, -2));
   if (term.length > 4 && term.endsWith('s') && term.length - 1 >= 4) variants.push(term.slice(0, -1));
   return [...new Set(variants)];
+}
+
+function queryHasConcept(query: string, concept: string): boolean {
+  return terms(query).some(
+    (term) => term === concept || term === `${concept}s` || term === `${concept}es` || termVariants(term).includes(concept),
+  );
+}
+
+function structuralScore(query: string, row: SourceSearchRow, extractionData: ExtractionSearchData | null): number {
+  const pathTokens = searchTokens(row.source_path ?? row.content_path ?? '');
+  const hasTaskManagerPath = pathTokens.includes('task') && pathTokens.some((token) => token === 'manager' || token === 'managers');
+  const hasWorkflowPath = pathTokens.includes('workflow') || pathTokens.includes('workflows');
+  const hasUseCasePath = pathTokens.includes('usecase') || pathTokens.includes('usecases');
+  const hasLoaderPath = pathTokens.includes('loader');
+  const hasGlobalVariablesPath = pathTokens.includes('global') && pathTokens.includes('variables');
+  const hasConftestPath = pathTokens.includes('conftest');
+  const hasClassIntent = queryHasConcept(query, 'class');
+  const hasFunctionIntent = queryHasConcept(query, 'function') || queryHasConcept(query, 'method');
+  const hasInterfaceIntent = queryHasConcept(query, 'interface');
+  const hasUseCaseIntent = queryHasConcept(query, 'use') || queryHasConcept(query, 'usecase');
+  const hasLoaderIntent = queryHasConcept(query, 'loader');
+  const hasDefaultsIntent = queryHasConcept(query, 'default');
+  const hasPytestIntent = queryHasConcept(query, 'pytest') || queryHasConcept(query, 'bootstrap');
+  const symbolKinds = new Set(extractionData?.symbolKinds ?? []);
+  let score = 0;
+  if (hasTaskManagerPath && hasClassIntent && symbolKinds.has('class')) score += 24;
+  if (hasTaskManagerPath && hasFunctionIntent && (symbolKinds.has('function') || symbolKinds.has('method'))) score += 12;
+  if (hasInterfaceIntent && symbolKinds.has('interface')) score += 12;
+  if (hasWorkflowPath && hasClassIntent && symbolKinds.has('class')) score += 4;
+  if (hasUseCasePath && hasUseCaseIntent) score += 16;
+  if (hasLoaderPath && hasLoaderIntent) score += 36;
+  if (hasGlobalVariablesPath && hasDefaultsIntent) score += 24;
+  if (hasConftestPath && hasPytestIntent) score += 24;
+  return score;
 }
 
 export function lexicalScore(query: string, weightedFields: Array<{ text: string | null; weight: number }>): number {
@@ -549,6 +593,7 @@ function parseExtractionSearchData(db: Database.Database, row: SourceSearchRow):
       analyzerId: row.extraction_analyzer_id,
       analyzerVersion: row.extraction_analyzer_version,
       fields,
+      symbolKinds: extraction.symbols.slice(0, MAX_EXTRACTION_SYMBOLS).map((symbol) => symbol.kind),
     };
   } catch {
     return null;
@@ -696,9 +741,12 @@ function searchSources(query: string, options: KnowledgeSearchOptions): Knowledg
       { text: row.mime_type, weight: 1 },
       { text: row.current_hash, weight: 1 },
     ]);
+    const structuralBonus = bestMatch ? structuralScore(query, row, extractionData) : 0;
     const rankClass = bestMatch ? bestMatch.field.rankClass : metadataScore > 0 ? METADATA_MATCH_RANK_CLASS : DEFAULT_MATCH_RANK_CLASS;
-    const score = bestMatch ? extractionScore + Math.min(metadataScore * 4, extractionScore) : metadataScore;
-    if (score === 0) continue;
+    const score = bestMatch
+      ? extractionScore + Math.min(metadataScore * 4, extractionScore) + structuralBonus
+      : metadataScore + structuralBonus;
+    if (score === 0 || (!bestMatch && metadataScore === 0)) continue;
     const result = withGraphExpansions(
       {
         mode,
