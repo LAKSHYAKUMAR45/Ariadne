@@ -8,97 +8,16 @@ import { KnowledgeQueue } from '../../src/knowledge/KnowledgeQueue.js';
 import { searchKnowledge } from '../../src/knowledge/KnowledgeSearch.js';
 import { KnowledgeSourceStore } from '../../src/knowledge/KnowledgeSourceStore.js';
 import { KnowledgeWorker } from '../../src/knowledge/KnowledgeWorker.js';
-import { parseKnowledgeAccuracyCorpus, type KnowledgeAccuracyQuestion } from './KnowledgeSearchEvaluator.js';
+import {
+  hasKnowledgeTypedGraphEvidence,
+  parseKnowledgeAccuracyCorpus,
+  scoreKnowledgeAccuracy,
+} from './KnowledgeSearchEvaluator.js';
 
 const PROJECT_ID = 'synthetic-naas-acceptance';
 const FIXTURE_ROOT = join(process.cwd(), 'test/knowledge/fixtures/naas');
 const FIXTURE_CONTENT_PATH = 'sources/files';
 const CREATED_AT = '2026-09-28T00:00:00.000Z';
-const TYPED_EDGE_TYPES = new Set(['calls', 'contains', 'defines', 'imports', 'inherits', 'references']);
-const TYPED_EVIDENCE_TYPES = new Set(['explicit_link', 'semantic_relationship']);
-
-interface KnowledgeAccuracyReport {
-  questionCount: number;
-  top1PathHits: number;
-  top3PathHits: number;
-  spanCitationHits: number;
-  typedGraphEvidenceHits: number;
-}
-
-interface GraphEvidenceRow {
-  node_type: string;
-  edge_type: string;
-  evidence_json: string;
-}
-
-function hasTypedGraphEvidence(
-  db: Database.Database,
-  sourcePath: string,
-  expectedSymbols: readonly string[],
-): boolean {
-  if (expectedSymbols.length === 0) return false;
-  const placeholders = expectedSymbols.map(() => '?').join(', ');
-  const rows = db.prepare(
-    `SELECT node.node_type, edge.edge_type, edge.evidence_json
-     FROM knowledge_graph_nodes node
-     JOIN knowledge_sources source
-       ON source.project_id = node.project_id
-      AND source.source_path = ?
-     JOIN knowledge_source_versions version
-       ON version.project_id = source.project_id
-      AND version.source_id = source.id
-      AND version.id = node.source_version_id
-     JOIN knowledge_graph_edges edge
-       ON edge.project_id = node.project_id
-      AND (edge.source_node_id = node.id OR edge.target_node_id = node.id)
-     WHERE node.project_id = ?
-       AND node.label IN (${placeholders})`,
-  ).all(sourcePath, PROJECT_ID, ...expectedSymbols) as GraphEvidenceRow[];
-
-  return rows.some((row) => {
-    if (!['class', 'function', 'method', 'module'].includes(row.node_type)) return false;
-    if (!TYPED_EDGE_TYPES.has(row.edge_type)) return false;
-    const storedEvidence: unknown = JSON.parse(row.evidence_json);
-    if (typeof storedEvidence !== 'object' || storedEvidence === null || Array.isArray(storedEvidence)) return false;
-    const evidence = (storedEvidence as { evidence?: unknown }).evidence;
-    return Array.isArray(evidence) && evidence.some(
-      (kind) => typeof kind === 'string' && TYPED_EVIDENCE_TYPES.has(kind),
-    );
-  });
-}
-
-function scoreAccuracy(
-  db: Database.Database,
-  questions: readonly KnowledgeAccuracyQuestion[],
-): KnowledgeAccuracyReport {
-  let top1PathHits = 0;
-  let top3PathHits = 0;
-  let spanCitationHits = 0;
-  let typedGraphEvidenceHits = 0;
-
-  for (const question of questions) {
-    const results = searchKnowledge(question.prompt, { db, projectId: PROJECT_ID, mode: 'sources' });
-    const expectedResults = results.filter((result) => question.expectedPaths.includes(result.title));
-    if (question.expectedPaths.includes(results[0]?.title ?? '')) top1PathHits += 1;
-    if (results.slice(0, 3).some((result) => question.expectedPaths.includes(result.title))) top3PathHits += 1;
-    if (expectedResults.some((result) => result.citations.some((citation) => citation.span !== null))) {
-      spanCitationHits += 1;
-    }
-    if (question.expectedPaths.some((sourcePath) =>
-      hasTypedGraphEvidence(db, sourcePath, question.expectedSymbols),
-    )) {
-      typedGraphEvidenceHits += 1;
-    }
-  }
-
-  return {
-    questionCount: questions.length,
-    top1PathHits,
-    top3PathHits,
-    spanCitationHits,
-    typedGraphEvidenceHits,
-  };
-}
 
 describe('KnowledgeWorker synthetic NAAS-shaped acceptance', () => {
   let db: Database.Database;
@@ -125,9 +44,9 @@ describe('KnowledgeWorker synthetic NAAS-shaped acceptance', () => {
   });
 
   it('meets path, citation, and typed-graph thresholds for ten offline worker questions', async () => {
-    const questions = parseKnowledgeAccuracyCorpus(JSON.parse(
+    const corpus = parseKnowledgeAccuracyCorpus(JSON.parse(
       readFileSync(join(FIXTURE_ROOT, 'questions.json'), 'utf8'),
-    )).questions as KnowledgeAccuracyQuestion[];
+    ));
     const fixturePaths = [
       'task-managers/device.py',
       'task-managers/gnmi.py',
@@ -163,19 +82,31 @@ describe('KnowledgeWorker synthetic NAAS-shaped acceptance', () => {
     }
 
     await new KnowledgeWorker(db, { workerId: 'naas-acceptance', now: () => CREATED_AT }).runOnce(PROJECT_ID);
-    const report = scoreAccuracy(db, questions);
+    const report = scoreKnowledgeAccuracy(
+      corpus,
+      (prompt) => searchKnowledge(prompt, { db, projectId: PROJECT_ID, mode: 'sources' }),
+      (question, sourcePath) => hasKnowledgeTypedGraphEvidence(db, {
+        projectId: PROJECT_ID,
+        sourcePath,
+        expectedSymbols: question.expectedSymbols,
+      }),
+    );
 
     expect(Object.keys(report).sort()).toEqual([
+      'corpusVersion',
+      'failures',
       'questionCount',
       'spanCitationHits',
       'top1PathHits',
       'top3PathHits',
       'typedGraphEvidenceHits',
     ]);
+    expect(report.corpusVersion).toBe('naas-v1');
     expect(report.questionCount).toBe(10);
     expect(report.top3PathHits).toBeGreaterThanOrEqual(8);
     expect(report.spanCitationHits).toBe(10);
     expect(report.typedGraphEvidenceHits).toBeGreaterThanOrEqual(8);
+    expect(report.failures).toEqual([]);
 
     const remainingJobs = db.prepare(
       `SELECT status, COUNT(*) AS count

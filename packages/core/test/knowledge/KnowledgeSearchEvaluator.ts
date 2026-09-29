@@ -1,3 +1,5 @@
+import type Database from 'better-sqlite3';
+
 export interface KnowledgeAccuracyQuestion {
   id: string;
   prompt: string;
@@ -33,6 +35,15 @@ export interface KnowledgeAccuracySearchResult {
   title: string;
   citations: ReadonlyArray<{ span: unknown }>;
 }
+
+interface GraphEvidenceRow {
+  node_type: string;
+  edge_type: string;
+  evidence_json: string;
+}
+
+const TYPED_EDGE_TYPES = new Set(['calls', 'contains', 'defines', 'imports', 'inherits', 'references']);
+const TYPED_EVIDENCE_TYPES = new Set(['explicit_link', 'semantic_relationship']);
 
 function expectObject(value: unknown, label: string): Record<string, unknown> {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
@@ -117,6 +128,47 @@ export function parseKnowledgeAccuracyCorpus(input: unknown): KnowledgeAccuracyC
 
 function hasNonNullSpan(result: KnowledgeAccuracySearchResult): boolean {
   return result.citations.some((citation) => citation.span !== null);
+}
+
+export function hasKnowledgeTypedGraphEvidence(
+  db: Database.Database,
+  options: {
+    projectId: string;
+    sourcePath: string;
+    expectedSymbols: readonly string[];
+  },
+): boolean {
+  const { expectedSymbols, projectId, sourcePath } = options;
+  if (expectedSymbols.length === 0) return false;
+
+  const placeholders = expectedSymbols.map(() => '?').join(', ');
+  const rows = db.prepare(
+    `SELECT node.node_type, edge.edge_type, edge.evidence_json
+     FROM knowledge_graph_nodes node
+     JOIN knowledge_sources source
+       ON source.project_id = node.project_id
+      AND source.source_path = ?
+     JOIN knowledge_source_versions version
+       ON version.project_id = source.project_id
+      AND version.source_id = source.id
+      AND version.id = node.source_version_id
+     JOIN knowledge_graph_edges edge
+       ON edge.project_id = node.project_id
+      AND (edge.source_node_id = node.id OR edge.target_node_id = node.id)
+     WHERE node.project_id = ?
+       AND node.label IN (${placeholders})`,
+  ).all(sourcePath, projectId, ...expectedSymbols) as GraphEvidenceRow[];
+
+  return rows.some((row) => {
+    if (!['class', 'function', 'method', 'module'].includes(row.node_type)) return false;
+    if (!TYPED_EDGE_TYPES.has(row.edge_type)) return false;
+    const storedEvidence: unknown = JSON.parse(row.evidence_json);
+    if (typeof storedEvidence !== 'object' || storedEvidence === null || Array.isArray(storedEvidence)) return false;
+    const evidence = (storedEvidence as { evidence?: unknown }).evidence;
+    return Array.isArray(evidence) && evidence.some(
+      (kind) => typeof kind === 'string' && TYPED_EVIDENCE_TYPES.has(kind),
+    );
+  });
 }
 
 export function scoreKnowledgeAccuracy(
