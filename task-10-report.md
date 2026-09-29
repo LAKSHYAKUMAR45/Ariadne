@@ -237,6 +237,14 @@ target root or legacy archive metadata, and reject redacted archives that
 provide no safe destination. Project-scoped chat CLI history/send arguments
 are documented and covered by the existing command tests.
 
+Task-history archive compatibility is now explicit and tested. External
+`task_history` sources are accepted only when their source URI is the
+canonical `ariadne://task/<id>` form and their persisted content path matches
+`tasks/<id>.md`; those references are preserved without requiring a local file.
+Ordinary file-backed sources remain subject to normal path, size, hash, and
+staging checks. The real NAAS archive export now succeeds with 150 files and
+all manifest checksums verified.
+
 ## Files changed
 
 - `.github/agents/ariadne.agent.md`

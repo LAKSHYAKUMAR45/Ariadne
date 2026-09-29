@@ -778,6 +778,59 @@ See [[graph|the graph]].
     });
   });
 
+  it('exports and imports task-history sources without requiring a local artifact', () => {
+    const source = database();
+    const { projectId } = seed(source);
+    source.prepare(
+      `INSERT INTO knowledge_sources
+       (id, project_id, source_kind, source_path, source_url, title, current_hash, status, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      'source_task_history',
+      projectId,
+      'task_history',
+      'ariadne://task/task-1',
+      null,
+      'Task history',
+      'external-hash',
+      'active',
+      '2026-01-01',
+      '2026-01-01',
+    );
+    source.prepare(
+      `INSERT INTO knowledge_source_versions
+       (id, project_id, source_id, version_number, content_hash, content_path, byte_length, mime_type, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      'source_version_task_history',
+      projectId,
+      'source_task_history',
+      1,
+      'external-hash',
+      'tasks/task-1.md',
+      12,
+      'text/markdown',
+      '2026-01-01',
+    );
+
+    const archive = exportKnowledgeProject(source, { projectId });
+    expect(archive.files['tasks/task-1.md']).toBeUndefined();
+
+    const taskHistoryRows = tableRows<Record<string, unknown>>(archive, 'knowledge_sources');
+    const invalidTaskHistoryArchive = rewriteTableRows(archive, 'knowledge_sources', [
+      ...taskHistoryRows.filter((row) => row.id !== 'source_task_history'),
+      { ...taskHistoryRows.find((row) => row.id === 'source_task_history'), source_path: null },
+    ]);
+    expect(() => importKnowledgeProject(database(), invalidTaskHistoryArchive, importOptions())).toThrow(/canonical task URI/i);
+
+    const target = database();
+    const imported = importKnowledgeProject(target, archive, importOptions());
+    expect(imported.projectId).toBe(projectId);
+    expect(target.prepare('SELECT source_kind FROM knowledge_sources WHERE id = ?').get('source_task_history')).toEqual({
+      source_kind: 'task_history',
+    });
+  });
+
   it('rejects replacing a project rooted in a different workspace', () => {
     const source = database();
     const { projectId } = seed(source);

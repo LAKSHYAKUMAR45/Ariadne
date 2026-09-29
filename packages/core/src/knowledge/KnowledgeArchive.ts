@@ -647,9 +647,11 @@ function validateTableRowValues(
   schema: ArchiveTableSchema,
   rows: readonly Record<string, unknown>[],
   workspaceRoot: string,
+  rowsByTable: ReadonlyMap<ArchiveTableName, readonly Record<string, unknown>[]>,
 ): void {
   const optional = new Set(schema.optionalColumns ?? []);
   const columnInfo = loadTableColumnInfo(db, schema.name, schema.columns);
+  const taskHistoryIds = taskHistorySourceTaskIds(rowsByTable);
   for (const [index, row] of rows.entries()) {
     for (const column of schema.columns) {
       if (!Object.prototype.hasOwnProperty.call(row, column)) {
@@ -662,9 +664,23 @@ function validateTableRowValues(
       assertArchiveColumnValue(row[column], info, `table ${schema.name} row ${index + 1} column ${column}`, {
         nullable: optional.has(column),
       });
+      if (schema.name === 'knowledge_sources' && column === 'source_path' && row.source_kind === 'task_history') {
+        if (typeof row[column] !== 'string' || !/^ariadne:\/\/task\/[A-Za-z0-9_-]+$/.test(row[column])) {
+          throw importRejected(`table knowledge_sources row ${index + 1} column source_path must be a canonical task URI.`);
+        }
+        continue;
+      }
       if (typeof row[column] === 'string') {
         const pathPolicy = PATH_POLICY_BY_COLUMN.get(`${schema.name}.${column}`);
-        if (pathPolicy) {
+        const externalSourceVersion =
+          schema.name === 'knowledge_source_versions' &&
+          column === 'content_path' &&
+          isExternalSourceVersionArtifact(
+            { table: 'knowledge_source_versions', column: 'content_path', root: 'knowledge-root' },
+            row,
+            taskHistoryIds,
+          );
+        if (pathPolicy && !externalSourceVersion) {
           assertArchivePathValue(
             row[column],
             pathPolicy,
@@ -1009,6 +1025,38 @@ function requireArtifactArchivePath(
   throw new Error(`Knowledge archive export rejected: ${message}`);
 }
 
+function isExternalSourceVersionArtifact(
+  spec: ArchiveArtifactSpec,
+  row: Record<string, unknown>,
+  taskHistorySourceTaskIds: ReadonlyMap<string, string>,
+): boolean {
+  if (spec.table !== 'knowledge_source_versions') {
+    return false;
+  }
+  const sourceId = row.source_id;
+  const taskId = typeof sourceId === 'string' ? taskHistorySourceTaskIds.get(sourceId) : undefined;
+  if (taskId === undefined) {
+    return false;
+  }
+  return row.content_path === `tasks/${taskId}.md`;
+}
+
+function taskHistorySourceTaskIds(
+  rowsByTable: ReadonlyMap<ArchiveTableName, readonly Record<string, unknown>[]>,
+): Map<string, string> {
+  const taskIds = new Map<string, string>();
+  for (const source of rowsByTable.get('knowledge_sources') ?? []) {
+    if (source.source_kind !== 'task_history' || typeof source.id !== 'string' || typeof source.source_path !== 'string') {
+      continue;
+    }
+    const match = /^ariadne:\/\/task\/([A-Za-z0-9_-]+)$/.exec(source.source_path);
+    if (match) {
+      taskIds.set(source.id, match[1]);
+    }
+  }
+  return taskIds;
+}
+
 function resolveKnowledgeContentPath(root: string, relativePath: string, label: string): string {
   const normalizedPath = normalizeKnowledgePath(relativePath);
   const absoluteRoot = path.resolve(root);
@@ -1115,7 +1163,11 @@ function addArchiveArtifactFiles(
   rowsByTable: ReadonlyMap<ArchiveTableName, readonly Record<string, unknown>[]>,
   workspaceRoot: string,
 ): void {
+  const taskHistoryIds = taskHistorySourceTaskIds(rowsByTable);
   for (const { spec, row, rowIndex } of archiveArtifactRows(rowsByTable)) {
+    if (isExternalSourceVersionArtifact(spec, row, taskHistoryIds)) {
+      continue;
+    }
     const archivePath = requireArtifactArchivePath(spec, row, rowIndex, 'export');
     if (archivePath === undefined) {
       continue;
@@ -1161,7 +1213,11 @@ function buildArchiveMaterializedFiles(
   workspaceRoot: string,
 ): ArchiveMaterializedFile[] {
   const files = new Map<string, ArchiveMaterializedFile>();
+  const taskHistoryIds = taskHistorySourceTaskIds(rowsByTable);
   for (const { spec, row, rowIndex } of archiveArtifactRows(rowsByTable)) {
+    if (isExternalSourceVersionArtifact(spec, row, taskHistoryIds)) {
+      continue;
+    }
     const archivePath = requireArtifactArchivePath(spec, row, rowIndex, 'import');
     if (archivePath === undefined) {
       continue;
@@ -1201,9 +1257,14 @@ function collectExistingArtifactPaths(
   workspaceRoot: string,
 ): string[] {
   const paths = new Set<string>();
+  const sourceRows = rowsFor(db, 'knowledge_sources', projectId);
+  const taskHistoryIds = taskHistorySourceTaskIds(new Map([['knowledge_sources', sourceRows]]));
   for (const spec of ARTIFACT_SPEC_BY_COLUMN.values()) {
     const rows = rowsFor(db, spec.table, projectId);
     for (const [rowIndex, row] of rows.entries()) {
+      if (isExternalSourceVersionArtifact(spec, row, taskHistoryIds)) {
+        continue;
+      }
       const archivePath = requireArtifactArchivePath(spec, row, rowIndex, 'cleanup');
       if (archivePath === undefined) {
         continue;
@@ -1520,7 +1581,7 @@ function buildImportPlan(db: Database.Database, archive: KnowledgeArchive, optio
     if (schema.name === 'knowledge_projects' && rows[0]) {
       rows[0] = { ...rows[0], workspace_root: workspaceRoot };
     }
-    validateTableRowValues(db, schema, rows, workspaceRoot);
+    validateTableRowValues(db, schema, rows, workspaceRoot, rowsByTable);
     totalRows += rows.length;
     if (totalRows > MAX_ARCHIVE_TOTAL_ROWS) {
       throw importRejected('archive exceeds the maximum supported total row count.');
