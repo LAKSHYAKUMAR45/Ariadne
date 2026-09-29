@@ -114,6 +114,42 @@ const MAX_STATUS_FAILURE_CODES = 5;
 const MAX_STATUS_LEASES = 8;
 const MAX_STATUS_ANALYZER_VERSIONS = 8;
 const MAX_STATUS_WARNINGS = 8;
+const MAX_KNOWLEDGE_ARCHIVE_ENTRIES = 10_000;
+const MAX_KNOWLEDGE_ARCHIVE_ENTRY_BYTES = 16 * 1024 * 1024;
+const MAX_KNOWLEDGE_ARCHIVE_TOTAL_BYTES = 256 * 1024 * 1024;
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && Object.getPrototypeOf(value) === Object.prototype;
+}
+
+function validateArchiveManifestForCli(manifest: unknown): asserts manifest is KnowledgeArchive['manifest'] {
+  if (!isPlainObject(manifest)) {
+    throw new Error('Knowledge archive import rejected: manifest must be a JSON object.');
+  }
+  if (!Array.isArray(manifest.entries)) {
+    throw new Error('Knowledge archive import rejected: manifest entries must be an array.');
+  }
+  if (manifest.entries.length > MAX_KNOWLEDGE_ARCHIVE_ENTRIES) {
+    throw new Error('Knowledge archive import rejected: manifest exceeds the maximum supported entry count.');
+  }
+  for (const entry of manifest.entries) {
+    if (!isPlainObject(entry)) {
+      throw new Error('Knowledge archive import rejected: manifest entries must be plain objects.');
+    }
+    if (
+      typeof entry.path !== 'string' ||
+      typeof entry.sha256 !== 'string' ||
+      typeof entry.mediaType !== 'string' ||
+      typeof entry.size !== 'number' ||
+      !Number.isInteger(entry.size) ||
+      entry.size < 0
+    ) {
+      throw new Error(
+        'Knowledge archive import rejected: manifest entries must include string path/sha256/mediaType values and a non-negative integer size.',
+      );
+    }
+  }
+}
 const LOOPBACK_PROVIDER_HOSTS = new Set(['127.0.0.1', '::1']);
 
 /** Opens the shared workspace state database (knowledge tables live alongside task tables) and guarantees it is closed, mirroring `withStore` in index.ts but without requiring a `TaskStore`. */
@@ -1328,13 +1364,13 @@ export function registerKnowledgeCommands(program: Command): void {
     });
 
   chat
-    .command('history <conversation-id>')
+    .command('history <project-id> <conversation-id>')
     .description('Show messages in a knowledge chat conversation')
     .option('--json', 'Output JSON')
-    .action(async (conversationId: string, opts: { json?: boolean }) => {
+    .action(async (projectId: string, conversationId: string, opts: { json?: boolean }) => {
       await runKnowledgeAction(opts, () =>
         withKnowledgeDb((db) =>
-          new KnowledgeChatService(db, new KnowledgeProviderRegistry(), UNCONFIGURED_CHAT_PROVIDER).listMessages(conversationId),
+          new KnowledgeChatService(db, new KnowledgeProviderRegistry(), UNCONFIGURED_CHAT_PROVIDER).listMessages(projectId, conversationId),
         ),
       (messages) => {
         if (messages.length === 0) {
@@ -1346,21 +1382,21 @@ export function registerKnowledgeCommands(program: Command): void {
     });
 
   chat
-    .command('send <conversation-id> <message>')
+    .command('send <project-id> <conversation-id> <message>')
     .description(
       'Send a message in a knowledge chat conversation. Provider profiles do not currently enable chat execution in ' +
         'the CLI, so this still fails with a clear "provider required" error.',
     )
     .option('-m, --mode <mode>', 'knowledge|sources|tasks|hybrid|read-sources-only')
     .option('--json', 'Output JSON')
-    .action(async (conversationId: string, message: string, opts: { mode?: KnowledgeSearchMode; json?: boolean }) => {
+    .action(async (projectId: string, conversationId: string, message: string, opts: { mode?: KnowledgeSearchMode; json?: boolean }) => {
       await runKnowledgeAction(opts, async () => {
         const providers = new KnowledgeProviderRegistry();
         if (!providers.supports('chat')) throw new KnowledgeProviderRequiredError('chat');
         return withKnowledgeDb(async (db) => {
           const service = new KnowledgeChatService(db, providers, UNCONFIGURED_CHAT_PROVIDER);
           const events = [];
-          for await (const event of service.streamKnowledgeChat({ conversationId, query: message, mode: opts.mode ?? 'hybrid' })) {
+          for await (const event of service.streamKnowledgeChat({ projectId, conversationId, query: message, mode: opts.mode ?? 'hybrid' })) {
             events.push(event);
           }
           return events;
@@ -1381,10 +1417,23 @@ export function registerKnowledgeCommands(program: Command): void {
         withKnowledgeDb((db) => {
           const archive = exportKnowledgeProject(db, { projectId, includeObsidian: opts.obsidian });
           const resolvedOutputDir = path.resolve(findWorkspaceRoot(), outputDir);
+          if (fs.existsSync(resolvedOutputDir) && fs.lstatSync(resolvedOutputDir).isSymbolicLink()) {
+            throw new Error('Knowledge archive export output directory must not be a symbolic link');
+          }
+          assertCliNoSymlinkComponents(findWorkspaceRoot(), resolvedOutputDir, 'Knowledge archive export output directory');
           fs.mkdirSync(resolvedOutputDir, { recursive: true });
-          fs.writeFileSync(path.join(resolvedOutputDir, 'manifest.json'), `${JSON.stringify(archive.manifest, null, 2)}\n`, 'utf8');
+          const manifestTarget = path.join(resolvedOutputDir, 'manifest.json');
+          assertCliNoSymlinkComponents(findWorkspaceRoot(), manifestTarget, 'Knowledge archive export manifest path');
+          if (fs.existsSync(manifestTarget) && fs.lstatSync(manifestTarget).isSymbolicLink()) {
+            throw new Error('Knowledge archive export manifest path must not be a symbolic link');
+          }
+          fs.writeFileSync(manifestTarget, `${JSON.stringify(archive.manifest, null, 2)}\n`, 'utf8');
           for (const [relativePath, content] of Object.entries(archive.files)) {
             const target = path.join(resolvedOutputDir, relativePath);
+            assertCliNoSymlinkComponents(resolvedOutputDir, target, 'Knowledge archive export file path');
+            if (fs.existsSync(target) && fs.lstatSync(target).isSymbolicLink()) {
+              throw new Error('Knowledge archive export file path must not be a symbolic link');
+            }
             fs.mkdirSync(path.dirname(target), { recursive: true });
             fs.writeFileSync(target, content as KnowledgeArchiveFile);
           }
@@ -1398,29 +1447,53 @@ export function registerKnowledgeCommands(program: Command): void {
     .description('Import a knowledge project previously written by "ariadne knowledge export"')
     .option('--replace', 'Replace an existing project with the same id')
     .option('--json', 'Output JSON')
-    .action(async (_projectId: string, inputDir: string, opts: { replace?: boolean; json?: boolean }) => {
+    .action(async (projectId: string, inputDir: string, opts: { replace?: boolean; json?: boolean }) => {
       await runKnowledgeAction(opts, () =>
         withKnowledgeDb((db) => {
+          const workspaceRoot = findWorkspaceRoot();
           const resolvedInputDir = fs.realpathSync(path.resolve(findWorkspaceRoot(), inputDir));
           const manifestPath = path.join(resolvedInputDir, 'manifest.json');
           if (fs.lstatSync(manifestPath).isSymbolicLink()) throw new Error('Knowledge archive manifest must not be a symbolic link');
-          const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8')) as KnowledgeArchive['manifest'];
+          const manifestStats = fs.statSync(manifestPath);
+          if (manifestStats.size > MAX_KNOWLEDGE_ARCHIVE_ENTRY_BYTES) {
+            throw new Error('Knowledge archive manifest exceeds the maximum supported file size');
+          }
+          let manifestValue: unknown;
+          try {
+            manifestValue = JSON.parse(fs.readFileSync(manifestPath, 'utf8')) as unknown;
+          } catch {
+            throw new Error('Knowledge archive import rejected: manifest.json must contain valid JSON.');
+          }
+          validateArchiveManifestForCli(manifestValue);
+          const manifest = manifestValue;
           const files: Record<string, KnowledgeArchiveFile> = {};
+          let totalBytes = manifestStats.size;
           for (const entry of manifest.entries) {
             const normalized = entry.path.replaceAll('\\', '/');
             if (!normalized || normalized.startsWith('/') || normalized.split('/').includes('..') || path.posix.normalize(normalized) !== normalized) {
               throw new Error(`Knowledge archive path traversal rejected: ${entry.path}`);
             }
             const target = path.resolve(resolvedInputDir, normalized);
-            const canonicalTarget = fs.realpathSync(target);
-            const relativeToInput = path.relative(resolvedInputDir, canonicalTarget);
             const entryStats = fs.lstatSync(target);
+            const relativeToInput = path.relative(resolvedInputDir, target);
             if (relativeToInput.startsWith('..') || path.isAbsolute(relativeToInput) || entryStats.isSymbolicLink() || !entryStats.isFile()) {
+              throw new Error(`Knowledge archive entry must stay within the input directory: ${entry.path}`);
+            }
+            if (entryStats.size > MAX_KNOWLEDGE_ARCHIVE_ENTRY_BYTES) {
+              throw new Error(`Knowledge archive entry exceeds the maximum supported file size: ${entry.path}`);
+            }
+            totalBytes += entryStats.size;
+            if (totalBytes > MAX_KNOWLEDGE_ARCHIVE_TOTAL_BYTES) {
+              throw new Error('Knowledge archive exceeds the maximum supported total file size');
+            }
+            const canonicalTarget = fs.realpathSync(target);
+            const relativeToCanonicalInput = path.relative(resolvedInputDir, canonicalTarget);
+            if (relativeToCanonicalInput.startsWith('..') || path.isAbsolute(relativeToCanonicalInput)) {
               throw new Error(`Knowledge archive entry must stay within the input directory: ${entry.path}`);
             }
             files[normalized] = fs.readFileSync(canonicalTarget);
           }
-          return importKnowledgeProject(db, { manifest, files }, { replaceExisting: opts.replace });
+          return importKnowledgeProject(db, { manifest, files }, { replaceExisting: opts.replace, expectedProjectId: projectId, workspaceRoot });
         }),
       (result) => console.log(`Imported project ${result.projectId}: ${result.tables} table(s), ${result.rows} row(s), ${result.files.length} file(s).`));
     });

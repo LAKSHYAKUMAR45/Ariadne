@@ -1,7 +1,7 @@
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import type Database from 'better-sqlite3';
-import { createKnowledgeId } from './KnowledgeIds.js';
+import { createKnowledgeId, normalizeKnowledgePath } from './KnowledgeIds.js';
 import {
   buildKnowledgeSearchContext,
   searchKnowledge,
@@ -74,6 +74,7 @@ export type KnowledgeChatProvider = (
 ) => AsyncIterable<string>;
 
 export interface StreamKnowledgeChatInput {
+  projectId: string;
   conversationId: string;
   query: string;
   mode?: KnowledgeSearchMode;
@@ -86,6 +87,7 @@ export interface StreamKnowledgeChatInput {
 }
 
 export interface RegenerateKnowledgeChatInput {
+  projectId: string;
   messageId: string;
   taskStore?: TaskStore;
   limit?: number;
@@ -96,6 +98,7 @@ export interface RegenerateKnowledgeChatInput {
 }
 
 export interface SaveKnowledgeChatMessageToPageInput {
+  projectId: string;
   messageId: string;
   type: KnowledgePageType;
   title: string;
@@ -154,6 +157,13 @@ interface ProjectRow {
 }
 
 const DEFAULT_HISTORY_LIMIT = 50;
+const ALLOWED_KNOWLEDGE_SEARCH_MODES = new Set<KnowledgeSearchMode>([
+  'knowledge',
+  'sources',
+  'tasks',
+  'hybrid',
+  'read-sources-only',
+]);
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -183,6 +193,57 @@ function rowToConversation(row: ConversationRow): KnowledgeConversationRecord {
 
 function conversationRelativePath(conversationId: string, messageId: string): string {
   return `conversations/${conversationId}/${messageId}.json`;
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && Object.getPrototypeOf(value) === Object.prototype;
+}
+
+function parseMessagePayload(raw: string): MessagePayload {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw) as unknown;
+  } catch {
+    throw new Error('Knowledge chat payload must contain valid JSON');
+  }
+  if (!isPlainObject(parsed)) {
+    throw new Error('Knowledge chat payload must be a plain object');
+  }
+  if (typeof parsed.content !== 'string') {
+    throw new Error('Knowledge chat payload content must be a string');
+  }
+  if (!Array.isArray(parsed.citations)) {
+    throw new Error('Knowledge chat payload citations must be an array');
+  }
+  for (const [index, citation] of parsed.citations.entries()) {
+    if (!isPlainObject(citation)) {
+      throw new Error(`Knowledge chat payload citation ${index + 1} must be a plain object`);
+    }
+    for (const key of ['pageId', 'sourceId', 'path', 'url'] as const) {
+      const value = citation[key];
+      if (value !== null && value !== undefined && typeof value !== 'string') {
+        throw new Error(`Knowledge chat payload citation ${index + 1} field ${key} must be a string or null`);
+      }
+    }
+    if (citation.span !== null && citation.span !== undefined) {
+      if (!isPlainObject(citation.span)) {
+        throw new Error(`Knowledge chat payload citation ${index + 1} span must be a plain object or null`);
+      }
+      if (typeof citation.span.id !== 'string') {
+        throw new Error(`Knowledge chat payload citation ${index + 1} span id must be a string`);
+      }
+    }
+  }
+  if (parsed.retrievalMode !== null && parsed.retrievalMode !== undefined) {
+    if (typeof parsed.retrievalMode !== 'string' || !ALLOWED_KNOWLEDGE_SEARCH_MODES.has(parsed.retrievalMode as KnowledgeSearchMode)) {
+      throw new Error('Knowledge chat payload retrievalMode must be a supported search mode or null');
+    }
+  }
+  return {
+    content: parsed.content,
+    citations: parsed.citations as KnowledgeSearchCitation[],
+    retrievalMode: (parsed.retrievalMode ?? null) as KnowledgeSearchMode | null,
+  };
 }
 
 /**
@@ -226,12 +287,13 @@ export class KnowledgeChatService {
          VALUES (@id, @projectId, @title, @createdAt, @createdAt)`,
       )
       .run(record);
-    return this.requireConversation(record.id);
+    return this.requireConversation(record.projectId, record.id);
   }
 
-  public getConversation(conversationId: string): KnowledgeConversationRecord {
+  public getConversation(projectId: string, conversationId: string): KnowledgeConversationRecord {
+    requireNonEmpty(projectId, 'project ID');
     requireNonEmpty(conversationId, 'conversation ID');
-    return this.requireConversation(conversationId);
+    return this.requireConversation(projectId, conversationId);
   }
 
   public listConversations(
@@ -251,42 +313,54 @@ export class KnowledgeChatService {
     return rows.map(rowToConversation);
   }
 
-  public renameConversation(conversationId: string, title: string | null): KnowledgeConversationRecord {
+  public renameConversation(projectId: string, conversationId: string, title: string | null): KnowledgeConversationRecord {
+    requireNonEmpty(projectId, 'project ID');
     requireNonEmpty(conversationId, 'conversation ID');
     if (title !== null) requireNonEmpty(title, 'title');
-    this.requireConversation(conversationId);
+    this.requireConversation(projectId, conversationId);
     this.db
       .prepare(
-        `UPDATE knowledge_conversations SET title = @title, updated_at = @updatedAt WHERE id = @id`,
+        `UPDATE knowledge_conversations
+         SET title = @title, updated_at = @updatedAt
+         WHERE id = @id AND project_id = @projectId`,
       )
-      .run({ id: conversationId, title, updatedAt: this.now() });
-    return this.requireConversation(conversationId);
+      .run({ id: conversationId, projectId, title, updatedAt: this.now() });
+    return this.requireConversation(projectId, conversationId);
   }
 
-  public deleteConversation(conversationId: string): void {
+  public deleteConversation(projectId: string, conversationId: string): void {
+    requireNonEmpty(projectId, 'project ID');
     requireNonEmpty(conversationId, 'conversation ID');
-    const conversation = this.requireConversation(conversationId);
+    const conversation = this.requireConversation(projectId, conversationId);
     const workspaceRoot = this.workspaceRoot(conversation.projectId);
-    this.db.prepare('DELETE FROM knowledge_conversations WHERE id = ?').run(conversationId);
-    rmSync(path.join(workspaceRoot, 'conversations', conversationId), { recursive: true, force: true });
+    const conversationPath = resolveConversationStoragePath(
+      workspaceRoot,
+      path.join('conversations', conversationId),
+      'Knowledge chat conversation path',
+    );
+    this.db.prepare('DELETE FROM knowledge_conversations WHERE id = ? AND project_id = ?').run(conversationId, projectId);
+    rmSync(conversationPath, { recursive: true, force: true });
   }
 
   public listMessages(
+    projectId: string,
     conversationId: string,
     options: ListKnowledgeMessagesOptions = {},
   ): KnowledgeChatMessageRecord[] {
+    requireNonEmpty(projectId, 'project ID');
     requireNonEmpty(conversationId, 'conversation ID');
     requirePositiveInteger(options.limit, 'list limit');
-    const conversation = this.requireConversation(conversationId);
+    const conversation = this.requireConversation(projectId, conversationId);
     const workspaceRoot = this.workspaceRoot(conversation.projectId);
     const rows = this.messageRows(conversationId);
     const ordered = options.limit === undefined ? rows : rows.slice(-options.limit);
     return ordered.map((row) => this.readMessage(workspaceRoot, row));
   }
 
-  public getMessage(messageId: string): KnowledgeChatMessageRecord {
+  public getMessage(projectId: string, messageId: string): KnowledgeChatMessageRecord {
+    requireNonEmpty(projectId, 'project ID');
     requireNonEmpty(messageId, 'message ID');
-    const row = this.messageRow(messageId);
+    const row = this.messageRow(projectId, messageId);
     const workspaceRoot = this.workspaceRoot(row.project_id);
     return this.readMessage(workspaceRoot, row);
   }
@@ -300,9 +374,10 @@ export class KnowledgeChatService {
   }
 
   public streamKnowledgeChat(input: StreamKnowledgeChatInput): AsyncIterable<KnowledgeChatEvent> {
+    requireNonEmpty(input.projectId, 'project ID');
     requireNonEmpty(input.conversationId, 'conversation ID');
     requireNonEmpty(input.query, 'query');
-    const conversation = this.requireConversation(input.conversationId);
+    const conversation = this.requireConversation(input.projectId, input.conversationId);
     return this.runStream({
       conversation,
       query: input.query,
@@ -318,12 +393,13 @@ export class KnowledgeChatService {
   }
 
   public regenerateKnowledgeChat(input: RegenerateKnowledgeChatInput): AsyncIterable<KnowledgeChatEvent> {
+    requireNonEmpty(input.projectId, 'project ID');
     requireNonEmpty(input.messageId, 'message ID');
-    const targetRow = this.messageRow(input.messageId);
+    const targetRow = this.messageRow(input.projectId, input.messageId);
     if (targetRow.role !== 'assistant') {
       throw new Error('Knowledge chat regeneration requires an assistant message');
     }
-    const conversation = this.requireConversation(targetRow.conversation_id);
+    const conversation = this.requireConversation(input.projectId, targetRow.conversation_id);
     const workspaceRoot = this.workspaceRoot(conversation.projectId);
     const priorUser = this.messageRows(conversation.id)
       .filter((row) => row.role === 'user' && row.created_at <= targetRow.created_at)
@@ -353,7 +429,7 @@ export class KnowledgeChatService {
     requireNonEmpty(input.messageId, 'message ID');
     requireNonEmpty(input.title, 'title');
     requireNonEmpty(input.slug, 'slug');
-    const message = this.getMessage(input.messageId);
+    const message = this.getMessage(input.projectId, input.messageId);
     const workspaceRoot = this.workspaceRoot(message.projectId);
 
     const provenance: KnowledgeProvenanceRef[] = message.citations
@@ -536,10 +612,10 @@ export class KnowledgeChatService {
     return error instanceof Error ? this.redact(error.message) : 'Knowledge chat provider failed';
   }
 
-  private requireConversation(conversationId: string): KnowledgeConversationRecord {
+  private requireConversation(projectId: string, conversationId: string): KnowledgeConversationRecord {
     const row = this.db
-      .prepare('SELECT * FROM knowledge_conversations WHERE id = ?')
-      .get(conversationId) as ConversationRow | undefined;
+      .prepare('SELECT * FROM knowledge_conversations WHERE id = ? AND project_id = ?')
+      .get(conversationId, projectId) as ConversationRow | undefined;
     if (row === undefined) {
       throw new Error(`Knowledge conversation not found: ${conversationId}`);
     }
@@ -552,10 +628,10 @@ export class KnowledgeChatService {
       .run({ id: conversationId, updatedAt: this.now() });
   }
 
-  private messageRow(messageId: string): MessageRow {
+  private messageRow(projectId: string, messageId: string): MessageRow {
     const row = this.db
-      .prepare('SELECT * FROM knowledge_messages WHERE id = ?')
-      .get(messageId) as MessageRow | undefined;
+      .prepare('SELECT * FROM knowledge_messages WHERE id = ? AND project_id = ?')
+      .get(messageId, projectId) as MessageRow | undefined;
     if (row === undefined) {
       throw new Error(`Knowledge chat message not found: ${messageId}`);
     }
@@ -641,19 +717,20 @@ export class KnowledgeChatService {
   }
 
   private writePayload(workspaceRoot: string, relativePath: string, payload: MessagePayload): void {
-    const absolutePath = path.join(workspaceRoot, relativePath);
+    const absolutePath = resolveConversationPayloadPath(workspaceRoot, relativePath);
     mkdirSync(path.dirname(absolutePath), { recursive: true });
     writeFileSync(absolutePath, JSON.stringify(payload), { encoding: 'utf8', flag: 'w' });
   }
 
   private readPayload(workspaceRoot: string, relativePath: string): MessagePayload {
-    const raw = readFileSync(path.join(workspaceRoot, relativePath), 'utf8');
-    return JSON.parse(raw) as MessagePayload;
+    const raw = readFileSync(resolveConversationPayloadPath(workspaceRoot, relativePath), 'utf8');
+    return parseMessagePayload(raw);
   }
 
   private deleteMessageRow(workspaceRoot: string, row: MessageRow): void {
+    const payloadPath = resolveConversationPayloadPath(workspaceRoot, row.content_path);
+    rmSync(payloadPath, { force: true });
     this.db.prepare('DELETE FROM knowledge_messages WHERE id = ?').run(row.id);
-    rmSync(path.join(workspaceRoot, row.content_path), { force: true });
   }
 
   private trimHistory(workspaceRoot: string, conversationId: string): void {
@@ -682,6 +759,21 @@ function pageContentPath(type: string, slug: string): string {
 function writeKnowledgePageFile(absolutePath: string, content: string): void {
   mkdirSync(path.dirname(absolutePath), { recursive: true });
   writeFileSync(absolutePath, content, { encoding: 'utf8', flag: 'w' });
+}
+
+function resolveConversationPayloadPath(workspaceRoot: string, relativePath: string): string {
+  const normalized = normalizeKnowledgePath(relativePath);
+  return resolveConversationStoragePath(workspaceRoot, normalized, 'Knowledge chat payload path');
+}
+
+function resolveConversationStoragePath(workspaceRoot: string, relativePath: string, label: string): string {
+  const storageRoot = path.join(workspaceRoot, 'conversations');
+  const absolutePath = path.resolve(workspaceRoot, relativePath);
+  if (!isPathWithinRoot(storageRoot, absolutePath)) {
+    throw new Error(`${label} must stay within conversations/`);
+  }
+  assertNoSymlinkComponents(workspaceRoot, absolutePath, label);
+  return absolutePath;
 }
 
 function dedupeCitations(citations: KnowledgeSearchCitation[]): KnowledgeSearchCitation[] {

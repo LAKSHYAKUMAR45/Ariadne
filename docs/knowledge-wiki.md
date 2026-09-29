@@ -165,7 +165,8 @@ ariadne knowledge export <project-id> knowledge-export --obsidian
 The directory contains `manifest.json`, project/table JSON data, rendered page
 Markdown, `graph.json`, and—when `--obsidian` is supplied—`.obsidian/app.json`.
 Rendered page links use Obsidian wiki-link syntax. The archive has checksums,
-rejects unsafe paths, and can be imported into another Ariadne workspace:
+rejects unsafe paths, requires the CLI target id to match the manifest project
+id exactly, and can be imported into another Ariadne workspace:
 
 ```bash
 ariadne knowledge import <project-id> knowledge-export

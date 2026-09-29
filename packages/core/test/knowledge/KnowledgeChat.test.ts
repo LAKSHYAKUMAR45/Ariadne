@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { openDatabase } from '../../src/db.js';
 import {
@@ -76,15 +76,52 @@ describe('KnowledgeChatService', () => {
 
     const conversation = service.createConversation({ projectId: 'project_1', title: 'Setup questions' });
     expect(conversation).toMatchObject({ projectId: 'project_1', title: 'Setup questions' });
-    expect(service.getConversation(conversation.id)).toMatchObject({ id: conversation.id });
+    expect(service.getConversation('project_1', conversation.id)).toMatchObject({ id: conversation.id });
     expect(service.listConversations('project_1')).toHaveLength(1);
 
-    const renamed = service.renameConversation(conversation.id, 'Renamed');
+    const renamed = service.renameConversation('project_1', conversation.id, 'Renamed');
     expect(renamed.title).toBe('Renamed');
 
-    service.deleteConversation(conversation.id);
-    expect(() => service.getConversation(conversation.id)).toThrow(/not found/);
+    service.deleteConversation('project_1', conversation.id);
+    expect(() => service.getConversation('project_1', conversation.id)).toThrow(/not found/);
     expect(existsSync(join(workspaceRoot, 'conversations', conversation.id))).toBe(false);
+  });
+
+  it('requires the caller project to match conversation and message ownership', async () => {
+    const { db } = createDatabase();
+    seedSource(db);
+    db.prepare(
+      `INSERT INTO knowledge_projects (id, workspace_root, name, status, created_at, updated_at)
+       VALUES ('project_2', ?, 'Other Wiki', 'active', ?, ?)`,
+    ).run(mkdtempSync(join(process.cwd(), '.knowledge-chat-other-')), CREATED_AT, CREATED_AT);
+    const service = new KnowledgeChatService(db, registryWithChatProvider(), chunkProvider(['answer']));
+    const conversation = service.createConversation({ projectId: 'project_1' });
+    const events = await collect(
+      service.streamKnowledgeChat({ projectId: 'project_1', conversationId: conversation.id, query: 'setup guide' }),
+    );
+    const assistantMessage = events.find((event) => event.type === 'done');
+    if (assistantMessage?.type !== 'done') throw new Error('Expected an assistant message');
+
+    expect(() => service.getConversation('project_2', conversation.id)).toThrow(/not found/);
+    expect(() => service.listMessages('project_2', conversation.id)).toThrow(/not found/);
+    expect(() => service.getMessage('project_2', assistantMessage.messageId)).toThrow(/not found/);
+    expect(() => service.renameConversation('project_2', conversation.id, 'Cross-project')).toThrow(/not found/);
+    expect(() => service.deleteConversation('project_2', conversation.id)).toThrow(/not found/);
+    expect(() =>
+      service.saveMessageToPage({
+        projectId: 'project_2',
+        messageId: assistantMessage.messageId,
+        type: 'source',
+        title: 'Cross-project',
+        slug: 'cross-project',
+      }),
+    ).toThrow(/not found/);
+    expect(() =>
+      service.regenerateKnowledgeChat({
+        projectId: 'project_2',
+        messageId: assistantMessage.messageId,
+      }),
+    ).toThrow(/not found/);
   });
 
   it('persists user and assistant messages and emits meta, delta, and done events in order', async () => {
@@ -95,6 +132,7 @@ describe('KnowledgeChatService', () => {
 
     const events = await collect(
       service.streamKnowledgeChat({
+        projectId: 'project_1',
         conversationId: conversation.id,
         query: 'setup guide',
         mode: 'sources',
@@ -112,7 +150,7 @@ describe('KnowledgeChatService', () => {
     expect((done as any).message.content).toBe('Hello world');
     expect((done as any).message.citations).toHaveLength(1);
 
-    const messages = service.listMessages(conversation.id);
+    const messages = service.listMessages('project_1', conversation.id);
     expect(messages).toHaveLength(2);
     expect(messages[0]).toMatchObject({ role: 'user', content: 'setup guide' });
     expect(messages[1]).toMatchObject({ role: 'assistant', content: 'Hello world' });
@@ -125,7 +163,7 @@ describe('KnowledgeChatService', () => {
     const conversation = service.createConversation({ projectId: 'project_1' });
 
     const events = await collect(
-      service.streamKnowledgeChat({ conversationId: conversation.id, query: 'setup guide', mode: 'read-sources-only' }),
+      service.streamKnowledgeChat({ projectId: 'project_1', conversationId: conversation.id, query: 'setup guide', mode: 'read-sources-only' }),
     );
     const meta = events.find((event) => event.type === 'meta');
     expect(meta).toMatchObject({ retrievalMode: 'read-sources-only', resultCount: 1, citationCount: 1 });
@@ -140,11 +178,11 @@ describe('KnowledgeChatService', () => {
 
     for (let index = 0; index < 3; index += 1) {
       await collect(
-        service.streamKnowledgeChat({ conversationId: conversation.id, query: `question ${index}`, mode: 'knowledge' }),
+        service.streamKnowledgeChat({ projectId: 'project_1', conversationId: conversation.id, query: `question ${index}`, mode: 'knowledge' }),
       );
     }
 
-    const messages = service.listMessages(conversation.id);
+    const messages = service.listMessages('project_1', conversation.id);
     expect(messages).toHaveLength(2);
     expect(messages[messages.length - 1].content).toBe('a');
   });
@@ -165,7 +203,7 @@ describe('KnowledgeChatService', () => {
 
     const events: KnowledgeChatEvent[] = [];
     const iterator = service
-      .streamKnowledgeChat({ conversationId: conversation.id, query: 'cancel me', mode: 'knowledge' })
+      .streamKnowledgeChat({ projectId: 'project_1', conversationId: conversation.id, query: 'cancel me', mode: 'knowledge' })
       [Symbol.asyncIterator]();
 
     let messageId = '';
@@ -182,7 +220,7 @@ describe('KnowledgeChatService', () => {
 
     expect(events.some((event) => event.type === 'cancelled')).toBe(true);
     expect(events.some((event) => event.type === 'done')).toBe(false);
-    const messages = service.listMessages(conversation.id);
+    const messages = service.listMessages('project_1', conversation.id);
     expect(messages).toHaveLength(1);
     expect(messages[0].role).toBe('user');
   });
@@ -198,14 +236,14 @@ describe('KnowledgeChatService', () => {
     const conversation = service.createConversation({ projectId: 'project_1' });
 
     const firstEvents = await collect(
-      service.streamKnowledgeChat({ conversationId: conversation.id, query: 'question', mode: 'knowledge' }),
+      service.streamKnowledgeChat({ projectId: 'project_1', conversationId: conversation.id, query: 'question', mode: 'knowledge' }),
     );
     const firstDone = firstEvents.find((event) => event.type === 'done') as Extract<
       KnowledgeChatEvent,
       { type: 'done' }
     >;
 
-    const secondEvents = await collect(service.regenerateKnowledgeChat({ messageId: firstDone.messageId }));
+    const secondEvents = await collect(service.regenerateKnowledgeChat({ projectId: 'project_1', messageId: firstDone.messageId }));
     const secondDone = secondEvents.find((event) => event.type === 'done') as Extract<
       KnowledgeChatEvent,
       { type: 'done' }
@@ -214,7 +252,7 @@ describe('KnowledgeChatService', () => {
     expect(secondDone.message.content).toBe('second answer');
     expect(secondDone.messageId).not.toBe(firstDone.messageId);
 
-    const messages = service.listMessages(conversation.id);
+    const messages = service.listMessages('project_1', conversation.id);
     expect(messages).toHaveLength(2);
     expect(messages[0]).toMatchObject({ role: 'user', content: 'question' });
     expect(messages[1]).toMatchObject({ role: 'assistant', content: 'second answer' });
@@ -227,11 +265,12 @@ describe('KnowledgeChatService', () => {
     const conversation = service.createConversation({ projectId: 'project_1' });
 
     const events = await collect(
-      service.streamKnowledgeChat({ conversationId: conversation.id, query: 'setup guide', mode: 'sources' }),
+      service.streamKnowledgeChat({ projectId: 'project_1', conversationId: conversation.id, query: 'setup guide', mode: 'sources' }),
     );
     const done = events.find((event) => event.type === 'done') as Extract<KnowledgeChatEvent, { type: 'done' }>;
 
     const page = service.saveMessageToPage({
+      projectId: 'project_1',
       messageId: done.messageId,
       type: 'synthesis',
       title: 'Setup Instructions',
@@ -250,18 +289,49 @@ describe('KnowledgeChatService', () => {
     const service = new KnowledgeChatService(db, registryWithChatProvider(), chunkProvider(['answer']));
     const conversation = service.createConversation({ projectId: 'project_1' });
     const events = await collect(
-      service.streamKnowledgeChat({ conversationId: conversation.id, query: 'question', mode: 'knowledge' }),
+      service.streamKnowledgeChat({ projectId: 'project_1', conversationId: conversation.id, query: 'question', mode: 'knowledge' }),
     );
     const done = events.find((event) => event.type === 'done') as Extract<KnowledgeChatEvent, { type: 'done' }>;
 
     expect(() =>
       service.saveMessageToPage({
+        projectId: 'project_1',
         messageId: done.messageId,
         type: 'synthesis',
         title: 'Unsafe',
         slug: '../../outside',
       }),
     ).toThrow(/safe path components/i);
+  });
+
+  it('rejects reading or deleting chat payloads through a symlinked conversations directory', () => {
+    const { db, workspaceRoot } = createDatabase();
+    const outsideRoot = mkdtempSync(join(process.cwd(), '.knowledge-chat-outside-'));
+    directories.push(outsideRoot);
+    mkdirSync(join(outsideRoot, 'conversation_1'), { recursive: true });
+    writeFileSync(
+      join(outsideRoot, 'conversation_1', 'message_1.json'),
+      JSON.stringify({ content: 'outside', citations: [], retrievalMode: 'knowledge' }),
+      'utf8',
+    );
+    symlinkSync(outsideRoot, join(workspaceRoot, 'conversations'));
+    db.prepare(
+      `INSERT INTO knowledge_conversations (id, project_id, title, created_at, updated_at)
+       VALUES ('conversation_1', 'project_1', 'Unsafe', ?, ?)`,
+    ).run(CREATED_AT, CREATED_AT);
+    db.prepare(
+      `INSERT INTO knowledge_messages (id, project_id, conversation_id, role, content_path, created_at)
+       VALUES ('message_1', 'project_1', 'conversation_1', 'assistant', 'conversations/conversation_1/message_1.json', ?)`,
+    ).run(CREATED_AT);
+
+    const service = new KnowledgeChatService(db, registryWithChatProvider(), chunkProvider(['unused']));
+
+    expect(() => service.listMessages('project_1', 'conversation_1')).toThrow(/symbolic links/i);
+    expect(() => service.deleteConversation('project_1', 'conversation_1')).toThrow(/symbolic links/i);
+    expect(db.prepare('SELECT COUNT(*) AS count FROM knowledge_messages WHERE id = ?').get('message_1')).toEqual({
+      count: 1,
+    });
+    expect(existsSync(join(outsideRoot, 'conversation_1', 'message_1.json'))).toBe(true);
   });
 
   it('emits an error event when no chat-capable provider is registered', async () => {
@@ -271,14 +341,14 @@ describe('KnowledgeChatService', () => {
     const conversation = service.createConversation({ projectId: 'project_1' });
 
     const events = await collect(
-      service.streamKnowledgeChat({ conversationId: conversation.id, query: 'anything', mode: 'knowledge' }),
+      service.streamKnowledgeChat({ projectId: 'project_1', conversationId: conversation.id, query: 'anything', mode: 'knowledge' }),
     );
 
     expect(events).toHaveLength(1);
     expect(events[0]).toMatchObject({ type: 'error' });
     expect((events[0] as any).message).toMatch(/chat/);
 
-    const messages = service.listMessages(conversation.id);
+    const messages = service.listMessages('project_1', conversation.id);
     expect(messages).toHaveLength(1);
     expect(messages[0].role).toBe('user');
   });
@@ -293,7 +363,7 @@ describe('KnowledgeChatService', () => {
     const conversation = service.createConversation({ projectId: 'project_1' });
 
     const events = await collect(
-      service.streamKnowledgeChat({ conversationId: conversation.id, query: 'anything', mode: 'knowledge' }),
+      service.streamKnowledgeChat({ projectId: 'project_1', conversationId: conversation.id, query: 'anything', mode: 'knowledge' }),
     );
 
     expect(events.some((event) => event.type === 'delta')).toBe(true);
@@ -301,7 +371,7 @@ describe('KnowledgeChatService', () => {
     const errorEvent = events.find((event) => event.type === 'error');
     expect(errorEvent).toMatchObject({ type: 'error', message: 'provider exploded' });
 
-    const messages = service.listMessages(conversation.id);
+    const messages = service.listMessages('project_1', conversation.id);
     expect(messages).toHaveLength(1);
     expect(messages[0].role).toBe('user');
   });

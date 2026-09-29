@@ -240,8 +240,10 @@ ariadne knowledge import <project-id> knowledge-vault
 
 Exports include a manifest, project/table JSON, rendered pages with
 Obsidian-compatible wiki links, and `graph.json`. Import is transactional and
-rejects unsafe paths, missing files, size/checksum mismatches, and duplicate
-project ids unless `--replace` is supplied. This is a one-way archive/export:
+requires the CLI `<project-id>` to exactly match the manifest project id.
+It rejects unsafe paths, missing files, size/checksum mismatches, malformed
+archive structure, and duplicate project ids unless `--replace` is supplied.
+This is a one-way archive/export:
 live Obsidian sync, automatic vault watching, and conflict resolution are not
 implemented. See [`knowledge-migration.md`](knowledge-migration.md) for the
 archive contract and transfer procedure.

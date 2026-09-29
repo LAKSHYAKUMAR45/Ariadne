@@ -18,6 +18,15 @@ export function assertExistingPathWithinRoot(root: string, target: string, label
 export function assertNoSymlinkComponents(root: string, target: string, label: string): void {
   const absoluteRoot = path.resolve(root);
   const absoluteTarget = path.resolve(target);
+  try {
+    if (lstatSync(absoluteRoot).isSymbolicLink()) {
+      throw new Error(`${label} must not traverse symbolic links`);
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+      throw error;
+    }
+  }
   if (!isPathWithinRoot(absoluteRoot, absoluteTarget)) {
     throw new Error(`${label} must stay within the output root`);
   }

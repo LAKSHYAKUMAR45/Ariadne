@@ -57,17 +57,29 @@ review it before sharing or opening it in another application.
 
 ## Import
 
-Import validates `manifest.json`, archive version, safe relative paths, file
-presence, sizes, and checksums before writing database rows:
+Import validates the complete archive structure before writing database rows:
+
+- `manifest.json` and `project.json` must describe the same non-empty project id
+- `knowledge_projects` must contain exactly one row for that same project
+- every project-scoped row must stay in that project
+- direct and indirect same-project references must resolve inside the archive
+- unknown/missing columns and duplicate archive identities are rejected
+- every required table export must be present
+- every archived file must be declared in the manifest, and file-backed
+  knowledge content is restored from the archive before the import commits
+- safe relative paths, file presence, sizes, and checksums must all match
+- exported archives redact `workspace_root`; imports always rewrite it to the
+  current local workspace root
 
 ```bash
 ariadne knowledge import <project-id> knowledge-export
 ```
 
 The command uses the project id recorded in the archive. The positional
-`<project-id>` is retained for CLI symmetry and workspace context; it does not
-rewrite the archive's project id. Import fails if that project already exists.
-Use `--replace` only when intentionally replacing the same project id:
+`<project-id>` is retained for CLI compatibility, but it must exactly match the
+manifest project id; import never rewrites the archive to a different project.
+Import fails if that project already exists. Use `--replace` only when
+intentionally replacing the same project id:
 
 ```bash
 ariadne knowledge import <project-id> knowledge-export --replace

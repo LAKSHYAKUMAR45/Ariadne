@@ -981,7 +981,7 @@ describe('ariadne knowledge commands', () => {
       await run('chat', 'list', projectId, '--json');
       expect((lastJson().data as Array<{ id: string }>).map((c) => c.id)).toContain(id);
 
-      await run('chat', 'send', id, 'What is this project about?', '--json');
+      await run('chat', 'send', projectId, id, 'What is this project about?', '--json');
       const sendResult = lastJson();
       expect(sendResult.ok).toBe(false);
       expect(sendResult.error?.capability).toBe('chat');
@@ -1012,6 +1012,119 @@ describe('ariadne knowledge commands', () => {
 
       await run('project', 'show', projectId, '--json');
       expect((lastJson().data as { name: string }).name).toBe('Exportable');
+    });
+
+    it('rejects a mismatched import project id before mutating the database', async () => {
+      fs.writeFileSync(path.join(root, 'notes.md'), '# Title\n\nContent.\n');
+      const exportedProjectId = await createProject('Archive source');
+      await run('ingest', 'file', exportedProjectId, 'notes.md', '--json');
+
+      const outputDir = path.join(root, 'exported');
+      await run('export', exportedProjectId, outputDir, '--json');
+      expect(lastJson().ok).toBe(true);
+
+      const replacementTargetId = 'project_replace_target';
+      insertProject(replacementTargetId, '/replacement-target', 'Replacement target');
+      await run('project', 'show', replacementTargetId, '--json');
+      expect((lastJson().data as { name: string }).name).toBe('Replacement target');
+
+      clearConsole();
+      await run('import', replacementTargetId, outputDir, '--replace', '--json');
+      const result = lastJson();
+      expect(result.ok).toBe(false);
+      expect(result.error?.message).toBe('Knowledge archive import target does not match the archive project ID.');
+      expect(process.exitCode).toBe(1);
+
+      clearConsole();
+      await run('project', 'show', replacementTargetId, '--json');
+      expect((lastJson().data as { name: string }).name).toBe('Replacement target');
+
+      clearConsole();
+      await run('project', 'show', exportedProjectId, '--json');
+      expect((lastJson().data as { name: string }).name).toBe('Archive source');
+    });
+
+    it('rejects oversized archive entries before reading them into memory', async () => {
+      fs.writeFileSync(path.join(root, 'notes.md'), '# Title\n\nContent.\n');
+      const projectId = await createProject('Archive source');
+      await run('ingest', 'file', projectId, 'notes.md', '--json');
+
+      const outputDir = path.join(root, 'exported');
+      await run('export', projectId, outputDir, '--json');
+      expect(lastJson().ok).toBe(true);
+
+      fs.writeFileSync(path.join(outputDir, 'data', 'knowledge_pages.json'), Buffer.alloc(16 * 1024 * 1024 + 1, 'a'));
+
+      clearConsole();
+      await run('import', projectId, outputDir, '--replace', '--json');
+      const result = lastJson();
+      expect(result.ok).toBe(false);
+      expect(result.error?.message).toContain('maximum supported file size');
+      expect(process.exitCode).toBe(1);
+
+      clearConsole();
+      await run('project', 'show', projectId, '--json');
+      expect((lastJson().data as { name: string }).name).toBe('Archive source');
+    });
+
+    it('rejects malformed manifest entry structures before preloading archive files', async () => {
+      fs.writeFileSync(path.join(root, 'notes.md'), '# Title\n\nContent.\n');
+      const projectId = await createProject('Archive source');
+      await run('ingest', 'file', projectId, 'notes.md', '--json');
+
+      const outputDir = path.join(root, 'exported');
+      await run('export', projectId, outputDir, '--json');
+      expect(lastJson().ok).toBe(true);
+
+      const manifestPath = path.join(outputDir, 'manifest.json');
+      const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8')) as { entries: unknown };
+      manifest.entries = {};
+      fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
+
+      clearConsole();
+      await run('import', projectId, outputDir, '--replace', '--json');
+      const result = lastJson();
+      expect(result.ok).toBe(false);
+      expect(result.error?.message).toBe('Knowledge archive import rejected: manifest entries must be an array.');
+      expect(process.exitCode).toBe(1);
+    });
+
+    it('rejects invalid manifest JSON with a stable archive error', async () => {
+      fs.writeFileSync(path.join(root, 'notes.md'), '# Title\n\nContent.\n');
+      const projectId = await createProject('Archive source');
+      await run('ingest', 'file', projectId, 'notes.md', '--json');
+
+      const outputDir = path.join(root, 'exported');
+      await run('export', projectId, outputDir, '--json');
+      expect(lastJson().ok).toBe(true);
+
+      fs.writeFileSync(path.join(outputDir, 'manifest.json'), '{not-json', 'utf8');
+
+      clearConsole();
+      await run('import', projectId, outputDir, '--replace', '--json');
+      const result = lastJson();
+      expect(result.ok).toBe(false);
+      expect(result.error?.message).toBe('Knowledge archive import rejected: manifest.json must contain valid JSON.');
+      expect(process.exitCode).toBe(1);
+    });
+
+    it('rejects export output directories that traverse symlinks', async () => {
+      fs.writeFileSync(path.join(root, 'notes.md'), '# Title\n\nContent.\n');
+      const projectId = await createProject('Archive source');
+      await run('ingest', 'file', projectId, 'notes.md', '--json');
+
+      const outputDir = path.join(root, 'exported');
+      const outsideDir = path.join(root, 'outside');
+      fs.mkdirSync(outsideDir, { recursive: true });
+      fs.mkdirSync(outputDir, { recursive: true });
+      fs.symlinkSync(outsideDir, path.join(outputDir, 'data'));
+
+      clearConsole();
+      await run('export', projectId, outputDir, '--json');
+      const result = lastJson();
+      expect(result.ok).toBe(false);
+      expect(result.error?.message).toMatch(/symbolic links/i);
+      expect(fs.existsSync(path.join(outsideDir, 'knowledge_projects.json'))).toBe(false);
     });
   });
 });

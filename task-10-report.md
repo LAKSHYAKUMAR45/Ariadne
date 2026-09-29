@@ -210,6 +210,26 @@ that case and warning-only enrichment outcomes as deterministic rather than
 enriched. This preserves correct job classification and aligns CLI worker
 status totals with actual provider use.
 
+## Adjacent archive-import hardening
+
+Follow-on security hardening now also covers the knowledge archive import path:
+
+- `knowledge import <project-id>` requires an exact match with
+  `manifest.projectId` before any replacement can occur
+- archive structure is validated up front, including the single-project row,
+  same-project ownership, representative indirect references, plain-object row
+  shape, and deterministic per-table column allowlists
+- required exported table files must all be present before `--replace`
+  continues, and exported archives redact `workspace_root` instead of leaking
+  the source machine path
+- manifest entries now have to match the archived file set exactly, and
+  file-backed knowledge artifacts (sources/pages/chat payloads) are staged and
+  restored from the archive before the replacement commits
+- archive-derived column names are no longer interpolated into SQL
+- conversation payload import/runtime checks now reject symlink traversal under
+  `conversations/`, and replacement remains transactional so rejected archives
+  do not delete the target project or touch unrelated projects
+
 ## Files changed
 
 - `.github/agents/ariadne.agent.md`
