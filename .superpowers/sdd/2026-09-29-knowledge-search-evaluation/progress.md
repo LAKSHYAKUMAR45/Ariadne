@@ -25,3 +25,4 @@ Task 3: complete (commits 9f806e1..c2b9758, review clean)
 Task 4: fix round 1/5 (1 addressed, 0 open; commit 64ae9d07eed9b3d08e195238048f5617f96ed623)
 Task 4: complete (commits c2b9758..64ae9d0, review clean after 1 fix round)
 Task 5: complete (regression gate green; synthetic acceptance thresholds met)
+Task 5: Ruling: the first review inspected `/home/lkumar/Ariadne` rather than the isolated feature worktree and reported missing files that are tracked at the feature HEAD; rerun the review with absolute feature-worktree artifacts. Cost if wrong: a real Task 5 defect could be missed, so acceptance is not complete until the corrected review passes.

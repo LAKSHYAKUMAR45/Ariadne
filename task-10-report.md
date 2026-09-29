@@ -303,3 +303,37 @@ question-specific path exceptions. Citation selection prefers the strongest
 persisted-span match when several extraction fields match.
 No question-specific terms, source-path exceptions, or fabricated citations
 were added.
+
+## 2026-09-29 Task 5 regression-gate milestone
+
+This documentation-only follow-up records the synthetic regression-gate
+milestone in the same authoritative task narrative without changing production
+code or claiming a new real-NAAS run.
+
+### Evaluator / corpus evidence
+
+- Evaluator entrypoint:
+  - `packages/core/test/knowledge/KnowledgeWorker.naas.test.ts`
+- Shared scorer:
+  - `packages/core/test/knowledge/KnowledgeSearchEvaluator.ts`
+- Corpus version:
+  - `naas-v1`
+
+### Verified synthetic metrics
+
+- `questionCount=10`
+- `top3PathHits>=8`
+- `spanCitationHits=10`
+- `typedGraphEvidenceHits>=8`
+- `failures=[]`
+
+### Validation commands
+
+```bash
+pnpm --filter @ariadne-dev/core test
+pnpm --filter @ariadne-dev/core build
+pnpm --filter @ariadne-dev/cli test
+pnpm --filter @ariadne-dev/cli build
+git diff --check
+cd packages/core && pnpm exec vitest run test/knowledge/KnowledgeWorker.naas.test.ts
+```
