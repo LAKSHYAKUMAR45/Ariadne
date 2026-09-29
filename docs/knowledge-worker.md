@@ -73,12 +73,11 @@ The core test suite includes an offline regression over original, minimal
 Python fixtures shaped around task-manager patterns. It runs the real worker,
 then scores a stable `naas-v1` fixture corpus.
 
-Run the evaluator and synthetic worker acceptance with:
+Run the evaluator and synthetic worker acceptance from the repository root
+with:
 
 ```bash
-pnpm --filter @ariadne-dev/core exec vitest run \
-  test/knowledge/KnowledgeSearchEvaluator.test.ts \
-  test/knowledge/KnowledgeWorker.naas.test.ts
+pnpm --filter @ariadne-dev/core run test:knowledge:evaluation
 ```
 
 The synthetic worker report always uses this JSON shape:

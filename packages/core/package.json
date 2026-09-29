@@ -14,6 +14,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "test": "vitest run",
+    "test:knowledge:evaluation": "vitest run test/knowledge/KnowledgeSearchEvaluator.test.ts test/knowledge/KnowledgeWorker.naas.test.ts",
     "lint": "echo \"(no lint configured yet)\""
   },
   "dependencies": {

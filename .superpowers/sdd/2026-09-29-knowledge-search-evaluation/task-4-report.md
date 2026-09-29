@@ -50,3 +50,33 @@ pnpm --filter @ariadne-dev/core build
 ```
 
 Expected outcome: passing focused regressions and core build.
+
+## Round 1 fix
+
+- Replaced the repo-root documentation example with
+  `pnpm --filter @ariadne-dev/core run test:knowledge:evaluation`.
+- Added `test:knowledge:evaluation` to `packages/core/package.json` so the
+  focused evaluator command stays anchored to package-local test paths when it
+  is launched from the repository root.
+
+### Repo-root verification
+
+```bash
+pnpm --filter @ariadne-dev/core run test:knowledge:evaluation
+```
+
+```text
+> @ariadne-dev/core@0.1.0 test:knowledge:evaluation /home/lkumar/Ariadne/.worktrees/ariadne-knowledge-wiki/packages/core
+> vitest run test/knowledge/KnowledgeSearchEvaluator.test.ts test/knowledge/KnowledgeWorker.naas.test.ts
+
+ RUN  v3.2.7 /home/lkumar/Ariadne/.worktrees/ariadne-knowledge-wiki/packages/core
+
+ ✓ test/knowledge/KnowledgeSearchEvaluator.test.ts (9 tests) 26ms
+ ✓ test/knowledge/KnowledgeWorker.naas.test.ts (1 test) 1051ms
+   ✓ KnowledgeWorker synthetic NAAS-shaped acceptance > meets path, citation, and typed-graph thresholds for ten offline worker questions  1049ms
+
+ Test Files  2 passed (2)
+      Tests  10 passed (10)
+   Start at  04:48:38
+   Duration  1.97s (transform 527ms, setup 27ms, collect 839ms, tests 1.08s, environment 0ms, prepare 227ms)
+```
