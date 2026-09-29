@@ -1,6 +1,7 @@
 import type Database from 'better-sqlite3';
 import { redactLines } from '../Redactor.js';
 import { createKnowledgeId } from './KnowledgeIds.js';
+import { SEARCH_TOKEN_LENGTH, foldSearchText, needleNarrowingGrams, trigramsOf } from './KnowledgeSearchTokens.js';
 import {
   validateDeterministicExtraction,
   type ExtractedSymbolKind,
@@ -23,6 +24,7 @@ const MAX_LOOKUP_FIELD_CHARS = 4_096;
 const MAX_NEEDLES = 128;
 const MAX_NEEDLE_CHARS = 256;
 const FOLD_FUNCTION = 'knowledge_fold';
+const FIELD_FOLD_FUNCTION = 'knowledge_fold_field';
 
 export type SearchIndexCoverage = 'extraction' | 'metadata_only';
 export type SearchIndexRowStatus = 'active' | 'stale' | 'failed';
@@ -317,7 +319,13 @@ const CURRENT_SOURCES_CTE = `
            ui.id AS usable_index_id,
            ui.coverage AS usable_coverage,
            ci.id AS current_index_id,
-           ci.status AS current_index_status
+           ci.status AS current_index_status,
+           ${FOLD_FUNCTION}(s.source_path) AS fold_source_path,
+           ${FOLD_FUNCTION}(s.source_url) AS fold_source_url,
+           ${FOLD_FUNCTION}(v.content_path) AS fold_content_path,
+           ${FOLD_FUNCTION}(s.source_kind) AS fold_source_kind,
+           ${FOLD_FUNCTION}(v.mime_type) AS fold_mime_type,
+           ${FOLD_FUNCTION}(s.current_hash) AS fold_current_hash
     FROM knowledge_sources s
     LEFT JOIN knowledge_source_versions v
       ON v.project_id = s.project_id
@@ -353,15 +361,76 @@ const CURRENT_SOURCES_CTE = `
     WHERE s.project_id = @projectId AND s.status = 'active'
   )`;
 
-const METADATA_MATCH_SQL = `EXISTS (
-  SELECT 1 FROM needles n
-  WHERE instr(${FOLD_FUNCTION}(cur.source_path), n.needle) > 0
-     OR instr(${FOLD_FUNCTION}(cur.source_url), n.needle) > 0
-     OR instr(${FOLD_FUNCTION}(cur.content_path), n.needle) > 0
-     OR instr(${FOLD_FUNCTION}(cur.source_kind), n.needle) > 0
-     OR instr(${FOLD_FUNCTION}(cur.mime_type), n.needle) > 0
-     OR instr(${FOLD_FUNCTION}(cur.current_hash), n.needle) > 0
+const METADATA_MATCH_CONDITION = `(
+  instr(cur.fold_source_path, n.needle) > 0
+  OR instr(cur.fold_source_url, n.needle) > 0
+  OR instr(cur.fold_content_path, n.needle) > 0
+  OR instr(cur.fold_source_kind, n.needle) > 0
+  OR instr(cur.fold_mime_type, n.needle) > 0
+  OR instr(cur.fold_current_hash, n.needle) > 0
 )`;
+
+interface NeedleEntry {
+  termKey: number;
+  needle: string;
+}
+
+/**
+ * Field matches for a set of needles, verified against the original field text. Needles of at least
+ * SEARCH_TOKEN_LENGTH characters are narrowed through the trigram token table first (every match contains all of
+ * the needle's grams, so narrowing never drops a true match); shorter needles have no grams and scan fields.
+ */
+function fieldMatchCtes(entries: readonly NeedleEntry[]): { sql: string; params: Record<string, string | number> } {
+  const params: Record<string, string | number> = {};
+  const all: string[] = [];
+  const long: string[] = [];
+  const grams: string[] = [];
+  const short: string[] = [];
+  entries.forEach((entry, needleId) => {
+    params[`needle${needleId}`] = entry.needle;
+    all.push(`(${needleId}, ${entry.termKey}, @needle${needleId})`);
+    if (Array.from(entry.needle).length < SEARCH_TOKEN_LENGTH) {
+      short.push(`(${needleId}, @needle${needleId})`);
+      return;
+    }
+    const needleGrams = needleNarrowingGrams(entry.needle);
+    long.push(`(${needleId}, @needle${needleId}, ${needleGrams.length})`);
+    needleGrams.forEach((gram, position) => {
+      params[`gram${needleId}_${position}`] = gram;
+      grams.push(`(${needleId}, @gram${needleId}_${position})`);
+    });
+  });
+  const values = (rows: string[], empty: string) => (rows.length > 0 ? `VALUES ${rows.join(', ')}` : empty);
+  const sql = `
+    needle_all(needle_id, term_key, needle) AS (${values(all, 'SELECT 0, 0, \'\' WHERE 0')}),
+    long_needles(needle_id, needle, gram_count) AS (${values(long, 'SELECT 0, \'\', 0 WHERE 0')}),
+    needle_grams(needle_id, gram) AS (${values(grams, 'SELECT 0, \'\' WHERE 0')}),
+    short_needles(needle_id, needle) AS (${values(short, 'SELECT 0, \'\' WHERE 0')}),
+    usable_indexes(index_id) AS (SELECT usable_index_id FROM cur WHERE usable_index_id IS NOT NULL),
+    gram_hits AS (
+      SELECT ng.needle_id AS needle_id, t.index_id AS index_id, t.field_order AS field_order
+      FROM needle_grams ng
+      JOIN knowledge_search_index_tokens t ON t.project_id = @projectId AND t.token = ng.gram
+      WHERE t.index_id IN (SELECT index_id FROM usable_indexes)
+      GROUP BY ng.needle_id, t.index_id, t.field_order
+      HAVING COUNT(*) = (SELECT l.gram_count FROM long_needles l WHERE l.needle_id = ng.needle_id)
+    ),
+    field_hits AS MATERIALIZED (
+      SELECT g.needle_id AS needle_id, f.index_id AS index_id, f.field_kind AS field_kind, f.rank_class AS rank_class
+      FROM gram_hits g
+      JOIN long_needles l ON l.needle_id = g.needle_id
+      JOIN knowledge_search_index_fields f
+        ON f.project_id = @projectId AND f.index_id = g.index_id AND f.field_order = g.field_order
+      WHERE instr(${FIELD_FOLD_FUNCTION}(f.field_text), l.needle) > 0
+      UNION ALL
+      SELECT s.needle_id, f.index_id, f.field_kind, f.rank_class
+      FROM short_needles s
+      JOIN knowledge_search_index_fields f
+        ON f.project_id = @projectId AND f.index_id IN (SELECT index_id FROM usable_indexes)
+      WHERE instr(${FIELD_FOLD_FUNCTION}(f.field_text), s.needle) > 0
+    )`;
+  return { sql, params };
+}
 
 interface CandidateRow {
   source_id: string;
@@ -455,15 +524,6 @@ function foldNeedles(needles: readonly string[]): string[] {
   return [...folded];
 }
 
-function needlesClause(needles: readonly string[]): { sql: string; params: Record<string, string> } {
-  const params: Record<string, string> = {};
-  const values = needles.map((needle, position) => {
-    params[`needle${position}`] = needle;
-    return `(@needle${position})`;
-  });
-  return { sql: `needles(needle) AS (VALUES ${values.join(', ')})`, params };
-}
-
 export interface KnowledgeSearchIndexOptions {
   now?: () => string;
 }
@@ -475,6 +535,7 @@ export interface KnowledgeSearchIndexOptions {
  */
 export class KnowledgeSearchIndex {
   private readonly now: () => string;
+  private fieldTextChecks = 0;
 
   public constructor(
     private readonly db: Database.Database,
@@ -484,6 +545,19 @@ export class KnowledgeSearchIndex {
     db.function(FOLD_FUNCTION, { deterministic: true }, (value: unknown) =>
       typeof value === 'string' ? value.toLocaleLowerCase() : null,
     );
+    db.function(FIELD_FOLD_FUNCTION, { deterministic: true }, (value: unknown) => {
+      this.fieldTextChecks += 1;
+      return typeof value === 'string' ? foldSearchText(value) : null;
+    });
+  }
+
+  /** Deterministic work measure: how many indexed field texts were folded and compared by lookups. */
+  public getWorkCounters(): { fieldTextChecks: number } {
+    return { fieldTextChecks: this.fieldTextChecks };
+  }
+
+  public resetWorkCounters(): void {
+    this.fieldTextChecks = 0;
   }
 
   public replaceForSourceVersion(input: ReplaceSearchIndexInput): void {
@@ -519,7 +593,14 @@ export class KnowledgeSearchIndex {
            (id, project_id, index_id, field_order, field_kind, field_text, field_weight, rank_class, span_id, symbol_kind, symbol_name, created_at)
          VALUES (@id, @projectId, @indexId, @fieldOrder, @fieldKind, @fieldText, @fieldWeight, @rankClass, @spanId, @symbolKind, @symbolName, @now)`,
       );
+      const insertToken = this.db.prepare(
+        `INSERT INTO knowledge_search_index_tokens (project_id, token, index_id, field_order)
+         VALUES (?, ?, ?, ?)`,
+      );
       materialized.fields.forEach((field, fieldOrder) => {
+        for (const gram of trigramsOf(foldSearchText(field.text))) {
+          insertToken.run(projectId, gram, indexId, fieldOrder);
+        }
         insertField.run({
           id: createKnowledgeId('search_field', `${indexId}:${fieldOrder}`),
           projectId,
@@ -675,67 +756,63 @@ export class KnowledgeSearchIndex {
     if (needles.length === 0) return [];
     const limit = Math.max(0, Math.min(MAX_RESULT_CANDIDATES, Math.trunc(query.limit ?? MAX_RESULT_CANDIDATES)));
     if (limit === 0) return [];
-    const clause = needlesClause(needles);
+    const matches = fieldMatchCtes(needles.map((needle) => ({ termKey: 0, needle })));
     const rows = this.db
       .prepare(
         `WITH ${CURRENT_SOURCES_CTE},
-         ${clause.sql}
+         ${matches.sql}
          SELECT cur.*, COALESCE(m.relevance, ${METADATA_MATCH_RANK_CLASS}) AS relevance
          FROM cur
          LEFT JOIN (
-           SELECT f.index_id AS index_id, MAX(f.rank_class) AS relevance
-           FROM knowledge_search_index_fields f
-           WHERE f.project_id = @projectId
-             AND f.index_id IN (SELECT usable_index_id FROM cur WHERE usable_index_id IS NOT NULL)
-             AND EXISTS (SELECT 1 FROM needles n WHERE instr(${FOLD_FUNCTION}(f.field_text), n.needle) > 0)
-           GROUP BY f.index_id
+           SELECT index_id, MAX(rank_class) AS relevance FROM field_hits GROUP BY index_id
          ) m ON m.index_id = cur.usable_index_id
          WHERE cur.usable_index_id IS NOT NULL
-           AND (m.index_id IS NOT NULL OR ${METADATA_MATCH_SQL})
+           AND (
+             m.index_id IS NOT NULL
+             OR EXISTS (SELECT 1 FROM needle_all n WHERE ${METADATA_MATCH_CONDITION})
+           )
          ORDER BY COALESCE(m.relevance, ${METADATA_MATCH_RANK_CLASS}) DESC,
                   COALESCE(cur.source_path, cur.source_url, cur.content_path, cur.source_id) ASC,
                   cur.source_version_id ASC
          LIMIT @limit`,
       )
-      .all({ ...this.cteParams(projectId), ...clause.params, limit }) as CandidateRow[];
+      .all({ ...this.cteParams(projectId), ...matches.params, limit }) as CandidateRow[];
     return rows.map((row) => this.toCandidate(projectId, row));
   }
 
-  /** Number of usable indexed documents containing any variant of each term, using legacy presence semantics. */
+  /**
+   * Number of usable indexed documents containing any variant of each term, using legacy presence semantics.
+   * All terms share one field-match pass instead of scanning fields once per term.
+   */
   public documentFrequency(projectId: string, terms: readonly SearchIndexTermVariants[]): Map<string, number> {
     const scopedProjectId = requireId(projectId, 'project ID');
-    const counts = new Map<string, number>();
-    for (const { term, variants } of terms) {
-      const needles = foldNeedles(variants);
-      if (needles.length === 0) {
-        counts.set(term, 0);
-        continue;
-      }
-      const clause = needlesClause(needles);
-      const row = this.db
-        .prepare(
-          `WITH ${CURRENT_SOURCES_CTE},
-           ${clause.sql}
-           SELECT COUNT(*) AS documents
+    const counts = new Map<string, number>(terms.map(({ term }) => [term, 0]));
+    const entries: NeedleEntry[] = terms.flatMap(({ variants }, termKey) =>
+      foldNeedles(variants).map((needle) => ({ termKey, needle })),
+    );
+    if (entries.length === 0) return counts;
+    const matches = fieldMatchCtes(entries);
+    const rows = this.db
+      .prepare(
+        `WITH ${CURRENT_SOURCES_CTE},
+         ${matches.sql}
+         SELECT term_key, COUNT(*) AS documents
+         FROM (
+           SELECT n.term_key AS term_key, cur.usable_index_id AS index_id
            FROM cur
+           JOIN needle_all n ON ${METADATA_MATCH_CONDITION}
            WHERE cur.usable_index_id IS NOT NULL
-             AND (
-               ${METADATA_MATCH_SQL}
-               OR (
-                 cur.usable_coverage = 'extraction'
-                 AND EXISTS (
-                   SELECT 1 FROM knowledge_search_index_fields f
-                   WHERE f.project_id = @projectId
-                     AND f.index_id = cur.usable_index_id
-                     AND f.field_kind <> 'path'
-                     AND EXISTS (SELECT 1 FROM needles n WHERE instr(${FOLD_FUNCTION}(f.field_text), n.needle) > 0)
-                 )
-               )
-             )`,
-        )
-        .get({ ...this.cteParams(scopedProjectId), ...clause.params }) as { documents: number };
-      counts.set(term, row.documents);
-    }
+           UNION
+           SELECT n.term_key, h.index_id
+           FROM field_hits h
+           JOIN needle_all n ON n.needle_id = h.needle_id
+           JOIN cur ON cur.usable_index_id = h.index_id AND cur.usable_coverage = 'extraction'
+           WHERE h.field_kind <> 'path'
+         )
+         GROUP BY term_key`,
+      )
+      .all({ ...this.cteParams(scopedProjectId), ...matches.params }) as Array<{ term_key: number; documents: number }>;
+    for (const row of rows) counts.set(terms[row.term_key].term, row.documents);
     return counts;
   }
 

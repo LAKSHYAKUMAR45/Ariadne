@@ -145,6 +145,7 @@ export const KNOWLEDGE_ARCHIVE_TABLE_REGISTRY: Readonly<Record<string, Knowledge
   knowledge_operation_log: required(),
   knowledge_search_indexes: derived('search_index'),
   knowledge_search_index_fields: derived('search_index'),
+  knowledge_search_index_tokens: derived('search_index'),
   knowledge_search_semantic_models: derived('semantic_model'),
   knowledge_search_semantic_vectors: derived('semantic_model'),
   knowledge_search_semantic_neighbors: derived('semantic_model'),

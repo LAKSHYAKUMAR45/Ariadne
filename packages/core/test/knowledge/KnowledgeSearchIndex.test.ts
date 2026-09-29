@@ -487,4 +487,114 @@ describe('KnowledgeSearchIndex', () => {
     expect(counts.get('widget')).toBe(1);
     expect(counts.get('absent')).toBe(0);
   });
+
+  it('deletes a project with span-backed index fields present', () => {
+    const { versionId } = register('src/loader.ts');
+    const saved = analyze(versionId);
+    index.replaceForSourceVersion({ projectId: PROJECT_ID, sourceVersionId: versionId, coverage: 'extraction', extractionId: saved.id });
+    expect(fields(versionId).some((row) => row.span_id !== null)).toBe(true);
+    expect(db.prepare('SELECT COUNT(*) AS c FROM knowledge_search_index_tokens').get()).not.toEqual({ c: 0 });
+
+    expect(() => db.prepare('DELETE FROM knowledge_projects WHERE id = ?').run(PROJECT_ID)).not.toThrow();
+
+    for (const table of [
+      'knowledge_search_indexes',
+      'knowledge_search_index_fields',
+      'knowledge_search_index_tokens',
+      'knowledge_source_spans',
+      'knowledge_source_versions',
+    ]) {
+      expect(db.prepare(`SELECT COUNT(*) AS c FROM ${table} WHERE project_id = ?`).get(PROJECT_ID)).toEqual({ c: 0 });
+    }
+  });
+
+  it('deletes a source version whose spans back index fields', () => {
+    const { source, versionId } = register('src/loader.ts');
+    const saved = analyze(versionId);
+    index.replaceForSourceVersion({ projectId: PROJECT_ID, sourceVersionId: versionId, coverage: 'extraction', extractionId: saved.id });
+
+    expect(() => db.prepare('DELETE FROM knowledge_sources WHERE id = ?').run(source.id)).not.toThrow();
+    expect(db.prepare('SELECT COUNT(*) AS c FROM knowledge_search_index_fields').get()).toEqual({ c: 0 });
+  });
+
+  it('keeps token rows in step with replaced fields and drops them with the index', () => {
+    const { versionId } = register('src/loader.ts');
+    const saved = analyze(versionId);
+    const input = { projectId: PROJECT_ID, sourceVersionId: versionId, coverage: 'extraction' as const, extractionId: saved.id };
+    const tokens = () =>
+      db.prepare('SELECT token FROM knowledge_search_index_tokens WHERE project_id = ? ORDER BY token').all(PROJECT_ID) as Array<{ token: string }>;
+
+    index.replaceForSourceVersion(input);
+    const first = tokens();
+    index.replaceForSourceVersion(input);
+
+    expect(tokens()).toEqual(first);
+    expect(first.map((row) => row.token)).toEqual(expect.arrayContaining(['loa', 'oad', 'wid']));
+    expect(first.every((row) => row.token === row.token.toLocaleLowerCase())).toBe(true);
+    db.prepare('DELETE FROM knowledge_search_indexes WHERE source_version_id = ?').run(versionId);
+    expect(tokens()).toEqual([]);
+  });
+
+  describe('candidate narrowing work', () => {
+    const DOCUMENTS = 120;
+
+    function seedCorpus() {
+      for (let position = 0; position < DOCUMENTS; position += 1) {
+        const { versionId } = register(`src/module${position}.ts`, `content ${position}`);
+        const rare = position === 57;
+        const saved = analyze(versionId, {
+          title: `module${position}`,
+          summary: `Handles routine chores ${position}.`,
+          sections: [
+            { id: 'section:1', kind: 'code', title: `Section ${position}`, text: 'plain body text', span: span(0, 10), confidence: 1 },
+          ],
+          symbols: [
+            { id: 'symbol:1', kind: 'function', name: rare ? 'zebraCrossing' : `helper${position}`, qualifiedName: `mod.fn${position}`, span: span(0, 5), confidence: 1 },
+          ],
+        });
+        index.replaceForSourceVersion({ projectId: PROJECT_ID, sourceVersionId: versionId, coverage: 'extraction', extractionId: saved.id });
+      }
+      return (db.prepare('SELECT COUNT(*) AS c FROM knowledge_search_index_fields WHERE project_id = ?').get(PROJECT_ID) as { c: number }).c;
+    }
+
+    it('verifies only narrowed fields instead of scanning every indexed field', () => {
+      const totalFields = seedCorpus();
+      index.resetWorkCounters();
+
+      const candidates = index.findCandidates({ projectId: PROJECT_ID, needles: ['zebracrossing'] });
+
+      expect(candidates.map((candidate) => candidate.sourcePath)).toEqual(['src/module57.ts']);
+      const { fieldTextChecks } = index.getWorkCounters();
+      expect(fieldTextChecks).toBeGreaterThan(0);
+      expect(fieldTextChecks).toBeLessThan(totalFields / 20);
+    });
+
+    it('computes document frequency for every term in one bounded pass', () => {
+      const totalFields = seedCorpus();
+      const terms = [
+        { term: 'zebracrossing', variants: ['zebracrossing'] },
+        { term: 'routine', variants: ['routine', 'routin'] },
+        { term: 'absentterm', variants: ['absentterm'] },
+        { term: 'chores', variants: ['chores', 'chore'] },
+      ];
+      index.resetWorkCounters();
+
+      const counts = index.documentFrequency(PROJECT_ID, terms);
+
+      expect(counts.get('zebracrossing')).toBe(1);
+      expect(counts.get('absentterm')).toBe(0);
+      expect(counts.get('routine')).toBe(DOCUMENTS);
+      expect(counts.get('chores')).toBe(DOCUMENTS);
+      // Scanning per needle would fold every field once for each of the six needles; narrowing stays below one scan.
+      expect(index.getWorkCounters().fieldTextChecks).toBeLessThan(totalFields);
+    });
+
+    it('still finds needles shorter than a token by scanning fields', () => {
+      seedCorpus();
+      const candidates = index.findCandidates({ projectId: PROJECT_ID, needles: ['zb'] });
+      expect(candidates).toEqual([]);
+      const found = index.findCandidates({ projectId: PROJECT_ID, needles: ['ze'] });
+      expect(found.map((candidate) => candidate.sourcePath)).toContain('src/module57.ts');
+    });
+  });
 });

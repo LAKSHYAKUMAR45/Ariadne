@@ -104,9 +104,39 @@ CREATE TABLE knowledge_search_index_fields (
     ON DELETE CASCADE,
   FOREIGN KEY (project_id, span_id)
     REFERENCES knowledge_source_spans(project_id, id)
-    ON DELETE RESTRICT
+    ON DELETE NO ACTION
+    DEFERRABLE INITIALLY DEFERRED
 );
+
+CREATE TABLE knowledge_search_index_tokens (
+  project_id TEXT NOT NULL,
+  token TEXT NOT NULL,
+  index_id TEXT NOT NULL,
+  field_order INTEGER NOT NULL,
+  PRIMARY KEY (project_id, token, index_id, field_order),
+  FOREIGN KEY (project_id, index_id)
+    REFERENCES knowledge_search_indexes(project_id, id)
+    ON DELETE CASCADE
+) WITHOUT ROWID;
+CREATE INDEX idx_knowledge_search_index_tokens_index_field
+  ON knowledge_search_index_tokens(project_id, index_id, field_order);
 ```
+
+The span reference is a deferred check rather than an immediate `RESTRICT`:
+deleting a project or source version cascades to spans and index rows in one
+statement (per the contracts rule that project deletion leaves no orphans), and
+an immediate `RESTRICT` would abort that cascade whenever span-backed fields
+existed. Index fields are derived, so nothing needs to outlive their spans.
+
+`knowledge_search_index_tokens` is the candidate-narrowing structure: one row
+per distinct lowercase character trigram of each stored field text. A needle of
+three or more characters can only match a field that contains all of its
+trigrams, so lookups intersect (a bounded prefix of) the needle's trigrams
+through the `(project_id, token, ...)` primary key, then verify the survivors
+with the original substring check on `field_text`. Needles shorter than three
+characters have no trigrams and scan fields. Document frequency for all query
+terms is computed in a single pass over the same narrowed matches. The table is
+derived data (`derived-rebuild`) and cascades with its index.
 
 `coverage = 'metadata_only'` rows are built for a source version with no
 current extraction (not yet analyzed or an unsupported `coverage_only` result).

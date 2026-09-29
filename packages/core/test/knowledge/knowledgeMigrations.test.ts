@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { openDatabase } from '../../src/db.js';
 import {
   applyKnowledgeMigrations,
+  applyKnowledgeSearchIndexMigration,
   applyKnowledgeReviewDeduplicationMigration,
   KNOWLEDGE_SCHEMA_VERSION,
 } from '../../src/knowledge/knowledgeMigrations.js';
@@ -568,9 +569,18 @@ describe('knowledge search index migration (global version 11, knowledge revisio
       'symbol_name',
       'created_at',
     ]);
+    expect(columns(db, 'knowledge_search_index_tokens')).toEqual(['project_id', 'token', 'index_id', 'field_order']);
     expect(indexNames(db)).toEqual(
-      expect.arrayContaining(['idx_knowledge_search_indexes_project_status']),
+      expect.arrayContaining([
+        'idx_knowledge_search_indexes_project_status',
+        'idx_knowledge_search_index_tokens_index_field',
+      ]),
     );
+    expect(indexColumns(db, 'idx_knowledge_search_index_tokens_index_field')).toEqual([
+      'project_id',
+      'index_id',
+      'field_order',
+    ]);
     db.close();
   });
 
@@ -660,5 +670,66 @@ describe('knowledge search index migration (global version 11, knowledge revisio
       expect.arrayContaining(['knowledge_search_indexes', 'knowledge_search_index_fields']),
     );
     reopened.close();
+  });
+
+  it('relaxes a legacy RESTRICT span reference and backfills tokens without losing fields', () => {
+    const directory = mkdtempSync(join(process.cwd(), '.test-knowledge-index-restrict-'));
+    temporaryDirectories.push(directory);
+    const databasePath = join(directory, 'state.db');
+    const now = '2026-09-29T00:00:00.000Z';
+
+    const first = openDatabase(databasePath);
+    first.prepare(
+      `INSERT INTO knowledge_projects (id, workspace_root, name, status, created_at, updated_at)
+       VALUES ('p', '/w', 'P', 'active', ?, ?)`,
+    ).run(now, now);
+    first.prepare(
+      `INSERT INTO knowledge_sources (id, project_id, source_kind, source_path, status, created_at, updated_at)
+       VALUES ('s', 'p', 'file', 'a.md', 'active', ?, ?)`,
+    ).run(now, now);
+    first.prepare(
+      `INSERT INTO knowledge_source_versions (id, project_id, source_id, version_number, content_hash, content_path, byte_length, created_at)
+       VALUES ('v', 'p', 's', 1, 'h', 'a.md', 1, ?)`,
+    ).run(now);
+    first.prepare(
+      `INSERT INTO knowledge_search_indexes
+       (id, project_id, source_version_id, index_version, status, coverage, extraction_id, field_count, created_at, updated_at)
+       VALUES ('i', 'p', 'v', 1, 'active', 'metadata_only', NULL, 1, ?, ?)`,
+    ).run(now, now);
+    first.prepare(
+      `INSERT INTO knowledge_search_index_fields
+       (id, project_id, index_id, field_order, field_kind, field_text, field_weight, rank_class, created_at)
+       VALUES ('f', 'p', 'i', 0, 'path', 'Alpha.md', 0, 1, ?)`,
+    ).run(now);
+    first.exec(`
+      DROP TABLE knowledge_search_index_tokens;
+      ALTER TABLE knowledge_search_index_fields RENAME TO fields_old;
+      CREATE TABLE knowledge_search_index_fields (
+        id TEXT PRIMARY KEY, project_id TEXT NOT NULL, index_id TEXT NOT NULL, field_order INTEGER NOT NULL,
+        field_kind TEXT NOT NULL, field_text TEXT NOT NULL, field_weight REAL NOT NULL, rank_class INTEGER NOT NULL,
+        span_id TEXT, symbol_kind TEXT, symbol_name TEXT, created_at TEXT NOT NULL,
+        UNIQUE (project_id, index_id, field_order),
+        FOREIGN KEY (project_id, index_id) REFERENCES knowledge_search_indexes(project_id, id) ON DELETE CASCADE,
+        FOREIGN KEY (project_id, span_id) REFERENCES knowledge_source_spans(project_id, id) ON DELETE RESTRICT
+      );
+      INSERT INTO knowledge_search_index_fields SELECT * FROM fields_old;
+      DROP TABLE fields_old;
+    `);
+    first.close();
+
+    const upgraded = openDatabase(databasePath);
+    applyKnowledgeSearchIndexMigration(upgraded);
+    const references = upgraded.prepare('PRAGMA foreign_key_list(knowledge_search_index_fields)').all() as Array<{
+      table: string;
+      on_delete: string;
+    }>;
+    expect(references.find((reference) => reference.table === 'knowledge_source_spans')?.on_delete).toBe('NO ACTION');
+    expect(upgraded.prepare('SELECT field_text FROM knowledge_search_index_fields').all()).toEqual([{ field_text: 'Alpha.md' }]);
+    expect(
+      (upgraded.prepare('SELECT token FROM knowledge_search_index_tokens ORDER BY token').all() as Array<{ token: string }>).map(
+        (row) => row.token,
+      ),
+    ).toEqual(['.md', 'a.m', 'alp', 'ha.', 'lph', 'pha'].sort());
+    upgraded.close();
   });
 });

@@ -888,6 +888,7 @@ See [[graph|the graph]].
       knowledge_settings: 'required',
       knowledge_search_indexes: 'derived-rebuild',
       knowledge_search_index_fields: 'derived-rebuild',
+      knowledge_search_index_tokens: 'derived-rebuild',
       knowledge_search_semantic_models: 'derived-rebuild',
       knowledge_search_semantic_vectors: 'derived-rebuild',
       knowledge_search_semantic_neighbors: 'derived-rebuild',

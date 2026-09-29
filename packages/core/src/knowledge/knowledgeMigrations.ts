@@ -1,5 +1,6 @@
 import type Database from 'better-sqlite3';
 import { KNOWLEDGE_SCHEMA_SQL, KNOWLEDGE_SCHEMA_VERSION } from './knowledgeSchema.js';
+import { foldSearchText, trigramsOf } from './KnowledgeSearchTokens.js';
 
 export { KNOWLEDGE_SCHEMA_VERSION } from './knowledgeSchema.js';
 
@@ -428,14 +429,95 @@ export function applyKnowledgeSearchIndexMigration(db: Database.Database): void 
           ON DELETE CASCADE,
         FOREIGN KEY (project_id, span_id)
           REFERENCES knowledge_source_spans(project_id, id)
-          ON DELETE RESTRICT
+          ON DELETE NO ACTION
+          DEFERRABLE INITIALLY DEFERRED
       )
+    `);
+  } else {
+    relaxSearchIndexSpanForeignKey(db);
+  }
+  const hadTokenTable = hasTable(db, 'knowledge_search_index_tokens');
+  if (!hadTokenTable) {
+    db.exec(`
+      CREATE TABLE knowledge_search_index_tokens (
+        project_id TEXT NOT NULL,
+        token TEXT NOT NULL,
+        index_id TEXT NOT NULL,
+        field_order INTEGER NOT NULL,
+        PRIMARY KEY (project_id, token, index_id, field_order),
+        FOREIGN KEY (project_id, index_id)
+          REFERENCES knowledge_search_indexes(project_id, id)
+          ON DELETE CASCADE
+      ) WITHOUT ROWID
     `);
   }
   db.exec(
     `CREATE INDEX IF NOT EXISTS idx_knowledge_search_indexes_project_status
      ON knowledge_search_indexes(project_id, status)`,
   );
+  db.exec(
+    `CREATE INDEX IF NOT EXISTS idx_knowledge_search_index_tokens_index_field
+     ON knowledge_search_index_tokens(project_id, index_id, field_order)`,
+  );
+  if (!hadTokenTable) backfillSearchIndexTokens(db);
+}
+
+/**
+ * The span reference used to be an immediate RESTRICT, which made a cascaded project or source-version delete fail
+ * when span-backed fields were still present. Index fields are derived, so the reference is now a deferred check that
+ * the same cascade satisfies before the statement completes.
+ */
+function relaxSearchIndexSpanForeignKey(db: Database.Database): void {
+  const references = db.prepare('PRAGMA foreign_key_list(knowledge_search_index_fields)').all() as Array<{
+    table: string;
+    on_delete: string;
+  }>;
+  const strict = references.some((reference) => reference.table === 'knowledge_source_spans' && reference.on_delete === 'RESTRICT');
+  if (!strict) return;
+  db.exec(`
+    CREATE TABLE knowledge_search_index_fields_next (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL,
+      index_id TEXT NOT NULL,
+      field_order INTEGER NOT NULL,
+      field_kind TEXT NOT NULL,
+      field_text TEXT NOT NULL,
+      field_weight REAL NOT NULL,
+      rank_class INTEGER NOT NULL,
+      span_id TEXT,
+      symbol_kind TEXT,
+      symbol_name TEXT,
+      created_at TEXT NOT NULL,
+      UNIQUE (project_id, index_id, field_order),
+      FOREIGN KEY (project_id, index_id)
+        REFERENCES knowledge_search_indexes(project_id, id)
+        ON DELETE CASCADE,
+      FOREIGN KEY (project_id, span_id)
+        REFERENCES knowledge_source_spans(project_id, id)
+        ON DELETE NO ACTION
+        DEFERRABLE INITIALLY DEFERRED
+    );
+    INSERT INTO knowledge_search_index_fields_next
+      SELECT id, project_id, index_id, field_order, field_kind, field_text, field_weight, rank_class,
+             span_id, symbol_kind, symbol_name, created_at
+      FROM knowledge_search_index_fields;
+    DROP TABLE knowledge_search_index_fields;
+    ALTER TABLE knowledge_search_index_fields_next RENAME TO knowledge_search_index_fields;
+  `);
+}
+
+function backfillSearchIndexTokens(db: Database.Database): void {
+  const insert = db.prepare(
+    'INSERT OR IGNORE INTO knowledge_search_index_tokens (project_id, token, index_id, field_order) VALUES (?, ?, ?, ?)',
+  );
+  const fields = db
+    .prepare('SELECT project_id, index_id, field_order, field_text FROM knowledge_search_index_fields')
+    .all() as Array<{ project_id: string; index_id: string; field_order: number; field_text: string }>;
+  for (const field of fields) {
+    for (const gram of trigramsOf(foldSearchText(field.field_text))) {
+      insert.run(field.project_id, gram, field.index_id, field.field_order);
+    }
+  }
 }
 
 /**
