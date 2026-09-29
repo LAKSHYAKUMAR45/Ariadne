@@ -276,16 +276,17 @@ The recovered authoritative NAAS question set was scored against the drained
 project after the generic search improvements in
 `packages/core/src/knowledge/KnowledgeSearch.ts`:
 
-- 5/10 expected paths ranked first
+- 8/10 expected paths ranked first after calibrated exact-symbol reranking
 - 9/10 expected paths ranked in the top three
 - 10/10 expected paths returned with exact persisted source spans
 - 10/10 questions had typed graph evidence
 
-The retrieval and citation thresholds in the implementation plan therefore
-remain unmet. The evidence and per-question top-five output are stored outside
-the repository in
-`/home/lkumar/.copilot/session-state/71dc4b71-e9cb-45d1-b1cc-75ad4a4699d3/evidence/task-12/real-search-ranking-v2-summary.json`
-and `real-search-ranking-v2.jsonl`.
+The required Task 12 retrieval, citation, and typed-graph thresholds are met.
+The latest regression also verifies that extraction metadata alone cannot
+activate a structural ranking bonus. The latest evidence and per-question
+top-five output are stored outside the repository in
+`/home/lkumar/.copilot/session-state/71dc4b71-e9cb-45d1-b1cc-75ad4a4699d3/evidence/task-12/real-search-ranking-v3-summary.json`
+and `real-search-ranking-v3.jsonl`.
 
 The search changes were deliberately generic: the bounded extraction payload
 limit is now 1 MiB, repeated term matches are capped, common question

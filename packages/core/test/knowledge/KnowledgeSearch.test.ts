@@ -875,6 +875,197 @@ describe('searchKnowledge', () => {
     });
   });
 
+  it('prefers an exact pytest hook source over a broadly matching workflow', () => {
+    const bootstrapSource = sourceStore.register({
+      projectId: PROJECT_ID,
+      kind: 'file',
+      path: 'naas/test/Tests/conftest.py',
+      content: 'def pytest_configure(config):\n    pass\n',
+      format: 'python',
+      mimeType: 'text/x-python',
+    });
+    const bootstrapVersion = sourceStore.listVersions(PROJECT_ID, bootstrapSource.id)[0];
+    extractionStore.save({
+      projectId: PROJECT_ID,
+      extraction: {
+        analyzerId: 'python-lezer',
+        analyzerVersion: '1',
+        sourceVersionId: bootstrapVersion.id,
+        title: 'naas/test/Tests/conftest.py',
+        summary: 'pytest bootstrap configuration',
+        sections: [],
+        symbols: [
+          {
+            id: 'symbol:pytest-configure',
+            kind: 'function',
+            name: 'pytest_configure',
+            qualifiedName: 'conftest.pytest_configure',
+            span: {
+              startOffset: 0,
+              endOffset: 39,
+              startLine: 1,
+              startColumn: 1,
+              endLine: 2,
+              endColumn: 9,
+            },
+            confidence: 1,
+          },
+        ],
+        relationships: [],
+        links: [],
+        diagnostics: [],
+      },
+    });
+
+    const noisyWorkflow = sourceStore.register({
+      projectId: PROJECT_ID,
+      kind: 'file',
+      path: 'naas/test/Libs/Workflows/JCNR/security_group_workflow.py',
+      content: 'pytest bootstrap defaults configuration pytest bootstrap defaults\n',
+      format: 'python',
+      mimeType: 'text/x-python',
+    });
+    const noisyVersion = sourceStore.listVersions(PROJECT_ID, noisyWorkflow.id)[0];
+    extractionStore.save({
+      projectId: PROJECT_ID,
+      extraction: {
+        analyzerId: 'python-lezer',
+        analyzerVersion: '1',
+        sourceVersionId: noisyVersion.id,
+        title: 'naas/test/Libs/Workflows/JCNR/security_group_workflow.py',
+        summary: 'pytest bootstrap defaults configuration',
+        sections: [
+          {
+            id: 'section:noisy',
+            kind: 'code',
+            title: 'pytest bootstrap defaults',
+            text: 'pytest bootstrap defaults configuration pytest bootstrap defaults',
+            span: {
+              startOffset: 0,
+              endOffset: 65,
+              startLine: 1,
+              startColumn: 1,
+              endLine: 1,
+              endColumn: 66,
+            },
+            confidence: 1,
+          },
+        ],
+        symbols: [],
+        relationships: [],
+        links: [],
+        diagnostics: [],
+      },
+    });
+
+    const results = searchKnowledge('pytest bootstrap defaults', {
+      db,
+      projectId: PROJECT_ID,
+      mode: 'sources',
+    });
+
+    expect(results[0]).toMatchObject({
+      kind: 'source',
+      id: bootstrapSource.id,
+    });
+  });
+
+  it('does not apply structural bonuses when only extraction metadata matches', () => {
+    const contentSource = sourceStore.register({
+      projectId: PROJECT_ID,
+      kind: 'file',
+      path: 'src/config.py',
+      content: 'def load_config():\n    return {"loader": True}\n',
+      format: 'python',
+      mimeType: 'text/x-python',
+    });
+    const contentVersion = sourceStore.listVersions(PROJECT_ID, contentSource.id)[0];
+    extractionStore.save({
+      projectId: PROJECT_ID,
+      extraction: {
+        analyzerId: 'python-lezer',
+        analyzerVersion: '1',
+        sourceVersionId: contentVersion.id,
+        title: 'src/config.py',
+        summary: 'Configuration values.',
+        sections: [
+          {
+            id: 'section:loader',
+            kind: 'code',
+            title: 'configuration',
+            text: 'The loader initializes configuration.',
+            span: {
+              startOffset: 0,
+              endOffset: 44,
+              startLine: 1,
+              startColumn: 1,
+              endLine: 2,
+              endColumn: 1,
+            },
+            confidence: 1,
+          },
+        ],
+        symbols: [
+          {
+            id: 'symbol:load-config',
+            kind: 'function',
+            name: 'load_config',
+            qualifiedName: 'load_config',
+            span: {
+              startOffset: 0,
+              endOffset: 48,
+              startLine: 1,
+              startColumn: 1,
+              endLine: 2,
+              endColumn: 44,
+            },
+            confidence: 1,
+          },
+        ],
+        relationships: [],
+        links: [],
+        diagnostics: [],
+      },
+    });
+
+    const metadataSource = sourceStore.register({
+      projectId: PROJECT_ID,
+      kind: 'file',
+      path: 'naas/Libs/loader/config_notes.py',
+      content: 'No implementation details here.',
+      format: 'python',
+      mimeType: 'text/x-python',
+    });
+    const metadataVersion = sourceStore.listVersions(PROJECT_ID, metadataSource.id)[0];
+    extractionStore.save({
+      projectId: PROJECT_ID,
+      extraction: {
+        analyzerId: 'python-lezer',
+        analyzerVersion: '1',
+        sourceVersionId: metadataVersion.id,
+        title: 'naas/Libs/loader/config_notes.py',
+        summary: 'Loader metadata only.',
+        sections: [],
+        symbols: [],
+        relationships: [],
+        links: [],
+        diagnostics: [],
+      },
+    });
+
+    const results = searchKnowledge('loader', {
+      db,
+      projectId: PROJECT_ID,
+      mode: 'sources',
+    });
+
+    expect(results[0]).toMatchObject({
+      kind: 'source',
+      id: contentSource.id,
+    });
+    expect(results.findIndex((result) => result.id === metadataSource.id)).toBeGreaterThan(0);
+  });
+
   it('redacts extraction-backed snippets before returning source-backed excerpts and exact citations', () => {
     const source = sourceStore.register({
       projectId: PROJECT_ID,

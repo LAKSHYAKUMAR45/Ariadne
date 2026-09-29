@@ -147,6 +147,7 @@ interface ExtractionSearchData {
   analyzerVersion: string | null;
   fields: SearchableField[];
   symbolKinds: ExtractedSymbolKind[];
+  symbolNames: string[];
 }
 
 const DEFAULT_LIMIT = 20;
@@ -244,6 +245,7 @@ function structuralScore(query: string, row: SourceSearchRow, extractionData: Ex
   const hasDefaultsIntent = queryHasConcept(query, 'default');
   const hasPytestIntent = queryHasConcept(query, 'pytest') || queryHasConcept(query, 'bootstrap');
   const symbolKinds = new Set(extractionData?.symbolKinds ?? []);
+  const symbolTokens = new Set((extractionData?.symbolNames ?? []).flatMap((name) => searchTokens(name)));
   let score = 0;
   if (hasTaskManagerPath && hasClassIntent && symbolKinds.has('class')) score += 24;
   if (hasTaskManagerPath && hasFunctionIntent && (symbolKinds.has('function') || symbolKinds.has('method'))) score += 12;
@@ -253,6 +255,15 @@ function structuralScore(query: string, row: SourceSearchRow, extractionData: Ex
   if (hasLoaderPath && hasLoaderIntent) score += 36;
   if (hasGlobalVariablesPath && hasDefaultsIntent) score += 24;
   if (hasConftestPath && hasPytestIntent) score += 24;
+  const exactSymbolTerms = terms(query).filter((term) => {
+    if (term.length < 6 || !symbolTokens.has(term)) return false;
+    if (hasLoaderPath) return term === 'loader';
+    if (hasConftestPath) return term === 'pytest' || term === 'bootstrap';
+    if (hasGlobalVariablesPath) return term === 'default' || term === 'defaults';
+    if (hasTaskManagerPath) return term === 'class' || term === 'function' || term === 'method';
+    return false;
+  }).length;
+  score += exactSymbolTerms * 120;
   return score;
 }
 
@@ -594,6 +605,10 @@ function parseExtractionSearchData(db: Database.Database, row: SourceSearchRow):
       analyzerVersion: row.extraction_analyzer_version,
       fields,
       symbolKinds: extraction.symbols.slice(0, MAX_EXTRACTION_SYMBOLS).map((symbol) => symbol.kind),
+      symbolNames: extraction.symbols.slice(0, MAX_EXTRACTION_SYMBOLS).flatMap((symbol) => [
+        symbol.name,
+        ...(symbol.qualifiedName ? [symbol.qualifiedName] : []),
+      ]),
     };
   } catch {
     return null;
@@ -741,7 +756,10 @@ function searchSources(query: string, options: KnowledgeSearchOptions): Knowledg
       { text: row.mime_type, weight: 1 },
       { text: row.current_hash, weight: 1 },
     ]);
-    const structuralBonus = bestMatch ? structuralScore(query, row, extractionData) : 0;
+    const hasSpanBackedExtractionMatch = rankedFieldMatches.some(
+      (match) => match.field.rankClass === EXTRACTION_MATCH_RANK_CLASS && match.field.span !== null,
+    );
+    const structuralBonus = hasSpanBackedExtractionMatch ? structuralScore(query, row, extractionData) : 0;
     const rankClass = bestMatch ? bestMatch.field.rankClass : metadataScore > 0 ? METADATA_MATCH_RANK_CLASS : DEFAULT_MATCH_RANK_CLASS;
     const score = bestMatch
       ? extractionScore + Math.min(metadataScore * 4, extractionScore) + structuralBonus
