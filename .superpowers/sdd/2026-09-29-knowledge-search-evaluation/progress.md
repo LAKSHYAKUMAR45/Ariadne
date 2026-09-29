@@ -1,0 +1,27 @@
+# SDD ledger — plan: docs/superpowers/plans/2026-09-29-knowledge-search-evaluation.md
+
+## Preflight scan
+
+| Scope | What was checked | Ruling |
+|---|---|---|
+| Task 1 → Task 2 | Task 1 produces validated `KnowledgeAccuracyCorpus`; Task 2 consumes it and adds report/scorer interfaces. | Compatible. |
+| Task 1 → Task 3 | Task 1 changes fixture fields and parser; Task 3 consumes parsed corpus in synthetic acceptance. | Compatible; Task 3 must use `prompt`, not legacy `query`. |
+| Task 2 → Task 3 | Task 2 produces `scoreKnowledgeAccuracy`; Task 3 supplies search and graph-evidence callbacks. | Compatible. |
+| Task 2 → Task 4 | Task 4 strengthens projection and required-question behavior in the scorer. | Compatible; preserve Task 2 output shape. |
+| Task 3 → Task 5 | Task 3 produces corpus-backed acceptance metrics; Task 5 records them. | Compatible. |
+| Task 4 → Task 5 | Task 4 documents evidence safety and deterministic reports; Task 5 records the gate. | Compatible. |
+| Task 1 | Parser tests match parser interface; fixture is later migrated to `prompt`, `required`. | Internally compatible. |
+| Task 2 | Scoring tests match scorer interface and report fields. | Internally compatible. |
+| Task 3 | Integration uses existing database setup and graph SQL while moving scoring into helper. | Internally compatible; parameterize project ID. |
+| Task 4 | Safety tests require bounded report projection and docs update. | Internally compatible. |
+| Task 5 | Validation commands cover core, CLI, builds, and diff check. | Internally compatible. |
+
+No plan/spec conflicts found. The spec is authoritative for providerless, non-mutating evaluation and the declared thresholds.
+
+Task 1 implementer commit: 08c6029de2bef22a848f0fa4eefcc1c44a66ad02
+Task 1: complete (commits f1c748b..08c6029, review clean)
+Task 2: complete (commits 08c6029..9f806e1, review clean)
+Task 3: complete (commits 9f806e1..c2b9758, review clean)
+Task 4: fix round 1/5 (1 addressed, 0 open; commit 64ae9d07eed9b3d08e195238048f5617f96ed623)
+Task 4: complete (commits c2b9758..64ae9d0, review clean after 1 fix round)
+Task 5: complete (regression gate green; synthetic acceptance thresholds met)
