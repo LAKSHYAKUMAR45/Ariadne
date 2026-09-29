@@ -11,6 +11,29 @@ export interface KnowledgeAccuracyCorpus {
   questions: KnowledgeAccuracyQuestion[];
 }
 
+export interface KnowledgeAccuracyFailure {
+  id: string;
+  prompt: string;
+  expectedPaths: string[];
+  returnedPaths: string[];
+  missing: string[];
+}
+
+export interface KnowledgeAccuracyReport {
+  corpusVersion: string;
+  questionCount: number;
+  top1PathHits: number;
+  top3PathHits: number;
+  spanCitationHits: number;
+  typedGraphEvidenceHits: number;
+  failures: KnowledgeAccuracyFailure[];
+}
+
+export interface KnowledgeAccuracySearchResult {
+  title: string;
+  citations: ReadonlyArray<{ span: unknown }>;
+}
+
 function expectObject(value: unknown, label: string): Record<string, unknown> {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
     throw new Error(`${label} must be an object`);
@@ -89,5 +112,73 @@ export function parseKnowledgeAccuracyCorpus(input: unknown): KnowledgeAccuracyC
   return {
     corpusVersion,
     questions: [...questions],
+  };
+}
+
+function hasNonNullSpan(result: KnowledgeAccuracySearchResult): boolean {
+  return result.citations.some((citation) => citation.span !== null);
+}
+
+export function scoreKnowledgeAccuracy(
+  corpus: KnowledgeAccuracyCorpus,
+  search: (prompt: string) => readonly KnowledgeAccuracySearchResult[],
+  hasTypedGraphEvidence: (question: KnowledgeAccuracyQuestion, path: string) => boolean,
+): KnowledgeAccuracyReport {
+  let top1PathHits = 0;
+  let top3PathHits = 0;
+  let spanCitationHits = 0;
+  let typedGraphEvidenceHits = 0;
+  const failures: KnowledgeAccuracyFailure[] = [];
+
+  for (const question of corpus.questions) {
+    const results = [...search(question.prompt)];
+    const returnedPaths = results.map((result) => result.title);
+    const expectedPaths = [...question.expectedPaths];
+
+    const top1 = returnedPaths[0] !== undefined && expectedPaths.includes(returnedPaths[0]);
+    const top3 = returnedPaths.slice(0, 3).some((path) => expectedPaths.includes(path));
+    const spanCitation = results.some((result) => expectedPaths.includes(result.title) && hasNonNullSpan(result));
+
+    let typedGraphEvidence = false;
+    for (const path of expectedPaths) {
+      if (hasTypedGraphEvidence(question, path)) {
+        typedGraphEvidence = true;
+        break;
+      }
+    }
+
+    if (question.required) {
+      if (top1) top1PathHits += 1;
+      if (top3) top3PathHits += 1;
+      if (spanCitation) spanCitationHits += 1;
+      if (typedGraphEvidence) typedGraphEvidenceHits += 1;
+
+      const missing = [
+        top1 ? null : 'top1',
+        top3 ? null : 'top3',
+        spanCitation ? null : 'spanCitation',
+        typedGraphEvidence ? null : 'typedGraphEvidence',
+      ].filter((value): value is string => value !== null);
+
+      if (missing.length > 0) {
+        failures.push({
+          id: question.id,
+          prompt: question.prompt,
+          expectedPaths,
+          returnedPaths,
+          missing,
+        });
+      }
+    }
+  }
+
+  return {
+    corpusVersion: corpus.corpusVersion,
+    questionCount: corpus.questions.length,
+    top1PathHits,
+    top3PathHits,
+    spanCitationHits,
+    typedGraphEvidenceHits,
+    failures,
   };
 }
