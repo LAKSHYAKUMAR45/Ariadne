@@ -400,4 +400,43 @@ describe('writeKnowledgeBenchmarkArtifacts', () => {
     expect(fs.existsSync(`${jsonPath}.tmp-${process.pid}`)).toBe(false);
     expect(fs.existsSync(markdownTempPath)).toBe(false);
   });
+
+  it('keeps the promoted pair when backup cleanup partially fails', () => {
+    const outputRoot = createScratchDir('backup-cleanup-failure');
+    const jsonPath = path.join(outputRoot, 'knowledge-baseline-v1.json');
+    const markdownPath = path.join(outputRoot, 'knowledge-baseline-v1.md');
+    fs.writeFileSync(jsonPath, '{"stable":true}\n', 'utf8');
+    fs.writeFileSync(markdownPath, '# Existing\n', 'utf8');
+
+    const markdownBackupPath = `${markdownPath}.bak-${process.pid}`;
+    __setKnowledgeBenchmarkReportFileSystemForTest({
+      existsSync: fs.existsSync,
+      mkdirSync: fs.mkdirSync,
+      readFileSync: fs.readFileSync,
+      renameSync: fs.renameSync,
+      writeFileSync: fs.writeFileSync,
+      rmSync(target, options) {
+        if (target === markdownBackupPath && fs.existsSync(markdownBackupPath)) {
+          throw new Error('simulated markdown backup cleanup failure');
+        }
+        return fs.rmSync(target, options);
+      },
+    });
+
+    const report = createKnowledgeBenchmarkReport(validReportInput());
+    let caught: unknown;
+    try {
+      writeKnowledgeBenchmarkArtifacts(outputRoot, report, privacyInput());
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught).toBeInstanceOf(AggregateError);
+    expect((caught as AggregateError).message).toMatch(/promoted.*backup cleanup/i);
+    expect((caught as AggregateError).errors).toEqual([
+      expect.objectContaining({ message: 'simulated markdown backup cleanup failure' }),
+    ]);
+    expect(JSON.parse(fs.readFileSync(jsonPath, 'utf8'))).toEqual(report);
+    expect(fs.readFileSync(markdownPath, 'utf8')).toContain('# Knowledge Benchmark Baseline Report');
+  });
 });

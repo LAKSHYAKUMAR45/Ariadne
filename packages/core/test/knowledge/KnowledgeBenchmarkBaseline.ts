@@ -6,6 +6,7 @@ import type { KnowledgeBenchmarkRunOptions } from './KnowledgeBenchmarkRunner.js
 export interface GitStatusEntry {
   code: string;
   path: string;
+  originalPath?: string;
 }
 
 export interface FilteredGitStatusEntries {
@@ -24,13 +25,17 @@ export const REPORT_PATH_ALLOWLIST = new Set([
 
 const GIT_COMMIT_PATTERN = /^[a-f0-9]{40}$/;
 
-function normalizeGitStatusPath(path: string): string {
+function parseGitStatusPath(path: string): Pick<GitStatusEntry, 'path' | 'originalPath'> {
   const renameSeparator = ' -> ';
   if (!path.includes(renameSeparator)) {
-    return path;
+    return { path };
   }
 
-  return path.slice(path.lastIndexOf(renameSeparator) + renameSeparator.length).trim();
+  const separatorIndex = path.lastIndexOf(renameSeparator);
+  return {
+    originalPath: path.slice(0, separatorIndex).trim(),
+    path: path.slice(separatorIndex + renameSeparator.length).trim(),
+  };
 }
 
 export function parseGitStatusEntries(output: string): GitStatusEntry[] {
@@ -45,7 +50,7 @@ export function parseGitStatusEntries(output: string): GitStatusEntry[] {
 
       return {
         code: line.slice(0, 2),
-        path: normalizeGitStatusPath(line.slice(3)),
+        ...parseGitStatusPath(line.slice(3)),
       };
     });
 }
@@ -55,7 +60,10 @@ export function filterKnowledgeBenchmarkGitStatusEntries(entries: readonly GitSt
   const dirtyEntries: GitStatusEntry[] = [];
 
   for (const entry of entries) {
-    if (REPORT_PATH_ALLOWLIST.has(entry.path)) {
+    const involvedPaths = entry.originalPath === undefined
+      ? [entry.path]
+      : [entry.originalPath, entry.path];
+    if (involvedPaths.every((path) => REPORT_PATH_ALLOWLIST.has(path))) {
       allowedEntries.push(entry);
       continue;
     }

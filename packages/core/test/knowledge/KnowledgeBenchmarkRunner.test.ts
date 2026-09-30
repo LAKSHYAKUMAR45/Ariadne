@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { existsSync, statSync } from 'node:fs';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
@@ -15,6 +16,27 @@ vi.setConfig({ testTimeout: 120_000 });
 
 const DIGEST_A = 'a'.repeat(64);
 const DIGEST_B = 'b'.repeat(64);
+
+function stableStringify(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`;
+  if (typeof value === 'object' && value !== null) {
+    const entries = Object.keys(value).sort().map((key) =>
+      `${JSON.stringify(key)}:${stableStringify((value as Record<string, unknown>)[key])}`);
+    return `{${entries.join(',')}}`;
+  }
+  return JSON.stringify(value) ?? 'null';
+}
+
+function digest(value: unknown): string {
+  return createHash('sha256').update(stableStringify(value)).digest('hex');
+}
+
+function firstProjectedResult(projection: unknown): Record<string, unknown> {
+  const questions = (projection as { questions: Array<{ results: Array<Record<string, unknown>> }> }).questions;
+  const result = questions.flatMap((question) => question.results).find((candidate) => candidate.hasSpanCitation === true);
+  if (!result) throw new Error('Expected a projected result with a span citation');
+  return result;
+}
 
 function testEnvironment(): KnowledgeBenchmarkRunOptions['environment'] {
   return {
@@ -332,6 +354,71 @@ describe('runKnowledgeBenchmark', () => {
     expect(result.report.gates.passed).toBe(false);
   });
 
+  it('changes the canonical digest when stable result identity changes without using unstable IDs', async () => {
+    const projections: unknown[] = [];
+    await runKnowledgeBenchmark(runOptions(), {
+      ...trackedHarness(),
+      hashProjection: (projection) => {
+        projections.push(structuredClone(projection));
+        return digest(projection);
+      },
+    });
+
+    const original = projections[0];
+    const changed = structuredClone(original);
+    const projected = firstProjectedResult(changed);
+    const identity = projected.identity as Record<string, unknown>;
+    identity.path = `${String(identity.path)}.renamed`;
+
+    expect(projected).not.toHaveProperty('id');
+    expect(projected).not.toHaveProperty('projectId');
+    expect(digest(changed)).not.toBe(digest(original));
+  });
+
+  it('changes the canonical digest when exact citation coordinates change while span presence remains true', async () => {
+    const projections: unknown[] = [];
+    await runKnowledgeBenchmark(runOptions(), {
+      ...trackedHarness(),
+      hashProjection: (projection) => {
+        projections.push(structuredClone(projection));
+        return digest(projection);
+      },
+    });
+
+    const original = projections[0];
+    const changed = structuredClone(original);
+    const projected = firstProjectedResult(changed);
+    const citations = projected.citations as Array<{ span: { startOffset: number } | null }>;
+    const citation = citations.find((candidate) => candidate.span !== null);
+    if (!citation?.span) throw new Error('Expected an exact projected citation span');
+    citation.span.startOffset += 1;
+
+    expect(projected.hasSpanCitation).toBe(true);
+    expect(digest(changed)).not.toBe(digest(original));
+  });
+
+  it('changes the canonical digest when citation identity changes while span presence remains true', async () => {
+    const projections: unknown[] = [];
+    await runKnowledgeBenchmark(runOptions(), {
+      ...trackedHarness(),
+      hashProjection: (projection) => {
+        projections.push(structuredClone(projection));
+        return digest(projection);
+      },
+    });
+
+    const original = projections[0];
+    const changed = structuredClone(original);
+    const projected = firstProjectedResult(changed);
+    const citations = projected.citations as Array<{ path: string | null; span: object | null }>;
+    const citation = citations.find((candidate) => candidate.span !== null);
+    if (!citation) throw new Error('Expected an exact projected citation');
+    citation.path = `${String(citation.path)}.renamed`;
+
+    expect(projected.hasSpanCitation).toBe(true);
+    expect(digest(changed)).not.toBe(digest(original));
+  });
+
   it('collects second-run quality failures into the quality gate', async () => {
     const result = await runKnowledgeBenchmark(runOptions(), trackedHarness((harness, index) => index === 1
       ? { ...harness, async runWorker() {} }
@@ -434,6 +521,37 @@ describe('runKnowledgeBenchmark', () => {
 
     expect(created).toHaveLength(1);
     expect(existsSync(created[0].workspaceRoot)).toBe(false);
+  });
+
+  it('preserves a primary benchmark failure and reports every cleanup failure', async () => {
+    const primary = new Error('injected primary failure');
+    const cleanupA = new Error('injected cleanup failure A');
+    const cleanupB = new Error('injected cleanup failure B');
+    let cleanupCalls = 0;
+    let hashCalls = 0;
+    const error = await runKnowledgeBenchmark(runOptions(), {
+      ...trackedHarness((harness) => ({
+        ...harness,
+        cleanup() {
+          cleanupCalls += 1;
+          harness.cleanup();
+          throw cleanupCalls === 1 ? cleanupA : cleanupB;
+        },
+      })),
+      hashProjection: () => {
+        hashCalls += 1;
+        if (hashCalls === 2) throw primary;
+        return DIGEST_A;
+      },
+    }).catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(AggregateError);
+    expect((error as AggregateError).cause).toBe(primary);
+    expect((error as AggregateError).errors).toEqual(expect.arrayContaining([
+      primary,
+      cleanupA,
+      cleanupB,
+    ]));
   });
 });
 

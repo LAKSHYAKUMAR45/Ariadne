@@ -143,9 +143,14 @@ export function createKnowledgeBenchmarkHarness(
     databasePath?: string;
     projectId?: string;
     createdAt?: string;
+    temporaryRootPrefix?: string;
   } = {},
 ): KnowledgeBenchmarkHarness {
-  const workspaceRoot = mkdtempSync(join(tmpdir(), '.knowledge-benchmark-'));
+  const temporaryRootPrefix = options.temporaryRootPrefix ?? '.knowledge-benchmark-';
+  if (temporaryRootPrefix.length === 0 || /[\\/]/.test(temporaryRootPrefix)) {
+    throw new Error('Benchmark temporary root prefix must be a non-empty file name prefix');
+  }
+  const workspaceRoot = mkdtempSync(join(tmpdir(), temporaryRootPrefix));
   let db: Database.Database | undefined;
   try {
     const databasePath = options.databasePath ?? join(workspaceRoot, 'state.db');

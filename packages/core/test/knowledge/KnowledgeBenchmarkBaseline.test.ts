@@ -60,6 +60,25 @@ describe('knowledge benchmark baseline git status filtering', () => {
 
     expect(isKnowledgeBenchmarkGitDirty(entries)).toBe(false);
   });
+
+  it.each([
+    'docs/benchmarks/knowledge-baseline-v1.json',
+    'docs/benchmarks/knowledge-baseline-v1.md',
+  ])('keeps a tracked file renamed into %s dirty', (destination) => {
+    const entries = parseGitStatusEntries([
+      `R  docs/benchmarks/previous-baseline.txt -> ${destination}`,
+    ].join('\n'));
+
+    expect(filterKnowledgeBenchmarkGitStatusEntries(entries)).toEqual({
+      allowedEntries: [],
+      dirtyEntries: [{
+        code: 'R ',
+        originalPath: 'docs/benchmarks/previous-baseline.txt',
+        path: destination,
+      }],
+    });
+    expect(isKnowledgeBenchmarkGitDirty(entries)).toBe(true);
+  });
 });
 
 describe('knowledge benchmark package wiring', () => {

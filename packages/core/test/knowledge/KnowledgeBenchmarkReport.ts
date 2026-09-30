@@ -688,12 +688,6 @@ export function writeKnowledgeBenchmarkArtifacts(
       transition.promoted = true;
     }
 
-    for (const transition of transitions) {
-      if (transition.backedUp) {
-        fileSystem.rmSync(transition.backupPath, { force: true, recursive: true });
-      }
-    }
-    return { jsonPath, markdownPath };
   } catch (error: unknown) {
     const failures: unknown[] = [error];
     const attempt = (step: () => void): void => {
@@ -727,6 +721,25 @@ export function writeKnowledgeBenchmarkArtifacts(
     }
     throw new AggregateError(failures, 'Benchmark artifact write failed and rollback was incomplete', { cause: error });
   }
+
+  const cleanupFailures: unknown[] = [];
+  for (const transition of transitions) {
+    if (!transition.backedUp) continue;
+    try {
+      fileSystem.rmSync(transition.backupPath, { force: true, recursive: true });
+      transition.backedUp = false;
+    } catch (error) {
+      cleanupFailures.push(error);
+    }
+  }
+  if (cleanupFailures.length > 0) {
+    throw new AggregateError(
+      cleanupFailures,
+      'Benchmark artifacts were promoted but backup cleanup was incomplete',
+      { cause: cleanupFailures[0] },
+    );
+  }
+  return { jsonPath, markdownPath };
 }
 
 export function __setKnowledgeBenchmarkReportFileSystemForTest(next?: FileSystemAdapter): void {

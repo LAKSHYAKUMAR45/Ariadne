@@ -1,6 +1,6 @@
 import { existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   createKnowledgeBenchmarkHarness,
@@ -94,13 +94,20 @@ describe('createKnowledgeBenchmarkHarness', () => {
   });
 
   it('removes its temporary root when construction fails after the root is created', () => {
-    const before = new Set(readdirSync(tmpdir()).filter((name) => name.startsWith('.knowledge-benchmark-')));
+    const temporaryRootPrefix = `.knowledge-benchmark-construction-${process.pid}-${Date.now()}-`;
+    const probe = createKnowledgeBenchmarkHarness({ temporaryRootPrefix });
+    try {
+      expect(basename(probe.workspaceRoot).startsWith(temporaryRootPrefix)).toBe(true);
+    } finally {
+      probe.cleanup();
+    }
 
-    expect(() => createKnowledgeBenchmarkHarness({ createdAt: {} as unknown as string })).toThrow();
+    expect(() => createKnowledgeBenchmarkHarness({
+      createdAt: {} as unknown as string,
+      temporaryRootPrefix,
+    })).toThrow();
 
-    const leaked = readdirSync(tmpdir()).filter(
-      (name) => name.startsWith('.knowledge-benchmark-') && !before.has(name),
-    );
+    const leaked = readdirSync(tmpdir()).filter((name) => name.startsWith(temporaryRootPrefix));
     expect(leaked).toEqual([]);
   });
 

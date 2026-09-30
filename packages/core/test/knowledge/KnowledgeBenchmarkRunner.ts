@@ -59,6 +59,24 @@ export interface KnowledgeBenchmarkRunnerDependencies {
 interface ProjectedResult {
   title: string;
   kind: string;
+  identity: {
+    path: string | null;
+    url: string | null;
+    contentHash: string | null;
+  };
+  citations: Array<{
+    path: string | null;
+    url: string | null;
+    span: {
+      startOffset: number;
+      endOffset: number;
+      startLine: number | null;
+      startColumn: number | null;
+      endLine: number | null;
+      endColumn: number | null;
+      label: string | null;
+    } | null;
+  }>;
   hasSpanCitation: boolean;
   searchConfidence: string | null;
   score: number;
@@ -134,9 +152,31 @@ function requiredQuestions(harness: KnowledgeBenchmarkHarness): KnowledgeAccurac
 }
 
 function projectResult(result: KnowledgeSearchResult): ProjectedResult {
+  const primaryCitation = result.citations[0];
+  const contentHash = result.metadata.contentHash;
   return {
     title: result.title,
     kind: result.kind,
+    identity: {
+      path: primaryCitation?.path ?? null,
+      url: primaryCitation?.url ?? null,
+      contentHash: typeof contentHash === 'string' ? contentHash : null,
+    },
+    citations: result.citations.map((citation) => ({
+      path: citation.path,
+      url: citation.url,
+      span: citation.span === null
+        ? null
+        : {
+            startOffset: citation.span.startOffset,
+            endOffset: citation.span.endOffset,
+            startLine: citation.span.startLine ?? null,
+            startColumn: citation.span.startColumn ?? null,
+            endLine: citation.span.endLine ?? null,
+            endColumn: citation.span.endColumn ?? null,
+            label: citation.span.label,
+          },
+    })),
     hasSpanCitation: result.citations.some((citation) => citation.span !== null),
     searchConfidence: result.searchConfidence ?? null,
     score: roundMetric(result.score),
@@ -727,8 +767,16 @@ export async function runKnowledgeBenchmark(
     throw error;
   } finally {
     const failures = cleanupAll(harnesses);
-    if (failures.length > 0 && primaryFailure === undefined) {
-      throw failures[0];
+    if (failures.length > 0) {
+      if (primaryFailure !== undefined) {
+        throw new AggregateError(
+          [primaryFailure, ...failures],
+          'Benchmark execution failed and cleanup was incomplete',
+          { cause: primaryFailure },
+        );
+      }
+      if (failures.length === 1) throw failures[0];
+      throw new AggregateError(failures, 'Benchmark cleanup was incomplete', { cause: failures[0] });
     }
   }
 }
