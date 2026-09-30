@@ -111,6 +111,34 @@
       {
         "command": "ariadne.graphify",
         "title": "Ariadne: Run Graphify (code knowledge graph)"
+      },
+      {
+        "command": "ariadne.knowledgeOverview",
+        "title": "Ariadne: Open Knowledge Overview"
+      },
+      {
+        "command": "ariadne.knowledgeSearch",
+        "title": "Ariadne: Search Knowledge Workspace"
+      },
+      {
+        "command": "ariadne.knowledgeRebuild",
+        "title": "Ariadne: Rebuild Knowledge Workspace"
+      },
+      {
+        "command": "ariadne.knowledgeQueue",
+        "title": "Ariadne: Show Knowledge Queue"
+      },
+      {
+        "command": "ariadne.knowledgeWorkerRunOnce",
+        "title": "Ariadne: Run Knowledge Worker Once"
+      },
+      {
+        "command": "ariadne.knowledgeReviewAccept",
+        "title": "Ariadne: Accept Knowledge Review"
+      },
+      {
+        "command": "ariadne.knowledgeReviewReject",
+        "title": "Ariadne: Reject Knowledge Review"
       }
     ],
     "configuration": {

@@ -1,4 +1,19 @@
 import type Database from 'better-sqlite3';
+import { KNOWLEDGE_SCHEMA_SQL } from './knowledge/knowledgeSchema.js';
+import {
+  applyKnowledgeGraphMetadataMigration,
+  applyKnowledgeQueueMigration,
+  applyKnowledgeReviewDeduplicationMigration,
+  applyKnowledgeAnalysisCoverageMigration,
+  applyKnowledgeFreshnessMigration,
+  applyKnowledgeSemanticMigration,
+  applyKnowledgeSemanticSummaryMigration,
+  applyKnowledgeSearchAnalyticsMigration,
+  applyKnowledgeGraphReportMigration,
+  applyKnowledgeJobResultSchemaMigration,
+  applyKnowledgeSearchIndexMigration,
+  applyKnowledgeSchemaV2Migration,
+} from './knowledge/knowledgeMigrations.js';
 
 /**
  * Schema migration runner, closing the "no schema migrations" gap flagged
@@ -158,6 +173,70 @@ export const MIGRATIONS: Migration[] = [
         );
       `);
     },
+  },
+  {
+    version: 7,
+    description: 'Add additive knowledge-wiki tables for project-scoped sources, pages, graph, and operations',
+    up: (db) => db.exec(KNOWLEDGE_SCHEMA_SQL),
+  },
+  {
+    version: 8,
+    description: 'Add leases, retries, and source-version deduplication to knowledge jobs',
+    up: (db) => applyKnowledgeQueueMigration(db),
+  },
+  {
+    version: 9,
+    description: 'Apply additive knowledge schema follow-up migrations for extractions, graph metadata, and review dedupe',
+    up: (db) => {
+      applyKnowledgeSchemaV2Migration(db);
+      applyKnowledgeGraphMetadataMigration(db);
+      applyKnowledgeReviewDeduplicationMigration(db);
+    },
+  },
+  {
+    version: 10,
+    description: 'Backfill knowledge job completion modes once and widen unknown-mode compatibility',
+    up: (db) => applyKnowledgeQueueMigration(db),
+  },
+  {
+    version: 11,
+    description: 'Add derived deterministic search index tables for knowledge sources',
+    up: (db) => applyKnowledgeSearchIndexMigration(db),
+  },
+  {
+    version: 12,
+    description: 'Add knowledge job result schema version for versioned analyzed job-result envelopes',
+    up: (db) => applyKnowledgeJobResultSchemaMigration(db),
+  },
+  {
+    version: 13,
+    description: 'Add knowledge analysis coverage and deferred relationship tables',
+    up: (db) => applyKnowledgeAnalysisCoverageMigration(db),
+  },
+  {
+    version: 14,
+    description: 'Add knowledge graph completeness report and ambiguity tables',
+    up: (db) => applyKnowledgeGraphReportMigration(db),
+  },
+  {
+    version: 15,
+    description: 'Add host-local knowledge source freshness and project watcher recovery tables',
+    up: (db) => applyKnowledgeFreshnessMigration(db),
+  },
+  {
+    version: 16,
+    description: 'Add derived local semantic model, vector, and neighbor tables for bounded hybrid search',
+    up: (db) => applyKnowledgeSemanticMigration(db),
+  },
+  {
+    version: 17,
+    description: 'Add grounded semantic summary records with reference-only evidence',
+    up: (db) => applyKnowledgeSemanticSummaryMigration(db),
+  },
+  {
+    version: 18,
+    description: 'Add privacy-preserving search analytics and ranking regression tables',
+    up: (db) => applyKnowledgeSearchAnalyticsMigration(db),
   },
 ];
 

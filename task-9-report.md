@@ -1,0 +1,147 @@
+# Task 9 Report — Provider Security/Correctness Follow-up
+
+## Scope
+Fixed all Task 9 follow-up security and correctness findings in `packages/core` only.
+
+The unrelated unstaged plan file `docs/superpowers/plans/2026-09-24-ariadne-knowledge-wiki-plan.md` was left untouched.
+
+This final pass closes the remaining address-classification gap too: provider endpoint validation now routes every literal/pinned IP through one shared classifier, rejects additional IPv6 special-use classes and IPv4-embedded IPv6 wrappers, and enforces exact textual loopback literals for plain HTTP test/local endpoints.
+
+## Host policy contract
+
+### Credential policy
+- `apiKeyEnv` is persisted as a variable name only and must use the `ARIADNE_KNOWLEDGE_PROVIDER_` prefix.
+- Secret resolution is now **host-controlled**.
+- Hosts must inject either:
+  - `allowedEnvironmentVariables: Set<string>`, or
+  - `resolveApiKey({ profile, envName, environment })`.
+- Legacy persisted env names are **default-deny** unless the host explicitly exact-allowlists them with `allowedLegacyEnvironmentVariables`.
+- Resolver callbacks now receive only the single approved env binding, never the caller's full environment.
+- Default behavior denies secret resolution and does **not** read or forward unapproved `process.env[...]` keys.
+- Diagnostics mention only the env-var name, never the secret value.
+
+### Endpoint / origin policy
+- Provider requests are now **host-controlled** too.
+- Hosts must inject an exact-origin allowlist/policy into `OpenAICompatibleProvider`.
+- Default behavior denies sending requests to unapproved origins.
+- Named hosts additionally require a transport implementing the new `requestPinned(...)` contract.
+- Plain-HTTP loopback endpoints must use the exact literal spellings `127.0.0.1` or `[::1]`; hostname aliases, shorthand/numeric IPv4 spellings, expanded IPv6 loopback text, and mapped/translated variants are rejected.
+- Loopback fixture tests inject explicit host policy.
+
+### Request-time network safety
+- Literal IP endpoints stay on the plain request path, but only after shared canonical parsing/classification accepts the destination.
+- Named hosts resolve inside the injected transport, must validate the full resolved set, and must bind the request to a selected approved address plus original Host/TLS metadata before credentials are released.
+- Every pinned `resolvedAddresses[].address` must parse as a canonical IP literal; hostnames, arbitrary tokens, malformed literals, zone identifiers, and family mismatches are rejected before the Authorization-bearing payload is released.
+- Validated pinned addresses are canonicalized before membership comparison, so equivalent IPv6 expanded/compressed spellings compare deterministically and the returned approved set/connection target use the canonical literal.
+- `selectedAddress` / `connectionTarget.address` must exactly match one of the validated canonical literals with the same family.
+- Named-host mapped/private/reserved/loopback/special-use resolutions are rejected by the same canonical classifier used for literal-IP endpoints.
+- IPv4-mapped, translated, compatible, NAT64-embedded, 6to4/Teredo, multicast, discard-only, benchmarking, documentation, unique-local, link-local, site-local, unspecified, and loopback IPv6 targets are rejected before a credential-bearing payload/request is released.
+- Redirects remain disabled.
+
+## RED
+Regression RED command:
+
+```bash
+pnpm --filter @ariadne-dev/core exec vitest run test/knowledge/KnowledgeProviderProfiles.test.ts test/knowledge/OpenAICompatibleProvider.test.ts test/knowledge/KnowledgeAnalysis.test.ts test/knowledge/KnowledgeWorker.test.ts test/knowledge/KnowledgeArchive.test.ts test/knowledge/knowledgeMigrations.test.ts
+```
+
+Initial RED findings reproduced by the new tests included:
+- unsafe legacy `apiKeyEnv` names still reached resolver callbacks / env access;
+- naïve named-host transports could claim pinning without a single enforceable request contract;
+- named-host validation and connection were split across an easy-to-misuse API;
+- pinned transports could still pass a hostname/arbitrary token as an “address”, mismatch the declared family, or select a target outside the validated canonical set;
+- prompt bounding and provider safeguards needed to stay green under the hardened contract.
+
+## GREEN
+Focused validation:
+
+```bash
+pnpm --filter @ariadne-dev/core exec vitest run test/knowledge/KnowledgeProviderProfiles.test.ts test/knowledge/OpenAICompatibleProvider.test.ts test/knowledge/KnowledgeAnalysis.test.ts test/knowledge/KnowledgeWorker.test.ts test/knowledge/KnowledgeArchive.test.ts test/knowledge/knowledgeMigrations.test.ts
+```
+
+Result: pass (`6` files / `63` tests).
+
+Full validation:
+
+```bash
+pnpm --filter @ariadne-dev/core test
+pnpm --filter @ariadne-dev/core build
+```
+
+Results:
+- full core tests: pass (`65` files / `561` tests)
+- core build: pass (`tsc -p tsconfig.json`)
+
+## Fix summary
+
+### 1. Secret boundary locked down
+- Added `KnowledgeProviderCredentialPolicy`.
+- Default secret resolution now denies all env-name dereferences.
+- Added `allowedLegacyEnvironmentVariables` so intentional legacy env support is explicit and exact.
+- Unsafe legacy env names are quarantined before any resolver callback or env lookup and return bounded warning diagnostics.
+- Approved names resolve only through the host contract; resolver callbacks receive only the single approved env binding.
+- Provider profile test adapters now receive only the sanitized approved credential subset, not the caller's raw `process.env`.
+- `apiKeyEnv` validation now requires the `ARIADNE_KNOWLEDGE_PROVIDER_` prefix.
+- Previously persisted legacy env-var names remain readable for compatibility, but new writes enforce the dedicated prefix.
+
+### 2. Endpoint policy made host-controlled
+- Added exact-origin host policy support to `OpenAICompatibleProvider`.
+- All provider requests are rejected unless the host explicitly approves the origin.
+- Loopback/private fixture origins are allowed only through injected test policy.
+
+### 3. SSRF hardening
+- Added shared `ProviderEndpointIpPolicy` parsing/classification so profile validation, literal-IP requests, and named-host pinned validations all use the same canonical decision path.
+- Replaced the old `resolveHostname + pinsResolvedHostnames + fetch` split with a single named-host `requestPinned(...)` transport operation.
+- The provider now validates the resolved set and selected address before it constructs a credential-bearing pinned request payload.
+- Added literal parsing/canonicalization for pinned transport addresses:
+  - rejects hostnames/arbitrary tokens and malformed literals;
+  - rejects zone identifiers;
+  - rejects declared family mismatches;
+  - rejects IPv4-mapped IPv6 pinned addresses directly;
+  - canonicalizes accepted IPv6 literals before membership comparison and before constructing the approved connection target.
+- Tightened literal-IP handling so only the exact loopback literals (`127.0.0.1` / `::1`) stay on the allowed loopback path; alternate shorthand, numeric, expanded, mapped, and translated loopback spellings are rejected.
+- The validated pinned payload binds connection target IP/port separately from the original hostname Host/SNI metadata, making rebinding harder to misuse accidentally.
+- Rejected private/reserved/special-use destinations, including IPv4-mapped, translated, compatible, NAT64-local-use, and other IPv6-to-IPv4 embedded forms.
+- Preserved acceptance for ordinary public literals, including globally reachable special-purpose IPv4 anycast addresses such as `192.0.0.9`.
+- Exported clear host-policy / transport / pinned-request types plus a safe default fetch transport for literal-IP paths.
+- Default transport now fails closed for named hosts unless the host injects a compliant pinned transport.
+- Kept redirects disabled.
+- Public requests now require both an approved origin and a safe resolved destination.
+
+### 4. Streaming response limits and cancellation
+- Replaced `response.text()` buffering with streaming reads.
+- Direct provider callers now also get explicit request-prompt byte limits without JSON-slicing.
+- Enforced byte limits using UTF-8 byte accounting.
+- Checked `Content-Length` early but still enforced the real streamed-byte cap.
+- Cancelled oversized streams immediately.
+- Already-aborted parent signals now fail synchronously before fetch starts and preserve the abort reason; destination validation is covered by the same timeout/abort path.
+
+### 5. Legacy/malformed row compatibility
+- Added compatibility handling so `list/get/select` skip unsupported legacy provider rows instead of bricking.
+- Added bounded redacted diagnostics via `listWithDiagnostics(...)`.
+- Legacy secrets stay hidden.
+- Persisted config parsing is now strict and typed; malformed rows are rejected without `String(...)`/`Number(...)` coercion or raw `TypeError` leakage.
+
+### 6. Structured prompt bounding
+- Bounded sections/symbols/relationships/pages before JSON serialization.
+- Added explicit truncation metadata to prompts.
+- Kept exact grounding spans intact; if grounding is too large, enrichment now returns a warning instead of silently dropping spans.
+- Preserved warning-only worker integration and deterministic-fact safety.
+
+## Security / audit notes
+- No provider secret values are written to SQLite, archives, exports, logs, job results, or diagnostics.
+- `knowledge_provider_profiles.configuration_json` remains omitted from archives.
+- Authorization data and response excerpts are redacted and bounded.
+- Provider output must still match the strict schema and exact deterministic grounding before enrichment is accepted.
+- Optional enrichment remains warning-only; deterministic generation/reconciliation behavior is unchanged.
+
+## Files changed
+- `packages/core/src/knowledge/ProviderEndpointIpPolicy.ts`
+- `packages/core/src/knowledge/KnowledgeProviderProfiles.ts`
+- `packages/core/src/knowledge/providers/OpenAICompatibleProvider.ts`
+- `packages/core/test/knowledge/OpenAICompatibleProvider.test.ts`
+- `packages/core/test/knowledge/KnowledgeProviderProfiles.test.ts`
+- `task-9-report.md`
+
+## Remaining concerns
+- None beyond the explicit host contract: named hosts still require a host-supplied pinned transport implementation, and plain-HTTP loopback endpoints must use literal loopback IPs.

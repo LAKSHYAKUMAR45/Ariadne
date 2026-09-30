@@ -3,6 +3,9 @@ import { AuthProvider, useAuth } from './auth/AuthProvider';
 import { LoginPage } from './auth/LoginPage';
 import type { ConfirmationRequest } from './api/types';
 import { ConfirmationDialog } from './components/ConfirmationDialog';
+import { KnowledgeOverviewPage } from './knowledge/KnowledgeOverviewPage';
+import { KnowledgeReviewsPage } from './knowledge/KnowledgeReviewsPage';
+import { KnowledgeSearchPage } from './knowledge/KnowledgeSearchPage';
 import { MembersPage } from './members/MembersPage';
 import { AuditPage } from './operations/AuditPage';
 import { BackupsPage } from './operations/BackupsPage';
@@ -21,7 +24,10 @@ type Section =
   | 'services'
   | 'deployments'
   | 'logs'
-  | 'audit';
+  | 'audit'
+  | 'knowledge-overview'
+  | 'knowledge-search'
+  | 'knowledge-reviews';
 
 const sections: ReadonlyArray<{ id: Section; label: string; glyph: string; adminOnly?: true }> = [
   { id: 'overview', label: 'Overview', glyph: 'OV', adminOnly: true },
@@ -32,6 +38,9 @@ const sections: ReadonlyArray<{ id: Section; label: string; glyph: string; admin
   { id: 'deployments', label: 'Deployments', glyph: 'DP', adminOnly: true },
   { id: 'logs', label: 'Logs', glyph: 'LG', adminOnly: true },
   { id: 'audit', label: 'Audit', glyph: 'AT', adminOnly: true },
+  { id: 'knowledge-overview', label: 'Knowledge', glyph: 'KN', adminOnly: true },
+  { id: 'knowledge-search', label: 'Search', glyph: 'SR', adminOnly: true },
+  { id: 'knowledge-reviews', label: 'Reviews', glyph: 'RV', adminOnly: true },
 ];
 
 const REAUTHENTICATION_REQUEST: ConfirmationRequest = {
@@ -73,17 +82,17 @@ function ConsoleShell() {
     }
   }, [section, visibleSections]);
 
-  if (!session) {
-    return null;
-  }
-
-  const activeSection = visibleSections.find((item) => item.id === section);
-
   const skipToContent = useCallback((event: MouseEvent<HTMLAnchorElement>) => {
     event.preventDefault();
     window.history.replaceState(null, '', '#main-content');
     mainRef.current?.focus();
   }, []);
+
+  if (!session) {
+    return null;
+  }
+
+  const activeSection = visibleSections.find((item) => item.id === section);
 
   return (
     <div className="app-shell">
@@ -160,6 +169,9 @@ function ConsoleShell() {
         {section === 'deployments' ? <DeploymentsPage /> : null}
         {section === 'logs' ? <LogsPage /> : null}
         {section === 'audit' ? <AuditPage /> : null}
+        {section === 'knowledge-overview' ? <KnowledgeOverviewPage /> : null}
+        {section === 'knowledge-search' ? <KnowledgeSearchPage /> : null}
+        {section === 'knowledge-reviews' ? <KnowledgeReviewsPage /> : null}
       </main>
       {reauthenticationRequired ? (
         <ConfirmationDialog

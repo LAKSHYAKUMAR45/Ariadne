@@ -28,6 +28,7 @@ describe('ariadne CLI surface', () => {
         'git-sync',
         'export',
         'workspace',
+        'knowledge',
         'backup',
         'restore',
         'init',
@@ -83,6 +84,77 @@ describe('ariadne CLI surface', () => {
 
     const searchCmd = program.commands.find((c) => c.name() === 'search')!;
     expect(searchCmd.options.some((o) => o.long === '--all-workspaces')).toBe(true);
+  });
+});
+
+describe('ariadne knowledge commands', () => {
+  let root: string;
+  let originalCwd: string;
+  let logSpy: ReturnType<typeof vi.spyOn>;
+
+  function resetCommanderOptionState(cmd: import('commander').Command): void {
+    (cmd as unknown as { _optionValues: Record<string, unknown> })._optionValues = {};
+    (cmd as unknown as { _optionValueSources: Record<string, unknown> })._optionValueSources = {};
+    for (const sub of cmd.commands) resetCommanderOptionState(sub);
+  }
+
+  beforeEach(() => {
+    resetCommanderOptionState(program);
+    root = fs.mkdtempSync(path.join(os.tmpdir(), 'ariadne-cli-knowledge-test-'));
+    originalCwd = process.cwd();
+    process.chdir(root);
+    logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    process.chdir(originalCwd);
+    logSpy.mockRestore();
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  it('projects a task explicitly and creates or resumes a task from an insight', async () => {
+    let db = core.openDatabase(core.stateDbPath(root));
+    db.prepare(
+      `INSERT INTO knowledge_projects (id, workspace_root, name, created_at, updated_at)
+       VALUES ('project-1', ?, 'Workspace', 'now', 'now')`,
+    ).run(root);
+    db.prepare(
+      `INSERT INTO knowledge_insights
+       (id, project_id, graph_snapshot_id, insight_type, content_path, confidence, created_at)
+       VALUES ('insight-1', 'project-1', NULL, 'bridge', 'knowledge-insights.json#bridge', 0.9, 'now')`,
+    ).run();
+    db.close();
+
+    let store = openWorkspaceStore(root);
+    const task = store.createTask({ title: 'Projection task' });
+    store.createCheckpoint({ taskId: task.id, level: 'micro', summary: 'Ready to project' });
+    store.close();
+
+    await program.parseAsync(['node', 'ariadne', 'knowledge', 'project-task', task.id, '--project', 'project-1']);
+    await program.parseAsync(['node', 'ariadne', 'knowledge', 'task-from-insight', 'insight-1', '--project', 'project-1']);
+
+    store = openWorkspaceStore(root);
+    const insightTask = store.listTasks().find((candidate) => candidate.goal?.includes('Knowledge insight: project-1/insight-1'));
+    expect(insightTask).toBeDefined();
+    store.updateTaskStatus(insightTask!.id, 'paused');
+    store.close();
+
+    await program.parseAsync(['node', 'ariadne', 'knowledge', 'task-from-insight', 'insight-1', '--project', 'project-1']);
+
+    store = openWorkspaceStore(root);
+    expect(store.getTask(insightTask!.id)?.status).toBe('active');
+    store.close();
+    db = core.openDatabase(core.stateDbPath(root));
+    expect(db.prepare('SELECT COUNT(*) AS count FROM knowledge_sources').get()).toEqual({ count: 1 });
+    db.close();
+    expect(core.readCurrentTaskId(root)).toBe(insightTask!.id);
+    expect(logSpy.mock.calls.map((args) => String(args[0]))).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining('Projected task'),
+        expect.stringContaining('Created task'),
+        expect.stringContaining('Resumed task'),
+      ]),
+    );
   });
 });
 

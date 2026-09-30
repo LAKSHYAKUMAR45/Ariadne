@@ -187,6 +187,16 @@ describe('App', () => {
     expect(screen.getByRole('button', { name: 'Review' })).toHaveAttribute('aria-pressed', 'true');
   });
 
+  it('exposes the knowledge workspace panels', async () => {
+    render(<App bridge={bridge()} initialState={baseState} />);
+    await userEvent.click(screen.getByRole('button', { name: 'Knowledge' }));
+    expect(screen.getByRole('heading', { name: 'Knowledge workspace' })).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: 'Knowledge Search' }));
+    expect(screen.getByRole('textbox', { name: 'Knowledge search query' })).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: 'Knowledge Graph' }));
+    expect(screen.getByRole('heading', { name: 'Knowledge Graph' })).toBeInTheDocument();
+  });
+
   it('switches tabs without routing', async () => {
     render(<App bridge={bridge()} initialState={baseState} />);
     const [todosButton] = screen.getAllByRole('button', { name: 'Todos' });

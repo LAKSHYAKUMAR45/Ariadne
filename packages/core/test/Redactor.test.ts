@@ -17,6 +17,11 @@ describe('Redactor', () => {
     expect(out).not.toContain('sk-abcdefghijklmnopqrstuvwx1234567890');
   });
 
+  it('redacts project-scoped OpenAI-style API keys with underscores', () => {
+    const out = redact('export OPENAI_API_KEY=sk-proj-abcdefghijklmnopqrstuvwxyz_1234567890');
+    expect(out).not.toContain('sk-proj-abcdefghijklmnopqrstuvwxyz_1234567890');
+  });
+
   it('redacts PEM private key blocks', () => {
     const out = redact('-----BEGIN RSA PRIVATE KEY-----\nMIIBogIBAAKCAQ==\n-----END RSA PRIVATE KEY-----');
     expect(out).toContain('REDACTED PRIVATE KEY');

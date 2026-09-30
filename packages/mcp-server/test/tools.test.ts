@@ -6,11 +6,13 @@ import { execFileSync } from 'node:child_process';
 import { inspect } from 'node:util';
 import * as core from '@ariadne-dev/core';
 import { TaskStore } from '@ariadne-dev/core';
+import Database from 'better-sqlite3';
 import * as tools from '../src/tools.js';
 import { readCurrentTaskId } from '../src/workspace.js';
 
 describe('mcp-server tools', () => {
   let store: TaskStore;
+  let knowledgeDb: Database.Database;
   let workspaceRoot: string;
 
   function git(args: string[], cwd: string): string {
@@ -37,12 +39,14 @@ describe('mcp-server tools', () => {
 
   beforeEach(() => {
     store = new TaskStore(':memory:');
+    knowledgeDb = core.openDatabase(':memory:');
     workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'ariadne-mcp-test-'));
   });
 
   afterEach(() => {
     vi.restoreAllMocks();
     store.close();
+    knowledgeDb.close();
     fs.rmSync(workspaceRoot, { recursive: true, force: true });
   });
 
@@ -70,6 +74,43 @@ describe('mcp-server tools', () => {
     expect(readCurrentTaskId(workspaceRoot)).toBe(a.id);
 
     expect(() => tools.taskUse(store, workspaceRoot, { taskId: 'nope' })).toThrow(/No task found/);
+  });
+
+  it('projects task knowledge and creates or resumes a task from an insight', () => {
+    knowledgeDb.prepare(
+      `INSERT INTO knowledge_projects (id, workspace_root, name, created_at, updated_at)
+       VALUES ('project-1', ?, 'Workspace', 'now', 'now')`,
+    ).run(workspaceRoot);
+    const task = tools.taskNew(store, workspaceRoot, { title: 'Projection task', goal: 'Capture task history' });
+    store.createCheckpoint({ taskId: task.id, level: 'micro', summary: 'Prepared projection' });
+
+    const projected = tools.knowledgeProjectTask(knowledgeDb, store, workspaceRoot, {
+      projectId: 'project-1',
+      taskId: task.id,
+      trigger: 'explicit',
+    });
+
+    knowledgeDb.prepare(
+      `INSERT INTO knowledge_insights
+       (id, project_id, graph_snapshot_id, insight_type, content_path, confidence, created_at)
+       VALUES ('insight-1', 'project-1', NULL, 'orphan', 'knowledge-insights.json#one', 1, 'now')`,
+    ).run();
+    const created = tools.knowledgeTaskFromInsight(knowledgeDb, store, workspaceRoot, {
+      projectId: 'project-1',
+      insightId: 'insight-1',
+    });
+    store.updateTaskStatus(created.task.id, 'paused');
+    const resumed = tools.knowledgeTaskFromInsight(knowledgeDb, store, workspaceRoot, {
+      projectId: 'project-1',
+      insightId: 'insight-1',
+    });
+
+    expect(projected.taskId).toBe(task.id);
+    expect(projected.provenance.map((ref) => ref.kind)).toContain('checkpoint');
+    expect(created.action).toBe('created');
+    expect(resumed.action).toBe('resumed');
+    expect(resumed.task.id).toBe(created.task.id);
+    expect(readCurrentTaskId(workspaceRoot)).toBe(created.task.id);
   });
 
   it('taskSetStatus pauses/completes/archives/reopens the current (or given) task', () => {

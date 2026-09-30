@@ -11,6 +11,7 @@ import type {
   DeploymentsResponse,
   LogEntry,
   LogSeverity,
+  KnowledgeReview,
   ServiceStatus,
   TaskSummary,
   TeamMember,
@@ -37,7 +38,10 @@ type SectionLabel =
   | 'Services'
   | 'Deployments'
   | 'Logs'
-  | 'Audit';
+  | 'Audit'
+  | 'Knowledge'
+  | 'Search'
+  | 'Reviews';
 
 interface CaptureFixture {
   event: TimelineEvent;
@@ -75,6 +79,7 @@ interface FixtureState {
   failNextLoginMessage: string | null;
   overviewPartialFailure: boolean;
   unexpectedRequests: string[];
+  knowledgeReviews: KnowledgeReview[];
 }
 
 interface ConsoleHarness {
@@ -98,6 +103,9 @@ const SECTION_HEADINGS: Record<SectionLabel, string> = {
   Deployments: 'Deployments',
   Logs: 'Recent logs',
   Audit: 'Audit',
+  Knowledge: 'Knowledge overview',
+  Search: 'Knowledge search',
+  Reviews: 'Knowledge reviews',
 };
 
 function isoAt(offsetMinutes: number): string {
@@ -392,6 +400,18 @@ function createFixtureState(): FixtureState {
     failNextLoginMessage: null,
     overviewPartialFailure: false,
     unexpectedRequests: [],
+    knowledgeReviews: [
+      {
+        id: 'review-knowledge-1',
+        projectId: 'project-knowledge-1',
+        pageVersionId: 'page-version-1',
+        status: 'pending',
+        requestedAt: isoAt(-15),
+        reviewedAt: null,
+        reviewerId: null,
+        summary: 'Confirm the queue recovery guidance',
+      },
+    ],
   };
 }
 
@@ -866,6 +886,95 @@ async function handleAdminRequest(route: Route, state: FixtureState): Promise<vo
 
   if (pathname === '/api/v1/admin/overview' && method === 'GET') {
     await fulfillJson(route, 200, buildOverview(state));
+    return;
+  }
+
+  if (pathname === '/api/v1/admin/knowledge/projects' && method === 'GET') {
+    await fulfillJson(route, 200, {
+      projects: [{
+        id: 'project-knowledge-1',
+        name: 'Ariadne workspace',
+        description: 'Local task, source, and generated knowledge.',
+        status: 'active',
+        sourceCount: 4,
+        pageCount: 8,
+        pendingReviewCount: state.knowledgeReviews.filter((review) => review.status === 'pending').length,
+        worker: {
+          queued: 3,
+          running: 1,
+          failed: 2,
+          oldestQueuedAt: isoAt(-20),
+          activeWorkerCount: 1,
+          deterministicCompleted: 7,
+          enrichedCompleted: 2,
+        },
+        updatedAt: isoAt(-5),
+      }],
+    });
+    return;
+  }
+
+  if (pathname === '/api/v1/admin/knowledge/projects/project-knowledge-1/search' && method === 'GET') {
+    const query = url.searchParams.get('query') ?? '';
+    await fulfillJson(route, 200, {
+      projectId: 'project-knowledge-1',
+      query,
+      results: query
+        ? [{
+            id: 'knowledge-page-queue',
+            kind: 'page',
+            title: 'Queue recovery',
+            snippet: 'Retry cancelled ingestion jobs after correcting a source failure.',
+            score: 8,
+            citations: [{
+              pageId: 'knowledge-page-queue',
+              sourceId: 'source-queue',
+              path: 'docs/queue.md',
+              url: null,
+              span: { id: 'queue-recovery', startOffset: 0, endOffset: 48, label: 'Recovery' },
+            }],
+          }]
+        : [],
+    });
+    return;
+  }
+
+  if (pathname === '/api/v1/admin/knowledge/projects/project-knowledge-1/reviews' && method === 'GET') {
+    await fulfillJson(route, 200, {
+      reviews: state.knowledgeReviews.filter((review) => review.status === 'pending'),
+    });
+    return;
+  }
+
+  const knowledgeReviewMatch = pathname.match(/^\/api\/v1\/admin\/knowledge\/projects\/project-knowledge-1\/reviews\/([^/]+)$/);
+  if (knowledgeReviewMatch && method === 'PATCH') {
+    if (!(await assertCsrf(route, state))) {
+      return;
+    }
+    const reviewId = decodeURIComponent(knowledgeReviewMatch[1]);
+    const review = state.knowledgeReviews.find((item) => item.id === reviewId);
+    const body = requestBody(route);
+    const evidence = body.evidence;
+    if (
+      !review ||
+      (body.action !== 'accept' && body.action !== 'reject' && body.action !== 'skip') ||
+      !evidence ||
+      typeof evidence !== 'object' ||
+      (evidence as Record<string, unknown>).kind !== 'dashboard' ||
+      (evidence as Record<string, unknown>).id !== reviewId
+    ) {
+      await fulfillError(route, 400, 'invalid_request', 'A valid knowledge review action is required.');
+      return;
+    }
+    const status = body.action === 'accept' ? 'approved' : body.action === 'reject' ? 'rejected' : 'dismissed';
+    const resolvedReview: KnowledgeReview = {
+      ...review,
+      status,
+      reviewedAt: isoAt(0),
+      reviewerId: state.session?.userId ?? null,
+    };
+    state.knowledgeReviews = state.knowledgeReviews.map((item) => item.id === reviewId ? resolvedReview : item);
+    await fulfillJson(route, 200, { review: resolvedReview });
     return;
   }
 

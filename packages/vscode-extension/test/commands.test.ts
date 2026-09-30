@@ -4,7 +4,7 @@ import * as path from 'node:path';
 import * as os from 'node:os';
 import { execFileSync } from 'node:child_process';
 import { TaskStore } from '@ariadne-dev/core';
-import { handleChatCommand, formatStatus, formatStatusSections, formatStatusBarItem, branchMismatchWarning } from '../src/commands.js';
+import { handleChatCommand, formatStatus, formatStatusSections, formatStatusBarItem, branchMismatchWarning, knowledgePanelCommand } from '../src/commands.js';
 
 describe('chat participant command logic', () => {
   let store: TaskStore;
@@ -15,6 +15,18 @@ describe('chat participant command logic', () => {
 
   afterEach(() => {
     store.close();
+  });
+
+  it('maps knowledge workspace commands to bridge requests', () => {
+    expect(knowledgePanelCommand('open-overview')).toEqual({ type: 'knowledge.overview' });
+    expect(knowledgePanelCommand('search', { query: '  auth  ' })).toEqual({
+      type: 'knowledge.search',
+      payload: { query: 'auth', mode: 'hybrid' },
+    });
+    expect(knowledgePanelCommand('review-accept', { reviewId: 'review-1' })).toEqual({
+      type: 'knowledge.review.resolve',
+      payload: { reviewId: 'review-1', action: 'accept' },
+    });
   });
 
   it('creates a task via /task new and marks it current', () => {

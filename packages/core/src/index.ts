@@ -1,5 +1,6 @@
 export { TaskStore } from './TaskStore.js';
 export { openDatabase } from './db.js';
+export type { DatabaseType } from './db.js';
 export { runMigrations, MIGRATIONS } from './migrations.js';
 export type { Migration } from './migrations.js';
 export { SCHEMA_SQL, SCHEMA_VERSION } from './schema.js';
@@ -85,6 +86,177 @@ export { ensureGitignored } from './gitignore.js';
 export { searchWorkspace } from './Search.js';
 export type { SearchCategory, SearchMatch, SearchResult, SearchOptions } from './Search.js';
 export {
+  buildKnowledgeSearchContext,
+  lexicalScore,
+  searchKnowledge,
+} from './knowledge/KnowledgeSearch.js';
+export {
+  hashDeterministicExtraction,
+  offsetToPosition,
+  stableExtractionStringify,
+  validateDeterministicExtraction,
+} from './knowledge/KnowledgeExtraction.js';
+export type {
+  DeterministicExtraction,
+  ExtractedMetadata,
+  ExtractedMetadataValue,
+  ExtractedLink,
+  ExtractedRelationship,
+  ExtractedRelationshipType,
+  ExtractedSection,
+  ExtractedSymbol,
+  DeferredRelationshipCandidate,
+  ExtractedSymbolKind,
+  ExtractionDiagnostic,
+  ExtractionDiagnosticSeverity,
+  KnowledgeSourcePosition,
+  KnowledgeSourceSpan,
+} from './knowledge/KnowledgeExtraction.js';
+export { KnowledgeExtractionStore } from './knowledge/KnowledgeExtractionStore.js';
+export {
+  AnalyzerRegistry,
+  createDefaultAnalyzerRegistry,
+  JavaScriptAnalyzer,
+  MarkdownAnalyzer,
+  PythonAnalyzer,
+  TextAnalyzer,
+} from './knowledge/analyzers/index.js';
+export {
+  ANALYZER_COVERAGE_DIAGNOSTIC_CODES,
+  ANALYZER_COVERAGE_STATUSES,
+  ANALYZER_UNSUPPORTED_REASONS,
+  classifyUnsupportedSource,
+  coverageFromOptionalIngest,
+  detectGeneratedCode,
+} from './knowledge/analyzers/index.js';
+export type {
+  AnalyzerCoverageDiagnosticCode,
+  AnalyzerCoverageStatus,
+  AnalyzerCoverageSummary,
+  AnalyzerInput,
+  AnalyzerResolution,
+  AnalyzerSelectionInput,
+  AnalyzerUnsupportedReason,
+  DeterministicAnalyzer,
+  OptionalIngestOutcome,
+} from './knowledge/analyzers/index.js';
+export { KnowledgeAnalysisCoverageStore, MAX_DEFERRED_RELATIONSHIPS_PER_SOURCE } from './knowledge/KnowledgeAnalysisCoverageStore.js';
+export type {
+  KnowledgeAnalysisCoverageRecord,
+  KnowledgeAnalysisCoverageSummaryCounts,
+  KnowledgeDeferredRelationshipRecord,
+} from './knowledge/KnowledgeAnalysisCoverageStore.js';
+export { getKnowledgeSurfaceStatus } from './knowledge/KnowledgeSurfaceStatus.js';
+export type { KnowledgeSurfaceStatus } from './knowledge/KnowledgeSurfaceStatus.js';
+export {
+  KnowledgeGraphReporter,
+  MAX_AMBIGUITY_CANDIDATES,
+  MAX_GRAPH_AMBIGUITIES_PER_REPORT,
+} from './knowledge/KnowledgeGraphReporting.js';
+export {
+  GRAPH_AMBIGUITY_KINDS,
+  GRAPH_AMBIGUITY_SEVERITIES,
+  GRAPH_COMPLETENESS_WARNING_CODES,
+} from './knowledge/KnowledgeGraphReportTypes.js';
+export type {
+  BuildKnowledgeGraphReportInput,
+  GraphCompletenessWarning,
+  KnowledgeGraphAmbiguity,
+  KnowledgeGraphAmbiguityKind,
+  KnowledgeGraphAmbiguitySeverity,
+  KnowledgeGraphCompletenessReport,
+  KnowledgeGraphReportingService,
+} from './knowledge/KnowledgeGraphReportTypes.js';
+export type {
+  KnowledgeExtractionRecord,
+  KnowledgeExtractionSectionRecord,
+  PersistedKnowledgeSourceSpan,
+  SaveKnowledgeExtractionInput,
+} from './knowledge/KnowledgeExtractionStore.js';
+export type {
+  KnowledgeAmbiguityReason,
+  KnowledgeSearchCitation,
+  KnowledgeSearchConfidence,
+  KnowledgeSearchContext,
+  KnowledgeSearchContextOptions,
+  KnowledgeSearchGraphExpansion,
+  KnowledgeSearchMode,
+  KnowledgeSearchOptions,
+  KnowledgeSearchResult,
+  KnowledgeSearchResultKind,
+  KnowledgeSearchDiagnostic,
+} from './knowledge/KnowledgeSearch.js';
+export {
+  KNOWLEDGE_SEARCH_INDEX_VERSION,
+  KnowledgeSearchIndex,
+  setKnowledgeSearchIndexChangedHook,
+} from './knowledge/KnowledgeSearchIndex.js';
+export {
+  KnowledgeSearchAnalyticsService,
+} from './knowledge/KnowledgeSearchAnalytics.js';
+export type {
+  DetectRankingRegressionInput,
+  DetectRankingRegressionResult,
+  KnowledgeFeedbackKind,
+  KnowledgeSearchAnalyticsOptions,
+  KnowledgeSearchRegressionRunKind,
+  PrunedAnalyticsRows,
+  RankingRegressionWarning,
+  RankingRegressionWarningCode,
+  RecordAnalyticsResult,
+  RecordSearchExposureInput,
+  RecordSearchFeedbackInput,
+} from './knowledge/KnowledgeSearchAnalytics.js';
+export {
+  KNOWLEDGE_SEMANTIC_MODEL_VERSION,
+  KnowledgeLocalSemanticIndex,
+  MAX_EXPANSION_CANDIDATES,
+  semanticModelStorageVersion,
+} from './knowledge/KnowledgeLocalSemanticIndex.js';
+export type {
+  KnowledgeLocalSemanticIndexOptions,
+  LocalSemanticCandidateScore,
+  LocalSemanticExpansion,
+  LocalSemanticRebuildReport,
+  LocalSemanticState,
+  LocalSemanticStatus,
+} from './knowledge/KnowledgeLocalSemanticIndex.js';
+export { orderHybridCandidates } from './knowledge/KnowledgeHybridOrdering.js';
+export type { HybridOrdering, HybridOrderingInput } from './knowledge/KnowledgeHybridOrdering.js';
+export type {
+  KnowledgeSearchIndexChange,
+  KnowledgeSearchIndexChangeContext,
+  KnowledgeSearchIndexChangedHook,
+  ReplaceSearchIndexInput,
+  SearchIndexCandidate,
+  SearchIndexCandidateQuery,
+  SearchIndexRebuildReport,
+  SearchIndexStatus,
+} from './knowledge/KnowledgeSearchIndex.js';
+export {
+  discoverKnowledgeSkills,
+  KnowledgeSkillRegistry,
+} from './knowledge/KnowledgeSkills.js';
+export type {
+  KnowledgeSkill,
+  KnowledgeSkillDiscovery,
+  KnowledgeSkillDiscoveryError,
+  KnowledgeSkillDiscoveryOptions,
+  KnowledgeSkillInput,
+  KnowledgeSkillInputRequest,
+  KnowledgeSkillRegistryOptions,
+  KnowledgeSkillScope,
+  SelectedKnowledgeSkill,
+} from './knowledge/KnowledgeSkills.js';
+export { KnowledgeOutputStore } from './knowledge/KnowledgeOutputs.js';
+export type {
+  CreateKnowledgeOutputInput,
+  KnowledgeOutput,
+  KnowledgeOutputOverwritePolicy,
+  KnowledgeOutputPreview,
+  KnowledgeOutputStoreOptions,
+} from './knowledge/KnowledgeOutputs.js';
+export {
   findWorkspaceRoot,
   stateDbPath,
   openWorkspaceStore,
@@ -145,3 +317,516 @@ export type {
   AriadneEventName,
   PluginHooks,
 } from './PluginRegistry.js';
+export { createKnowledgeId, normalizeKnowledgePath } from './knowledge/KnowledgeIds.js';
+export { KnowledgeProjectStore } from './knowledge/KnowledgeProjectStore.js';
+export type {
+  CreateKnowledgeProjectInput,
+  KnowledgeProject,
+  KnowledgeProjectStatus,
+  ListKnowledgeProjectsOptions,
+  UpdateKnowledgeProjectInput,
+} from './knowledge/KnowledgeProjectStore.js';
+export { KnowledgeSourceStore, registerKnowledgeSource } from './knowledge/KnowledgeSourceStore.js';
+export { KnowledgeFreshnessService } from './knowledge/KnowledgeFreshness.js';
+export type {
+  KnowledgeFreshnessReason,
+  KnowledgeFreshnessRunResult,
+  KnowledgeFreshnessServiceOptions,
+  KnowledgeFreshnessStatus,
+  KnowledgeFreshnessWatchOptions,
+  KnowledgeFreshnessWatcherFactory,
+} from './knowledge/KnowledgeFreshness.js';
+export { KnowledgeFreshnessStore, boundedFreshnessCode, boundedFreshnessMessage } from './knowledge/KnowledgeFreshnessStore.js';
+export type {
+  KnowledgeFreshnessState,
+  KnowledgeProjectWatcherRecord,
+  KnowledgeSourceFreshnessRecord,
+  KnowledgeWatcherStatus,
+  UpdateProjectWatcherInput,
+  UpsertSourceFreshnessInput,
+} from './knowledge/KnowledgeFreshnessStore.js';
+export type { KnowledgeFreshnessWatcherHandle } from './knowledge/KnowledgeFreshnessWatch.js';
+export { storeImmutableKnowledgeSourceContent } from './knowledge/KnowledgeSourceContentStore.js';
+export type {
+  RegisterKnowledgeSourceInput,
+  KnowledgeSourceVersionRecord,
+} from './knowledge/KnowledgeSourceStore.js';
+export {
+  KnowledgeSourceVersionLoadError,
+  loadKnowledgeSourceVersion,
+} from './knowledge/KnowledgeSourceVersionLoader.js';
+export type { LoadedKnowledgeSourceVersion } from './knowledge/KnowledgeSourceVersionLoader.js';
+export { scanKnowledgeSources } from './knowledge/KnowledgeSourceScanner.js';
+export type { SourceCandidate } from './knowledge/KnowledgeSourceScanner.js';
+export { shouldIngestSource } from './knowledge/SourcePolicy.js';
+export type { SourceDecision, SourceDecisionAction, SourceDecisionReason, SourcePolicy } from './knowledge/SourcePolicy.js';
+export { KnowledgeReconciliation, reconcileChangedSource, reconcileDeletedSource } from './knowledge/KnowledgeReconciliation.js';
+export type {
+  KnowledgeReconciliationOptions,
+  ReconciliationRunOptions,
+  SourceReconciliationResult,
+} from './knowledge/KnowledgeReconciliation.js';
+export {
+  KNOWLEDGE_MANIFEST_VERSION,
+  buildKnowledgeManifest,
+  readKnowledgeManifest,
+  writeKnowledgeManifest,
+} from './knowledge/KnowledgeManifest.js';
+export type { KnowledgeManifest } from './knowledge/KnowledgeManifest.js';
+export {
+  KnowledgePageStore,
+  createPageVersion,
+  getCurrentPage,
+  listPages,
+  supersedePageVersion,
+  markPageStale,
+} from './knowledge/KnowledgePageStore.js';
+export type {
+  CreatePageVersionInput,
+  KnowledgePage,
+  KnowledgePageVersion,
+  SupersedePageVersionInput,
+} from './knowledge/KnowledgePageStore.js';
+export {
+  KnowledgeRenderer,
+  renderKnowledgePage,
+  renderKnowledgeIndex,
+  renderKnowledgeOverview,
+  renderKnowledgeLog,
+} from './knowledge/KnowledgeRenderer.js';
+export type {
+  KnowledgePageRenderInput,
+  KnowledgeIndexEntry,
+} from './knowledge/KnowledgeRenderer.js';
+export {
+  buildDeterministicPagePayload,
+} from './knowledge/DeterministicPageBuilder.js';
+export type {
+  DeterministicPageBuildInput,
+} from './knowledge/DeterministicPageBuilder.js';
+export {
+  KnowledgeGeneratorService,
+  runKnowledgeGeneration,
+} from './knowledge/KnowledgeGeneratorService.js';
+export type {
+  KnowledgeGenerationPageInput,
+  KnowledgeGenerationPageResult,
+  KnowledgeGenerationPayload,
+  KnowledgeGenerationRunOptions,
+  KnowledgeGenerationResult,
+  KnowledgeGeneratorServiceOptions,
+} from './knowledge/KnowledgeGeneratorService.js';
+export {
+  KnowledgeWorker,
+  knowledgeWorkerFailure,
+} from './knowledge/KnowledgeWorker.js';
+export type {
+  KnowledgeEnrichmentInput,
+  KnowledgeEnrichmentInsightInput,
+  KnowledgeEnrichmentResult,
+  KnowledgeEnrichmentReviewInput,
+  KnowledgeEnrichmentService,
+  KnowledgeWorkerDependencies,
+  KnowledgeWorkerFailureCode,
+  KnowledgeWorkerOptions,
+  KnowledgeWorkerRunResult,
+  KnowledgeWorkerStepResult,
+  KnowledgeWorkerWarning,
+} from './knowledge/KnowledgeWorker.js';
+export { KnowledgeWorkerPool } from './knowledge/KnowledgeWorkerPool.js';
+export type {
+  KnowledgeWorkerPoolOptions,
+  KnowledgeWorkerPoolRunResult,
+  KnowledgeWorkerSlotFactoryInput,
+  KnowledgeWorkerSlotResult,
+} from './knowledge/KnowledgeWorkerPool.js';
+export {
+  KNOWLEDGE_HOST_SETTING_KEYS,
+  KNOWLEDGE_WORKER_CONCURRENCY_DEFAULT,
+  KNOWLEDGE_WORKER_CONCURRENCY_MAX,
+  KNOWLEDGE_WORKER_CONCURRENCY_MIN,
+  KnowledgeHostSettingsStore,
+  KnowledgeAnalyticsSettingsStore,
+  KnowledgeSearchSettingsStore,
+  KnowledgeWorkerSettingsStore,
+  resolveKnowledgeSemanticRetrieval,
+  resolveKnowledgeWorkerConcurrency,
+  validateKnowledgeWorkerConcurrency,
+} from './knowledge/KnowledgeHostSettingsStore.js';
+export type {
+  KnowledgeAnalyticsSettingsStoreOptions,
+  KnowledgeHostSettingKey,
+  KnowledgeSearchSettingsStoreLike,
+  KnowledgeSemanticRetrievalOption,
+  KnowledgeWorkerSettingsStoreLike,
+  ResolvedKnowledgeSemanticRetrieval,
+  ResolvedKnowledgeWorkerConcurrency,
+} from './knowledge/KnowledgeHostSettingsStore.js';
+export {
+  KnowledgeQueue,
+  enqueueKnowledgeJob,
+  claimKnowledgeJob,
+} from './knowledge/KnowledgeQueue.js';
+export type {
+  EnqueueKnowledgeJobInput,
+  KnowledgeJobRecord,
+  KnowledgeJobResult,
+  KnowledgeAnalyzedJobResult,
+  KnowledgeCoverageOnlyJobResult,
+  KnowledgeJobResultBase,
+  KnowledgeJobResultInput,
+  KnowledgeJobResultLegacyState,
+  KnowledgeQueueStatus,
+  KnowledgeProgressEvent,
+  KnowledgeQueueOptions,
+  KnowledgeRequeueContext,
+  KnowledgeRequeueEvent,
+  KnowledgeRequeueReason,
+} from './knowledge/KnowledgeQueue.js';
+export { KNOWLEDGE_REQUEUE_REASONS } from './knowledge/KnowledgeQueue.js';
+export { KnowledgeProvenance } from './knowledge/KnowledgeProvenance.js';
+export type { RecordKnowledgeProvenanceInput } from './knowledge/KnowledgeProvenance.js';
+export { KnowledgeOperationLog } from './knowledge/KnowledgeOperationLog.js';
+export type {
+  AppendKnowledgeOperationInput,
+  KnowledgeOperationEvent,
+  KnowledgeOperationStatus,
+  ListKnowledgeOperationsOptions,
+} from './knowledge/KnowledgeOperationLog.js';
+export {
+  KNOWLEDGE_REVIEW_ACTIONS,
+  createKnowledgeReview,
+  KnowledgeReviewConflictError,
+  listKnowledgeReviews,
+  resolveKnowledgeReview,
+  reopenKnowledgeReview,
+  bulkResolveKnowledgeReviews,
+} from './knowledge/KnowledgeReview.js';
+export type {
+  BulkResolveKnowledgeReviewsResult,
+  CreateKnowledgeReviewInput,
+  KnowledgeReviewAction,
+  KnowledgeReviewEvidence,
+  KnowledgeReviewRecord,
+  ListKnowledgeReviewsOptions,
+  ReopenKnowledgeReviewInput,
+  ResolveKnowledgeReviewInput,
+} from './knowledge/KnowledgeReview.js';
+export type {
+  KnowledgeProjectId,
+  KnowledgeSourceId,
+  KnowledgePageId,
+  KnowledgeJobId,
+  KnowledgeReviewId,
+  KnowledgeGraphNodeId,
+  KnowledgePageType,
+  KnowledgeSourceKind,
+  KnowledgeJobStatus,
+  KnowledgeReviewStatus,
+  KnowledgeGraphEdgeType,
+  KnowledgeEdgeEvidence,
+  KnowledgeProvenanceKind,
+  KnowledgeProvenanceRef,
+  KnowledgePageRecord,
+  KnowledgeSourceRecord,
+} from './knowledge/KnowledgeTypes.js';
+export {
+  detectKnowledgeCommunities,
+  scoreCommunityCohesion,
+  findBridgeNodes,
+  persistKnowledgeCommunities,
+} from './knowledge/graph/KnowledgeCommunities.js';
+export type {
+  KnowledgeGraphNode,
+  KnowledgeGraphEdge,
+  KnowledgeGraphView,
+  KnowledgeCommunity,
+  KnowledgeBridgeNode,
+} from './knowledge/graph/KnowledgeCommunities.js';
+export {
+  detectKnowledgeInsights,
+  findSparseCommunities,
+  findOrphanPages,
+  findContradictions,
+  findStalePages,
+  persistKnowledgeInsights,
+} from './knowledge/graph/KnowledgeInsights.js';
+export type {
+  KnowledgeInsight,
+  KnowledgeInsightType,
+  KnowledgeInsightAction,
+} from './knowledge/graph/KnowledgeInsights.js';
+export {
+  createOrResumeTaskFromKnowledgeInsight,
+  getKnowledgeInsight,
+  projectTaskKnowledge,
+} from './knowledge/TaskKnowledgeProjection.js';
+export type {
+  CreateOrResumeTaskFromKnowledgeInsightInput,
+  CreateOrResumeTaskFromKnowledgeInsightResult,
+  KnowledgeInsightRecord,
+  ProjectTaskKnowledgeInput,
+  TaskKnowledgeProjectionResult,
+  TaskKnowledgeProjectionTrigger,
+} from './knowledge/TaskKnowledgeProjection.js';
+export {
+  KnowledgeGraph,
+  scoreGraphEdge,
+} from './knowledge/graph/KnowledgeGraph.js';
+export type {
+  KnowledgeGraphNodeRecord,
+  KnowledgeGraphEdgeRecord,
+  UpsertGraphNodeInput,
+  UpsertGraphEdgeInput,
+} from './knowledge/graph/KnowledgeGraph.js';
+export {
+  getGraphNeighborhood,
+  findGraphPath,
+} from './knowledge/graph/KnowledgeGraphTraversal.js';
+export type {
+  GraphTraversalOptions,
+  KnowledgeGraphNeighborhood,
+  KnowledgeGraphPath,
+} from './knowledge/graph/KnowledgeGraphTraversal.js';
+export {
+  KNOWLEDGE_EDGE_EVIDENCE_WEIGHTS,
+} from './knowledge/graph/KnowledgeGraphScoring.js';
+export {
+  CodeIngestor,
+  DocumentIngestor,
+  MarkdownIngestor,
+  MediaIngestor,
+  PlainTextIngestor,
+  TaskHistoryIngestor,
+  documentFormat,
+  mediaFormat,
+} from './knowledge/formats/index.js';
+export type {
+  DocumentAdapter,
+  DocumentFormat,
+  DocumentIngestorOptions,
+  ExtractedSource,
+  IngestHeading,
+  IngestInput,
+  IngestLink,
+  IngestMediaReference,
+  IngestSpan,
+  KnowledgeIngestor,
+  MediaAdapter,
+  MediaFormat,
+  MediaIngestorOptions,
+  OptionalIngestFailed,
+  OptionalIngestResult,
+  OptionalIngestUnsupported,
+} from './knowledge/formats/index.js';
+export {
+  KNOWLEDGE_PROVIDER_CAPABILITIES,
+  KnowledgeProviderRegistry,
+  KnowledgeProviderRequiredError,
+  KnowledgeProviderTimeoutError,
+  redactKnowledgeProviderPayload,
+} from './knowledge/KnowledgeProviders.js';
+export type {
+  KnowledgeProvider,
+  KnowledgeProviderCapability,
+  KnowledgeProviderExecutionContext,
+  KnowledgeProviderExecutionOptions,
+  KnowledgeRedactionHook,
+} from './knowledge/KnowledgeProviders.js';
+export {
+  KnowledgeProviderProfileStore,
+  normalizeOpenAICompatibleEndpoint,
+  resolveKnowledgeProviderApiKey,
+} from './knowledge/KnowledgeProviderProfiles.js';
+export type {
+  CreateKnowledgeProviderProfileInput,
+  KnowledgeProviderDiagnostic,
+  KnowledgeProviderCredentialPolicy,
+  KnowledgeProviderProfile,
+  KnowledgeProviderProfileListResult,
+  KnowledgeProviderProfileTestAdapter,
+  KnowledgeProviderProfileStoreOptions,
+  KnowledgeProviderTestAdapter,
+  KnowledgeProviderTestAdapterInput,
+  KnowledgeProviderTestAdapterResult,
+  KnowledgeProviderTestResult,
+  ResolveKnowledgeProviderApiKeyResult,
+} from './knowledge/KnowledgeProviderProfiles.js';
+export {
+  rankByEmbedding,
+} from './knowledge/KnowledgeEmbeddings.js';
+export type {
+  EmbeddingProvider as KnowledgeEmbeddingProvider,
+  EmbeddingCandidate,
+  RankedEmbeddingCandidate,
+  RankByEmbeddingOptions,
+} from './knowledge/KnowledgeEmbeddings.js';
+export { KnowledgeGraphMaterializer } from './knowledge/KnowledgeGraphMaterializer.js';
+export type { KnowledgeGraphMaterializationResult } from './knowledge/KnowledgeGraphMaterializer.js';
+export { importGraphifyJson } from './knowledge/GraphifyImport.js';
+export type {
+  GraphImportNode,
+  GraphImportEdge,
+  GraphImportResult,
+} from './knowledge/GraphifyImport.js';
+export {
+  createProviderRequiredGeneration,
+  redactKnowledgeAnalysisPayload,
+  validateKnowledgeAnalysis,
+  validateKnowledgeGeneration,
+} from './knowledge/KnowledgeAnalysis.js';
+export {
+  KNOWLEDGE_ARCHIVE_TABLES,
+  KNOWLEDGE_ARCHIVE_TABLE_REGISTRY,
+  KNOWLEDGE_ARCHIVE_VERSION,
+  exportKnowledgeProject,
+  importKnowledgeProject,
+} from './knowledge/KnowledgeArchive.js';
+export { KNOWLEDGE_HOST_SETTING_PREFIX } from './knowledge/knowledgeSchema.js';
+export type {
+  KnowledgeArchive,
+  KnowledgeArchiveAuthenticity,
+  KnowledgeArchiveAuthenticityResult,
+  KnowledgeArchiveAuthenticitySigner,
+  KnowledgeArchiveAuthenticityVerifier,
+  KnowledgeArchiveCompatibilityBlock,
+  KnowledgeArchiveCompatibilityPolicy,
+  KnowledgeArchiveEntry,
+  KnowledgeArchiveFile,
+  KnowledgeArchiveManifest,
+  KnowledgeArchiveManifestV2,
+  KnowledgeArchiveWarning,
+  ExportKnowledgeProjectOptions,
+  ImportKnowledgeProjectOptions,
+  ImportResult,
+} from './knowledge/KnowledgeArchive.js';
+export type {
+  GeneratedKnowledge,
+  KnowledgeAnalysis,
+  KnowledgeAnalysisInput,
+  KnowledgeAnalysisPayloadKind,
+  KnowledgeAnalysisRedactionHooks,
+  KnowledgeAnalysisSourceSpan,
+  KnowledgeAnalyzer,
+  KnowledgeClaim,
+  KnowledgeContradiction,
+  KnowledgeEntity,
+  KnowledgeGeneration,
+  KnowledgeGenerationInput,
+  KnowledgeGenerator,
+  KnowledgeRelationship,
+  KnowledgeResearchGap,
+  ProviderRequiredKnowledgeGeneration,
+} from './knowledge/KnowledgeAnalysis.js';
+export {
+  createOpenAICompatibleFetchTransport,
+  OpenAICompatibleEnrichmentService,
+  OpenAICompatibleProvider,
+} from './knowledge/providers/OpenAICompatibleProvider.js';
+export type {
+  OpenAICompatibleAnalyzeInput,
+  OpenAICompatibleEnrichmentServiceOptions,
+  OpenAICompatibleGenerateInput,
+  OpenAICompatibleGroundingInput,
+  OpenAICompatibleHostPolicy,
+  OpenAICompatiblePinnedTransportRequest,
+  OpenAICompatibleProviderOptions,
+  OpenAICompatibleProviderResult,
+  OpenAICompatibleResolvedAddress,
+  OpenAICompatibleTransportRequest,
+  OpenAICompatibleTransport,
+  OpenAICompatibleValidatedPinnedTransportRequest,
+} from './knowledge/providers/OpenAICompatibleProvider.js';
+export {
+  KnowledgeChatService,
+} from './knowledge/KnowledgeChat.js';
+export type {
+  CreateKnowledgeConversationInput,
+  KnowledgeChatEvent,
+  KnowledgeChatMessageRecord,
+  KnowledgeChatProvider,
+  KnowledgeChatProviderMessage,
+  KnowledgeChatProviderRequest,
+  KnowledgeChatRole,
+  KnowledgeChatServiceOptions,
+  KnowledgeChatSynthesisOptions,
+  KnowledgeConversationRecord,
+  ListKnowledgeConversationsOptions,
+  ListKnowledgeMessagesOptions,
+  RegenerateKnowledgeChatInput,
+  SaveKnowledgeChatMessageToPageInput,
+  StreamKnowledgeChatInput,
+} from './knowledge/KnowledgeChat.js';
+export { KnowledgeAnswerSynthesizer } from './knowledge/KnowledgeAnswerSynthesis.js';
+export type { KnowledgeAnswerSynthesizerOptions } from './knowledge/KnowledgeAnswerSynthesis.js';
+export type {
+  KnowledgeAnswerStrategy,
+  KnowledgeAnswerSynthesisService,
+  KnowledgeSynthesisClaim,
+  KnowledgeSynthesisClaimConfidence,
+  KnowledgeSynthesisEvidence,
+  KnowledgeSynthesisResult,
+  KnowledgeSynthesisSection,
+  KnowledgeSynthesisWarning,
+  KnowledgeSynthesisWarningCode,
+  PersistedKnowledgeSynthesis,
+  PersistedKnowledgeSynthesisEvidence,
+  SynthesizeKnowledgeAnswerInput,
+} from './knowledge/KnowledgeSynthesisTypes.js';
+export { parsePersistedKnowledgeSynthesis, toPersistedKnowledgeSynthesis } from './knowledge/KnowledgeSynthesisPersistence.js';
+export { KnowledgeGenerationGateway } from './knowledge/KnowledgeGenerationGateway.js';
+export type {
+  KnowledgeGenerationFailure,
+  KnowledgeGenerationGatewayOptions,
+  KnowledgeGenerationOutcome,
+  KnowledgeGenerationRequest,
+  KnowledgeJsonCompletionClient,
+  KnowledgeJsonCompletionInput,
+} from './knowledge/KnowledgeGenerationGateway.js';
+export { PROVIDER_FALLBACK_REASONS, providerFallbackWarning } from './knowledge/KnowledgeProviderFallback.js';
+export type { ProviderFallbackReason, ProviderFallbackWarning } from './knowledge/KnowledgeProviderFallback.js';
+export { KnowledgeSemanticSummaryStore } from './knowledge/KnowledgeSemanticSummaries.js';
+export type { KnowledgeSemanticSummaryStoreOptions } from './knowledge/KnowledgeSemanticSummaries.js';
+export { KNOWLEDGE_SUMMARY_SCOPE_KINDS, KNOWLEDGE_SUMMARY_STRATEGIES } from './knowledge/KnowledgeSemanticSummaryTypes.js';
+export type {
+  BuildKnowledgeSemanticSummaryInput,
+  KnowledgeSemanticSummaryEvidence,
+  KnowledgeSemanticSummaryRecord,
+  KnowledgeSemanticSummaryService,
+  KnowledgeSemanticSummaryWarning,
+  KnowledgeSummaryScopeKind,
+  KnowledgeSummaryStrategy,
+} from './knowledge/KnowledgeSemanticSummaryTypes.js';
+export {
+  deriveCitationContext,
+  legacyCitationContext,
+  parseCitationContext,
+  toPersistedCitationContext,
+} from './knowledge/KnowledgeCitationContext.js';
+export type {
+  CitationContextOptions,
+  KnowledgeCitationContext,
+  KnowledgeCitationFieldKind,
+  KnowledgeCitationLegacyState,
+  KnowledgeCitationMatchKind,
+  KnowledgeCitationSnippetPolicy,
+} from './knowledge/KnowledgeCitationContext.js';
+export { parseMessagePayload, serializeMessagePayload } from './knowledge/KnowledgeChatPayload.js';
+export type { MessagePayloadV2 } from './knowledge/KnowledgeChatPayload.js';
+export {
+  KnowledgeResearchService,
+  ResearchConfirmationRequiredError,
+  ResearchProviderRequiredError,
+  ResearchProviderTimeoutError,
+  ResearchRateLimitError,
+  ResearchRequestCancelledError,
+} from './knowledge/KnowledgeResearch.js';
+export type {
+  CreateResearchRequestInput,
+  KnowledgeResearchServiceOptions,
+  ResearchRequest,
+  ResearchRequestStatus,
+  ResearchRunResult,
+  ResearchSynthesisPage,
+} from './knowledge/KnowledgeResearch.js';
+export type { ResearchProvider, ResearchResult } from './knowledge/research/ResearchProviders.js';

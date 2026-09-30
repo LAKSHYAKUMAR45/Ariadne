@@ -1,9 +1,10 @@
 import { McpServer, ResourceTemplate } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
-import type { TaskStore } from '@ariadne-dev/core';
+import { openDatabase, stateDbPath, type TaskStore } from '@ariadne-dev/core';
 import { findWorkspaceRoot, openWorkspaceStore } from './workspace.js';
 import * as tools from './tools.js';
 import * as syncTools from './syncTools.js';
+import { registerKnowledgeTools } from './knowledgeTools.js';
 
 /** Wraps a tool result value as the `{ content: [...] }` shape the MCP SDK expects. */
 function jsonResult(value: unknown): { content: Array<{ type: 'text'; text: string }> } {
@@ -19,6 +20,13 @@ function errorResult(err: unknown): { content: Array<{ type: 'text'; text: strin
 const TASK_STATUS = z.enum(['active', 'paused', 'done', 'archived']);
 const CHECKPOINT_LEVEL = z.enum(['micro', 'session', 'milestone']);
 const TODO_STATUS = z.enum(['pending', 'done', 'blocked']);
+const KNOWLEDGE_PROJECTION_TRIGGER = z.enum(['explicit', 'checkpoint', 'build']);
+
+function requireKnowledgeWrite(confirm: boolean | undefined): void {
+  if (confirm !== true) {
+    throw new Error('Knowledge mutation requires confirm=true');
+  }
+}
 
 /**
  * Builds an MCP server exposing Ariadne's task state as tools, per
@@ -30,9 +38,14 @@ const TODO_STATUS = z.enum(['pending', 'done', 'blocked']);
  * `store` is injectable for tests; defaults to opening the resolved
  * workspace's `.ariadne/state.db`.
  */
-export function createAriadneMcpServer(options?: { workspaceRoot?: string; store?: TaskStore }): McpServer {
+export function createAriadneMcpServer(options?: {
+  workspaceRoot?: string;
+  store?: TaskStore;
+  knowledgeDb?: ReturnType<typeof openDatabase>;
+}): McpServer {
   const workspaceRoot = options?.workspaceRoot ?? findWorkspaceRoot();
   const store = options?.store ?? openWorkspaceStore(workspaceRoot);
+  const knowledgeDb = options?.knowledgeDb ?? openKnowledgeDatabase(workspaceRoot);
 
   const server = new McpServer({
     name: 'ariadne',
@@ -122,6 +135,51 @@ export function createAriadneMcpServer(options?: { workspaceRoot?: string; store
     async (args) => {
       try {
         return jsonResult(tools.taskEdit(store, workspaceRoot, args));
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    'knowledge_project_task',
+    {
+      title: 'Project task knowledge',
+      description:
+        'Explicitly projects task/checkpoint/decision/file/commit history into knowledge source and provenance records.',
+      inputSchema: {
+        projectId: z.string(),
+        taskId: z.string().optional(),
+        trigger: KNOWLEDGE_PROJECTION_TRIGGER.optional(),
+        confirm: z.boolean().optional(),
+      },
+    },
+    async (args) => {
+      try {
+        requireKnowledgeWrite(args.confirm);
+        return jsonResult(tools.knowledgeProjectTask(knowledgeDb, store, workspaceRoot, args));
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    'knowledge_task_from_insight',
+    {
+      title: 'Create or resume task from insight',
+      description: 'Creates a new Ariadne task for a knowledge insight, or resumes the existing linked task.',
+      inputSchema: {
+        projectId: z.string(),
+        insightId: z.string(),
+        title: z.string().optional(),
+        confirm: z.boolean().optional(),
+      },
+    },
+    async (args) => {
+      try {
+        requireKnowledgeWrite(args.confirm);
+        return jsonResult(tools.knowledgeTaskFromInsight(knowledgeDb, store, workspaceRoot, args));
       } catch (err) {
         return errorResult(err);
       }
@@ -677,6 +735,11 @@ export function createAriadneMcpServer(options?: { workspaceRoot?: string; store
     },
   );
 
+  registerKnowledgeTools(server, {
+    db: knowledgeDb,
+    workspaceRoot,
+  });
+
   server.registerTool(
     'sync_push',
     {
@@ -777,4 +840,11 @@ export function createAriadneMcpServer(options?: { workspaceRoot?: string; store
   );
 
   return server;
+}
+
+function openKnowledgeDatabase(workspaceRoot: string): ReturnType<typeof openDatabase> {
+  // The MCP task store owns its connection. Knowledge adapters use a separate
+  // connection so injected in-memory TaskStore instances remain testable while
+  // normal servers still share the workspace's SQLite database.
+  return openDatabase(stateDbPath(workspaceRoot));
 }

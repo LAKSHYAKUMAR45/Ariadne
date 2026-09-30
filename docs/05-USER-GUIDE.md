@@ -11,6 +11,7 @@ package's own README.*
 [3. Installing](#3-installing) ·
 [4. Quick start](#4-quick-start) ·
 [5. CLI](#5-using-the-cli) ·
+[5.1 Knowledge workspace](#51-knowledge-workspace) ·
 [6. MCP client](#6-using-an-mcp-client-claude-code-gemini-cli-codex-custom-agents-etc) ·
 [7. VS Code + Copilot Chat](#7-using-the-vs-code-extension-copilot-chat) ·
 [8. Cross-workspace](#8-working-across-multiple-workspaces) ·
@@ -174,6 +175,78 @@ ariadne sync profile use <name>                # switch which sync profile is cu
 
 Run `ariadne --help` or `ariadne <command> --help` for the authoritative list
 and flags at any time.
+
+### 5.1 Knowledge workspace
+
+The knowledge workspace is the local-first, core-backed wiki surface. It uses
+the same `.ariadne/state.db` as task history, but keeps projects, sources,
+versioned Markdown pages, provenance, graph data, reviews, and queued work in
+knowledge-specific tables. The CLI and MCP server are two adapters over this
+same data.
+
+Create a project and ingest a source:
+
+```bash
+ariadne knowledge project create "Project wiki" --roots src,docs
+ariadne knowledge source scan <project-id> docs
+ariadne knowledge ingest file <project-id> docs/02-ARCHITECTURE.md
+ariadne knowledge page list <project-id>
+ariadne knowledge search <project-id> "storage boundary"
+```
+
+The implemented offline path includes deterministic source ingestion, lexical
+search, page/version storage, task-history projections, bounded graph
+neighborhood/path queries, review actions, and project archive export/import.
+Use `--json` on CLI commands when integrating with scripts. See the complete
+reference in [`knowledge-wiki.md`](knowledge-wiki.md).
+
+#### Providers and privacy
+
+Provider capabilities are explicit (`chat`, `analysis`, `generation`,
+`embeddings`, `vision`, `transcription`, and `research`). No provider is
+contacted by default. Embeddings are optional; search falls back to lexical
+ranking. Research and chat require a provider supplied by an integrating
+caller. The current CLI does not persist provider configuration, so
+`knowledge research` and `knowledge chat send` report a provider-required error
+instead of making a network request. MCP queues those requests but does not
+execute them in its adapter. Provider setup and durable credential management
+are **active/in progress**, not shipped setup commands.
+
+Knowledge operations remain workspace-scoped. Common secret-shaped values are
+redacted before provider/persistence boundaries, sensitive-looking projected
+paths are suppressed, archive checksums are validated, and provider
+configuration payloads are omitted from exports. Review content before sharing:
+pattern-based redaction cannot identify every secret.
+
+#### Graphify and Obsidian
+
+Graphify is still a separate installed tool. Ariadne's `graphify` command and
+MCP tool pass through to the real binary:
+
+```bash
+uv tool install graphifyy
+ariadne graphify update .
+ariadne graphify query "how does authentication work"
+ariadne knowledge graph import-graphify <project-id> graphify.json
+```
+
+Export a project as portable Markdown, optionally with minimal Obsidian vault
+configuration:
+
+```bash
+ariadne knowledge export <project-id> knowledge-vault --obsidian
+ariadne knowledge import <project-id> knowledge-vault
+```
+
+Exports include a manifest, project/table JSON, rendered pages with
+Obsidian-compatible wiki links, and `graph.json`. Import is transactional and
+requires the CLI `<project-id>` to exactly match the manifest project id.
+It rejects unsafe paths, missing files, size/checksum mismatches, malformed
+archive structure, and duplicate project ids unless `--replace` is supplied.
+This is a one-way archive/export:
+live Obsidian sync, automatic vault watching, and conflict resolution are not
+implemented. See [`knowledge-migration.md`](knowledge-migration.md) for the
+archive contract and transfer procedure.
 
 **Tip:** `--task <id>` works even for a task from a *different* workspace —
 see [§8 Cross-workspace tasks](#8-working-across-multiple-workspaces). The

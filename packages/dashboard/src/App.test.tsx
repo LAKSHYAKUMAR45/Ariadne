@@ -157,6 +157,9 @@ describe('Ariadne operations console', () => {
     expect(screen.queryByRole('button', { name: 'Deployments' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Logs' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Audit' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Knowledge' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Search' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Reviews' })).not.toBeInTheDocument();
     expect(
       screen.getByRole('link', { name: 'Back to jcnr-triage' }),
     ).toHaveAttribute('href', 'http://nodem2:8090/');
@@ -191,6 +194,9 @@ describe('Ariadne operations console', () => {
     expect(screen.getByRole('button', { name: 'Deployments' })).toBeVisible();
     expect(screen.getByRole('button', { name: 'Logs' })).toBeVisible();
     expect(screen.getByRole('button', { name: 'Audit' })).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Knowledge' })).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Search' })).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Reviews' })).toBeVisible();
     expect(
       screen.getByRole('link', { name: 'Back to jcnr-triage' }),
     ).toHaveAttribute('href', 'http://nodem2:8090/');

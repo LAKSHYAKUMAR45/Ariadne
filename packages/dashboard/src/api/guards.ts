@@ -14,6 +14,13 @@ import type {
   DeploymentCandidate,
   DeploymentsResponse,
   HostMetrics,
+  KnowledgeCitation,
+  KnowledgeProjectSummary,
+  KnowledgeReview,
+  KnowledgeReviewAction,
+  KnowledgeReviewStatus,
+  KnowledgeSearchResult,
+  KnowledgeWorkerSummary,
   LogEntry,
   LogsResponse,
   MemberMutationResponse,
@@ -53,6 +60,10 @@ function isFiniteNumber(value: unknown): value is number {
 
 function isInteger(value: unknown): value is number {
   return isFiniteNumber(value) && Number.isInteger(value);
+}
+
+function isNonNegativeInteger(value: unknown): value is number {
+  return isInteger(value) && value >= 0;
 }
 
 function isNullableString(value: unknown): value is string | null {
@@ -374,4 +385,120 @@ export function isAuditResponse(value: unknown): value is AuditResponse {
     isArrayOf(value.events, isAuditEvent) &&
     (value.nextCursor === null || isString(value.nextCursor))
   );
+}
+
+function isKnowledgeProjectSummary(value: unknown): value is KnowledgeProjectSummary {
+  return (
+    isRecord(value) &&
+    isNonEmptyString(value.id) &&
+    isNonEmptyString(value.name) &&
+    isNullableString(value.description) &&
+    (value.status === 'active' || value.status === 'archived') &&
+    isInteger(value.sourceCount) &&
+    isInteger(value.pageCount) &&
+    isInteger(value.pendingReviewCount) &&
+    isKnowledgeWorkerSummary(value.worker) &&
+    isTimestamp(value.updatedAt)
+  );
+}
+
+function isKnowledgeWorkerSummary(value: unknown): value is KnowledgeWorkerSummary {
+  return (
+    isRecord(value) &&
+    isNonNegativeInteger(value.queued) &&
+    isNonNegativeInteger(value.running) &&
+    isNonNegativeInteger(value.failed) &&
+    (value.oldestQueuedAt === null || isTimestamp(value.oldestQueuedAt)) &&
+    isNonNegativeInteger(value.activeWorkerCount) &&
+    isNonNegativeInteger(value.deterministicCompleted) &&
+    isNonNegativeInteger(value.enrichedCompleted)
+  );
+}
+
+export function isKnowledgeProjectsResponse(value: unknown): value is { projects: KnowledgeProjectSummary[] } {
+  return isRecord(value) && isArrayOf(value.projects, isKnowledgeProjectSummary);
+}
+
+function isKnowledgeCitation(value: unknown): value is KnowledgeCitation {
+  if (!isRecord(value)) {
+    return false;
+  }
+
+  const span = value.span;
+  return (
+    isNullableString(value.pageId) &&
+    isNullableString(value.sourceId) &&
+    isNullableString(value.path) &&
+    isNullableString(value.url) &&
+    (span === null ||
+      (isRecord(span) &&
+        isNonEmptyString(span.id) &&
+        isInteger(span.startOffset) &&
+        isInteger(span.endOffset) &&
+        isNullableString(span.label)))
+  );
+}
+
+function isKnowledgeSearchResult(value: unknown): value is KnowledgeSearchResult {
+  const hasAmbiguityMetadata = value !== null && typeof value === 'object' &&
+    ('ambiguityReason' in value || 'ambiguityAlternatives' in value);
+  return (
+    isRecord(value) &&
+    isNonEmptyString(value.id) &&
+    (value.kind === 'page' || value.kind === 'source' || value.kind === 'task') &&
+    isNonEmptyString(value.title) &&
+    isString(value.snippet) &&
+    isFiniteNumber(value.score) &&
+    isArrayOf(value.citations, isKnowledgeCitation) &&
+    (value.searchConfidence === undefined || value.searchConfidence === 'clear' || value.searchConfidence === 'ambiguous') &&
+    (value.ambiguityReason === undefined ||
+      value.ambiguityReason === 'near_tie' ||
+      value.ambiguityReason === 'shared_role' ||
+      value.ambiguityReason === 'insufficient_intent') &&
+    (value.ambiguityAlternatives === undefined || isNonNegativeInteger(value.ambiguityAlternatives)) &&
+    (!hasAmbiguityMetadata || value.searchConfidence === 'ambiguous')
+  );
+}
+
+export function isKnowledgeSearchResponse(value: unknown): value is {
+  projectId: string;
+  query: string;
+  results: KnowledgeSearchResult[];
+} {
+  return (
+    isRecord(value) &&
+    isNonEmptyString(value.projectId) &&
+    isString(value.query) &&
+    isArrayOf(value.results, isKnowledgeSearchResult)
+  );
+}
+
+function isKnowledgeReviewStatus(value: unknown): value is KnowledgeReviewStatus {
+  return value === 'pending' || value === 'approved' || value === 'rejected' || value === 'dismissed';
+}
+
+export function isKnowledgeReviewAction(value: unknown): value is KnowledgeReviewAction {
+  return value === 'accept' || value === 'reject' || value === 'skip';
+}
+
+function isKnowledgeReview(value: unknown): value is KnowledgeReview {
+  return (
+    isRecord(value) &&
+    isNonEmptyString(value.id) &&
+    isNonEmptyString(value.projectId) &&
+    isNullableString(value.pageVersionId) &&
+    isKnowledgeReviewStatus(value.status) &&
+    isTimestamp(value.requestedAt) &&
+    isNullableString(value.reviewedAt) &&
+    isNullableString(value.reviewerId) &&
+    isNullableString(value.summary)
+  );
+}
+
+export function isKnowledgeReviewsResponse(value: unknown): value is { reviews: KnowledgeReview[] } {
+  return isRecord(value) && isArrayOf(value.reviews, isKnowledgeReview);
+}
+
+export function isKnowledgeReviewMutationResponse(value: unknown): value is { review: KnowledgeReview } {
+  return isRecord(value) && isKnowledgeReview(value.review);
 }

@@ -28,7 +28,7 @@ const KNOWN_TOKEN_RULES: RedactionRule[] = [
   { name: 'aws-access-key-id', pattern: /\bAKIA[0-9A-Z]{16}\b/g, replace: '***' },
   { name: 'github-pat', pattern: /\bgh[pousr]_[A-Za-z0-9]{20,}\b/g, replace: '***' },
   { name: 'slack-token', pattern: /\bxox[baprs]-[A-Za-z0-9-]{10,}\b/g, replace: '***' },
-  { name: 'openai-key', pattern: /\bsk-[A-Za-z0-9]{20,}\b/g, replace: '***' },
+  { name: 'openai-key', pattern: /\bsk-[A-Za-z0-9_-]{20,}\b/g, replace: '***' },
   {
     name: 'private-key-block',
     pattern: /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g,

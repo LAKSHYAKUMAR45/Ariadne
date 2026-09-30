@@ -42,6 +42,12 @@ directory), and reads/writes `<workspace-root>/.ariadne/state.db`.
 | `git_sync` | Syncs the current git branch and any new commits into the current (or given) task by shelling out to `git` directly — works without any editor's git integration open. Equivalent to the CLI's `git-sync`. |
 | `export_task` | Renders the current (or given) task's full history as a Markdown document (text in the response) — for sharing or pasting into a PR description. Equivalent to the CLI's `export` (which additionally writes the file to `.ariadne/export/<task-id>.md`). |
 | `sync_push` / `sync_pull` / `sync_list_remote` / `sync_profile_list` | Shell out to the installed `ariadne` CLI's `sync push`/`sync pull`/`sync list-remote`/`sync profile list` commands (must already be logged in via `ariadne sync login` — these tools never handle credentials). `sync_pull` accepts `importNew: true` for `--import-new`. All accept an optional `profile` to target a non-default sync profile. Returns the CLI's raw stdout as `output`. |
+| `knowledge_project_*`, `knowledge_source_*`, `knowledge_queue_*`, `knowledge_page_*` | Manage the typed knowledge project, source, queue, and page state through the shared core stores. Mutating calls require `confirm: true`; reads are bounded to 100 records. |
+| `knowledge_search` | Searches knowledge pages and sources with bounded results, token-budgeted context, and source/page citations. |
+| `knowledge_graph_neighborhood` / `knowledge_graph_path` | Read bounded native graph neighborhoods and paths. |
+| `knowledge_review_*` | List and resolve auditable reviews; review mutations require `confirm: true`. |
+| `knowledge_research` / `knowledge_chat` | Queue research or chat work without making provider/network calls in the MCP adapter. |
+| `knowledge_export` / `knowledge_import` | Write or validate the project manifest in `.ariadne/knowledge`; export requires `confirm: true`. |
 
 All tools that need a task default to the workspace's "current task" (the
 same one `ariadne task use` sets) when no explicit `taskId` is given.
@@ -71,6 +77,10 @@ requiring the model to make an explicit tool call:
 |---|---|
 | `ariadne://task/current/context` | The current task's context package (same shape as `get_context` with no `taskId`). |
 | `ariadne://task/{taskId}/context` | A specific task's context package. Supports resource listing so clients can discover one entry per existing task. |
+| `ariadne://knowledge/project/current` | Markdown overview for the current active knowledge project. |
+| `ariadne://knowledge/project/{projectId}/page/{pageId}` | JSON page metadata and provenance. |
+| `ariadne://knowledge/project/{projectId}/queue` | Bounded queue status. |
+| `ariadne://knowledge/project/{projectId}/reviews` | Pending reviews with review citations. |
 
 ## Development
 
@@ -80,10 +90,11 @@ pnpm --filter @ariadne-dev/mcp-server build
 pnpm --filter @ariadne-dev/mcp-server test
 ```
 
-`src/tools.ts` holds pure, transport-agnostic implementations of every tool
-(directly unit-testable without spinning up the MCP SDK); `src/server.ts`
-wires those into `McpServer` with Zod input schemas and registers the
-resources described above; `src/index.ts` is the stdio entry point.
+`src/tools.ts` holds pure, transport-agnostic task implementations and shared
+MCP bounds; `src/knowledgeTools.ts` adapts the shared core knowledge stores,
+search, graph, review, queue, and manifest APIs with Zod validation and
+citations. `src/server.ts` wires both adapters into `McpServer` and registers
+the resources described above; `src/index.ts` is the stdio entry point.
 
 ## Known limitations (early/pre-release)
 
