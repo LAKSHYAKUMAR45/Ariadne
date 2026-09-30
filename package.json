@@ -15,6 +15,7 @@
   "homepage": "https://github.com/LAKSHYAKUMAR45/Ariadne#readme",
   "scripts": {
     "build": "pnpm -r run build",
+    "benchmark:knowledge": "pnpm --filter @ariadne-dev/core benchmark:knowledge",
     "test": "pnpm -r run test",
     "lint": "pnpm -r run lint",
     "install:cli": "node scripts/install-cli.mjs",
