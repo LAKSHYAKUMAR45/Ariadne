@@ -3,6 +3,7 @@ import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { KnowledgeBenchmarkQualityMetrics, MetricCountRate } from './KnowledgeBenchmarkMetrics.js';
 import {
+  __setKnowledgeBenchmarkReportFileSystemForTest,
   KNOWLEDGE_BENCHMARK_SCHEMA_VERSION,
   assertKnowledgeBenchmarkPrivacy,
   createKnowledgeBenchmarkReport,
@@ -139,6 +140,7 @@ function privacyInput(extra?: Partial<KnowledgeBenchmarkPrivacyInput>): Knowledg
 afterEach(() => {
   cleanupScratchRoot();
   delete process.env.KNOWLEDGE_BENCHMARK_REPORT_TEST_SECRET;
+  __setKnowledgeBenchmarkReportFileSystemForTest();
   vi.restoreAllMocks();
 });
 
@@ -183,6 +185,48 @@ describe('createKnowledgeBenchmarkReport', () => {
       expect(benchmark.status).toBe('not_measured');
       expect(benchmark).not.toHaveProperty('score');
     }
+  });
+
+  it('rejects public benchmark entries with unexpected own properties', () => {
+    const input = validReportInput();
+    const benchmarkWithScore = {
+      ...input.publicBenchmarks[0],
+      score: 0.91,
+    };
+
+    expect(() =>
+      createKnowledgeBenchmarkReport({
+        ...input,
+        publicBenchmarks: [
+          benchmarkWithScore,
+          ...input.publicBenchmarks.slice(1),
+        ] as KnowledgeBenchmarkReportV1['publicBenchmarks'],
+      }),
+    ).toThrow(/publicBenchmarks\[0\].*unexpected/i);
+  });
+
+  it('rejects count and rate metrics whose rate does not match count divided by total', () => {
+    expect(() =>
+      createKnowledgeBenchmarkReport({
+        ...validReportInput(),
+        quality: {
+          ...qualityMetrics(),
+          recallAt1: metric(8, 10, 0.81),
+        },
+      }),
+    ).toThrow(/quality\.recallAt1\.rate/i);
+  });
+
+  it('rejects count and rate metrics whose total differs from requiredQuestionCount', () => {
+    expect(() =>
+      createKnowledgeBenchmarkReport({
+        ...validReportInput(),
+        quality: {
+          ...qualityMetrics(),
+          ambiguityRate: metric(1, 9, 0.111111),
+        },
+      }),
+    ).toThrow(/quality\.ambiguityRate\.total|requiredQuestionCount/i);
   });
 });
 
@@ -256,5 +300,41 @@ describe('writeKnowledgeBenchmarkArtifacts', () => {
     expect(fs.readFileSync(markdownPath, 'utf8')).toBe('# Existing\n');
     expect(fs.existsSync(`${jsonPath}.tmp-${process.pid}`)).toBe(false);
     expect(fs.existsSync(`${markdownPath}.tmp-${process.pid}`)).toBe(false);
+  });
+
+  it('restores both original targets and removes temp plus backup files when the second target transition fails', () => {
+    const outputRoot = createScratchDir('rollback');
+    const jsonPath = path.join(outputRoot, 'knowledge-baseline-v1.json');
+    const markdownPath = path.join(outputRoot, 'knowledge-baseline-v1.md');
+    fs.writeFileSync(jsonPath, '{"stable":true}\n', 'utf8');
+    fs.writeFileSync(markdownPath, '# Existing\n', 'utf8');
+
+    const markdownTempPath = `${markdownPath}.tmp-${process.pid}`;
+    __setKnowledgeBenchmarkReportFileSystemForTest({
+      existsSync: fs.existsSync,
+      mkdirSync: fs.mkdirSync,
+      readFileSync: fs.readFileSync,
+      rmSync: fs.rmSync,
+      writeFileSync: fs.writeFileSync,
+      renameSync(from, to) {
+        if (from === markdownTempPath && to === markdownPath) {
+          throw new Error('simulated markdown rename failure');
+        }
+        return fs.renameSync(from, to);
+      },
+    });
+
+    const report = createKnowledgeBenchmarkReport(validReportInput());
+
+    expect(() => writeKnowledgeBenchmarkArtifacts(outputRoot, report, privacyInput())).toThrow(
+      /simulated markdown rename failure/,
+    );
+
+    expect(fs.readFileSync(jsonPath, 'utf8')).toBe('{"stable":true}\n');
+    expect(fs.readFileSync(markdownPath, 'utf8')).toBe('# Existing\n');
+    expect(fs.existsSync(`${jsonPath}.tmp-${process.pid}`)).toBe(false);
+    expect(fs.existsSync(`${markdownPath}.tmp-${process.pid}`)).toBe(false);
+    expect(fs.existsSync(`${jsonPath}.bak-${process.pid}`)).toBe(false);
+    expect(fs.existsSync(`${markdownPath}.bak-${process.pid}`)).toBe(false);
   });
 });

@@ -89,6 +89,11 @@ const PUBLIC_BENCHMARK_NAMES = [
   'VIBE',
 ] as const;
 
+type FileSystemAdapter = Pick<
+  typeof fs,
+  'existsSync' | 'mkdirSync' | 'readFileSync' | 'renameSync' | 'rmSync' | 'writeFileSync'
+>;
+
 interface PublicBenchmarkStatus {
   name: string;
   status: 'not_measured';
@@ -98,6 +103,8 @@ interface PublicBenchmarkStatus {
 type KnowledgeBenchmarkReportInput = Omit<KnowledgeBenchmarkReportV1, 'schemaVersion' | 'benchmarkId'>;
 
 type NormalizedReport = KnowledgeBenchmarkReportV1;
+
+let fileSystem: FileSystemAdapter = fs;
 
 function assertNonEmptyString(value: string, label: string): string {
   if (typeof value !== 'string' || value.trim().length === 0) {
@@ -162,12 +169,42 @@ function assertGitCommit(value: string, label: string): string {
   return normalized;
 }
 
-function normalizeMetricCountRate(value: MetricCountRate, label: string): MetricCountRate {
+function assertExactOwnProperties(
+  value: object,
+  label: string,
+  expectedProperties: readonly string[],
+): void {
+  const actualProperties = Reflect.ownKeys(value);
+  const unexpectedProperties = actualProperties.filter((property) =>
+    typeof property !== 'string' || !expectedProperties.includes(property),
+  );
+  if (unexpectedProperties.length > 0) {
+    throw new Error(`${label} contains unexpected own properties`);
+  }
+  for (const property of expectedProperties) {
+    if (!Object.prototype.hasOwnProperty.call(value, property)) {
+      throw new Error(`${label} must include ${property}`);
+    }
+  }
+}
+
+function normalizeMetricCountRate(
+  value: MetricCountRate,
+  label: string,
+  requiredTotal: number,
+): MetricCountRate {
   const count = assertNonNegativeInteger(value.count, `${label}.count`);
   const total = assertNonNegativeInteger(value.total, `${label}.total`);
   const rate = assertRate(value.rate, `${label}.rate`);
   if (count > total) {
     throw new Error(`${label}.count must be less than or equal to ${label}.total`);
+  }
+  if (total !== requiredTotal) {
+    throw new Error(`${label}.total must equal configuration.requiredQuestionCount`);
+  }
+  const expectedRate = Number((count / total).toFixed(6));
+  if (rate !== expectedRate) {
+    throw new Error(`${label}.rate must equal ${expectedRate.toFixed(6)} derived from count / total`);
   }
   return {
     count,
@@ -178,17 +215,18 @@ function normalizeMetricCountRate(value: MetricCountRate, label: string): Metric
 
 function normalizeQualityMetrics(
   value: KnowledgeBenchmarkQualityMetrics,
+  requiredQuestionCount: number,
 ): KnowledgeBenchmarkQualityMetrics {
   return {
-    recallAt1: normalizeMetricCountRate(value.recallAt1, 'quality.recallAt1'),
-    recallAt3: normalizeMetricCountRate(value.recallAt3, 'quality.recallAt3'),
-    recallAt10: normalizeMetricCountRate(value.recallAt10, 'quality.recallAt10'),
+    recallAt1: normalizeMetricCountRate(value.recallAt1, 'quality.recallAt1', requiredQuestionCount),
+    recallAt3: normalizeMetricCountRate(value.recallAt3, 'quality.recallAt3', requiredQuestionCount),
+    recallAt10: normalizeMetricCountRate(value.recallAt10, 'quality.recallAt10', requiredQuestionCount),
     meanReciprocalRank: assertRate(value.meanReciprocalRank, 'quality.meanReciprocalRank'),
     ndcgAt10: assertRate(value.ndcgAt10, 'quality.ndcgAt10'),
-    zeroResultRate: normalizeMetricCountRate(value.zeroResultRate, 'quality.zeroResultRate'),
-    ambiguityRate: normalizeMetricCountRate(value.ambiguityRate, 'quality.ambiguityRate'),
-    exactSpanCitationRate: normalizeMetricCountRate(value.exactSpanCitationRate, 'quality.exactSpanCitationRate'),
-    typedGraphEvidenceRate: normalizeMetricCountRate(value.typedGraphEvidenceRate, 'quality.typedGraphEvidenceRate'),
+    zeroResultRate: normalizeMetricCountRate(value.zeroResultRate, 'quality.zeroResultRate', requiredQuestionCount),
+    ambiguityRate: normalizeMetricCountRate(value.ambiguityRate, 'quality.ambiguityRate', requiredQuestionCount),
+    exactSpanCitationRate: normalizeMetricCountRate(value.exactSpanCitationRate, 'quality.exactSpanCitationRate', requiredQuestionCount),
+    typedGraphEvidenceRate: normalizeMetricCountRate(value.typedGraphEvidenceRate, 'quality.typedGraphEvidenceRate', requiredQuestionCount),
   };
 }
 
@@ -221,6 +259,7 @@ function normalizePublicBenchmarks(
 
   const byName = new Map<string, PublicBenchmarkStatus>();
   for (const [index, benchmark] of value.entries()) {
+    assertExactOwnProperties(benchmark, `publicBenchmarks[${index}]`, ['name', 'status', 'reason']);
     const name = assertNonEmptyString(benchmark.name, `publicBenchmarks[${index}].name`);
     if (byName.has(name)) {
       throw new Error(`Duplicate public benchmark \"${name}\"`);
@@ -310,7 +349,7 @@ function normalizeReportInput(input: KnowledgeBenchmarkReportInput): NormalizedR
     throw new Error('gates.passed must match the aggregate gate results');
   }
 
-  const quality = normalizeQualityMetrics(input.quality);
+  const quality = normalizeQualityMetrics(input.quality, configuration.requiredQuestionCount);
 
   const performance = {
     policy: input.performance.policy,
@@ -602,7 +641,7 @@ export function writeKnowledgeBenchmarkArtifacts(
   privacy: KnowledgeBenchmarkPrivacyInput,
 ): { jsonPath: string; markdownPath: string } {
   const normalizedOutputRoot = path.resolve(assertNonEmptyString(outputRoot, 'outputRoot'));
-  fs.mkdirSync(normalizedOutputRoot, { recursive: true });
+  fileSystem.mkdirSync(normalizedOutputRoot, { recursive: true });
 
   const jsonPath = path.join(normalizedOutputRoot, JSON_FILENAME);
   const markdownPath = path.join(normalizedOutputRoot, MARKDOWN_FILENAME);
@@ -612,26 +651,64 @@ export function writeKnowledgeBenchmarkArtifacts(
 
   const jsonTemp = `${jsonPath}.tmp-${process.pid}`;
   const markdownTemp = `${markdownPath}.tmp-${process.pid}`;
+  const jsonBackup = `${jsonPath}.bak-${process.pid}`;
+  const markdownBackup = `${markdownPath}.bak-${process.pid}`;
+  const transitions = [
+    { targetPath: jsonPath, tempPath: jsonTemp, backupPath: jsonBackup, originalExisted: false, backedUp: false, promoted: false },
+    { targetPath: markdownPath, tempPath: markdownTemp, backupPath: markdownBackup, originalExisted: false, backedUp: false, promoted: false },
+  ];
   try {
     const json = serializeKnowledgeBenchmarkJson(report);
     const markdown = renderKnowledgeBenchmarkMarkdown(report);
 
-    fs.writeFileSync(jsonTemp, json, 'utf8');
-    fs.writeFileSync(markdownTemp, markdown, 'utf8');
+    fileSystem.writeFileSync(jsonTemp, json, 'utf8');
+    fileSystem.writeFileSync(markdownTemp, markdown, 'utf8');
 
-    JSON.parse(fs.readFileSync(jsonTemp, 'utf8'));
+    JSON.parse(fileSystem.readFileSync(jsonTemp, 'utf8'));
     assertKnowledgeBenchmarkPrivacy(
-      fs.readFileSync(jsonTemp, 'utf8'),
-      fs.readFileSync(markdownTemp, 'utf8'),
+      fileSystem.readFileSync(jsonTemp, 'utf8'),
+      fileSystem.readFileSync(markdownTemp, 'utf8'),
       privacy,
     );
 
-    fs.renameSync(jsonTemp, jsonPath);
-    fs.renameSync(markdownTemp, markdownPath);
+    for (const transition of transitions) {
+      fileSystem.rmSync(transition.backupPath, { force: true, recursive: true });
+      transition.originalExisted = fileSystem.existsSync(transition.targetPath);
+      if (transition.originalExisted) {
+        fileSystem.renameSync(transition.targetPath, transition.backupPath);
+        transition.backedUp = true;
+      }
+    }
+
+    for (const transition of transitions) {
+      fileSystem.renameSync(transition.tempPath, transition.targetPath);
+      transition.promoted = true;
+    }
+
+    for (const transition of transitions) {
+      if (transition.backedUp) {
+        fileSystem.rmSync(transition.backupPath, { force: true, recursive: true });
+      }
+    }
     return { jsonPath, markdownPath };
   } catch (error: unknown) {
-    fs.rmSync(jsonTemp, { force: true });
-    fs.rmSync(markdownTemp, { force: true });
+    for (const transition of [...transitions].reverse()) {
+      if (transition.promoted) {
+        fileSystem.rmSync(transition.targetPath, { force: true, recursive: true });
+      }
+      if (transition.backedUp) {
+        fileSystem.renameSync(transition.backupPath, transition.targetPath);
+        transition.backedUp = false;
+      }
+    }
+    fileSystem.rmSync(jsonTemp, { force: true, recursive: true });
+    fileSystem.rmSync(markdownTemp, { force: true, recursive: true });
+    fileSystem.rmSync(jsonBackup, { force: true, recursive: true });
+    fileSystem.rmSync(markdownBackup, { force: true, recursive: true });
     throw error;
   }
+}
+
+export function __setKnowledgeBenchmarkReportFileSystemForTest(next?: FileSystemAdapter): void {
+  fileSystem = next ?? fs;
 }
