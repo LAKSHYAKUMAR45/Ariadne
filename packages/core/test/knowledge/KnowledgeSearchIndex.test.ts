@@ -381,7 +381,7 @@ describe('KnowledgeSearchIndex', () => {
     extractions.save({
       projectId: PROJECT_ID,
       extraction: buildExtraction(b.versionId, { analyzerVersion: '2', title: 'beta' }),
-      completedAt: '2026-09-30T00:00:00.000Z',
+      completedAt: new Date(Date.parse(first.updatedAt) + 1).toISOString(),
     });
     expect(index.findCandidates({ projectId: PROJECT_ID, needles: ['beta'] })).toEqual([]);
 
