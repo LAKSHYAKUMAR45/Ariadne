@@ -35,7 +35,7 @@ import type {
   KnowledgeEnrichmentService,
 } from '../KnowledgeWorker.js';
 import { KnowledgeProviderCallError } from '../KnowledgeProviderFallback.js';
-import { redact } from '../../Redactor.js';
+import { redact, redactLines } from '../../Redactor.js';
 
 const MAX_REQUEST_SYSTEM_PROMPT_LENGTH = 2_000;
 const MAX_REQUEST_PROMPT_BYTES = 12_000;
@@ -52,6 +52,7 @@ const MAX_RELATIONSHIP_COUNT = 12;
 const MAX_PAGE_COUNT = 4;
 const MAX_PAGE_CONTENT_LENGTH = 480;
 const MAX_ALLOWED_SOURCE_SPANS = 256;
+const MAX_SOURCE_PATH_LENGTH = 512;
 const TRUNCATION_SUFFIX = ' …[truncated]';
 
 export interface OpenAICompatibleGroundingInput {
@@ -242,9 +243,36 @@ function utf8ByteLength(value: string): number {
   return Buffer.byteLength(value, 'utf8');
 }
 
-function boundPromptField(value: string, maxLength: number): { value: string; truncated: boolean } {
-  const bounded = boundedText(value, maxLength);
-  return { value: bounded, truncated: bounded !== value.trim() };
+function redactedPromptField(value: string, maxLength: number): { value: string; truncated: boolean } {
+  const redacted = redactLines(value);
+  const bounded = boundedText(redacted, maxLength);
+  return { value: bounded, truncated: bounded !== redacted.trim() };
+}
+
+function redactedPromptText(value: string, maxLength: number): string {
+  return redactedPromptField(value, maxLength).value;
+}
+
+function redactedPromptValue(value: unknown): unknown {
+  if (typeof value === 'string') {
+    return redactLines(value);
+  }
+  if (Array.isArray(value)) {
+    return value.map((entry) => redactedPromptValue(entry));
+  }
+  if (value !== null && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, entry]) => [key, redactedPromptValue(entry)]),
+    );
+  }
+  return value;
+}
+
+function redactedPromptSpan(span: KnowledgeAnalysisSourceSpan): KnowledgeAnalysisSourceSpan {
+  return {
+    ...span,
+    ...(span.label ? { label: redactLines(span.label) } : {}),
+  };
 }
 
 function throwIfAborted(signal: AbortSignal | undefined): void {
@@ -405,12 +433,25 @@ function sourceSpanFingerprint(span: KnowledgeAnalysisSourceSpan): string {
   ].join('\0');
 }
 
+function groundingSpanFingerprint(span: KnowledgeAnalysisSourceSpan): string {
+  return [
+    span.sourceId,
+    span.sourceVersionId ?? '',
+    span.startOffset,
+    span.endOffset,
+    span.startLine,
+    span.startColumn,
+    span.endLine,
+    span.endColumn,
+  ].join('\0');
+}
+
 function ensureGroundedAnalysis(
   analysis: KnowledgeAnalysis,
   grounding: OpenAICompatibleGroundingInput,
 ): KnowledgeAnalysis {
   const allowedSourceIds = new Set([grounding.sourceId]);
-  const allowedSpanFingerprints = new Set(grounding.sourceSpans.map(sourceSpanFingerprint));
+  const allowedSpanFingerprints = new Set(grounding.sourceSpans.map(groundingSpanFingerprint));
   const validateSourceIds = (sourceIds: readonly string[], label: string): void => {
     for (const sourceId of sourceIds) {
       if (!allowedSourceIds.has(sourceId)) {
@@ -423,7 +464,7 @@ function ensureGroundedAnalysis(
       throw new Error(`Provider ${label} must include at least one grounded source span`);
     }
     for (const span of spans) {
-      if (!allowedSpanFingerprints.has(sourceSpanFingerprint(span))) {
+      if (!allowedSpanFingerprints.has(groundingSpanFingerprint(span))) {
         throw new Error(`Provider ${label} must use exact source spans from the deterministic input`);
       }
       if (span.sourceId !== grounding.sourceId || span.sourceVersionId !== grounding.sourceVersionId) {
@@ -484,28 +525,43 @@ function renderAnalysisPrompt(input: KnowledgeEnrichmentInput, sourceSpans: read
   }
   let truncatedSectionTexts = 0;
   const sections = input.extraction.sections.slice(0, MAX_SECTION_COUNT).map((section) => {
-    const bounded = boundPromptField(section.text, MAX_SECTION_TEXT_LENGTH);
+    const bounded = redactedPromptField(section.text, MAX_SECTION_TEXT_LENGTH);
     if (bounded.truncated) {
       truncatedSectionTexts += 1;
     }
     return {
       id: section.id,
-      title: section.title ?? section.kind,
-      text: bounded.value,
-      span: sourceSpans.find((span) => span.startOffset === section.span.startOffset && span.endOffset === section.span.endOffset),
+      title: redactedPromptText(section.title ?? section.kind, MAX_SECTION_TEXT_LENGTH),
+      text: redactedPromptText(section.text, MAX_SECTION_TEXT_LENGTH),
+      span: (() => {
+        const span = sourceSpans.find(
+          (candidate) =>
+            candidate.startOffset === section.span.startOffset && candidate.endOffset === section.span.endOffset,
+        );
+        return span ? redactedPromptSpan(span) : undefined;
+      })(),
     };
   });
   const symbols = input.extraction.symbols.slice(0, MAX_SYMBOL_COUNT).map((symbol) => ({
     id: symbol.id,
-    kind: symbol.kind,
-    name: symbol.name,
-    qualifiedName: symbol.qualifiedName ?? null,
+    kind: redactedPromptText(symbol.kind, MAX_EXCERPT_LENGTH),
+    name: redactedPromptText(symbol.name, MAX_EXCERPT_LENGTH),
+    qualifiedName:
+      symbol.qualifiedName === undefined || symbol.qualifiedName === null
+        ? null
+        : redactedPromptText(symbol.qualifiedName, MAX_EXCERPT_LENGTH),
   }));
   const relationships = input.extraction.relationships.slice(0, MAX_RELATIONSHIP_COUNT).map((relationship) => ({
     id: relationship.id,
-    type: relationship.type,
-    fromId: relationship.fromId ?? relationship.sourceSymbolId ?? null,
-    toId: relationship.toId ?? relationship.targetSymbolId ?? relationship.targetReference ?? null,
+    type: redactedPromptText(relationship.type, MAX_EXCERPT_LENGTH),
+    fromId: redactedPromptText(
+      relationship.fromId ?? relationship.sourceSymbolId ?? '',
+      MAX_EXCERPT_LENGTH,
+    ) || null,
+    toId: redactedPromptText(
+      relationship.toId ?? relationship.targetSymbolId ?? relationship.targetReference ?? '',
+      MAX_EXCERPT_LENGTH,
+    ) || null,
   }));
   const prompt = JSON.stringify(
     {
@@ -513,11 +569,11 @@ function renderAnalysisPrompt(input: KnowledgeEnrichmentInput, sourceSpans: read
       source: {
         sourceId: input.sourceId,
         sourceVersionId: input.sourceVersionId,
-        sourcePath: input.sourcePath,
+        sourcePath: redactedPromptText(input.sourcePath ?? '', MAX_SOURCE_PATH_LENGTH),
       },
       extraction: {
-        title: input.extraction.title,
-        summary: boundedText(input.extraction.summary, MAX_SECTION_TEXT_LENGTH),
+        title: redactedPromptText(input.extraction.title ?? '', MAX_SECTION_TEXT_LENGTH),
+        summary: redactedPromptText(input.extraction.summary, MAX_SECTION_TEXT_LENGTH),
         sections,
         symbols,
         relationships,
@@ -530,7 +586,7 @@ function renderAnalysisPrompt(input: KnowledgeEnrichmentInput, sourceSpans: read
         diagnosticsOmitted: input.extraction.diagnostics.length,
         linksOmitted: input.extraction.links.length,
       },
-      allowedSourceSpans: sourceSpans,
+      allowedSourceSpans: sourceSpans.map(redactedPromptSpan),
     },
     null,
     2,
@@ -552,17 +608,17 @@ function renderGenerationPrompt(
       source: {
         sourceId: input.sourceId,
         sourceVersionId: input.sourceVersionId,
-        sourcePath: input.sourcePath,
+        sourcePath: redactedPromptText(input.sourcePath ?? '', MAX_SOURCE_PATH_LENGTH),
       },
       pages: pages.slice(0, MAX_PAGE_COUNT).map((page) => ({
         pageVersionId: page.id,
-        title: page.content.split('\n', 2)[0] ?? '',
-        contentExcerpt: boundedText(page.content, MAX_PAGE_CONTENT_LENGTH),
+        title: redactedPromptText(page.content.split('\n', 2)[0] ?? '', MAX_PAGE_CONTENT_LENGTH),
+        contentExcerpt: redactedPromptText(page.content, MAX_PAGE_CONTENT_LENGTH),
       })),
       truncation: {
         pagesOmitted: Math.max(0, input.pageVersionIds.length - Math.min(input.pageVersionIds.length, MAX_PAGE_COUNT)),
       },
-      analysis: providerAnalysis,
+      analysis: redactedPromptValue(providerAnalysis),
     },
     null,
     2,

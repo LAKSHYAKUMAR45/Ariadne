@@ -1548,6 +1548,123 @@ describe('OpenAICompatibleProvider', () => {
     expect((userMessages[1]?.content.length ?? 0) > 0).toBe(true);
   });
 
+  it('redacts source-derived secrets from analysis and generation provider prompts', async () => {
+    const db = database();
+    const project = new KnowledgeProjectStore(db).create({
+      id: 'project-openai' as never,
+      workspaceRoot: '/workspace/openai',
+      name: 'OpenAI',
+      roots: ['docs'],
+      createdAt: CREATED_AT,
+    });
+    const pageVersion = new KnowledgePageStore(db).createPageVersion({
+      projectId: project.id,
+      pageId: createKnowledgeId('page', 'secret-page') as never,
+      type: 'source',
+      title: 'src/secret.py',
+      slug: 'source-src-secret-py',
+      content: '# Secret page\n\nTOKEN=page-secret-value\n',
+      createdAt: CREATED_AT,
+    });
+    const { endpoint, requests } = await startServer((_request, response) => {
+      const requestIndex = requests.length;
+      const requestBody = JSON.parse(requests[requestIndex - 1]?.body ?? '{}') as {
+        messages?: Array<{ role: string; content: string }>;
+      };
+      const userPrompt = JSON.parse(requestBody.messages?.find((message) => message.role === 'user')?.content ?? '{}') as {
+        allowedSourceSpans?: unknown[];
+      };
+      const firstAllowedSpan = userPrompt.allowedSourceSpans?.[0] ?? groundedSpan('source-1');
+      const groundedSourceId =
+        typeof firstAllowedSpan === 'object' &&
+        firstAllowedSpan !== null &&
+        'sourceId' in firstAllowedSpan &&
+        typeof firstAllowedSpan.sourceId === 'string'
+          ? firstAllowedSpan.sourceId
+          : 'source-1';
+      const groundedAnalysis = analysisPayload(groundedSourceId);
+      for (const collection of [
+        groundedAnalysis.entities,
+        groundedAnalysis.claims,
+        groundedAnalysis.relationships,
+        groundedAnalysis.contradictions,
+        groundedAnalysis.researchGaps,
+      ]) {
+        collection.forEach((entry: { sourceSpans?: unknown[] }) => {
+          if (entry.sourceSpans) {
+            entry.sourceSpans = [firstAllowedSpan];
+          }
+        });
+      }
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(
+        JSON.stringify({
+          choices: [
+            {
+              message: {
+                content: JSON.stringify(
+                  requestIndex === 2
+                    ? { ...generationPayload(groundedSourceId), analysis: groundedAnalysis }
+                    : groundedAnalysis,
+                ),
+              },
+            },
+          ],
+        }),
+      );
+    });
+    const profileStore = new KnowledgeProviderProfileStore(db, { now: () => CREATED_AT });
+    profileStore.setEnabled(
+      project.id,
+      profileStore.create({
+        projectId: project.id,
+        profileName: 'analysis',
+        endpoint,
+        model: 'gpt-4.1-mini',
+        capabilities: ['analysis', 'generation'],
+        timeoutMs: 10_000,
+        apiKeyEnv: null,
+        enabled: false,
+      }).profileName,
+      true,
+    );
+    const service = new OpenAICompatibleEnrichmentService(db, {
+      profileStore,
+      environment: {},
+      hostPolicy: { allowedOrigins: new Set([new URL(endpoint).origin]) },
+    });
+    const extraction = createExtraction();
+    extraction.summary = 'TOKEN=summary-secret-value';
+    extraction.sections[0] = {
+      ...extraction.sections[0],
+      title: ['SECRET', 'section-title-secret'].join('='),
+      text: ['TOKEN', 'section-secret-value'].join('='),
+      span: {
+        ...extraction.sections[0].span,
+        label: ['TOKEN', 'span-secret-value'].join('='),
+      },
+    };
+
+    await service.enrich({
+      projectId: project.id,
+      jobId: 'job-secret-redaction',
+      sourceId: 'source-1',
+      sourceVersionId: 'source-version-1',
+      sourcePath: 'src/secret.py',
+      extraction,
+      pageVersionIds: [pageVersion.id],
+    });
+
+    expect(requests).toHaveLength(2);
+    const requestBodies = requests.map((request) => request.body);
+    expect(requestBodies.join('\n')).not.toContain('summary-secret-value');
+    expect(requestBodies.join('\n')).not.toContain('section-title-secret');
+    expect(requestBodies.join('\n')).not.toContain('section-secret-value');
+    expect(requestBodies.join('\n')).not.toContain('span-secret-value');
+    expect(requestBodies.join('\n')).not.toContain('page-secret-value');
+    expect(requestBodies.join('\n')).toContain(['TOKEN', '***'].join('='));
+  });
+
   it('skips enrichment with a warning instead of silently dropping grounding when the exact-span prompt is too large', async () => {
     const db = database();
     const project = new KnowledgeProjectStore(db).create({
