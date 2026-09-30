@@ -16,6 +16,12 @@ const DEFAULT_PROJECT_ID = 'synthetic-naas-benchmark';
 const DEFAULT_CREATED_AT = '2026-09-29T00:00:00.000Z';
 const CONTENT_ROOT = 'sources/files';
 const INCREMENTAL_SOURCE_PATH = 'task-managers/configlet.py';
+const SENTINEL_PROJECT_ID = 'synthetic-naas-sentinel';
+const SENTINEL_SOURCE_PATH = 'sentinel/task-managers/configlet.py';
+export const KNOWLEDGE_BENCHMARK_SENTINEL_CANARIES = [
+  'SENTINEL-CANARY-7f3c9a51',
+  'sentinel.canary@example.invalid',
+] as const;
 const INCREMENTAL_APPEND_LINE = '\n# benchmark incremental refresh\n';
 const SOURCE_PATHS = [
   'task-managers/configlet.py',
@@ -49,6 +55,7 @@ export interface KnowledgeBenchmarkHarness {
   input: KnowledgeBenchmarkInput;
   seedInitialSources(): { queuedJobCount: number };
   runWorker(workerId: string): Promise<void>;
+  seedSentinelProject(): Promise<{ projectId: string }>;
   applyIncrementalUpdate(): { sourcePath: string; sourceVersionId: string };
   cleanup(): void;
 }
@@ -200,6 +207,37 @@ export function createKnowledgeBenchmarkHarness(
     },
     async runWorker(workerId: string): Promise<void> {
       await new KnowledgeWorker(db, { workerId, now: () => createdAt }).runOnce(projectId);
+    },
+    async seedSentinelProject(): Promise<{ projectId: string }> {
+      const sentinelRoot = join(workspaceRoot, 'sentinel-project');
+      mkdirSync(sentinelRoot, { recursive: true });
+      db.prepare(
+        `INSERT INTO knowledge_projects
+         (id, workspace_root, name, status, created_at, updated_at)
+         VALUES (?, ?, 'Synthetic sentinel project', 'active', ?, ?)`,
+      ).run(SENTINEL_PROJECT_ID, sentinelRoot, createdAt, createdAt);
+      const content = `${input.sources[0].content}\n${KNOWLEDGE_BENCHMARK_SENTINEL_CANARIES.map((canary) => `# ${canary}`).join('\n')}\n`;
+      persistSourceCopy(sentinelRoot, SENTINEL_SOURCE_PATH, content);
+      const record = sourceStore.register({
+        projectId: SENTINEL_PROJECT_ID,
+        kind: 'file',
+        path: SENTINEL_SOURCE_PATH,
+        content,
+        contentPath: contentPathForSource(SENTINEL_SOURCE_PATH),
+        mimeType: 'text/x-python',
+      });
+      const version = sourceStore.currentVersion(SENTINEL_PROJECT_ID, record.id);
+      if (!version) {
+        throw new Error('Expected current sentinel source version');
+      }
+      queue.enqueue({
+        projectId: SENTINEL_PROJECT_ID,
+        jobKind: 'analyze',
+        sourceVersionId: version.id,
+        payload: { sourceId: record.id, sourceVersionId: version.id, path: SENTINEL_SOURCE_PATH },
+      });
+      await new KnowledgeWorker(db, { workerId: 'benchmark-sentinel', now: () => createdAt }).runOnce(SENTINEL_PROJECT_ID);
+      return { projectId: SENTINEL_PROJECT_ID };
     },
     applyIncrementalUpdate(): { sourcePath: string; sourceVersionId: string } {
       const storedPath = storedPathForSource(workspaceRoot, INCREMENTAL_SOURCE_PATH);
