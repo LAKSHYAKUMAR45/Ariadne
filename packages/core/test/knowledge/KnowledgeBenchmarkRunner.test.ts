@@ -1,4 +1,4 @@
-import { existsSync } from 'node:fs';
+import { existsSync, statSync } from 'node:fs';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   createKnowledgeBenchmarkHarness,
@@ -197,6 +197,123 @@ describe('runKnowledgeBenchmark', () => {
 
     expect(result.report.gates.passed).toBe(false);
     expect(result.report.gates.correctness.violations.join('\n')).toMatch(/required source job failed/i);
+  });
+
+  it('fails correctness when the sentinel analyze job did not complete', async () => {
+    const result = await runKnowledgeBenchmark(runOptions(), trackedHarness((harness) => ({
+      ...harness,
+      async seedSentinelProject() {
+        const sentinel = await harness.seedSentinelProject();
+        harness.db.prepare(
+          `UPDATE knowledge_jobs SET status = 'failed', failure_code = 'injected_failure', failure_message = 'x'
+           WHERE project_id = ?`,
+        ).run(sentinel.projectId);
+        return sentinel;
+      },
+    })));
+
+    expect(result.report.gates.correctness.passed).toBe(false);
+    expect(result.report.gates.correctness.violations.join('\n')).toMatch(/sentinel.*(job|completed)/i);
+  });
+
+  it('fails correctness when the sentinel is not seeded or searchable', async () => {
+    const result = await runKnowledgeBenchmark(runOptions(), trackedHarness((harness) => ({
+      ...harness,
+      async seedSentinelProject() {
+        return { projectId: 'never-seeded-sentinel' };
+      },
+    })));
+
+    expect(result.report.gates.correctness.passed).toBe(false);
+    expect(result.report.gates.correctness.violations.join('\n')).toMatch(/sentinel/i);
+  });
+
+  it('fails correctness when the queued job count does not match the fixture sources', async () => {
+    const result = await runKnowledgeBenchmark(runOptions(), trackedHarness((harness) => ({
+      ...harness,
+      seedInitialSources() {
+        const seeded = harness.seedInitialSources();
+        return { queuedJobCount: seeded.queuedJobCount - 1 };
+      },
+    })));
+
+    expect(result.report.gates.correctness.passed).toBe(false);
+    expect(result.report.gates.correctness.violations.join('\n')).toMatch(/queued job count/i);
+  });
+
+  it('fails correctness when an analyze job is missing for a current version', async () => {
+    let deleted = false;
+    const result = await runKnowledgeBenchmark(runOptions(), trackedHarness((harness) => ({
+      ...harness,
+      async runWorker(workerId: string) {
+        await harness.runWorker(workerId);
+        if (deleted) return;
+        deleted = true;
+        harness.db.prepare(
+          `DELETE FROM knowledge_jobs WHERE id = (
+             SELECT id FROM knowledge_jobs WHERE project_id = ? AND job_kind = 'analyze' ORDER BY id LIMIT 1)`,
+        ).run(harness.projectId);
+      },
+    })));
+
+    expect(result.report.gates.correctness.passed).toBe(false);
+    expect(result.report.gates.correctness.violations.join('\n')).toMatch(/analyze job/i);
+  });
+
+  it('fails correctness when a fixture source is missing', async () => {
+    const result = await runKnowledgeBenchmark(runOptions(), trackedHarness((harness) => ({
+      ...harness,
+      seedInitialSources() {
+        const seeded = harness.seedInitialSources();
+        harness.db.pragma('foreign_keys = OFF');
+        const source = harness.db.prepare(
+          'SELECT id FROM knowledge_sources WHERE project_id = ? ORDER BY id LIMIT 1',
+        ).get(harness.projectId) as { id: string };
+        harness.db.prepare('DELETE FROM knowledge_jobs WHERE project_id = ? AND source_version_id IN (SELECT id FROM knowledge_source_versions WHERE source_id = ?)').run(harness.projectId, source.id);
+        harness.db.prepare('DELETE FROM knowledge_source_versions WHERE source_id = ?').run(source.id);
+        harness.db.prepare('DELETE FROM knowledge_sources WHERE id = ?').run(source.id);
+        harness.db.pragma('foreign_keys = ON');
+        return { queuedJobCount: seeded.queuedJobCount - 1 };
+      },
+    })));
+
+    expect(result.report.gates.correctness.passed).toBe(false);
+    expect(result.report.gates.correctness.violations.join('\n')).toMatch(/missing|source row/i);
+  });
+
+  it('fails correctness when a failed job has no resolvable source version', async () => {
+    const result = await runKnowledgeBenchmark(runOptions(), trackedHarness((harness) => ({
+      ...harness,
+      async runWorker(workerId: string) {
+        await harness.runWorker(workerId);
+        harness.db.prepare(
+          `INSERT OR IGNORE INTO knowledge_jobs
+           (id, project_id, job_kind, source_version_id, status, failure_code, failure_message, payload_json, requested_at)
+           VALUES ('orphan-failed', ?, 'analyze', NULL, 'failed', 'orphan', 'x', '{}', '2026-09-29T00:00:00.000Z')`,
+        ).run(harness.projectId);
+      },
+    })));
+
+    expect(result.report.gates.correctness.passed).toBe(false);
+    expect(result.report.gates.correctness.violations.join('\n')).toMatch(/unresolved source/i);
+  });
+
+  it('measures SQLite bytes for the initial fixture project before the sentinel is seeded', async () => {
+    let bytesBeforeSentinel = 0;
+    const result = await runKnowledgeBenchmark(runOptions(), trackedHarness((harness, index) => ({
+      ...harness,
+      async seedSentinelProject() {
+        if (index === 0) {
+          harness.db.pragma('wal_checkpoint(TRUNCATE)');
+          bytesBeforeSentinel = [harness.databasePath, `${harness.databasePath}-wal`, `${harness.databasePath}-shm`]
+            .reduce((total, path) => total + (existsSync(path) ? statSync(path).size : 0), 0);
+        }
+        return harness.seedSentinelProject();
+      },
+    })));
+
+    expect(bytesBeforeSentinel).toBeGreaterThan(0);
+    expect(result.report.performance.sqliteBytes.total).toBe(bytesBeforeSentinel);
   });
 
   it('fails determinism when the second projection digest differs', async () => {

@@ -258,8 +258,23 @@ function collectCorrectnessViolations(
     if (job.status !== 'completed' && !validFailure && job.status !== 'queued' && job.status !== 'running') {
       violations.push('Job reached an invalid terminal state');
     }
+    if (job.status === 'failed' && job.source_path === null) {
+      violations.push('Failed job has an unresolved source or source version');
+    }
     if (job.status === 'failed' && job.source_path !== null && requiredPaths.has(job.source_path)) {
       violations.push(`Required source job failed for ${job.source_path}`);
+    }
+  }
+  const analyzeStatusesByPath = new Map<string, string[]>();
+  for (const job of jobs) {
+    if (job.job_kind === 'analyze' && job.source_path !== null) {
+      analyzeStatusesByPath.set(job.source_path, [...(analyzeStatusesByPath.get(job.source_path) ?? []), job.status]);
+    }
+  }
+  for (const requiredPath of requiredPaths) {
+    const statuses = analyzeStatusesByPath.get(requiredPath) ?? [];
+    if (statuses.length === 0 || statuses.some((status) => status !== 'completed')) {
+      violations.push(`Required source ${requiredPath} does not have only completed analyze jobs`);
     }
   }
 
@@ -302,6 +317,89 @@ function collectCorrectnessViolations(
     if (occurrences > 1) {
       violations.push(`Duplicate current source version registrations for ${sourcePath}`);
     }
+  }
+  return violations.map((violation) => `${label}: ${violation}`);
+}
+
+function collectInitialAccountingViolations(
+  harness: KnowledgeBenchmarkHarness,
+  queuedJobCount: number,
+  label: string,
+): string[] {
+  const { db, projectId, input } = harness;
+  const violations: string[] = [];
+  if (queuedJobCount !== input.sources.length) {
+    violations.push(`Queued job count ${queuedJobCount} does not match ${input.sources.length} fixture sources`);
+  }
+  const sourceStmt = db.prepare('SELECT id, current_hash FROM knowledge_sources WHERE project_id = ? AND source_path = ?');
+  const versionStmt = db.prepare(
+    'SELECT id FROM knowledge_source_versions WHERE project_id = ? AND source_id = ? AND content_hash = ?',
+  );
+  const jobStmt = db.prepare(
+    `SELECT status FROM knowledge_jobs
+     WHERE project_id = ? AND source_version_id = ? AND job_kind = 'analyze'`,
+  );
+  for (const source of input.sources) {
+    const rows = sourceStmt.all(projectId, source.path) as Array<{ id: string; current_hash: string }>;
+    if (rows.length !== 1) {
+      violations.push(`Fixture source ${source.path} has ${rows.length} source rows`);
+      continue;
+    }
+    const versions = versionStmt.all(projectId, rows[0].id, rows[0].current_hash) as Array<{ id: string }>;
+    if (versions.length !== 1) {
+      violations.push(`Fixture source ${source.path} has ${versions.length} current source versions`);
+      continue;
+    }
+    const jobs = jobStmt.all(projectId, versions[0].id) as Array<{ status: string }>;
+    if (jobs.length !== 1 || jobs[0].status !== 'completed') {
+      violations.push(`Fixture source ${source.path} does not have exactly one completed analyze job`);
+    }
+  }
+  const sourceRows = count(db, 'SELECT COUNT(*) AS count FROM knowledge_sources WHERE project_id = ?', projectId);
+  if (sourceRows !== input.sources.length) {
+    violations.push(`Project has ${sourceRows} source rows for ${input.sources.length} fixture sources`);
+  }
+  return violations.map((violation) => `${label}: ${violation}`);
+}
+
+async function verifySentinelProject(
+  harness: KnowledgeBenchmarkHarness,
+  sentinelProjectId: string,
+  label: string,
+): Promise<string[]> {
+  const { db } = harness;
+  const violations: string[] = [];
+  if (sentinelProjectId === harness.projectId) {
+    violations.push('Sentinel project id matches the benchmark project');
+  }
+  const sources = db.prepare(
+    `SELECT source.id, source.current_hash FROM knowledge_sources source WHERE source.project_id = ?`,
+  ).all(sentinelProjectId) as Array<{ id: string; current_hash: string }>;
+  const current = sources.flatMap((source) => db.prepare(
+    'SELECT id FROM knowledge_source_versions WHERE project_id = ? AND source_id = ? AND content_hash = ?',
+  ).all(sentinelProjectId, source.id, source.current_hash) as Array<{ id: string }>);
+  if (sources.length !== 1 || current.length !== 1) {
+    violations.push(`Sentinel project has ${sources.length} sources and ${current.length} current versions instead of one`);
+  } else {
+    const analyze = db.prepare(
+      `SELECT status FROM knowledge_jobs WHERE project_id = ? AND source_version_id = ? AND job_kind = 'analyze'`,
+    ).all(sentinelProjectId, current[0].id) as Array<{ status: string }>;
+    if (analyze.length !== 1 || analyze[0].status !== 'completed') {
+      violations.push('Sentinel analyze job is not exactly one completed job');
+    }
+  }
+  let found = false;
+  try {
+    found = searchKnowledge(KNOWLEDGE_BENCHMARK_SENTINEL_CANARIES[0], {
+      db,
+      projectId: sentinelProjectId,
+      mode: 'sources',
+    }).some((result) => result.projectId === sentinelProjectId);
+  } catch {
+    found = false;
+  }
+  if (!found) {
+    violations.push('Sentinel-only search returned no result under the sentinel project');
   }
   return violations.map((violation) => `${label}: ${violation}`);
 }
@@ -406,11 +504,16 @@ function cleanupAll(harnesses: readonly KnowledgeBenchmarkHarness[]): unknown[] 
 async function buildProcessedHarness(
   harness: KnowledgeBenchmarkHarness,
   workerId: string,
-): Promise<{ sentinelProjectId: string }> {
-  harness.seedInitialSources();
+): Promise<{ sentinelProjectId: string; violations: string[] }> {
+  const { queuedJobCount } = harness.seedInitialSources();
   await harness.runWorker(workerId);
+  const violations = [
+    ...collectInitialAccountingViolations(harness, queuedJobCount, 'determinism build'),
+    ...collectCorrectnessViolations(harness, 'determinism build'),
+  ];
   const sentinel = await harness.seedSentinelProject();
-  return { sentinelProjectId: sentinel.projectId };
+  violations.push(...await verifySentinelProject(harness, sentinel.projectId, 'determinism build'));
+  return { sentinelProjectId: sentinel.projectId, violations };
 }
 
 function assembleReport(
@@ -447,10 +550,11 @@ export async function runKnowledgeBenchmark(
       peakRss = Math.max(peakRss, process.memoryUsage().rss);
     };
 
+    let initialQueuedJobCount = 0;
     const construction = await measureMilliseconds(() => {
       const created = createHarness();
       harnesses.push(created);
-      created.seedInitialSources();
+      initialQueuedJobCount = created.seedInitialSources().queuedJobCount;
       return created;
     });
     const harness = construction.value;
@@ -460,6 +564,7 @@ export async function runKnowledgeBenchmark(
 
     const drain = await measureMilliseconds(() => harness.runWorker('benchmark-initial'));
     sampleRss();
+    correctnessViolations.push(...collectInitialAccountingViolations(harness, initialQueuedJobCount, 'initial drain'));
     correctnessViolations.push(...collectCorrectnessViolations(harness, 'initial drain'));
     const completedJobs = count(
       harness.db,
@@ -468,7 +573,9 @@ export async function runKnowledgeBenchmark(
     );
     const drainMs = requirePositiveFinite(drain.durationMs, 'workerDrainMs');
 
+    const bytes = sqliteBytes(harness);
     const { projectId: sentinelProjectId } = await harness.seedSentinelProject();
+    correctnessViolations.push(...await verifySentinelProject(harness, sentinelProjectId, 'initial build'));
     await yieldToEventLoop();
     const quality = runQualityPass(harness, sentinelProjectId, 'initial quality');
     await yieldToEventLoop();
@@ -514,7 +621,6 @@ export async function runKnowledgeBenchmark(
     correctnessViolations.push(...timedProjectionViolations);
     correctnessViolations.push(...incrementalQuality.violations.filter((violation) => /leaked/.test(violation)));
 
-    const bytes = sqliteBytes(harness);
     const sourceBytes = requirePositiveFinite(harness.input.sourceBytes, 'sourceBytes');
     const drainSeconds = drainMs / 1000;
 
@@ -534,6 +640,7 @@ export async function runKnowledgeBenchmark(
       second,
       runQualityPass(second, secondSentinel.sentinelProjectId, 'determinism quality'),
     );
+    correctnessViolations.push(...secondSentinel.violations);
     const secondRunDigest = hashProjection(secondProjection);
     const determinismMatched = firstRunDigest === secondRunDigest;
 
