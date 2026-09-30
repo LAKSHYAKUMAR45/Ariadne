@@ -1,0 +1,143 @@
+{
+  "schemaVersion": "knowledge-benchmark-report-v1",
+  "benchmarkId": "a0390fa1dd099b836f82ece061b1f28f218040202031171cc1fa9101ff496508",
+  "generatedAt": "2026-09-30T09:19:27.817Z",
+  "git": {
+    "commit": "7d63cd44f6e382524e4ce96f0316a588426d7e0b",
+    "dirty": false
+  },
+  "environment": {
+    "node": "v20.20.2",
+    "platform": "linux",
+    "architecture": "x64",
+    "cpuModel": "AMD EPYC-Rome Processor",
+    "logicalCpuCount": 16,
+    "totalMemoryBytes": 67434610688
+  },
+  "configuration": {
+    "corpusVersion": "naas-v1",
+    "corpusDigest": "7725c7df9e23392a2554dfa7f50e8cf38360a9e6e66bf16a6b86535719e9d4b8",
+    "sourceCount": 8,
+    "sourceBytes": 4094,
+    "requiredQuestionCount": 10,
+    "searchWarmupRounds": 1,
+    "searchTimedRounds": 30,
+    "searchSampleCount": 300
+  },
+  "gates": {
+    "passed": true,
+    "quality": {
+      "passed": true,
+      "violations": []
+    },
+    "correctness": {
+      "passed": true,
+      "violations": []
+    },
+    "privacy": {
+      "passed": true,
+      "violations": []
+    },
+    "determinism": {
+      "passed": true,
+      "violations": []
+    }
+  },
+  "quality": {
+    "recallAt1": {
+      "count": 10,
+      "total": 10,
+      "rate": 1
+    },
+    "recallAt3": {
+      "count": 10,
+      "total": 10,
+      "rate": 1
+    },
+    "recallAt10": {
+      "count": 10,
+      "total": 10,
+      "rate": 1
+    },
+    "meanReciprocalRank": 1,
+    "ndcgAt10": 1,
+    "zeroResultRate": {
+      "count": 0,
+      "total": 10,
+      "rate": 0
+    },
+    "ambiguityRate": {
+      "count": 0,
+      "total": 10,
+      "rate": 0
+    },
+    "exactSpanCitationRate": {
+      "count": 10,
+      "total": 10,
+      "rate": 1
+    },
+    "typedGraphEvidenceRate": {
+      "count": 10,
+      "total": 10,
+      "rate": 1
+    }
+  },
+  "performance": {
+    "policy": "observational",
+    "coldConstructionMs": 83.146,
+    "workerDrainMs": 999.347,
+    "completedJobsPerSecond": 8.005226,
+    "sourceBytesPerSecond": 4096.67458,
+    "incrementalUpdateMs": 106.459,
+    "searchLatencyMs": {
+      "p50": 29.581,
+      "p95": 53.393,
+      "p99": 68.983
+    },
+    "sqliteBytes": {
+      "main": 2355200,
+      "wal": 0,
+      "shm": 32768,
+      "total": 2387968
+    },
+    "storageAmplification": 583.284807,
+    "rssBytes": {
+      "start": 80453632,
+      "peak": 134520832,
+      "delta": 54067200
+    }
+  },
+  "determinism": {
+    "digestAlgorithm": "sha256",
+    "firstRunDigest": "b8fa793580e02eec2f8c5bbce496ed1dcf25a7020a02efebf510825ec2c2bd45",
+    "secondRunDigest": "b8fa793580e02eec2f8c5bbce496ed1dcf25a7020a02efebf510825ec2c2bd45",
+    "matched": true
+  },
+  "publicBenchmarks": [
+    {
+      "name": "CodeSearchNet",
+      "status": "not_measured",
+      "reason": "Not measured in the offline baseline; no reviewed adapter or dataset is bundled."
+    },
+    {
+      "name": "RepoBench",
+      "status": "not_measured",
+      "reason": "Not measured in the offline baseline; no reviewed adapter or dataset is bundled."
+    },
+    {
+      "name": "BEIR/MTEB",
+      "status": "not_measured",
+      "reason": "Not measured in the offline baseline; no reviewed adapter or dataset is bundled."
+    },
+    {
+      "name": "ALCE",
+      "status": "not_measured",
+      "reason": "Not measured in the offline baseline; no reviewed adapter or dataset is bundled."
+    },
+    {
+      "name": "VIBE",
+      "status": "not_measured",
+      "reason": "Not measured in the offline baseline; no reviewed adapter or dataset is bundled."
+    }
+  ]
+}
