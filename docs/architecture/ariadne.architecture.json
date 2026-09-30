@@ -1,0 +1,281 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "Ariadne Architecture",
+    "output": "ariadne.html",
+    "quality_profile": "showcase",
+    "repository": {
+      "url": "https://github.com/LAKSHYAKUMAR45/Ariadne",
+      "provider": "github",
+      "link_mode": "web",
+      "revision": "ef5f5870d85323de74340820ff5e8585a655d931"
+    },
+    "views": [
+      {
+        "id": "local-state",
+        "label": "Local task state",
+        "focus": ["mcp-client", "mcp-server", "cli", "vscode-extension", "core", "workspace-db", "registry"],
+        "note": "Follow local clients through the shared core to workspace state and the cross-workspace index."
+      },
+      {
+        "id": "optional-sync",
+        "label": "Optional cloud sync",
+        "focus": ["cli", "mcp-server", "vscode-extension", "sync-server", "postgres"],
+        "note": "See the opt-in push/pull path to a separately operated sync service."
+      }
+    ]
+  },
+  "components": [
+    {
+      "id": "mcp-client",
+      "type": "external",
+      "label": "MCP Client",
+      "pos": [40, 210],
+      "size": [150, 64]
+    },
+    {
+      "id": "mcp-server",
+      "type": "backend",
+      "label": "MCP Server",
+      "sublabel": "tools + context resources",
+      "pos": [220, 130],
+      "size": [170, 70],
+      "sources": [
+        {
+          "path": "packages/mcp-server/src/server.ts",
+          "label": "MCP tool wiring"
+        },
+        {
+          "path": "packages/mcp-server/src/syncTools.ts",
+          "label": "Sync tool delegation"
+        }
+      ]
+    },
+    {
+      "id": "cli",
+      "type": "backend",
+      "label": "CLI",
+      "sublabel": "ariadne commands",
+      "pos": [220, 290],
+      "size": [170, 70],
+      "sources": [
+        {
+          "path": "packages/cli/src/index.ts",
+          "label": "CLI entry point"
+        },
+        {
+          "path": "packages/cli/src/syncCommands.ts",
+          "label": "Sync commands"
+        }
+      ]
+    },
+    {
+      "id": "vscode-extension",
+      "type": "frontend",
+      "label": "VS Code Extension",
+      "sublabel": "Copilot Chat + capture",
+      "pos": [220, 450],
+      "size": [190, 70],
+      "sources": [
+        {
+          "path": "packages/vscode-extension/src/extension.ts",
+          "label": "Extension entry point"
+        },
+        {
+          "path": "packages/vscode-extension/src/passiveCapture.ts",
+          "label": "Passive capture"
+        }
+      ]
+    },
+    {
+      "id": "core",
+      "type": "backend",
+      "label": "@ariadne-dev/core",
+      "sublabel": "TaskStore + context + capture",
+      "pos": [440, 290],
+      "size": [200, 80],
+      "sources": [
+        {
+          "path": "packages/core/src/index.ts",
+          "label": "Shared core exports"
+        },
+        {
+          "path": "packages/core/src/workspace.ts",
+          "label": "Workspace store"
+        }
+      ]
+    },
+    {
+      "id": "workspace-db",
+      "type": "database",
+      "label": "Workspace SQLite",
+      "sublabel": ".ariadne/state.db",
+      "pos": [660, 180],
+      "size": [190, 70],
+      "sources": [
+        {
+          "path": "packages/core/src/db.ts",
+          "label": "SQLite database"
+        },
+        {
+          "path": "packages/core/src/schema.ts",
+          "label": "Task schema"
+        }
+      ]
+    },
+    {
+      "id": "registry",
+      "type": "database",
+      "label": "Machine Registry",
+      "sublabel": "~/.ariadne/registry.db · index only",
+      "pos": [660, 390],
+      "size": [210, 70],
+      "sources": [
+        {
+          "path": "packages/core/src/Registry.ts",
+          "label": "Cross-workspace index"
+        }
+      ]
+    },
+    {
+      "id": "sync-server",
+      "type": "cloud",
+      "label": "Sync Server",
+      "sublabel": "optional, self-hosted API",
+      "pos": [900, 240],
+      "size": [190, 76],
+      "sources": [
+        {
+          "path": "packages/sync-server/src/index.ts",
+          "label": "HTTP server"
+        },
+        {
+          "path": "packages/sync-server/src/routes/sync.ts",
+          "label": "Push/pull API"
+        }
+      ]
+    },
+    {
+      "id": "postgres",
+      "type": "database",
+      "label": "PostgreSQL",
+      "sublabel": "remote synced data",
+      "pos": [1160, 240],
+      "size": [170, 70],
+      "sources": [
+        {
+          "path": "packages/sync-server/src/db.ts",
+          "label": "Server database pool"
+        },
+        {
+          "path": "deploy/nodem2/compose.yaml",
+          "label": "Deployment services"
+        }
+      ]
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "Developer machine · local-first",
+      "wraps": ["mcp-client", "mcp-server", "cli", "vscode-extension", "core", "workspace-db", "registry"],
+      "pad": 10
+    },
+    {
+      "kind": "region",
+      "label": "Optional self-hosted sync service",
+      "wraps": ["sync-server", "postgres"],
+      "pad": 10
+    }
+  ],
+  "connections": [
+    {
+      "id": "client-to-mcp",
+      "from": "mcp-client",
+      "to": "mcp-server",
+      "label": "MCP over stdio",
+      "labelDy": -8,
+      "labelDx": -40,
+      "variant": "emphasis"
+    },
+    {
+      "id": "mcp-to-cli",
+      "from": "mcp-server",
+      "to": "cli",
+      "label": "sync tools invoke CLI",
+      "variant": "dashed",
+      "labelDy": 24
+    },
+    {
+      "id": "mcp-to-core",
+      "from": "mcp-server",
+      "to": "core",
+      "label": "task tools + context"
+    },
+    {
+      "id": "cli-to-core",
+      "from": "cli",
+      "to": "core"
+    },
+    {
+      "id": "vscode-to-core",
+      "from": "vscode-extension",
+      "to": "core",
+      "label": "chat + passive capture"
+    },
+    {
+      "id": "core-to-state",
+      "from": "core",
+      "to": "workspace-db",
+      "label": "source of truth"
+    },
+    {
+      "id": "core-to-registry",
+      "from": "core",
+      "to": "registry"
+    },
+    {
+      "id": "cli-to-sync",
+      "from": "cli",
+      "to": "sync-server",
+      "label": "opt-in push / pull",
+      "variant": "dashed",
+      "fromSide": "left",
+      "toSide": "bottom",
+      "via": [[190, 325], [190, 550], [995, 550]]
+    },
+    {
+      "id": "sync-to-db",
+      "from": "sync-server",
+      "to": "postgres"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Local-first",
+      "items": [
+        "CLI, MCP server, and VS Code extension use the shared core.",
+        "Each workspace's SQLite database remains its source of truth."
+      ]
+    },
+    {
+      "dot": "violet",
+      "title": "Registry is an index",
+      "items": [
+        "The machine-wide registry helps discover tasks across workspaces.",
+        "It is not a copy of task history or a sync mechanism."
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "Sync is optional",
+      "items": [
+        "Push/pull goes to a separately operated HTTP service.",
+        "MCP and VS Code sync commands delegate to the CLI.",
+        "PostgreSQL stores the remote shared data; local use does not depend on it."
+      ]
+    }
+  ]
+}

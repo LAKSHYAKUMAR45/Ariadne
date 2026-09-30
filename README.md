@@ -89,29 +89,21 @@ because UX is intentionally secondary here. The primary way you'll use
 Ariadne day-to-day is through the chat participant or the CLI, not a custom
 dashboard.
 
-```
-┌─────────────────┐   ┌─────────────────┐   ┌──────────────────────────┐
-│   CLI (ariadne)  │   │   MCP server    │   │  VS Code extension +    │
-│                  │   │                 │   │  Copilot Chat participant│
-└────────┬─────────┘   └────────┬────────┘   └────────────┬─────────────┘
-         │                      │                          │
-         └──────────────────────┼──────────────────────────┘
-                                 │
-                         ┌───────▼────────┐
-                         │  @ariadne-dev/core │   SQLite schema + TaskStore
-                         └───────┬────────┘
-                                 │
-                    <workspace-root>/.ariadne/state.db
-```
+[![Ariadne architecture: local clients and shared core, with optional cloud sync](docs/architecture/ariadne.png)](docs/architecture/ariadne.html)
+
+*Click the diagram to open the interactive architecture view.*
 
 - **Storage**: SQLite, local to each workspace, gitignored by default.
-  Markdown export is opt-in for sharing task state.
+  The machine-wide registry is only an index for cross-workspace discovery;
+  it is not a second source of task history.
 - **Summarization**: rule-based and fully deterministic for now — no LLM
   calls, no network access required. LLM-based summarization is planned as
   an opt-in plugin later.
 - **Integration**: any surface (CLI, MCP server, chat participant) can read
   and write the same task state, so switching AI assistants doesn't lose
   anything.
+- **Optional cloud sync**: push/pull task data to a self-hosted server; local
+  use does not depend on it.
 
 New to Ariadne? Read [`docs/05-USER-GUIDE.md`](docs/05-USER-GUIDE.md) for a
 practical walkthrough of installing and using all three surfaces. See
