@@ -1,9 +1,9 @@
 # Knowledge Benchmark Baseline Report
 
-- Benchmark ID: a0390fa1dd099b836f82ece061b1f28f218040202031171cc1fa9101ff496508
+- Benchmark ID: 8ad674d399b4065b3e0f94cb8d207e2b35881ac6e5b6e9ccb854e543dfcdc8ad
 - Schema Version: knowledge-benchmark-report-v1
-- Generated At: 2026-09-30T09:19:27.817Z
-- Git Commit: 7d63cd44f6e382524e4ce96f0316a588426d7e0b
+- Generated At: 2026-09-30T10:20:37.158Z
+- Git Commit: 04464e9f3564fd2e0e89805973f235600ddea75a
 - Git Dirty: no
 
 ## Gates
@@ -35,22 +35,22 @@
 | Observation | Value |
 | --- | --- |
 | Policy | observational |
-| Cold construction (ms) | 83.146 |
-| Worker drain (ms) | 999.347 |
-| Completed jobs per second | 8.005226 |
-| Source bytes per second | 4096.674580 |
-| Incremental update (ms) | 106.459 |
-| Search latency p50 (ms) | 29.581 |
-| Search latency p95 (ms) | 53.393 |
-| Search latency p99 (ms) | 68.983 |
-| SQLite main bytes | 2355200 |
+| Cold construction (ms) | 121.755 |
+| Worker drain (ms) | 842.166 |
+| Completed jobs per second | 9.499312 |
+| Source bytes per second | 4861.272776 |
+| Incremental update (ms) | 143.818 |
+| Search latency p50 (ms) | 30.158 |
+| Search latency p95 (ms) | 53.088 |
+| Search latency p99 (ms) | 57.759 |
+| SQLite main bytes | 2347008 |
 | SQLite WAL bytes | 0 |
 | SQLite SHM bytes | 32768 |
-| SQLite total bytes | 2387968 |
-| Storage amplification | 583.284807 |
-| RSS start bytes | 80453632 |
-| RSS peak bytes | 134520832 |
-| RSS delta bytes | 54067200 |
+| SQLite total bytes | 2379776 |
+| Storage amplification | 581.283830 |
+| RSS start bytes | 82972672 |
+| RSS peak bytes | 136777728 |
+| RSS delta bytes | 53805056 |
 
 Machine-dependent values are observational in baseline v1.
 
@@ -59,8 +59,8 @@ Machine-dependent values are observational in baseline v1.
 | Field | Value |
 | --- | --- |
 | Digest algorithm | sha256 |
-| First run digest | b8fa793580e02eec2f8c5bbce496ed1dcf25a7020a02efebf510825ec2c2bd45 |
-| Second run digest | b8fa793580e02eec2f8c5bbce496ed1dcf25a7020a02efebf510825ec2c2bd45 |
+| First run digest | b1cfd8438b93fffb84106d6207746d4c6c09180e412978a0d7aa70d89b8c5fb8 |
+| Second run digest | b1cfd8438b93fffb84106d6207746d4c6c09180e412978a0d7aa70d89b8c5fb8 |
 | Matched | yes |
 
 ## Environment

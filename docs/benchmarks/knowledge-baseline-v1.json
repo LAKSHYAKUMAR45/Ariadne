@@ -1,9 +1,9 @@
 {
   "schemaVersion": "knowledge-benchmark-report-v1",
-  "benchmarkId": "a0390fa1dd099b836f82ece061b1f28f218040202031171cc1fa9101ff496508",
-  "generatedAt": "2026-09-30T09:19:27.817Z",
+  "benchmarkId": "8ad674d399b4065b3e0f94cb8d207e2b35881ac6e5b6e9ccb854e543dfcdc8ad",
+  "generatedAt": "2026-09-30T10:20:37.158Z",
   "git": {
-    "commit": "7d63cd44f6e382524e4ce96f0316a588426d7e0b",
+    "commit": "04464e9f3564fd2e0e89805973f235600ddea75a",
     "dirty": false
   },
   "environment": {
@@ -84,33 +84,33 @@
   },
   "performance": {
     "policy": "observational",
-    "coldConstructionMs": 83.146,
-    "workerDrainMs": 999.347,
-    "completedJobsPerSecond": 8.005226,
-    "sourceBytesPerSecond": 4096.67458,
-    "incrementalUpdateMs": 106.459,
+    "coldConstructionMs": 121.755,
+    "workerDrainMs": 842.166,
+    "completedJobsPerSecond": 9.499312,
+    "sourceBytesPerSecond": 4861.272776,
+    "incrementalUpdateMs": 143.818,
     "searchLatencyMs": {
-      "p50": 29.581,
-      "p95": 53.393,
-      "p99": 68.983
+      "p50": 30.158,
+      "p95": 53.088,
+      "p99": 57.759
     },
     "sqliteBytes": {
-      "main": 2355200,
+      "main": 2347008,
       "wal": 0,
       "shm": 32768,
-      "total": 2387968
+      "total": 2379776
     },
-    "storageAmplification": 583.284807,
+    "storageAmplification": 581.28383,
     "rssBytes": {
-      "start": 80453632,
-      "peak": 134520832,
-      "delta": 54067200
+      "start": 82972672,
+      "peak": 136777728,
+      "delta": 53805056
     }
   },
   "determinism": {
     "digestAlgorithm": "sha256",
-    "firstRunDigest": "b8fa793580e02eec2f8c5bbce496ed1dcf25a7020a02efebf510825ec2c2bd45",
-    "secondRunDigest": "b8fa793580e02eec2f8c5bbce496ed1dcf25a7020a02efebf510825ec2c2bd45",
+    "firstRunDigest": "b1cfd8438b93fffb84106d6207746d4c6c09180e412978a0d7aa70d89b8c5fb8",
+    "secondRunDigest": "b1cfd8438b93fffb84106d6207746d4c6c09180e412978a0d7aa70d89b8c5fb8",
     "matched": true
   },
   "publicBenchmarks": [
