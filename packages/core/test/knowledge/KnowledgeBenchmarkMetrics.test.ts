@@ -43,6 +43,31 @@ describe('calculateKnowledgeBenchmarkQuality', () => {
     expect(metrics.typedGraphEvidenceRate).toEqual({ count: 1, total: 3, rate: 0.333333 });
   });
 
+  it('only counts ambiguity when the leading result is ambiguous', () => {
+    const metrics = calculateKnowledgeBenchmarkQuality([
+      {
+        id: 'q1',
+        expectedPaths: ['a.py'],
+        results: [
+          { title: 'a.py', hasSpanCitation: false, searchConfidence: 'clear' },
+          { title: 'b.py', hasSpanCitation: false, searchConfidence: 'ambiguous' },
+        ],
+        hasTypedGraphEvidence: false,
+      },
+      {
+        id: 'q2',
+        expectedPaths: ['c.py'],
+        results: [
+          { title: 'x.py', hasSpanCitation: false, searchConfidence: null },
+          { title: 'c.py', hasSpanCitation: true, searchConfidence: 'ambiguous' },
+        ],
+        hasTypedGraphEvidence: false,
+      },
+    ]);
+
+    expect(metrics.ambiguityRate).toEqual({ count: 0, total: 2, rate: 0 });
+  });
+
   it('uses the ideal denominator bounded by the number of expected paths and rank 10', () => {
     const metrics = calculateKnowledgeBenchmarkQuality([
       {

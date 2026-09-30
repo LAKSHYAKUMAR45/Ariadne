@@ -169,7 +169,7 @@ export function calculateKnowledgeBenchmarkQuality(
     if (outcome.results.length === 0) {
       zeroResultCount += 1;
     }
-    if (outcome.results.some((result) => result.searchConfidence === 'ambiguous')) {
+    if (outcome.results[0]?.searchConfidence === 'ambiguous') {
       ambiguityCount += 1;
     }
     if (outcome.results.some((result) => isRelevant(result.title, outcome.expectedPaths) && result.hasSpanCitation)) {
