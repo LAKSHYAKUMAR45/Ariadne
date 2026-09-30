@@ -44,5 +44,5 @@ describe('knowledge benchmark baseline artifact', () => {
     });
     expect(existsSync(REPORT_JSON_PATH)).toBe(true);
     expect(existsSync(REPORT_MARKDOWN_PATH)).toBe(true);
-  });
+  }, 300_000);
 });

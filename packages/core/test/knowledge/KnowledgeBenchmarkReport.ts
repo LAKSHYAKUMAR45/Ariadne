@@ -640,6 +640,9 @@ export function writeKnowledgeBenchmarkArtifacts(
   report: KnowledgeBenchmarkReportV1,
   privacy: KnowledgeBenchmarkPrivacyInput,
 ): { jsonPath: string; markdownPath: string } {
+  if (report.gates.passed !== true) {
+    throw new Error('Refusing to write benchmark artifacts for a report with failed gates');
+  }
   const normalizedOutputRoot = path.resolve(assertNonEmptyString(outputRoot, 'outputRoot'));
   fileSystem.mkdirSync(normalizedOutputRoot, { recursive: true });
 
@@ -692,20 +695,37 @@ export function writeKnowledgeBenchmarkArtifacts(
     }
     return { jsonPath, markdownPath };
   } catch (error: unknown) {
+    const failures: unknown[] = [error];
+    const attempt = (step: () => void): void => {
+      try {
+        step();
+      } catch (rollbackError) {
+        failures.push(rollbackError);
+      }
+    };
     for (const transition of [...transitions].reverse()) {
       if (transition.promoted) {
-        fileSystem.rmSync(transition.targetPath, { force: true, recursive: true });
+        attempt(() => fileSystem.rmSync(transition.targetPath, { force: true, recursive: true }));
       }
       if (transition.backedUp) {
-        fileSystem.renameSync(transition.backupPath, transition.targetPath);
-        transition.backedUp = false;
+        attempt(() => {
+          fileSystem.renameSync(transition.backupPath, transition.targetPath);
+          transition.backedUp = false;
+        });
       }
     }
-    fileSystem.rmSync(jsonTemp, { force: true, recursive: true });
-    fileSystem.rmSync(markdownTemp, { force: true, recursive: true });
-    fileSystem.rmSync(jsonBackup, { force: true, recursive: true });
-    fileSystem.rmSync(markdownBackup, { force: true, recursive: true });
-    throw error;
+    attempt(() => fileSystem.rmSync(jsonTemp, { force: true, recursive: true }));
+    attempt(() => fileSystem.rmSync(markdownTemp, { force: true, recursive: true }));
+    // A backup that could not be restored is the only copy of the original; keep it.
+    for (const transition of transitions) {
+      if (!transition.backedUp) {
+        attempt(() => fileSystem.rmSync(transition.backupPath, { force: true, recursive: true }));
+      }
+    }
+    if (failures.length === 1) {
+      throw error;
+    }
+    throw new AggregateError(failures, 'Benchmark artifact write failed and rollback was incomplete', { cause: error });
   }
 }
 

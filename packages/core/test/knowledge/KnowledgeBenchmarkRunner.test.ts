@@ -332,6 +332,72 @@ describe('runKnowledgeBenchmark', () => {
     expect(result.report.gates.passed).toBe(false);
   });
 
+  it('collects second-run quality failures into the quality gate', async () => {
+    const result = await runKnowledgeBenchmark(runOptions(), trackedHarness((harness, index) => index === 1
+      ? { ...harness, async runWorker() {} }
+      : harness));
+
+    expect(result.report.gates.passed).toBe(false);
+    expect(result.report.gates.quality.violations.join('\n')).toMatch(/determinism quality/);
+  });
+
+  it('collects second-run isolation failures into the correctness gate', async () => {
+    const result = await runKnowledgeBenchmark(runOptions(), trackedHarness((harness, index) => index === 1
+      ? {
+          ...harness,
+          async seedSentinelProject() {
+            await harness.seedSentinelProject();
+            return { projectId: harness.projectId };
+          },
+        }
+      : harness));
+
+    expect(result.report.gates.correctness.violations.join('\n')).toMatch(/determinism quality: .*leaked/);
+  });
+
+  it('throws with the preserved cause when privacy validation itself fails', async () => {
+    const cause = new Error('injected privacy failure');
+    const error = await runKnowledgeBenchmark(runOptions(), {
+      ...trackedHarness(),
+      assertPrivacy: () => {
+        throw cause;
+      },
+    }).catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toMatch(/privacy/i);
+    expect((error as Error).cause).toBe(cause);
+    for (const harness of created) expect(existsSync(harness.workspaceRoot)).toBe(false);
+  });
+
+  it('throws with the preserved cause when the archive gate throws', async () => {
+    const cause = new Error('injected archive failure');
+    const error = await runKnowledgeBenchmark(runOptions(), {
+      ...trackedHarness(),
+      runArchiveGate: () => {
+        throw cause;
+      },
+    }).catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toMatch(/archive gate/i);
+    expect((error as Error).cause).toBe(cause);
+  });
+
+  it('throws with the preserved cause when the sentinel-only search throws', async () => {
+    const cause = new Error('injected sentinel search failure');
+    const error = await runKnowledgeBenchmark(runOptions(), {
+      ...trackedHarness(),
+      searchSentinel: () => {
+        throw cause;
+      },
+    }).catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toMatch(/sentinel/i);
+    expect((error as Error).cause).toBe(cause);
+  });
+
   it('removes every temporary workspace after success', async () => {
     await runKnowledgeBenchmark(runOptions(), trackedHarness());
 

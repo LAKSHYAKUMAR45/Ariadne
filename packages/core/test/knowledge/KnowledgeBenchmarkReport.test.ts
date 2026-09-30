@@ -337,4 +337,67 @@ describe('writeKnowledgeBenchmarkArtifacts', () => {
     expect(fs.existsSync(`${jsonPath}.bak-${process.pid}`)).toBe(false);
     expect(fs.existsSync(`${markdownPath}.bak-${process.pid}`)).toBe(false);
   });
+
+  it('rejects a report whose gates failed without writing any target', () => {
+    const outputRoot = createScratchDir('failed-gates');
+    const input = validReportInput();
+    const report = createKnowledgeBenchmarkReport({
+      ...input,
+      gates: {
+        ...input.gates,
+        passed: false,
+        quality: { passed: false, violations: ['Recall@1 below threshold'] },
+      },
+    });
+
+    expect(() => writeKnowledgeBenchmarkArtifacts(outputRoot, report, privacyInput())).toThrow(/gates/i);
+
+    expect(fs.readdirSync(outputRoot)).toEqual([]);
+  });
+
+  it('preserves the original failure, attempts every rollback step, and keeps an unrestorable backup', () => {
+    const outputRoot = createScratchDir('rollback-failure');
+    const jsonPath = path.join(outputRoot, 'knowledge-baseline-v1.json');
+    const markdownPath = path.join(outputRoot, 'knowledge-baseline-v1.md');
+    fs.writeFileSync(jsonPath, '{"stable":true}\n', 'utf8');
+    fs.writeFileSync(markdownPath, '# Existing\n', 'utf8');
+
+    const markdownTempPath = `${markdownPath}.tmp-${process.pid}`;
+    const jsonBackupPath = `${jsonPath}.bak-${process.pid}`;
+    __setKnowledgeBenchmarkReportFileSystemForTest({
+      existsSync: fs.existsSync,
+      mkdirSync: fs.mkdirSync,
+      readFileSync: fs.readFileSync,
+      rmSync: fs.rmSync,
+      writeFileSync: fs.writeFileSync,
+      renameSync(from, to) {
+        if (from === markdownTempPath && to === markdownPath) {
+          throw new Error('simulated markdown rename failure');
+        }
+        if (from === jsonBackupPath && to === jsonPath) {
+          throw new Error('simulated json restore failure');
+        }
+        return fs.renameSync(from, to);
+      },
+    });
+
+    const report = createKnowledgeBenchmarkReport(validReportInput());
+    let caught: unknown;
+    try {
+      writeKnowledgeBenchmarkArtifacts(outputRoot, report, privacyInput());
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught).toBeInstanceOf(AggregateError);
+    const messages = (caught as AggregateError).errors.map((error: Error) => error.message);
+    expect(messages).toEqual(expect.arrayContaining([
+      'simulated markdown rename failure',
+      'simulated json restore failure',
+    ]));
+    expect(fs.readFileSync(markdownPath, 'utf8')).toBe('# Existing\n');
+    expect(fs.readFileSync(jsonBackupPath, 'utf8')).toBe('{"stable":true}\n');
+    expect(fs.existsSync(`${jsonPath}.tmp-${process.pid}`)).toBe(false);
+    expect(fs.existsSync(markdownTempPath)).toBe(false);
+  });
 });

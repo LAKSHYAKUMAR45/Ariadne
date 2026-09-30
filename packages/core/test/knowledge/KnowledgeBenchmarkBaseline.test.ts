@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import {
   filterKnowledgeBenchmarkGitStatusEntries,
@@ -58,5 +59,17 @@ describe('knowledge benchmark baseline git status filtering', () => {
     ].join('\n'));
 
     expect(isKnowledgeBenchmarkGitDirty(entries)).toBe(false);
+  });
+});
+
+describe('knowledge benchmark package wiring', () => {
+  it('runs the baseline helper tests in the benchmark script', () => {
+    const pkg = JSON.parse(readFileSync('package.json', 'utf8')) as { scripts: Record<string, string> };
+    expect(pkg.scripts['test:knowledge:benchmark']).toContain('test/knowledge/KnowledgeBenchmarkBaseline.test.ts');
+  });
+
+  it('gives the authoritative baseline run an explicit timeout', () => {
+    const source = readFileSync('test/knowledge/KnowledgeBenchmark.baseline.test.ts', 'utf8');
+    expect(source).toMatch(/\},\s*300_000,?\s*\);/);
   });
 });

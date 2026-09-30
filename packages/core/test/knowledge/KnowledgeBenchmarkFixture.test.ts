@@ -1,3 +1,6 @@
+import { existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   createKnowledgeBenchmarkHarness,
@@ -78,6 +81,40 @@ describe('createKnowledgeBenchmarkHarness', () => {
       ).get(harness.projectId)).toEqual({ count: 1 });
     } finally {
       harness.cleanup();
+    }
+  });
+
+  it('creates its temporary root outside the repository working directory', () => {
+    const harness = createKnowledgeBenchmarkHarness();
+    try {
+      expect(harness.workspaceRoot.startsWith(tmpdir())).toBe(true);
+    } finally {
+      harness.cleanup();
+    }
+  });
+
+  it('removes its temporary root when construction fails after the root is created', () => {
+    const before = new Set(readdirSync(tmpdir()).filter((name) => name.startsWith('.knowledge-benchmark-')));
+
+    expect(() => createKnowledgeBenchmarkHarness({ createdAt: {} as unknown as string })).toThrow();
+
+    const leaked = readdirSync(tmpdir()).filter(
+      (name) => name.startsWith('.knowledge-benchmark-') && !before.has(name),
+    );
+    expect(leaked).toEqual([]);
+  });
+
+  it('closes but does not delete a caller-supplied database path when construction fails', () => {
+    const externalRoot = mkdtempSync(join(tmpdir(), 'knowledge-benchmark-external-'));
+    const databasePath = join(externalRoot, 'external.db');
+    try {
+      expect(() => createKnowledgeBenchmarkHarness({
+        databasePath,
+        createdAt: {} as unknown as string,
+      })).toThrow();
+      expect(existsSync(databasePath)).toBe(true);
+    } finally {
+      rmSync(externalRoot, { recursive: true, force: true });
     }
   });
 });

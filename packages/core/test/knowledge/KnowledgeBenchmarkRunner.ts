@@ -51,6 +51,9 @@ export interface KnowledgeBenchmarkRunResult {
 export interface KnowledgeBenchmarkRunnerDependencies {
   createHarness: typeof createKnowledgeBenchmarkHarness;
   hashProjection: (projection: unknown) => string;
+  runArchiveGate: typeof runKnowledgeBenchmarkArchiveGate;
+  assertPrivacy: typeof assertKnowledgeBenchmarkPrivacy;
+  searchSentinel: typeof searchKnowledge;
 }
 
 interface ProjectedResult {
@@ -366,6 +369,7 @@ async function verifySentinelProject(
   harness: KnowledgeBenchmarkHarness,
   sentinelProjectId: string,
   label: string,
+  searchSentinel: typeof searchKnowledge,
 ): Promise<string[]> {
   const { db } = harness;
   const violations: string[] = [];
@@ -390,13 +394,13 @@ async function verifySentinelProject(
   }
   let found = false;
   try {
-    found = searchKnowledge(KNOWLEDGE_BENCHMARK_SENTINEL_CANARIES[0], {
+    found = searchSentinel(KNOWLEDGE_BENCHMARK_SENTINEL_CANARIES[0], {
       db,
       projectId: sentinelProjectId,
       mode: 'sources',
     }).some((result) => result.projectId === sentinelProjectId);
-  } catch {
-    found = false;
+  } catch (error) {
+    throw new Error(`${label}: sentinel-only search failed`, { cause: error });
   }
   if (!found) {
     violations.push('Sentinel-only search returned no result under the sentinel project');
@@ -504,6 +508,7 @@ function cleanupAll(harnesses: readonly KnowledgeBenchmarkHarness[]): unknown[] 
 async function buildProcessedHarness(
   harness: KnowledgeBenchmarkHarness,
   workerId: string,
+  searchSentinel: typeof searchKnowledge,
 ): Promise<{ sentinelProjectId: string; violations: string[] }> {
   const { queuedJobCount } = harness.seedInitialSources();
   await harness.runWorker(workerId);
@@ -512,7 +517,7 @@ async function buildProcessedHarness(
     ...collectCorrectnessViolations(harness, 'determinism build'),
   ];
   const sentinel = await harness.seedSentinelProject();
-  violations.push(...await verifySentinelProject(harness, sentinel.projectId, 'determinism build'));
+  violations.push(...await verifySentinelProject(harness, sentinel.projectId, 'determinism build', searchSentinel));
   return { sentinelProjectId: sentinel.projectId, violations };
 }
 
@@ -540,6 +545,9 @@ export async function runKnowledgeBenchmark(
   const timedRounds = requireValidRounds(options.timedSearchRounds ?? DEFAULT_TIMED_SEARCH_ROUNDS);
   const createHarness = dependencies.createHarness ?? createKnowledgeBenchmarkHarness;
   const hashProjection = dependencies.hashProjection ?? defaultHashProjection;
+  const runArchiveGate = dependencies.runArchiveGate ?? runKnowledgeBenchmarkArchiveGate;
+  const assertPrivacy = dependencies.assertPrivacy ?? assertKnowledgeBenchmarkPrivacy;
+  const searchSentinel = dependencies.searchSentinel ?? searchKnowledge;
   const harnesses: KnowledgeBenchmarkHarness[] = [];
   let primaryFailure: unknown;
 
@@ -575,7 +583,7 @@ export async function runKnowledgeBenchmark(
 
     const bytes = sqliteBytes(harness);
     const { projectId: sentinelProjectId } = await harness.seedSentinelProject();
-    correctnessViolations.push(...await verifySentinelProject(harness, sentinelProjectId, 'initial build'));
+    correctnessViolations.push(...await verifySentinelProject(harness, sentinelProjectId, 'initial build', searchSentinel));
     await yieldToEventLoop();
     const quality = runQualityPass(harness, sentinelProjectId, 'initial quality');
     await yieldToEventLoop();
@@ -626,27 +634,29 @@ export async function runKnowledgeBenchmark(
 
     await yieldToEventLoop();
     try {
-      runKnowledgeBenchmarkArchiveGate(harness.db, harness.projectId);
-    } catch {
-      correctnessViolations.push('Archive gate rejected the benchmark project export or tampered import checks');
+      runArchiveGate(harness.db, harness.projectId);
+    } catch (error) {
+      throw new Error('Archive gate failed for the benchmark project', { cause: error });
     }
 
     const firstRunDigest = hashProjection(firstProjection);
     const second = createHarness();
     harnesses.push(second);
-    const secondSentinel = await buildProcessedHarness(second, 'benchmark-determinism');
+    const secondSentinel = await buildProcessedHarness(second, 'benchmark-determinism', searchSentinel);
     await yieldToEventLoop();
-    const secondProjection = buildProjection(
-      second,
-      runQualityPass(second, secondSentinel.sentinelProjectId, 'determinism quality'),
-    );
+    const secondQuality = runQualityPass(second, secondSentinel.sentinelProjectId, 'determinism quality');
+    const secondProjection = buildProjection(second, secondQuality);
     correctnessViolations.push(...secondSentinel.violations);
     const secondRunDigest = hashProjection(secondProjection);
     const determinismMatched = firstRunDigest === secondRunDigest;
 
     const isLeak = (violation: string): boolean => /leaked/.test(violation);
-    const qualityViolations = [...quality.violations, ...incrementalQuality.violations].filter((v) => !isLeak(v));
-    const leakViolations = quality.violations.filter(isLeak);
+    const qualityViolations = [
+      ...quality.violations,
+      ...incrementalQuality.violations,
+      ...secondQuality.violations,
+    ].filter((v) => !isLeak(v));
+    const leakViolations = [...quality.violations, ...secondQuality.violations].filter(isLeak);
     const toMs = (ns: number): number => roundMetric(ns / NANOSECONDS_PER_MILLISECOND, 3);
 
     const privacy: KnowledgeBenchmarkPrivacyInput = {
@@ -701,18 +711,15 @@ export async function runKnowledgeBenchmark(
       determinism: gate(determinismMatched ? [] : ['Repeated clean run digests differ']),
     };
 
-    let report = assembleReport(options, body, { ...gates, privacy: gate([]) });
+    const report = assembleReport(options, body, { ...gates, privacy: gate([]) });
     try {
-      assertKnowledgeBenchmarkPrivacy(
+      assertPrivacy(
         serializeKnowledgeBenchmarkJson(report),
         renderKnowledgeBenchmarkMarkdown(report),
         privacy,
       );
-    } catch {
-      report = assembleReport(options, body, {
-        ...gates,
-        privacy: gate(['Privacy scan rejected the report content']),
-      });
+    } catch (error) {
+      throw new Error('Benchmark privacy validation failed', { cause: error });
     }
     return { report, privacy };
   } catch (error) {

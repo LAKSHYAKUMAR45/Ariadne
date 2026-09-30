@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, join, sep, relative, resolve } from 'node:path';
 import type Database from 'better-sqlite3';
 import { openDatabase } from '../../src/db.js';
@@ -144,24 +145,55 @@ export function createKnowledgeBenchmarkHarness(
     createdAt?: string;
   } = {},
 ): KnowledgeBenchmarkHarness {
-  const workspaceRoot = mkdtempSync(join(process.cwd(), '.knowledge-benchmark-'));
-  const databasePath = options.databasePath ?? join(workspaceRoot, 'state.db');
-  const projectId = options.projectId ?? DEFAULT_PROJECT_ID;
-  const createdAt = options.createdAt ?? DEFAULT_CREATED_AT;
-  const input = loadKnowledgeBenchmarkInput();
-  const db = openDatabase(databasePath);
-  applyKnowledgeMigrations(db);
+  const workspaceRoot = mkdtempSync(join(tmpdir(), '.knowledge-benchmark-'));
+  let db: Database.Database | undefined;
+  try {
+    const databasePath = options.databasePath ?? join(workspaceRoot, 'state.db');
+    const projectId = options.projectId ?? DEFAULT_PROJECT_ID;
+    const createdAt = options.createdAt ?? DEFAULT_CREATED_AT;
+    const input = loadKnowledgeBenchmarkInput();
+    const opened = openDatabase(databasePath);
+    db = opened;
+    applyKnowledgeMigrations(opened);
+    opened.prepare(
+      `INSERT INTO knowledge_projects
+       (id, workspace_root, name, status, created_at, updated_at)
+       VALUES (?, ?, 'Synthetic NAAS benchmark fixtures', 'active', ?, ?)`,
+    ).run(projectId, workspaceRoot, createdAt, createdAt);
+    return buildHarness(opened, databasePath, projectId, workspaceRoot, createdAt, input);
+  } catch (error) {
+    const failures: unknown[] = [error];
+    try {
+      db?.close();
+    } catch (closeError) {
+      failures.push(closeError);
+    }
+    // Only the harness-owned temporary root is removed; a caller-supplied databasePath stays put.
+    try {
+      rmSync(workspaceRoot, { recursive: true, force: true });
+    } catch (removeError) {
+      failures.push(removeError);
+    }
+    if (failures.length > 1) {
+      throw new AggregateError(failures, 'Benchmark harness construction failed and cleanup was incomplete', { cause: error });
+    }
+    throw error;
+  }
+}
+
+function buildHarness(
+  db: Database.Database,
+  databasePath: string,
+  projectId: string,
+  workspaceRoot: string,
+  createdAt: string,
+  input: KnowledgeBenchmarkInput,
+): KnowledgeBenchmarkHarness {
   const queue = new KnowledgeQueue(db, { now: () => createdAt });
   const sourceStore = new KnowledgeSourceStore(db);
   let cleaned = false;
   let databaseClosed = false;
   let workspaceRemoved = false;
-
-  db.prepare(
-    `INSERT INTO knowledge_projects
-     (id, workspace_root, name, status, created_at, updated_at)
-     VALUES (?, ?, 'Synthetic NAAS benchmark fixtures', 'active', ?, ?)`,
-  ).run(projectId, workspaceRoot, createdAt, createdAt);
 
   return {
     db,

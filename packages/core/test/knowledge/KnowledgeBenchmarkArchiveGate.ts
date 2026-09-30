@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type Database from 'better-sqlite3';
 import { openDatabase } from '../../src/db.js';
@@ -78,7 +79,7 @@ export function runKnowledgeBenchmarkArchiveGate(
   projectId: string,
 ): { passed: true } {
   const archive = exportKnowledgeProject(sourceDb, { projectId });
-  const isolatedRoot = mkdtempSync(join(process.cwd(), '.knowledge-benchmark-archive-'));
+  const isolatedRoot = mkdtempSync(join(tmpdir(), '.knowledge-benchmark-archive-'));
   let target: Database.Database | null = null;
   try {
     target = openDatabase(join(isolatedRoot, 'import-target.db'));
