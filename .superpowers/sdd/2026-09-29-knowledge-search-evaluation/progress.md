@@ -29,3 +29,7 @@ Task 5: Ruling: the first review inspected `/home/lkumar/Ariadne` rather than th
 Task 5: fix round 1/5 (1 addressed, 0 open; commit b2c2fea780ab55d097bbaee6b73a6dc047daedbd)
 Task 5: complete (commits 64ae9d0..b2c2fea, review clean after 1 fix round)
 Final review ruling: the approved spec governs the conflicting plan text; top-one is diagnostic only, while top-three/span/typed-graph thresholds are the acceptance gate. Cost if wrong: accepting the stricter gate would reject the recorded real NAAS result and make future ranking improvements impossible under the intended contract.
+Final review fix wave: commit fb5b33811614126cdfe5a797e0aeed750f3d0746; pending scoped re-review.
+Final fix wave: 1/1 review clean (commit fb5b338; top-one diagnostic-only gate and evaluator edge-case coverage addressed).
+Task 5: complete (commits 64ae9d0..fb5b338, review clean after 1 fix round)
+Final whole-branch review: clean after final fix wave scoped re-review.
