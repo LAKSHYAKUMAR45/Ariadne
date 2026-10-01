@@ -1,0 +1,578 @@
+import { createHash } from 'node:crypto';
+import { existsSync, statSync } from 'node:fs';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import {
+  createKnowledgeBenchmarkHarness,
+  type KnowledgeBenchmarkHarness,
+} from './KnowledgeBenchmarkFixture.js';
+import { runKnowledgeBenchmarkArchiveGate } from './KnowledgeBenchmarkArchiveGate.js';
+import {
+  runKnowledgeBenchmark,
+  type KnowledgeBenchmarkRunOptions,
+  type KnowledgeBenchmarkRunnerDependencies,
+} from './KnowledgeBenchmarkRunner.js';
+
+vi.setConfig({ testTimeout: 120_000 });
+
+const DIGEST_A = 'a'.repeat(64);
+const DIGEST_B = 'b'.repeat(64);
+
+function stableStringify(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`;
+  if (typeof value === 'object' && value !== null) {
+    const entries = Object.keys(value).sort().map((key) =>
+      `${JSON.stringify(key)}:${stableStringify((value as Record<string, unknown>)[key])}`);
+    return `{${entries.join(',')}}`;
+  }
+  return JSON.stringify(value) ?? 'null';
+}
+
+function digest(value: unknown): string {
+  return createHash('sha256').update(stableStringify(value)).digest('hex');
+}
+
+function firstProjectedResult(projection: unknown): Record<string, unknown> {
+  const questions = (projection as { questions: Array<{ results: Array<Record<string, unknown>> }> }).questions;
+  const result = questions.flatMap((question) => question.results).find((candidate) => candidate.hasSpanCitation === true);
+  if (!result) throw new Error('Expected a projected result with a span citation');
+  return result;
+}
+
+function testEnvironment(): KnowledgeBenchmarkRunOptions['environment'] {
+  return {
+    node: 'v22.10.0',
+    platform: 'linux',
+    architecture: 'x64',
+    cpuModel: 'Benchmark CPU',
+    logicalCpuCount: 4,
+    totalMemoryBytes: 8_589_934_592,
+  };
+}
+
+function runOptions(overrides: Partial<KnowledgeBenchmarkRunOptions> = {}): KnowledgeBenchmarkRunOptions {
+  return {
+    generatedAt: '2026-09-29T12:00:00.000Z',
+    git: { commit: 'a'.repeat(40), dirty: false },
+    environment: testEnvironment(),
+    timedSearchRounds: 2,
+    ...overrides,
+  };
+}
+
+describe('runKnowledgeBenchmark', () => {
+  const created: KnowledgeBenchmarkHarness[] = [];
+
+  afterEach(() => {
+    for (const harness of created.splice(0)) harness.cleanup();
+  });
+
+  function trackedHarness(
+    mutate: (harness: KnowledgeBenchmarkHarness, index: number) => KnowledgeBenchmarkHarness = (harness) => harness,
+  ): Partial<KnowledgeBenchmarkRunnerDependencies> {
+    return {
+      createHarness: (options) => {
+        const harness = createKnowledgeBenchmarkHarness(options);
+        created.push(harness);
+        return mutate(harness, created.length - 1);
+      },
+    };
+  }
+
+  it('runs the production pipeline and passes all portable gates', async () => {
+    const result = await runKnowledgeBenchmark(runOptions());
+
+    expect(result.report.gates.passed).toBe(true);
+    expect(result.report.configuration).toMatchObject({
+      corpusVersion: 'naas-v1',
+      sourceCount: 8,
+      requiredQuestionCount: 10,
+      searchWarmupRounds: 1,
+      searchTimedRounds: 2,
+      searchSampleCount: 20,
+    });
+    expect(result.report.quality.recallAt3.count).toBeGreaterThanOrEqual(8);
+    expect(result.report.quality.exactSpanCitationRate.count).toBe(10);
+    expect(result.report.quality.typedGraphEvidenceRate.count).toBeGreaterThanOrEqual(8);
+    expect(result.report.determinism.matched).toBe(true);
+    expect(result.report.performance.policy).toBe('observational');
+    expect(result.report.performance.completedJobsPerSecond).toBeGreaterThan(0);
+    expect(result.report.performance.storageAmplification).toBeGreaterThan(0);
+    expect(result.privacy.rawPrompts.length).toBeGreaterThanOrEqual(10);
+    expect(result.privacy.prohibitedValues.length).toBeGreaterThan(0);
+  });
+
+  it.each([0, -1, 1.5, Number.NaN])('rejects timedSearchRounds %s', async (rounds) => {
+    await expect(runKnowledgeBenchmark(runOptions({ timedSearchRounds: rounds }), trackedHarness()))
+      .rejects.toThrow(/timedSearchRounds/);
+    expect(created).toHaveLength(0);
+  });
+
+  it('keeps a sentinel project seeded, completed, and out of benchmark results', async () => {
+    let sentinelSources = 0;
+    const result = await runKnowledgeBenchmark(runOptions(), trackedHarness((harness) => ({
+      ...harness,
+      async seedSentinelProject() {
+        const sentinel = await harness.seedSentinelProject();
+        sentinelSources = (harness.db.prepare(
+          `SELECT COUNT(*) AS count FROM knowledge_jobs WHERE project_id = ? AND status = 'completed'`,
+        ).get(sentinel.projectId) as { count: number }).count;
+        return sentinel;
+      },
+    })));
+
+    expect(sentinelSources).toBeGreaterThan(0);
+    expect(result.report.gates.correctness).toEqual({ passed: true, violations: [] });
+  });
+
+  it('fails correctness when benchmark results belong to the sentinel project', async () => {
+    const result = await runKnowledgeBenchmark(runOptions(), trackedHarness((harness) => ({
+      ...harness,
+      async seedSentinelProject() {
+        await harness.seedSentinelProject();
+        return { projectId: harness.projectId };
+      },
+    })));
+
+    expect(result.report.gates.passed).toBe(false);
+    expect(result.report.gates.correctness.violations.join('\n')).toMatch(/sentinel/i);
+  });
+
+  it('fails correctness when a job is owned by a different project than its source version', async () => {
+    const result = await runKnowledgeBenchmark(runOptions(), trackedHarness((harness) => ({
+      ...harness,
+      async seedSentinelProject() {
+        const sentinel = await harness.seedSentinelProject();
+        const version = harness.db.prepare(
+          'SELECT id FROM knowledge_source_versions WHERE project_id = ? LIMIT 1',
+        ).get(harness.projectId) as { id: string };
+        harness.db.prepare(
+          `INSERT OR IGNORE INTO knowledge_jobs
+           (id, project_id, job_kind, source_version_id, status, payload_json, requested_at, completed_at)
+           VALUES ('wrong-project-job', ?, 'analyze', ?, 'completed', '{}', '2026-09-29T00:00:00.000Z', '2026-09-29T00:00:00.000Z')`,
+        ).run(sentinel.projectId, version.id);
+        return sentinel;
+      },
+    })));
+
+    expect(result.report.gates.correctness.passed).toBe(false);
+    expect(result.report.gates.correctness.violations.join('\n')).toMatch(/wrong project/i);
+  });
+
+  it('fails correctness on duplicate active jobs', async () => {
+    const result = await runKnowledgeBenchmark(runOptions(), trackedHarness((harness) => ({
+      ...harness,
+      async runWorker(workerId: string) {
+        await harness.runWorker(workerId);
+        harness.db.exec('DROP INDEX IF EXISTS idx_knowledge_jobs_source_version');
+        const job = harness.db.prepare(
+          `SELECT job_kind, source_version_id FROM knowledge_jobs WHERE project_id = ? LIMIT 1`,
+        ).get(harness.projectId) as { job_kind: string; source_version_id: string };
+        for (const id of ['duplicate-a', 'duplicate-b']) {
+          harness.db.prepare(
+            `INSERT OR IGNORE INTO knowledge_jobs
+             (id, project_id, job_kind, source_version_id, status, payload_json, requested_at)
+             VALUES (?, ?, ?, ?, 'queued', '{}', '2026-09-29T00:00:00.000Z')`,
+          ).run(id, harness.projectId, job.job_kind, job.source_version_id);
+        }
+      },
+    })));
+
+    expect(result.report.gates.correctness.passed).toBe(false);
+    expect(result.report.gates.correctness.violations.join('\n')).toMatch(/duplicate active job/i);
+  });
+
+  it('fails correctness on duplicate current source versions', async () => {
+    const result = await runKnowledgeBenchmark(runOptions(), trackedHarness((harness) => ({
+      ...harness,
+      async runWorker(workerId: string) {
+        await harness.runWorker(workerId);
+        harness.db.exec(
+          `INSERT OR IGNORE INTO knowledge_sources
+           (id, project_id, source_kind, source_path, current_hash, status, created_at, updated_at)
+           SELECT 'dup-source', project_id, source_kind, source_path, 'dup-hash', status, created_at, updated_at
+           FROM knowledge_sources WHERE source_path = 'task-managers/configlet.py'`,
+        );
+        harness.db.exec(
+          `INSERT OR IGNORE INTO knowledge_source_versions
+           (id, project_id, source_id, version_number, content_hash, content_path, byte_length, created_at)
+           SELECT 'dup-version', project_id, 'dup-source', 1, 'dup-hash', content_path, byte_length, created_at
+           FROM knowledge_source_versions LIMIT 1`,
+        );
+      },
+    })));
+
+    expect(result.report.gates.correctness.passed).toBe(false);
+    expect(result.report.gates.correctness.violations.join('\n')).toMatch(/duplicate current source version/i);
+  });
+
+  it('fails correctness and quality when a required source job failed', async () => {
+    const result = await runKnowledgeBenchmark(runOptions(), trackedHarness((harness) => ({
+      ...harness,
+      async runWorker(workerId: string) {
+        await harness.runWorker(workerId);
+        harness.db.prepare(
+          `UPDATE knowledge_jobs SET status = 'failed', failure_code = 'injected_failure', failure_message = 'x'
+           WHERE id = (SELECT id FROM knowledge_jobs WHERE project_id = ? ORDER BY id LIMIT 1)`,
+        ).run(harness.projectId);
+      },
+    })));
+
+    expect(result.report.gates.passed).toBe(false);
+    expect(result.report.gates.correctness.violations.join('\n')).toMatch(/required source job failed/i);
+  });
+
+  it('fails correctness when the sentinel analyze job did not complete', async () => {
+    const result = await runKnowledgeBenchmark(runOptions(), trackedHarness((harness) => ({
+      ...harness,
+      async seedSentinelProject() {
+        const sentinel = await harness.seedSentinelProject();
+        harness.db.prepare(
+          `UPDATE knowledge_jobs SET status = 'failed', failure_code = 'injected_failure', failure_message = 'x'
+           WHERE project_id = ?`,
+        ).run(sentinel.projectId);
+        return sentinel;
+      },
+    })));
+
+    expect(result.report.gates.correctness.passed).toBe(false);
+    expect(result.report.gates.correctness.violations.join('\n')).toMatch(/sentinel.*(job|completed)/i);
+  });
+
+  it('fails correctness when the sentinel is not seeded or searchable', async () => {
+    const result = await runKnowledgeBenchmark(runOptions(), trackedHarness((harness) => ({
+      ...harness,
+      async seedSentinelProject() {
+        return { projectId: 'never-seeded-sentinel' };
+      },
+    })));
+
+    expect(result.report.gates.correctness.passed).toBe(false);
+    expect(result.report.gates.correctness.violations.join('\n')).toMatch(/sentinel/i);
+  });
+
+  it('fails correctness when the queued job count does not match the fixture sources', async () => {
+    const result = await runKnowledgeBenchmark(runOptions(), trackedHarness((harness) => ({
+      ...harness,
+      seedInitialSources() {
+        const seeded = harness.seedInitialSources();
+        return { queuedJobCount: seeded.queuedJobCount - 1 };
+      },
+    })));
+
+    expect(result.report.gates.correctness.passed).toBe(false);
+    expect(result.report.gates.correctness.violations.join('\n')).toMatch(/queued job count/i);
+  });
+
+  it('fails correctness when an analyze job is missing for a current version', async () => {
+    let deleted = false;
+    const result = await runKnowledgeBenchmark(runOptions(), trackedHarness((harness) => ({
+      ...harness,
+      async runWorker(workerId: string) {
+        await harness.runWorker(workerId);
+        if (deleted) return;
+        deleted = true;
+        harness.db.prepare(
+          `DELETE FROM knowledge_jobs WHERE id = (
+             SELECT id FROM knowledge_jobs WHERE project_id = ? AND job_kind = 'analyze' ORDER BY id LIMIT 1)`,
+        ).run(harness.projectId);
+      },
+    })));
+
+    expect(result.report.gates.correctness.passed).toBe(false);
+    expect(result.report.gates.correctness.violations.join('\n')).toMatch(/analyze job/i);
+  });
+
+  it('fails correctness when a fixture source is missing', async () => {
+    const result = await runKnowledgeBenchmark(runOptions(), trackedHarness((harness) => ({
+      ...harness,
+      seedInitialSources() {
+        const seeded = harness.seedInitialSources();
+        harness.db.pragma('foreign_keys = OFF');
+        const source = harness.db.prepare(
+          'SELECT id FROM knowledge_sources WHERE project_id = ? ORDER BY id LIMIT 1',
+        ).get(harness.projectId) as { id: string };
+        harness.db.prepare('DELETE FROM knowledge_jobs WHERE project_id = ? AND source_version_id IN (SELECT id FROM knowledge_source_versions WHERE source_id = ?)').run(harness.projectId, source.id);
+        harness.db.prepare('DELETE FROM knowledge_source_versions WHERE source_id = ?').run(source.id);
+        harness.db.prepare('DELETE FROM knowledge_sources WHERE id = ?').run(source.id);
+        harness.db.pragma('foreign_keys = ON');
+        return { queuedJobCount: seeded.queuedJobCount - 1 };
+      },
+    })));
+
+    expect(result.report.gates.correctness.passed).toBe(false);
+    expect(result.report.gates.correctness.violations.join('\n')).toMatch(/missing|source row/i);
+  });
+
+  it('fails correctness when a failed job has no resolvable source version', async () => {
+    const result = await runKnowledgeBenchmark(runOptions(), trackedHarness((harness) => ({
+      ...harness,
+      async runWorker(workerId: string) {
+        await harness.runWorker(workerId);
+        harness.db.prepare(
+          `INSERT OR IGNORE INTO knowledge_jobs
+           (id, project_id, job_kind, source_version_id, status, failure_code, failure_message, payload_json, requested_at)
+           VALUES ('orphan-failed', ?, 'analyze', NULL, 'failed', 'orphan', 'x', '{}', '2026-09-29T00:00:00.000Z')`,
+        ).run(harness.projectId);
+      },
+    })));
+
+    expect(result.report.gates.correctness.passed).toBe(false);
+    expect(result.report.gates.correctness.violations.join('\n')).toMatch(/unresolved source/i);
+  });
+
+  it('measures SQLite bytes for the initial fixture project before the sentinel is seeded', async () => {
+    let bytesBeforeSentinel = 0;
+    const result = await runKnowledgeBenchmark(runOptions(), trackedHarness((harness, index) => ({
+      ...harness,
+      async seedSentinelProject() {
+        if (index === 0) {
+          harness.db.pragma('wal_checkpoint(TRUNCATE)');
+          bytesBeforeSentinel = [harness.databasePath, `${harness.databasePath}-wal`, `${harness.databasePath}-shm`]
+            .reduce((total, path) => total + (existsSync(path) ? statSync(path).size : 0), 0);
+        }
+        return harness.seedSentinelProject();
+      },
+    })));
+
+    expect(bytesBeforeSentinel).toBeGreaterThan(0);
+    expect(result.report.performance.sqliteBytes.total).toBe(bytesBeforeSentinel);
+  });
+
+  it('fails determinism when the second projection digest differs', async () => {
+    let calls = 0;
+    const result = await runKnowledgeBenchmark(runOptions(), {
+      ...trackedHarness(),
+      hashProjection: () => (calls++ === 0 ? DIGEST_A : DIGEST_B),
+    });
+
+    expect(result.report.determinism).toMatchObject({
+      firstRunDigest: DIGEST_A,
+      secondRunDigest: DIGEST_B,
+      matched: false,
+    });
+    expect(result.report.gates.determinism.passed).toBe(false);
+    expect(result.report.gates.passed).toBe(false);
+  });
+
+  it('changes the canonical digest when stable result identity changes without using unstable IDs', async () => {
+    const projections: unknown[] = [];
+    await runKnowledgeBenchmark(runOptions(), {
+      ...trackedHarness(),
+      hashProjection: (projection) => {
+        projections.push(structuredClone(projection));
+        return digest(projection);
+      },
+    });
+
+    const original = projections[0];
+    const changed = structuredClone(original);
+    const projected = firstProjectedResult(changed);
+    const identity = projected.identity as Record<string, unknown>;
+    identity.path = `${String(identity.path)}.renamed`;
+
+    expect(projected).not.toHaveProperty('id');
+    expect(projected).not.toHaveProperty('projectId');
+    expect(digest(changed)).not.toBe(digest(original));
+  });
+
+  it('changes the canonical digest when exact citation coordinates change while span presence remains true', async () => {
+    const projections: unknown[] = [];
+    await runKnowledgeBenchmark(runOptions(), {
+      ...trackedHarness(),
+      hashProjection: (projection) => {
+        projections.push(structuredClone(projection));
+        return digest(projection);
+      },
+    });
+
+    const original = projections[0];
+    const changed = structuredClone(original);
+    const projected = firstProjectedResult(changed);
+    const citations = projected.citations as Array<{ span: { startOffset: number } | null }>;
+    const citation = citations.find((candidate) => candidate.span !== null);
+    if (!citation?.span) throw new Error('Expected an exact projected citation span');
+    citation.span.startOffset += 1;
+
+    expect(projected.hasSpanCitation).toBe(true);
+    expect(digest(changed)).not.toBe(digest(original));
+  });
+
+  it('changes the canonical digest when citation identity changes while span presence remains true', async () => {
+    const projections: unknown[] = [];
+    await runKnowledgeBenchmark(runOptions(), {
+      ...trackedHarness(),
+      hashProjection: (projection) => {
+        projections.push(structuredClone(projection));
+        return digest(projection);
+      },
+    });
+
+    const original = projections[0];
+    const changed = structuredClone(original);
+    const projected = firstProjectedResult(changed);
+    const citations = projected.citations as Array<{ path: string | null; span: object | null }>;
+    const citation = citations.find((candidate) => candidate.span !== null);
+    if (!citation) throw new Error('Expected an exact projected citation');
+    citation.path = `${String(citation.path)}.renamed`;
+
+    expect(projected.hasSpanCitation).toBe(true);
+    expect(digest(changed)).not.toBe(digest(original));
+  });
+
+  it('collects second-run quality failures into the quality gate', async () => {
+    const result = await runKnowledgeBenchmark(runOptions(), trackedHarness((harness, index) => index === 1
+      ? { ...harness, async runWorker() {} }
+      : harness));
+
+    expect(result.report.gates.passed).toBe(false);
+    expect(result.report.gates.quality.violations.join('\n')).toMatch(/determinism quality/);
+  });
+
+  it('collects second-run isolation failures into the correctness gate', async () => {
+    const result = await runKnowledgeBenchmark(runOptions(), trackedHarness((harness, index) => index === 1
+      ? {
+          ...harness,
+          async seedSentinelProject() {
+            await harness.seedSentinelProject();
+            return { projectId: harness.projectId };
+          },
+        }
+      : harness));
+
+    expect(result.report.gates.correctness.violations.join('\n')).toMatch(/determinism quality: .*leaked/);
+  });
+
+  it('throws with the preserved cause when privacy validation itself fails', async () => {
+    const cause = new Error('injected privacy failure');
+    const error = await runKnowledgeBenchmark(runOptions(), {
+      ...trackedHarness(),
+      assertPrivacy: () => {
+        throw cause;
+      },
+    }).catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toMatch(/privacy/i);
+    expect((error as Error).cause).toBe(cause);
+    for (const harness of created) expect(existsSync(harness.workspaceRoot)).toBe(false);
+  });
+
+  it('throws with the preserved cause when the archive gate throws', async () => {
+    const cause = new Error('injected archive failure');
+    const error = await runKnowledgeBenchmark(runOptions(), {
+      ...trackedHarness(),
+      runArchiveGate: () => {
+        throw cause;
+      },
+    }).catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toMatch(/archive gate/i);
+    expect((error as Error).cause).toBe(cause);
+  });
+
+  it('throws with the preserved cause when the sentinel-only search throws', async () => {
+    const cause = new Error('injected sentinel search failure');
+    const error = await runKnowledgeBenchmark(runOptions(), {
+      ...trackedHarness(),
+      searchSentinel: () => {
+        throw cause;
+      },
+    }).catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toMatch(/sentinel/i);
+    expect((error as Error).cause).toBe(cause);
+  });
+
+  it('removes every temporary workspace after success', async () => {
+    await runKnowledgeBenchmark(runOptions(), trackedHarness());
+
+    expect(created).toHaveLength(2);
+    for (const harness of created) expect(existsSync(harness.workspaceRoot)).toBe(false);
+  });
+
+  it('removes every temporary workspace after an injected failure', async () => {
+    let calls = 0;
+    await expect(runKnowledgeBenchmark(runOptions(), {
+      ...trackedHarness(),
+      hashProjection: () => {
+        calls += 1;
+        if (calls === 2) throw new Error('injected hash failure');
+        return DIGEST_A;
+      },
+    })).rejects.toThrow('injected hash failure');
+
+    expect(created).toHaveLength(2);
+    for (const harness of created) expect(existsSync(harness.workspaceRoot)).toBe(false);
+  });
+
+  it('removes the first workspace when the second harness cannot be created', async () => {
+    let calls = 0;
+    await expect(runKnowledgeBenchmark(runOptions(), {
+      createHarness: (options) => {
+        calls += 1;
+        if (calls === 2) throw new Error('injected create failure');
+        const harness = createKnowledgeBenchmarkHarness(options);
+        created.push(harness);
+        return harness;
+      },
+    })).rejects.toThrow('injected create failure');
+
+    expect(created).toHaveLength(1);
+    expect(existsSync(created[0].workspaceRoot)).toBe(false);
+  });
+
+  it('preserves a primary benchmark failure and reports every cleanup failure', async () => {
+    const primary = new Error('injected primary failure');
+    const cleanupA = new Error('injected cleanup failure A');
+    const cleanupB = new Error('injected cleanup failure B');
+    let cleanupCalls = 0;
+    let hashCalls = 0;
+    const error = await runKnowledgeBenchmark(runOptions(), {
+      ...trackedHarness((harness) => ({
+        ...harness,
+        cleanup() {
+          cleanupCalls += 1;
+          harness.cleanup();
+          throw cleanupCalls === 1 ? cleanupA : cleanupB;
+        },
+      })),
+      hashProjection: () => {
+        hashCalls += 1;
+        if (hashCalls === 2) throw primary;
+        return DIGEST_A;
+      },
+    }).catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(AggregateError);
+    expect((error as AggregateError).cause).toBe(primary);
+    expect((error as AggregateError).errors).toEqual(expect.arrayContaining([
+      primary,
+      cleanupA,
+      cleanupB,
+    ]));
+  });
+});
+
+describe('runKnowledgeBenchmarkArchiveGate', () => {
+  it('exports a benchmark project and rejects mismatched project rows and undeclared columns', async () => {
+    const harness = createKnowledgeBenchmarkHarness({ projectId: 'archive-gate-benchmark' });
+    try {
+      harness.seedInitialSources();
+      await harness.runWorker('archive-gate');
+      expect(runKnowledgeBenchmarkArchiveGate(harness.db, harness.projectId)).toEqual({ passed: true });
+    } finally {
+      harness.cleanup();
+    }
+  });
+
+  it('fails when the benchmark project does not exist', () => {
+    const harness = createKnowledgeBenchmarkHarness();
+    try {
+      expect(() => runKnowledgeBenchmarkArchiveGate(harness.db, 'missing-project')).toThrow();
+    } finally {
+      harness.cleanup();
+    }
+  });
+});
