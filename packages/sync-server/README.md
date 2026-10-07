@@ -44,6 +44,13 @@ operations also require the exact confirmation phrase presented by the
 dashboard and reach a durable terminal operation state before they count as
 successful.
 
+Members have task access; other operations sections are admin-only. The
+dashboard frontend additionally has Knowledge/Search/Reviews components,
+but this standalone server does not mount their knowledge API routes.
+Task sync does not upload local knowledge projects, pages, or graphs.
+See the [feature reference](../../docs/FEATURES.md) and
+[user guide](../../docs/05-USER-GUIDE.md) for the complete availability matrix.
+
 The console is restricted to typed workflows: verified backup download and
 restore, `sync-server`/PostgreSQL restart, deploy of a listed trusted SHA,
 rollback to the recorded revision, and guarded capture deletion. Restore,

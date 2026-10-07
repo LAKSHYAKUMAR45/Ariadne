@@ -58,8 +58,8 @@ and let any assistant read and write to it.
   current branch and any new commits into a task on demand, for workflows
   where the background watcher hasn't run yet.
 - **Markdown export** — render a task to Markdown (`export`/`/export`/
-  `export_task`), the only opt-in way task history leaves the SQLite
-  database (e.g. to paste into a PR description).
+  `export_task`) for a handoff or PR description. Sync, capture uploads,
+  backups, and knowledge projections are separate explicit copy boundaries.
 - **Cross-workspace task discovery** — a global registry (`~/.ariadne/registry.db`)
   lets you list/search/act on tasks from *any* workspace you've used Ariadne
   in, without needing to `cd` there first — while each workspace's own
@@ -89,10 +89,9 @@ and let any assistant read and write to it.
 
 ## How it works
 
-One shared core library, wrapped by three thin, interchangeable surfaces —
-because UX is intentionally secondary here. The primary way you'll use
-Ariadne day-to-day is through the chat participant or the CLI, not a custom
-dashboard.
+One shared core library serves three local interfaces: CLI, MCP, and VS Code
+panel/chat. An optional browser console operates on self-hosted server state;
+it is not another automatic view of every local workspace database.
 
 [![Ariadne architecture: local clients and shared core, with optional cloud sync](docs/architecture/ariadne.png)](docs/architecture/ariadne.html)
 
@@ -111,7 +110,9 @@ dashboard.
   use does not depend on it.
 
 New to Ariadne? Read [`docs/05-USER-GUIDE.md`](docs/05-USER-GUIDE.md) for a
-practical walkthrough of installing and using all three surfaces. See
+practical walkthrough of installation, task/knowledge workflows, and the
+optional operations console. Read [`docs/FEATURES.md`](docs/FEATURES.md) for
+the complete feature inventory, interface availability, and limitations. See
 [`docs/knowledge-wiki.md`](docs/knowledge-wiki.md) for the knowledge workspace
 reference and [`docs/knowledge-migration.md`](docs/knowledge-migration.md) for
 archive/Obsidian migration details. See [`docs/`](docs/) for the full design
@@ -128,6 +129,7 @@ This is a pnpm workspace monorepo:
 | [`packages/mcp-server`](packages/mcp-server) | `@ariadne-dev/mcp-server` — an MCP server exposing task state as tools to any MCP-capable AI client (Claude Code, Gemini CLI, Codex, Copilot, etc.), no VS Code required. |
 | [`packages/vscode-extension`](packages/vscode-extension) | `ariadne-vscode` — a VS Code extension that adds an `@ariadne` Copilot Chat participant, commands, and passive background capture (saved files, terminal commands, git commits). |
 | [`packages/sync-server`](packages/sync-server) | `@ariadne-dev/sync-server` — an optional, self-hosted cloud sync server (Express + Postgres) for syncing tasks/checkpoints across machines/teammates. |
+| [`packages/dashboard`](packages/dashboard) | `@ariadne-dev/dashboard` — browser task and operations console; knowledge UI components exist but standalone knowledge API wiring is incomplete. |
 
 ## Getting started
 
@@ -233,15 +235,17 @@ MCP server:
 ariadne knowledge project create "Project wiki" --roots src,docs
 ariadne knowledge project-task <task-id> --project <project-id> --trigger checkpoint
 ariadne knowledge ingest file <project-id> docs/02-ARCHITECTURE.md
+ariadne knowledge worker run <project-id> --once
+ariadne knowledge worker status <project-id>
 ariadne knowledge search <project-id> "storage boundary"
 ariadne knowledge export <project-id> knowledge-export --obsidian
 ```
 
 See [`docs/knowledge-wiki.md`](docs/knowledge-wiki.md) for the command and
 provider boundaries, and [`docs/knowledge-migration.md`](docs/knowledge-migration.md)
-for validated archive import/export. Provider-backed chat/research and
-provider configuration UX are active/in-progress surfaces; no provider is
-implicitly contacted.
+for validated archive import/export. Worker provider profiles and concurrency
+management are implemented; provider-backed CLI chat/research execution still
+requires an integrating provider surface. Baseline processing is offline.
 
 ### Cross-workspace task discovery
 
@@ -295,18 +299,22 @@ tunnel and refuse to send credentials if another process occupies the port.
 `sync push`/`sync pull` take an optional `--task <id>` to scope to a single
 task. `sync pull --import-new` also creates local tasks for remote ones this
 workspace has never linked, instead of skipping them. Tasks, checkpoints,
-todos, decisions, errors, open questions, and commands sync; files/commits
-remain local by design. Access is flat (any account on the server can
-read/write any synced task). Conflicts default to remote-wins and can be
-changed with `--on-conflict local-wins`.
+todos, decisions, errors, open questions, and commands sync. Eligible file
+captures have a separate encrypted upload/history path; ordinary touched-file
+metadata and Git commit records remain local. Active members share access to
+synced tasks within the singleton team. Conflicts default to remote-wins and
+can be changed with `--on-conflict local-wins`.
 
 ### Operations console
 
 The tracked nodem2 deployment also provides a single-admin operations console.
 After `ariadne sync setup [username]` creates the project-configured tunnel,
 open `http://127.0.0.1:14300/admin`. The console is the supported interface
-for its eight sections: **Overview**, **Members**, **Tasks**, **Backups**,
-**Services**, **Deployments**, **Logs**, and **Audit**.
+for its implemented operations sections: **Overview**, **Members**, **Tasks**,
+**Backups**, **Services**, **Deployments**, **Logs**, and **Audit**. Members
+have task access; other sections require admin authority. The frontend also
+contains Knowledge/Search/Reviews views, but the standalone server does not
+mount their knowledge endpoints.
 
 It uses a browser session and CSRF protection, not the sync JWT. Every guarded
 change requires fresh password reauthentication (within five minutes) and the
@@ -357,9 +365,12 @@ in the editor.
 Early / pre-release. The task CLI, MCP server, and VS Code extension are
 functional and tested. The core-first knowledge workspace is implemented for
 local projects, sources, pages, search, graph, reviews, queueing, projections,
-and archive/Obsidian export. Provider-backed research/chat execution,
-persistent provider setup, live Obsidian synchronization, and a dedicated
-knowledge UI are not shipped; treat them as active/in-progress surfaces.
+and archive/Obsidian export. The offline worker, CLI concurrency settings, and
+worker provider profiles are implemented. Provider-backed CLI research/chat
+execution, live Obsidian synchronization, full VS Code knowledge panel
+actions, and standalone dashboard knowledge API wiring remain incomplete.
+Core synthesis, summaries, freshness, and analytics services require an
+integrating caller; see the [feature reference](docs/FEATURES.md).
 Expect rough edges — see the package READMEs and knowledge documentation for
 known limitations.
 

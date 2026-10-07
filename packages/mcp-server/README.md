@@ -44,10 +44,17 @@ directory), and reads/writes `<workspace-root>/.ariadne/state.db`.
 | `sync_push` / `sync_pull` / `sync_list_remote` / `sync_profile_list` | Shell out to the installed `ariadne` CLI's `sync push`/`sync pull`/`sync list-remote`/`sync profile list` commands (must already be logged in via `ariadne sync login` — these tools never handle credentials). `sync_pull` accepts `importNew: true` for `--import-new`. All accept an optional `profile` to target a non-default sync profile. Returns the CLI's raw stdout as `output`. |
 | `knowledge_project_*`, `knowledge_source_*`, `knowledge_queue_*`, `knowledge_page_*` | Manage the typed knowledge project, source, queue, and page state through the shared core stores. Mutating calls require `confirm: true`; reads are bounded to 100 records. |
 | `knowledge_search` | Searches knowledge pages and sources with bounded results, token-budgeted context, and source/page citations. |
+| `knowledge_worker_status` / `knowledge_worker_run_once` | Inspect bounded project status or drain that project's offline queue; run-once requires `confirm: true`. CLI pool/provider-management options are not exposed by these tools. |
 | `knowledge_graph_neighborhood` / `knowledge_graph_path` | Read bounded native graph neighborhoods and paths. |
 | `knowledge_review_*` | List and resolve auditable reviews; review mutations require `confirm: true`. |
 | `knowledge_research` / `knowledge_chat` | Queue research or chat work without making provider/network calls in the MCP adapter. |
 | `knowledge_export` / `knowledge_import` | Write or validate the project manifest in `.ariadne/knowledge`; export requires `confirm: true`. |
+
+These manifest tools are not full portable archive export/import. Use
+`ariadne knowledge export` / `ariadne knowledge import` for archive transfer.
+For the complete project feature inventory and practical workflows, see
+[FEATURES.md](../../docs/FEATURES.md) and the
+[user guide](../../docs/05-USER-GUIDE.md).
 
 All tools that need a task default to the workspace's "current task" (the
 same one `ariadne task use` sets) when no explicit `taskId` is given.

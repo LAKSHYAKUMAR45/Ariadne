@@ -146,10 +146,19 @@ git, clipboard/editor, and CLI work:
 
 ## Known limitations (early/pre-release)
 
+- The confirmed **Ariadne: Run Knowledge Worker Once** command processes an
+  active workspace-scoped project. Other knowledge palette entries currently
+  open the task panel, but its dispatcher does not implement their knowledge
+  actions. Use the CLI/MCP for knowledge project management, search, reviews,
+  and portable archives.
 - Passive capture only ever appends to an *explicitly started* task (via
   `/task new` or "Ariadne: New Task") — it never creates or auto-switches
   tasks. Terminal command capture requires VS Code's shell integration API
   (stable since 1.93) and a shell that supports it.
+
+See the [complete feature reference](../../docs/FEATURES.md) and
+[user guide](../../docs/05-USER-GUIDE.md) for interface availability and
+step-by-step task/knowledge workflows.
 
 ## Development
 

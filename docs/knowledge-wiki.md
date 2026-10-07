@@ -9,9 +9,10 @@ separate knowledge stores.
 
 > **Status:** project/source/page/search/graph/review/queue storage and the
 > archive exporter are implemented. Provider-backed research and chat are
-> explicit integration points, not turnkey hosted features. The CLI currently
-> has no persisted provider configuration, so those commands fail with a
-> provider-required result rather than making an implicit network call. MCP
+> explicit integration points, not turnkey hosted features. CLI worker provider
+> profiles are implemented, but do not enable research/chat execution; those
+> commands fail with a provider-required result rather than making an implicit
+> network call. MCP
 > queues research/chat work but does not execute a provider in its adapter.
 
 ## Workspace model
@@ -58,15 +59,17 @@ The no-provider path is intentional:
   embedding provider is supplied;
 - research requires an explicitly supplied research provider and consent;
 - chat requires an explicitly supplied chat provider;
-- the current CLI does not persist provider credentials or profiles;
+- the CLI stores worker profile metadata and environment-variable names, not
+  credential values; those profiles do not wire research/chat execution;
 - the MCP knowledge adapter queues research/chat requests and does not invoke a
   network provider itself.
 
 Do not put provider keys in project files or exported archives. Provider
-profiles are stored as a dedicated table for future/configured integrations,
-but archive export omits `configuration_json` and includes only redacted
-profile metadata. Provider setup UX and durable credential management remain
-**in progress**.
+profiles are stored in a dedicated table for configured worker integrations.
+Current portable archive export omits the entire provider-profile table.
+Use the CLI `knowledge provider` commands described in
+[knowledge-worker.md](knowledge-worker.md); public named-host transport and
+turnkey research/chat execution remain incomplete.
 
 ## Answer synthesis and semantic summaries
 
@@ -114,14 +117,15 @@ available and the citation references. MCP search keeps its existing
 bounded result context. The dashboard search page validates and renders the
 optional confidence/ambiguity fields alongside its existing citation list.
 
-The VS Code extension can request knowledge search/overview and run the worker
-once. Its search panel displays confidence/ambiguity with citations, and its
-run-once notification shows a warning count without exposing diagnostic text.
-The panel bridge has no worker-status or operational-summary response contract.
-The dashboard project overview likewise receives only the existing project
-and worker counts from its API; it does not expose coverage, graph, synthesis,
-or analytics status. Those surfaces are intentionally unchanged until their
-backing API contracts carry these fields.
+The VS Code extension implements a confirmed worker run-once palette command,
+whose notification includes a warning count without diagnostic text. Other
+knowledge palette actions open the task panel, but its current dispatcher
+does not implement the corresponding knowledge requests. The dashboard has
+knowledge overview/search/review UI components, including citation and
+confidence rendering, but the standalone sync server does not mount their
+knowledge API routes. Do not treat either set of frontend affordances as a
+complete operational knowledge interface. Use CLI/MCP for local processing,
+status, and retrieval.
 
 Archive import returns a `derived_data_rebuild_required` warning and names the
 local search-index and semantic-model rebuild targets. The CLI displays these
@@ -141,6 +145,7 @@ pnpm --filter @ariadne-dev/cli build
 ariadne knowledge project create "Ariadne wiki" --roots src,docs
 ariadne knowledge source scan <project-id> docs
 ariadne knowledge ingest file <project-id> docs/02-ARCHITECTURE.md
+ariadne knowledge worker run <project-id> --once
 ariadne knowledge page list <project-id>
 ariadne knowledge search <project-id> "workspace scope"
 ariadne knowledge graph neighborhood <project-id> <node-id>
@@ -152,8 +157,8 @@ Useful command groups are `project`, `source`, `ingest`, `queue`, `page`,
 Use `--json` for scripting. Mutating MCP calls require `confirm=true`; the CLI
 uses its normal local command authorization.
 
-`knowledge research` and `knowledge chat send` are visible commands, but they
-are active/in-progress surfaces until a provider is registered by the caller.
+`knowledge research` and `knowledge chat send` are visible commands, but their
+CLI provider-backed execution is not wired by adding worker profiles.
 They return a clear provider-required error instead of silently falling back to
 an unconfigured service.
 
@@ -181,6 +186,7 @@ Knowledge tools include:
   `knowledge_source_register`;
 - `knowledge_queue_list`, `knowledge_queue_enqueue`,
   `knowledge_queue_cancel`;
+- `knowledge_worker_status`, `knowledge_worker_run_once`;
 - `knowledge_page_list`, `knowledge_page_get`, `knowledge_page_create`;
 - `knowledge_search`, `knowledge_graph_neighborhood`,
   `knowledge_graph_path`;

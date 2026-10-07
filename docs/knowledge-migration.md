@@ -26,10 +26,10 @@ Markdown pages are rendered from the current page versions. The manifest
 records the archive format, project id, generated time, every file's size,
 media type, and SHA-256 checksum.
 
-Provider profile metadata is included only after removing
-`configuration_json`. The manifest explicitly lists
-`knowledge_provider_profiles.configuration_json` as omitted. Credentials,
-tokens, and provider prompts must be configured again at the destination.
+The provider-profile table is privacy-omitted in current exports, not a
+portable provider configuration. Credentials, tokens, and provider setup
+must be configured again at the destination. Host-local settings, feedback,
+and derived indexes/models are also intentionally excluded.
 
 With `--obsidian`, the exporter additionally writes:
 
@@ -128,7 +128,8 @@ warning is returned until those are rebuilt locally.
 1. Export from the source workspace to a dedicated directory.
 2. Move or copy that directory through your approved local transfer method.
 3. In the destination workspace, build/run the same Ariadne version or a
-   version that supports archive version `1`.
+   reader that supports the archive's actual manifest version and required
+   features (current readers support versions `1` and `2`).
 4. Import without `--replace` first; resolve duplicate project ids deliberately.
 5. Reconfigure any provider integration outside the archive.
 6. Review pending reviews, queued jobs, source roots, and page provenance.
@@ -144,9 +145,11 @@ cloud-sync credentials.
   rejected.
 - Provider configuration payloads are never restored because they are never
   exported.
-- Archive import restores database rows; it does not copy source files into
-  the destination workspace. Re-ingest a source if the referenced source
-  content is unavailable.
+- Archive import restores database rows and declared immutable knowledge
+  content artifacts under the local knowledge directory. It does not
+  reconstruct the working repository's original source files or Git history.
+  Re-ingest original sources when you want to analyze changes at the
+  destination.
 - Queued work is metadata. Import does not run providers or make network
   calls.
 - Obsidian export does not provide two-way synchronization, conflict
